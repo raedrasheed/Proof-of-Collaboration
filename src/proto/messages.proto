@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package pocol;
+
+// Network messages
+message Version {
+  int32 version = 1;
+  string user_agent = 2;
+  int64 timestamp = 3;
+  int32 nonce = 4;
+}
+
+message VerAck {
+  bool acknowledged = 1;
+}
+
+message Transaction {
+  bytes txid = 1;
+  repeated bytes inputs = 2;
+  repeated bytes outputs = 3;
+  int64 fee = 4;
+  int64 timestamp = 5;
+}
+
+message Block {
+  bytes hash = 1;
+  bytes prev_hash = 2;
+  int64 timestamp = 3;
+  int32 nonce = 4;
+  bytes merkle_root = 5;
+  bytes share_merkle_root = 6; // Merkle root of all valid shares
+  repeated Transaction transactions = 7;
+  map<string, int32> share_table = 8; // Miner ID -> share count
+}
+
+message RangeRequest {
+  int32 range_id = 1;
+  string miner_id = 2;
+}
+
+message RangeComplete {
+  int32 range_id = 1;
+  string miner_id = 2;
+}
+
+message Share {
+  bytes header = 1;
+  int32 nonce = 2;
+  bytes proof = 3;
+  string miner_id = 4;
+}
+
+message NetworkMessage {
+  enum MessageType {
+    VERSION = 0;
+    VERACK = 1;
+    TRANSACTION = 2;
+    BLOCK = 3;
+    RANGE_REQUEST = 4;
+    RANGE_COMPLETE = 5;
+    SHARE = 6;
+  }
+  
+  MessageType type = 1;
+  
+  oneof payload {
+    Version version = 2;
+    VerAck verack = 3;
+    Transaction transaction = 4;
+    Block block = 5;
+    RangeRequest range_request = 6;
+    RangeComplete range_complete = 7;
+    Share share = 8;
+  }
+}
