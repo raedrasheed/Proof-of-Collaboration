@@ -1,5 +1,6 @@
 #include "../include/miner.hpp"
 #include "../include/crypto_utils.hpp"
+#include "../include/string_utils.hpp"  // Add this line
 #include <openssl/sha.h>
 #include <random>
 #include <algorithm>
@@ -218,7 +219,7 @@ void Miner::mine_thread() {
         // Get the current template
         Block current_template = template_builder_->get_current_template();
         
-        // Create the header
+        // Create the header (using hex hashes)
         std::string header = current_template.prev_hash + 
                             current_template.merkle_root + 
                             std::to_string(current_template.timestamp);
@@ -234,7 +235,7 @@ void Miner::mine_thread() {
                 break;
             }
             
-            // Calculate the hash
+            // Calculate the hash (returns hex now)
             std::string hash = double_sha256(header + std::to_string(nonce));
             
             // Check if the hash meets the block target
@@ -255,7 +256,7 @@ void Miner::mine_thread() {
                 Share share;
                 share.header = header;
                 share.nonce = nonce;
-                share.proof = hash;
+                share.proof = hash; // Now hex
                 share.miner_id = miner_id_;
                 
                 submit_share(share);
@@ -339,7 +340,10 @@ bool Miner::meets_share_target(const std::string& hash) const {
 
 std::string Miner::double_sha256(const std::string& data) const {
     // Use the compute_double_sha256 function from crypto_utils.hpp
-    return compute_double_sha256(data);
+    std::string binary_hash = compute_double_sha256(data);
+    
+    // Convert to hex string for readability and comparison
+    return bytes_to_hex_string(binary_hash);
 }
 
 } // namespace pocol

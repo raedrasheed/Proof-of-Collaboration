@@ -2,6 +2,7 @@
 #include "../include/crypto_utils.hpp"
 #include "../include/transaction_utils.hpp"
 #include "../include/utxo_set.hpp"
+#include "../include/string_utils.hpp"  // Add this line
 #include <openssl/sha.h>
 #include <algorithm>
 #include <chrono>
@@ -17,7 +18,7 @@ TemplateBuilder::~TemplateBuilder() {
 }
 
 Block TemplateBuilder::build_template(const std::string& prev_block_hash) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     
     // Create a new block template
     Block block;
@@ -64,17 +65,12 @@ Block TemplateBuilder::build_template(const std::string& prev_block_hash) {
     return block;
 }
 
-Block TemplateBuilder::get_current_template() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return current_template_;
-}
-
 void TemplateBuilder::update_template(const std::string& prev_block_hash) {
     build_template(prev_block_hash);
 }
 
 bool TemplateBuilder::add_share(const Share& share) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     
     // Validate the share
     if (!validate_share(share)) {
@@ -92,7 +88,7 @@ bool TemplateBuilder::add_share(const Share& share) {
 }
 
 Block TemplateBuilder::finalize_block(int32_t nonce) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     
     // Set the nonce
     current_template_.nonce = nonce;
@@ -104,7 +100,10 @@ Block TemplateBuilder::finalize_block(int32_t nonce) {
                          std::to_string(nonce);
     
     // Use the compute_double_sha256 function from crypto_utils.hpp
-    std::string hash = compute_double_sha256(header);
+    std::string binary_hash = compute_double_sha256(header);
+    
+    // Convert to hex string for readability
+    std::string hash = bytes_to_hex_string(binary_hash);
     
     // Set the block hash
     current_template_.hash = hash;
@@ -130,7 +129,7 @@ Block TemplateBuilder::finalize_block(int32_t nonce) {
         mempool_->remove_transaction(tx.txid);
     }
     
-    // Build a new template for the next block
+    // Build a new template for the next block (use hex hash)
     build_template(hash);
     
     return finalized_block;
@@ -138,8 +137,8 @@ Block TemplateBuilder::finalize_block(int32_t nonce) {
 
 std::string TemplateBuilder::create_merkle_root(const std::vector<Transaction>& transactions) const {
     if (transactions.empty()) {
-        // Return a default merkle root for empty blocks
-        return std::string(SHA256_DIGEST_LENGTH, '0');
+        // Return a default merkle root for empty blocks (hex zeros)
+        return std::string(64, '0'); // 32 bytes = 64 hex characters
     }
     
     // Create a vector of transaction hashes
@@ -161,8 +160,9 @@ std::string TemplateBuilder::create_merkle_root(const std::vector<Transaction>& 
                 combined = hashes[i] + hashes[i]; // Duplicate the last hash if there's an odd number
             }
             
-            // Use the compute_double_sha256 function from crypto_utils.hpp
-            new_hashes.push_back(compute_double_sha256(combined));
+            // Use the compute_double_sha256 function and convert to hex
+            std::string binary_hash = compute_double_sha256(combined);
+            new_hashes.push_back(bytes_to_hex_string(binary_hash));
         }
         
         hashes = new_hashes;
@@ -173,8 +173,8 @@ std::string TemplateBuilder::create_merkle_root(const std::vector<Transaction>& 
 
 std::string TemplateBuilder::create_share_merkle_root(const std::vector<Share>& shares) const {
     if (shares.empty()) {
-        // Return a default merkle root for empty shares
-        return std::string(SHA256_DIGEST_LENGTH, '0');
+        // Return a default merkle root for empty shares (hex zeros)
+        return std::string(64, '0'); // 32 bytes = 64 hex characters
     }
     
     // Create a vector of share hashes
@@ -183,8 +183,9 @@ std::string TemplateBuilder::create_share_merkle_root(const std::vector<Share>& 
         // Hash the share
         std::string share_data = share.header + std::to_string(share.nonce) + share.proof;
         
-        // Use the compute_sha256 function from crypto_utils.hpp
-        hashes.push_back(compute_sha256(share_data));
+        // Use the compute_sha256 function and convert to hex
+        std::string binary_hash = compute_sha256(share_data);
+        hashes.push_back(bytes_to_hex_string(binary_hash));
     }
     
     // Build the merkle tree (same as for transactions)
@@ -200,8 +201,9 @@ std::string TemplateBuilder::create_share_merkle_root(const std::vector<Share>& 
                 combined = hashes[i] + hashes[i]; // Duplicate the last hash if there's an odd number
             }
             
-            // Use the compute_sha256 function from crypto_utils.hpp
-            new_hashes.push_back(compute_sha256(combined));
+            // Use the compute_sha256 function and convert to hex
+            std::string binary_hash = compute_sha256(combined);
+            new_hashes.push_back(bytes_to_hex_string(binary_hash));
         }
         
         hashes = new_hashes;

@@ -52,6 +52,11 @@ private:
     std::string get_pocol_miners(const std::string& params);
     std::string complete_pocol_range(const std::string& params);
     
+    std::string list_all_utxos(const std::string& params);
+    std::string get_transaction_outputs(const std::string& params);
+    std::string get_mempool(const std::string& params);
+    std::string get_mempool_info(const std::string& params);
+
     // Helper method to get all addresses with UTXOs
     std::vector<std::string> get_all_addresses();
     

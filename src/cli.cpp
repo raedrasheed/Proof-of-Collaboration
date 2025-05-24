@@ -7,6 +7,15 @@
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include "../include/crypto_utils.hpp"
+#include <chrono>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#endif
 
 namespace http = boost::beast::http;
 namespace pt = boost::property_tree;
@@ -15,13 +24,32 @@ namespace pt = boost::property_tree;
 std::string send_rpc_request(const std::string& host, uint16_t port, 
                             const std::string& method, const std::string& params) {
     try {
+        std::cout << "DEBUG: Starting RPC request to " << host << ":" << port << std::endl;
+        std::cout << "DEBUG: Method: " << method << std::endl;
+        std::cout << "DEBUG: Params: " << params << std::endl;
+        
+        // Record start time
+        auto start_time = std::chrono::high_resolution_clock::now();
+        
         // Set up connection
         boost::asio::io_context io_context;
         boost::asio::ip::tcp::resolver resolver(io_context);
         boost::asio::ip::tcp::socket socket(io_context);
         
-        auto const results = resolver.resolve(host, std::to_string(port));
-        boost::asio::connect(socket, results.begin(), results.end());
+        std::cout << "DEBUG: Resolving host..." << std::endl;
+        boost::system::error_code ec;
+        auto const results = resolver.resolve(host, std::to_string(port), ec);
+        if (ec) {
+            std::cout << "DEBUG: Error resolving host: " << ec.message() << std::endl;
+            return std::string("Error resolving host: ") + ec.message();
+        }
+        
+        std::cout << "DEBUG: Connecting to host..." << std::endl;
+        boost::asio::connect(socket, results.begin(), results.end(), ec);
+        if (ec) {
+            std::cout << "DEBUG: Error connecting to host: " << ec.message() << std::endl;
+            return std::string("Error connecting to host: ") + ec.message();
+        }
         
         // Prepare JSON-RPC request
         pt::ptree request;
@@ -34,6 +62,8 @@ std::string send_rpc_request(const std::string& host, uint16_t port,
         pt::write_json(request_stream, request);
         std::string request_body = request_stream.str();
         
+        std::cout << "DEBUG: Request body: " << request_body << std::endl;
+        
         // Prepare HTTP request
         http::request<http::string_body> req{http::verb::post, "/", 11};
         req.set(http::field::host, host);
@@ -43,18 +73,67 @@ std::string send_rpc_request(const std::string& host, uint16_t port,
         req.body() = request_body;
         
         // Send request
-        http::write(socket, req);
+        std::cout << "DEBUG: Sending request..." << std::endl;
+        http::write(socket, req, ec);
+        if (ec) {
+            std::cout << "DEBUG: Error sending request: " << ec.message() << std::endl;
+            return std::string("Error sending request: ") + ec.message();
+        }
         
         // Receive response
+        std::cout << "DEBUG: Waiting for response..." << std::endl;
         boost::beast::flat_buffer buffer;
         http::response<http::string_body> res;
-        http::read(socket, buffer, res);
+        
+        // Set a timeout for reading the response (5 seconds)
+        //socket.set_option(boost::asio::socket_base::receive_timeout(boost::asio::chrono::seconds(5)), ec);
+        //if (ec) {
+        //    std::cout << "DEBUG: Error setting socket timeout: " << ec.message() << std::endl;
+        //}
+        
+        // Set a timeout using SO_RCVTIMEO socket option (more widely supported)
+#ifdef _WIN32
+    DWORD timeout = 5000; // 5 seconds in milliseconds
+    setsockopt(socket.native_handle(), SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+#else
+    struct timeval tv;
+    tv.tv_sec = 5;  // 5 seconds timeout
+    tv.tv_usec = 0;
+    setsockopt(socket.native_handle(), SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+#endif
+std::cout << "DEBUG: Socket timeout set" << std::endl;
+        
+        http::read(socket, buffer, res, ec);
+        if (ec) {
+            std::cout << "DEBUG: Error reading response: " << ec.message() << std::endl;
+            return std::string("Error reading response: ") + ec.message();
+        }
+        
+        // Record end time and calculate duration
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+        
+        // Print debug information
+        std::cout << "DEBUG: Request completed in " << duration << " ms" << std::endl;
+        std::cout << "HTTP Status: " << res.result_int() << " " << res.reason() << std::endl;
+        std::cout << "Response Headers:" << std::endl;
+        for (auto const& field : res.base()) {
+            std::cout << "  " << field.name() << ": " << field.value() << std::endl;
+        }
+        
+        std::cout << "DEBUG: Raw response body:" << std::endl;
+        std::cout << res.body() << std::endl;
         
         // Close connection
-        socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both);
+        std::cout << "DEBUG: Closing connection..." << std::endl;
+        socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+        if (ec && ec != boost::asio::error::not_connected) {
+            std::cout << "DEBUG: Error shutting down socket: " << ec.message() << std::endl;
+        }
         
         return res.body();
     } catch (const std::exception& e) {
+        std::cout << "DEBUG: Exception caught: " << e.what() << std::endl;
         return std::string("Error: ") + e.what();
     }
 }
@@ -76,15 +155,33 @@ void print_help() {
     std::cout << "  generatekeypair                   - Generate a new key pair for transactions" << std::endl;
     std::cout << "  createcoinbase <address>          - Create a coinbase transaction (for testing)" << std::endl;
     std::cout << "  mineblock <public_key>            - Mine a new block with transactions from the mempool" << std::endl;
+    std::cout << "  listutxos                         - List all available UTXOs in the system" << std::endl;
+    std::cout << "  gettransactionoutputs <txid>      - Get all outputs for a specific transaction" << std::endl;
+    std::cout << "  getmempool                        - View all transactions in the mempool" << std::endl;
+    std::cout << "  getmempoolinfo                    - Get mempool statistics and information" << std::endl;
     std::cout << "  help                              - Show this help message" << std::endl;
     std::cout << "  exit                              - Exit the CLI" << std::endl;
+}
+
+// Helper function to convert binary data to hex string
+std::string binary_to_hex(const std::string& binary) {
+    std::string hex;
+    for (unsigned char c : binary) {
+        char buf[3];
+        sprintf(buf, "%02x", static_cast<unsigned char>(c));
+        hex += buf;
+    }
+    return hex;
 }
 
 // Function to sign a message with a private key
 std::string sign_message(const std::string& message, const std::string& private_key) {
     // In a real implementation, this would use proper cryptographic signing
     // For our simplified implementation, we'll just concatenate the message and private key and hash it
-    return pocol::compute_sha256(message + private_key);
+    std::string binary_signature = pocol::compute_sha256(message + private_key);
+    
+    // Convert the binary signature to a hexadecimal string
+    return binary_to_hex(binary_signature);
 }
 
 int main(int argc, char* argv[]) {
@@ -167,14 +264,12 @@ int main(int argc, char* argv[]) {
             // Sign the message
             std::string signature = sign_message(message, private_key);
             
-            pt::ptree miner_params;
-            miner_params.put("public_key", public_key);
-            miner_params.put("signature", signature);
-            miner_params.put("message", message);
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"public_key\":\"" + public_key + 
+                             "\",\"signature\":\"" + signature + 
+                             "\",\"message\":\"" + message + "\"}";
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, miner_params);
-            params = params_stream.str();
+            params = json_params;
         } else if (method == "requestpocolrange") {
             std::string public_key;
             std::string private_key;
@@ -203,14 +298,12 @@ int main(int argc, char* argv[]) {
             // Sign the message
             std::string signature = sign_message(message, private_key);
             
-            pt::ptree range_params;
-            range_params.put("public_key", public_key);
-            range_params.put("signature", signature);
-            range_params.put("message", message);
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"public_key\":\"" + public_key + 
+                             "\",\"signature\":\"" + signature + 
+                             "\",\"message\":\"" + message + "\"}";
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, range_params);
-            params = params_stream.str();
+            params = json_params;
         } else if (method == "submitpocolshare" && tokens.size() >= 3) {
             std::string header = tokens[1];
             int nonce = std::stoi(tokens[2]);
@@ -241,15 +334,13 @@ int main(int argc, char* argv[]) {
             // Sign the message
             std::string signature = sign_message(message, private_key);
             
-            pt::ptree share_params;
-            share_params.put("header", header);
-            share_params.put("nonce", nonce);
-            share_params.put("public_key", public_key);
-            share_params.put("signature", signature);
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"header\":\"" + header + 
+                             "\",\"nonce\":" + std::to_string(nonce) + 
+                             ",\"public_key\":\"" + public_key + 
+                             "\",\"signature\":\"" + signature + "\"}";
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, share_params);
-            params = params_stream.str();
+            params = json_params;
         } else if (method == "completepocolrange" && tokens.size() >= 2) {
             int range_id = std::stoi(tokens[1]);
             std::string public_key;
@@ -279,49 +370,52 @@ int main(int argc, char* argv[]) {
             // Sign the message
             std::string signature = sign_message(message, private_key);
             
-            pt::ptree complete_params;
-            complete_params.put("range_id", range_id);
-            complete_params.put("public_key", public_key);
-            complete_params.put("signature", signature);
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"range_id\":" + std::to_string(range_id) + 
+                             ",\"public_key\":\"" + public_key + 
+                             "\",\"signature\":\"" + signature + "\"}";
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, complete_params);
-            params = params_stream.str();
+            params = json_params;
         } else if (method == "getpocolminers") {
             params = "";
         } else if (method == "getpocolrewards") {
-            pt::ptree rewards_params;
+            std::string public_key;
+            
             if (tokens.size() >= 2) {
-                rewards_params.put("public_key", tokens[1]);
+                public_key = tokens[1];
             } else if (!current_public_key.empty()) {
-                rewards_params.put("public_key", current_public_key);
+                public_key = current_public_key;
+            } else {
+                std::cout << "Enter public key: ";
+                std::getline(std::cin, public_key);
             }
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, rewards_params);
-            params = params_stream.str();
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"public_key\":\"" + public_key + "\"}";
+            
+            params = json_params;
         } else if (method == "getpocolbalance" && tokens.size() >= 2) {
-            pt::ptree balance_params;
-            balance_params.put("address", tokens[1]);
+            std::string address = tokens[1];
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, balance_params);
-            params = params_stream.str();
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"address\":\"" + address + "\"}";
+            
+            params = json_params;
         } else if (method == "getpocolutxos" && tokens.size() >= 2) {
-            pt::ptree utxos_params;
-            utxos_params.put("address", tokens[1]);
+            std::string address = tokens[1];
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, utxos_params);
-            params = params_stream.str();
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"address\":\"" + address + "\"}";
+            
+            params = json_params;
         } else if (method == "getpocolutxo" && tokens.size() >= 3) {
-            pt::ptree utxo_params;
-            utxo_params.put("txid", tokens[1]);
-            utxo_params.put("index", tokens[2]);
+            std::string txid = tokens[1];
+            std::string index = tokens[2];
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, utxo_params);
-            params = params_stream.str();
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"txid\":\"" + txid + "\",\"index\":" + index + "}";
+            
+            params = json_params;
         } else if (method == "createcoinbase") {
             // Handle coinbase transaction creation
             std::string address;
@@ -334,12 +428,10 @@ int main(int argc, char* argv[]) {
                 std::getline(std::cin, address);
             }
             
-            pt::ptree coinbase_params;
-            coinbase_params.put("address", address);
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"address\":\"" + address + "\"}";
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, coinbase_params);
-            params = params_stream.str();
+            params = json_params;
             
             // Use the createcoinbase RPC method
             method = "createcoinbase";
@@ -370,14 +462,10 @@ int main(int argc, char* argv[]) {
             std::string message = "register_miner";
             std::string signature = sign_message(message, private_key);
             
-            pt::ptree register_params;
-            register_params.put("public_key", public_key);
-            register_params.put("signature", signature);
-            register_params.put("message", message);
-            
-            std::ostringstream register_params_stream;
-            pt::write_json(register_params_stream, register_params);
-            std::string register_params_str = register_params_stream.str();
+            // Create the JSON object manually to ensure proper formatting
+            std::string register_params_str = "{\"public_key\":\"" + public_key + 
+                                    "\",\"signature\":\"" + signature + 
+                                    "\",\"message\":\"" + message + "\"}";
             
             std::string register_response = send_rpc_request(host, port, "registerpocolminer", register_params_str);
             std::cout << "Miner registration: " << register_response << std::endl;
@@ -390,14 +478,10 @@ int main(int argc, char* argv[]) {
             message = "request_range";
             signature = sign_message(message, private_key);
             
-            pt::ptree range_params;
-            range_params.put("public_key", public_key);
-            range_params.put("signature", signature);
-            range_params.put("message", message);
-            
-            std::ostringstream range_params_stream;
-            pt::write_json(range_params_stream, range_params);
-            std::string range_params_str = range_params_stream.str();
+            // Create the JSON object manually to ensure proper formatting
+            std::string range_params_str = "{\"public_key\":\"" + public_key + 
+                                 "\",\"signature\":\"" + signature + 
+                                 "\",\"message\":\"" + message + "\"}";
             
             std::string range_response = send_rpc_request(host, port, "requestpocolrange", range_params_str);
             std::cout << "Range request: " << range_response << std::endl;
@@ -437,16 +521,11 @@ int main(int argc, char* argv[]) {
                 std::string share_message = header + std::to_string(nonce);
                 std::string share_signature = sign_message(share_message, private_key);
                 
-                // Submit a share for this nonce
-                pt::ptree share_params;
-                share_params.put("header", header);
-                share_params.put("nonce", nonce);
-                share_params.put("public_key", public_key);
-                share_params.put("signature", share_signature);
-                
-                std::ostringstream share_params_stream;
-                pt::write_json(share_params_stream, share_params);
-                std::string share_params_str = share_params_stream.str();
+                // Create the JSON object manually to ensure proper formatting
+                std::string share_params_str = "{\"header\":\"" + header + 
+                                    "\",\"nonce\":" + std::to_string(nonce) + 
+                                    ",\"public_key\":\"" + public_key + 
+                                    "\",\"signature\":\"" + share_signature + "\"}";
                 
                 std::string share_response = send_rpc_request(host, port, "submitpocolshare", share_params_str);
                 std::cout << "Share submission: " << share_response << std::endl;
@@ -468,14 +547,10 @@ int main(int argc, char* argv[]) {
             std::string complete_message = std::to_string(range_id);
             std::string complete_signature = sign_message(complete_message, private_key);
             
-            pt::ptree complete_params;
-            complete_params.put("range_id", range_id);
-            complete_params.put("public_key", public_key);
-            complete_params.put("signature", complete_signature);
-            
-            std::ostringstream complete_params_stream;
-            pt::write_json(complete_params_stream, complete_params);
-            std::string complete_params_str = complete_params_stream.str();
+            // Create the JSON object manually to ensure proper formatting
+            std::string complete_params_str = "{\"range_id\":" + std::to_string(range_id) + 
+                                   ",\"public_key\":\"" + public_key + 
+                                   "\",\"signature\":\"" + complete_signature + "\"}";
             
             std::string complete_response = send_rpc_request(host, port, "completepocolrange", complete_params_str);
             std::cout << "Range completion: " << complete_response << std::endl;
@@ -484,25 +559,21 @@ int main(int argc, char* argv[]) {
             continue;
         } else if (method == "createpocoltransaction") {
             // Interactive transaction creation
-            pt::ptree tx_params;
-            pt::ptree inputs_array;
-            pt::ptree outputs_array;
-            
-            // Get inputs
             std::cout << "Enter number of inputs: ";
             int num_inputs;
             std::cin >> num_inputs;
             std::cin.ignore(); // Clear the newline
             
+            std::string inputs_json = "[";
             for (int i = 0; i < num_inputs; ++i) {
                 std::cout << "Enter input " << (i + 1) << " (txid:index): ";
                 std::string input;
                 std::getline(std::cin, input);
                 
-                pt::ptree input_node;
-                input_node.put("", input);
-                inputs_array.push_back(std::make_pair("", input_node));
+                if (i > 0) inputs_json += ",";
+                inputs_json += "\"" + input + "\"";
             }
+            inputs_json += "]";
             
             // Get outputs
             std::cout << "Enter number of outputs: ";
@@ -510,15 +581,16 @@ int main(int argc, char* argv[]) {
             std::cin >> num_outputs;
             std::cin.ignore(); // Clear the newline
             
+            std::string outputs_json = "[";
             for (int i = 0; i < num_outputs; ++i) {
                 std::cout << "Enter output " << (i + 1) << " (address:amount): ";
                 std::string output;
                 std::getline(std::cin, output);
                 
-                pt::ptree output_node;
-                output_node.put("", output);
-                outputs_array.push_back(std::make_pair("", output_node));
+                if (i > 0) outputs_json += ",";
+                outputs_json += "\"" + output + "\"";
             }
+            outputs_json += "]";
             
             // Get fee
             std::cout << "Enter fee: ";
@@ -536,21 +608,20 @@ int main(int argc, char* argv[]) {
                 std::getline(std::cin, private_key);
             }
             
-            tx_params.add_child("inputs", inputs_array);
-            tx_params.add_child("outputs", outputs_array);
-            tx_params.put("fee", fee);
-            tx_params.put("private_key", private_key);
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"inputs\":" + inputs_json + 
+                             ",\"outputs\":" + outputs_json + 
+                             ",\"fee\":" + std::to_string(fee) + 
+                             ",\"private_key\":\"" + private_key + "\"}";
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, tx_params);
-            params = params_stream.str();
+            params = json_params;
         } else if (method == "getpocoltransaction" && tokens.size() >= 2) {
-            pt::ptree tx_params;
-            tx_params.put("txid", tokens[1]);
+            std::string txid = tokens[1];
             
-            std::ostringstream params_stream;
-            pt::write_json(params_stream, tx_params);
-            params = params_stream.str();
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"txid\":\"" + txid + "\"}";
+            
+            params = json_params;
         } else if (method == "generatekeypair") {
             // This is a client-side operation, no need to send to the server
             std::cout << "Generating new key pair..." << std::endl;
@@ -575,19 +646,16 @@ int main(int argc, char* argv[]) {
             // For our simplified implementation, we'll just hash the private key
             std::string public_key_binary = pocol::compute_sha256(private_key);
 
-            // Extend the public key to make it look more realistic
-            while (public_key_binary.length() < 64) {
-                public_key_binary += pocol::compute_sha256(public_key_binary);
-            }
-            public_key_binary = public_key_binary.substr(0, 64);
+            // Convert the binary hash to a hexadecimal string
+            std::string public_key = binary_to_hex(public_key_binary);
 
-            // Convert binary public key to hexadecimal string for display
-            std::string public_key = "";
-            for (unsigned char c : public_key_binary) {
-                char hex[3];
-                sprintf(hex, "%02x", static_cast<unsigned char>(c));
-                public_key += hex;
+            // Extend the public key to make it look more realistic
+            std::string extended_public_key = public_key;
+            for (int i = 0; i < 3 && extended_public_key.length() < 128; ++i) {
+                std::string next_hash_binary = pocol::compute_sha256(extended_public_key);
+                extended_public_key += binary_to_hex(next_hash_binary);
             }
+            public_key = extended_public_key.substr(0, 128);
             
             // Store the key pair for convenience
             current_private_key = private_key;
@@ -599,12 +667,26 @@ int main(int argc, char* argv[]) {
             std::cout << "NOTE: This key pair has been stored for use in subsequent commands." << std::endl;
             
             continue; // Skip sending to server
+        } else if (method == "listutxos") {
+            params = "";
+        } else if (method == "gettransactionoutputs" && tokens.size() >= 2) {
+            std::string txid = tokens[1];
+            
+            // Create the JSON object manually to ensure proper formatting
+            std::string json_params = "{\"txid\":\"" + txid + "\"}";
+            
+            params = json_params;
+        } else if (method == "getmempool") {
+            params = "";
+        } else if (method == "getmempoolinfo") {
+            params = "";
         } else {
             std::cout << "Unknown command or invalid parameters. Type 'help' for available commands." << std::endl;
             continue;
         }
         
         // Send request and print response
+        std::cout << "Sending request: Method=" << method << ", Params=" << params << std::endl;
         std::string response = send_rpc_request(host, port, method, params);
         std::cout << response << std::endl;
     }

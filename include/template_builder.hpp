@@ -6,6 +6,7 @@
 #include <memory> // Add this for std::shared_ptr
 #include "message_types.hpp"
 #include "mempool.hpp"
+#include <iostream>
 
 namespace pocol {
 
@@ -18,7 +19,14 @@ public:
     Block build_template(const std::string& prev_block_hash);
     
     // Get the current block template
-    Block get_current_template() const;
+    Block get_current_template() const {
+        std::cout << "DEBUG: Entering get_current_template()" << std::endl;
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::cout << "DEBUG: Acquired mutex in get_current_template()" << std::endl;
+        Block result = current_template_;
+        std::cout << "DEBUG: Returning from get_current_template()" << std::endl;
+        return result;
+    }
     
     // Update the current template with new transactions or a new seed
     void update_template(const std::string& prev_block_hash);
@@ -43,7 +51,7 @@ private:
     std::shared_ptr<Mempool> mempool_;
     Block current_template_;
     std::vector<Share> shares_;
-    mutable std::mutex mutex_;
+    mutable std::recursive_mutex mutex_;
     const size_t MAX_BLOCK_SIZE = 1024 * 1024; // 1 MiB
 };
 
