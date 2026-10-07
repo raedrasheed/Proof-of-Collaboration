@@ -30,6 +30,21 @@ test('capability set (--tools) is explicit; scoped allow/deny and default permis
   assert.ok(!a.includes('--dangerously-skip-permissions') && !a.includes('bypassPermissions'));
 });
 
+test('smoke prompt follows the ledger to the latest saved review result; it assumes no revision', () => {
+  const { prompt, args } = buildCommand({ mode: 'smoke', sessionId: SESSION });
+  assert.ok(!/0\.\d/.test(prompt), 'no fixed revision such as 0.8 in the prompt');
+  assert.ok(!/run-results-/.test(prompt), 'no fixed result file name');
+  assert.match(prompt, /coordination\/issue-ledger\.json/);
+  assert.match(prompt, /latestCompletedRevision/);
+  assert.match(prompt, /coordination\/review-001\/<that revision>\/results\//);
+  assert.match(prompt, /source file path/);
+  assert.match(prompt, /unavailable/);
+  assert.match(prompt, /do not substitute another revision/);
+  assert.match(prompt, /Do not write or edit any file/);
+  assert.equal(args[args.indexOf('-p') + 1], prompt);
+  assert.equal(buildCommand({ mode: 'smoke', sessionId: SESSION }).prompt, prompt, 'fixed text, nothing from the browser');
+});
+
 test('invalid plan or session fails before any lease or spawn', () => {
   const { w, sp } = makeWorker();
   assert.throws(() => w.start({ id: 'job-bad-1', dispatch: { mode: 'author', sessionId: SESSION, taskFile: '../x.md', plannedDir: 'm1-draft-0.9' } }), /ملف المهمة/);

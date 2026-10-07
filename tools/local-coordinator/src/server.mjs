@@ -11,7 +11,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { BrokerError, Controller } from './broker.mjs';
 import { findClaude } from './worker.mjs';
 import { Notifier } from './notifier.mjs';
-import { newToken, writeJsonAtomic, isoNow } from './util.mjs';
+import { newToken, readJson, writeJsonAtomic, isoNow } from './util.mjs';
 import { redact, redactDeep, registerSecret } from './redact.mjs';
 
 const base = path.dirname(fileURLToPath(import.meta.url));
@@ -137,14 +137,44 @@ export function resolveWorkspace(explicit) {
   throw new Error('لم يُعثر على coordination/issue-ledger.json. استخدم --workspace بمسار مساحة العمل.');
 }
 
+/**
+ * The ONLY settings recovered from a previous private connection.json: the host notifier's
+ * codex executable path and existing thread ID. Tokens, URLs, model, permissions and every
+ * other field are ignored. Missing or corrupt file -> nothing.
+ */
+export function savedHostNotifier(connectionFile) {
+  const old = readJson(connectionFile, null);
+  const h = old && typeof old === 'object' && !Array.isArray(old) ? old.hostNotifier : null;
+  const pick = (v) => (typeof v === 'string' && v.length > 0 && v.length <= 1024 ? v : null);
+  if (!h || typeof h !== 'object' || Array.isArray(h)) return { codexBin: null, threadId: null };
+  return { codexBin: pick(h.codexBin), threadId: pick(h.threadId) };
+}
+
+/** Precedence: codexBin = argument > saved; threadId = argument > CODEX_THREAD_ID > saved. Validation is the Notifier's. */
+export function resolveNotifierConfig({ argBin = null, argThread = null, env = process.env, saved = { codexBin: null, threadId: null } }) {
+  const envThread = typeof env?.CODEX_THREAD_ID === 'string' && env.CODEX_THREAD_ID ? env.CODEX_THREAD_ID : null;
+  const codexBin = argBin || saved.codexBin || null;
+  const threadId = argThread || envThread || saved.threadId || null;
+  return {
+    codexBin, threadId,
+    source: {
+      codexBin: argBin ? 'argument' : saved.codexBin ? 'saved' : 'none',
+      threadId: argThread ? 'argument' : envThread ? 'environment' : saved.threadId ? 'saved' : 'none',
+    },
+  };
+}
+
 export async function main() {
   if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('Node.js 22 أو أحدث مطلوب.');
   const workspace = resolveWorkspace(arg('--workspace'));
   let claudeBin = null, claudeNote = null;
   try { claudeBin = findClaude(arg('--claude-bin')); } catch (e) { claudeNote = e.message; }
-  // Host transport: `codex queue --remote unix:// --thread <existing>` only. Paths and thread come
-  // from the operator's command line (or CODEX_THREAD_ID), never from the browser.
-  const notifier = new Notifier({ codexBin: arg('--codex-bin') || null, threadId: arg('--codex-thread') || process.env.CODEX_THREAD_ID || null, ws: workspace });
+  // Host transport: `codex queue --remote unix:// --thread <existing>` only. Path and thread come
+  // from the operator's command line, CODEX_THREAD_ID, or the previous private connection.json
+  // (read BEFORE it is replaced below) — never from the browser.
+  const saved = savedHostNotifier(path.join(workspace, 'coordination', 'ui-control', 'connection.json'));
+  const notifierCfg = resolveNotifierConfig({ argBin: arg('--codex-bin') || null, argThread: arg('--codex-thread') || null, saved });
+  const notifier = new Notifier({ codexBin: notifierCfg.codexBin, threadId: notifierCfg.threadId, ws: workspace });
   // Notifications are held until connection.json (which the message points to) is written.
   const controller = new Controller({ workspace, sessionId: arg('--claude-session') || null, claudeBin, notifier, holdNotifications: true });
   controller.acquireService(null);
@@ -159,7 +189,9 @@ export async function main() {
     url, port: actual, pid: process.pid, startedAt: isoNow(), workspace,
     reviewerApi: `http://127.0.0.1:${actual}/api/reviewer/`, reviewerHeader: 'X-PoCol-Reviewer', reviewerToken,
     stateFile: controller.stateFile, logFile: controller.logFile, claudeBin, claudeNote,
-    hostNotifier: notifier.describe(),
+    // Keep the operator's chosen inputs even if validation failed this time (e.g. codex.exe moved),
+    // so the next plain start reports the same honest error instead of silently forgetting them.
+    hostNotifier: { ...notifier.describe(), codexBin: notifier.codexBin || notifierCfg.codexBin, threadId: notifierCfg.threadId, source: notifierCfg.source },
     noteAr: 'ملف خاص بالمنسق المضيف. لا تنشره ولا تضفه إلى Git. وصول الإشعار ليس اتصالًا ولا استلامًا ولا مراجعة؛ الاتصال يكون باستدعاء attach فعليًا.',
   };
   writeJsonAtomic(controller.connectionFile, connection);
@@ -170,7 +202,7 @@ export async function main() {
     '\nمعلومات الاتصال الخاصة بالمنسق المضيف: ' + path.join(controller.uiDir, 'connection.json'));
   if (claudeNote) console.log('\nتنبيه: ' + claudeNote + ' (العرض والطابور يعملان؛ تشغيل مهام المؤلف معطل).');
   const nc = notifier.configured();
-  console.log(nc.ok ? `\nإشعار المنسق المضيف: codex queue --remote unix:// إلى الخيط القائم …${notifier.threadId.slice(-8)}`
+  console.log(nc.ok ? `\nإشعار المنسق المضيف: codex queue --remote unix:// إلى الخيط القائم …${notifier.threadId.slice(-8)} (المصدر: ${notifierCfg.source.codexBin}/${notifierCfg.source.threadId})`
     : '\nتنبيه: ' + nc.reason + ' (الطلبات تُحفظ وتظهر حالة الإشعار في الصفحة).');
   console.log('\nأبقِ النافذة مفتوحة. Ctrl+C يوقف الخادم ولا يقتل مهمة مؤلف قائمة.\n');
   let closing = false;

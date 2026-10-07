@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { createApp } from '../src/server.mjs';
+import { createApp, resolveNotifierConfig, savedHostNotifier } from '../src/server.mjs';
+import { Notifier } from '../src/notifier.mjs';
 import { Controller } from '../src/broker.mjs';
 import { fakeSpawner, makeWorkspace, resultLine } from './helpers.mjs';
 
@@ -116,4 +118,70 @@ test('a review recorded through the reviewer API reaches the browser timeline on
   assert.ok(cards.indexOf(jobCard) < cards.indexOf(reviewCard));
   assert.ok(cards.some((c) => c.source?.endsWith('claude-006.jsonl')), 'historical cards still served');
   assert.ok(!h.text.includes(s.reviewerToken));
+});
+
+// ---------- host notifier settings recovered from the previous private connection.json ----------
+const SYN_THREAD = '00000000-0000-4000-8000-0000000071ad';
+const ENV_THREAD = '00000000-0000-4000-8000-00000000e0e0';
+const ARG_THREAD = '00000000-0000-4000-8000-00000000a0a0';
+
+function savedConnection(content) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'pocol-conn-'));
+  const file = path.join(dir, 'connection.json');
+  if (content !== undefined) writeFileSync(file, typeof content === 'string' ? content : JSON.stringify(content));
+  return { dir, file };
+}
+
+test('saved notifier fallback reads only codexBin and threadId; never tokens or other settings', () => {
+  const { file } = savedConnection({
+    url: 'http://127.0.0.1:1/#control-token-should-not-load', reviewerToken: 'reviewer-token-should-not-load', reviewerHeader: 'X-PoCol-Reviewer',
+    claudeBin: 'C:/other/claude.exe', model: 'some-model', permissionMode: 'bypassPermissions', workspace: 'C:/elsewhere',
+    hostNotifier: { configured: true, codexBin: 'C:/tools/codex.exe', threadId: SYN_THREAD, remote: 'tcp://evil', token: 'nested-secret', model: 'x', sandbox: 'off' },
+  });
+  const saved = savedHostNotifier(file);
+  assert.deepEqual(saved, { codexBin: 'C:/tools/codex.exe', threadId: SYN_THREAD });
+  const json = JSON.stringify(resolveNotifierConfig({ env: {}, saved }));
+  for (const leaked of ['token', 'bypassPermissions', 'some-model', 'tcp://evil', 'claude.exe', 'elsewhere']) assert.ok(!json.includes(leaked), `not loaded: ${leaked}`);
+});
+
+test('notifier settings precedence: argument > environment > saved; saved used only as fallback', () => {
+  const saved = { codexBin: 'C:/saved/codex.exe', threadId: SYN_THREAD };
+  const a = resolveNotifierConfig({ argBin: 'C:/arg/codex.exe', argThread: ARG_THREAD, env: { CODEX_THREAD_ID: ENV_THREAD }, saved });
+  assert.equal(a.codexBin, 'C:/arg/codex.exe'); assert.equal(a.threadId, ARG_THREAD);
+  assert.deepEqual(a.source, { codexBin: 'argument', threadId: 'argument' });
+  const e = resolveNotifierConfig({ env: { CODEX_THREAD_ID: ENV_THREAD }, saved });
+  assert.equal(e.threadId, ENV_THREAD); assert.equal(e.source.threadId, 'environment');
+  assert.equal(e.codexBin, 'C:/saved/codex.exe'); assert.equal(e.source.codexBin, 'saved');
+  const s = resolveNotifierConfig({ env: {}, saved });
+  assert.deepEqual([s.codexBin, s.threadId], ['C:/saved/codex.exe', SYN_THREAD]);
+  assert.deepEqual(s.source, { codexBin: 'saved', threadId: 'saved' });
+  const none = resolveNotifierConfig({ env: {}, saved: { codexBin: null, threadId: null } });
+  assert.deepEqual([none.codexBin, none.threadId], [null, null]);
+});
+
+test('missing or corrupt connection file gives nothing and an honest notConfigured notifier', () => {
+  for (const content of [undefined, '', '{"hostNotifier":', 'null', '[]', '{"hostNotifier":"C:/codex.exe"}', '{"hostNotifier":{"codexBin":5,"threadId":["x"]}}']) {
+    const { file, dir } = savedConnection(content);
+    const saved = savedHostNotifier(file);
+    assert.deepEqual(saved, { codexBin: null, threadId: null }, `content ${JSON.stringify(content)}`);
+    const cfg = resolveNotifierConfig({ env: {}, saved });
+    const n = new Notifier({ codexBin: cfg.codexBin, threadId: cfg.threadId, ws: dir });
+    assert.equal(n.configured().ok, false);
+    assert.match(n.configured().reason, /--codex-bin/);
+  }
+});
+
+test('saved values are validated by the existing Notifier, exactly like explicit ones', () => {
+  const { dir, file } = savedConnection();
+  const exe = path.join(dir, 'codex.exe'); writeFileSync(exe, 'MZ');
+  const cmd = path.join(dir, 'codex.cmd'); writeFileSync(cmd, '@echo off');
+  writeFileSync(file, JSON.stringify({ hostNotifier: { codexBin: exe, threadId: SYN_THREAD } }));
+  let cfg = resolveNotifierConfig({ env: {}, saved: savedHostNotifier(file) });
+  assert.equal(new Notifier({ ...cfg, ws: dir, platform: 'win32' }).configured().ok, true, 'valid saved settings restore the transport');
+  writeFileSync(file, JSON.stringify({ hostNotifier: { codexBin: cmd, threadId: SYN_THREAD } }));
+  cfg = resolveNotifierConfig({ env: {}, saved: savedHostNotifier(file) });
+  assert.match(new Notifier({ ...cfg, ws: dir, platform: 'win32' }).configured().reason, /\.exe/);
+  writeFileSync(file, JSON.stringify({ hostNotifier: { codexBin: exe, threadId: 'not-a-thread' } }));
+  cfg = resolveNotifierConfig({ env: {}, saved: savedHostNotifier(file) });
+  assert.match(new Notifier({ ...cfg, ws: dir, platform: 'win32' }).configured().reason, /خيط/);
 });

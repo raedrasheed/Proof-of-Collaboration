@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export const SESSION = '83a06b92-c5ea-45e3-852e-b5b5f28a3eea';
+// Clearly synthetic; real session/thread IDs live only in private coordination files.
+export const SESSION = '00000000-0000-4000-8000-00000000c1a0';
 export const FAKE_PRIV = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 export function utf16(text) {

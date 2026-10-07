@@ -16,7 +16,11 @@ export function buildCommand({ mode, sessionId, taskFile, plannedDir }) {
   // pre-approves calls inside it. Both are fixed here; the deny list stays as a backstop.
   let prompt, tools, allowed;
   if (mode === 'smoke') {
-    prompt = 'Read-only status check requested through the local coordinator. Read coordination/issue-ledger.json and coordination/review-001/m1-draft-0.8/results/run-results-0.8.json, then report the latest verified revision and its pass/recorded/fail counts in two sentences. Do not write or edit any file.';
+    // Fixed text, no revision baked in: the latest revision is whatever the ledger says now.
+    prompt = 'Read-only status check requested through the local coordinator. Read coordination/issue-ledger.json and take its latestCompletedRevision value (a directory name such as m1-draft-0.N). '
+      + 'Then use Glob to find that same revision\'s independently saved review result under coordination/review-001/<that revision>/results/ and read it. '
+      + 'Report in two sentences: the revision, its passed/recorded/failed counts from that saved result, and the exact source file path. '
+      + 'If no saved result exists for that revision, say the counts are unavailable; do not substitute another revision or the ledger\'s own summary. Do not write or edit any file.';
     tools = ['Read', 'Glob', 'Grep'];
     allowed = ['Read', 'Glob', 'Grep'];
   } else if (mode === 'author') {
