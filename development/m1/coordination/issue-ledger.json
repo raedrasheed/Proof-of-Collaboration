@@ -1,6 +1,6 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.22-reviewed-V3-partial",
+  "status": "0.23-reviewed-revise-C31",
   "latestCompletedRevision": "0.22",
   "issues": [
     {
@@ -208,6 +208,12 @@
       "status": "closed-spec-tooling",
       "evidence": "review-001/genesis-depth-independent-probe.json:4291bytes/depth1500 ->RecursionError",
       "decision": "Nonrecursive GenesisSpec framing parser; preserve structural/integer error precedence and all old fixtures"
+    },
+    {
+      "id": "C31",
+      "status": "open",
+      "evidence": "review-001/x8-independent-probes-0.23.json: recordedK0reach+emptyduplicate ->PASS",
+      "decision": "Validate duplicate/unknown/malformed observation windows; never erase evidence of reach. Complete C7 per-path sensitivity definition."
     }
   ],
   "history": [
@@ -322,6 +328,11 @@
       "revision": "0.22",
       "result": "196pass52recorded0fail; independent23/23 after correcting one root expected-version precedence; V3Partial40Partial1NotStarted0Complete; owners unchanged",
       "evidence": "review-001/REVIEW-0.22.md"
+    },
+    {
+      "revision": "0.23",
+      "result": "104pass29recorded0fail;8JS syntaxpass; independent36pass1FAIL C31 ->revise; accepted0.22",
+      "evidence": "review-001/REVIEW-0.23.md"
     }
   ],
   "githubHandoff": {
@@ -335,5 +346,5 @@
     "commit": "c0abce5",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6036136929"
   },
-  "nextAction": "Continue V4 X8 fixtures then consolidated M1spec audit, owner-independent; no production or owner approval."
+  "nextAction": "Claude repair C31 in new0.24; then consolidated M1spec/fixture audit and owner decision packet; no production."
 }
