@@ -1971,9 +1971,87 @@
       "publicationCurated": false
     },
     {
+      "path": "m1-draft-0.20/annex/C29-SINK-GRAMMAR.md",
+      "localSha256": "e00b1730fde9e8b496b5c7c16bf8bfc0a9c71f25e3492acdc4ab59a0891d99bd",
+      "publicSha256": "e00b1730fde9e8b496b5c7c16bf8bfc0a9c71f25e3492acdc4ab59a0891d99bd",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.20/M1-SPEC-0.20-AMENDMENT.md",
+      "localSha256": "3d80cb040dbf65776b4a06feb84435c1d580fca2d8e499c972cd06e30615b14e",
+      "publicSha256": "3d80cb040dbf65776b4a06feb84435c1d580fca2d8e499c972cd06e30615b14e",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.20/M1-STATUS-0.20.md",
+      "localSha256": "cdb6f72c57a6e6ef7a30a161f3529358f4736846a4a895a9faa2e1a8323ec4b0",
+      "publicSha256": "cdb6f72c57a6e6ef7a30a161f3529358f4736846a4a895a9faa2e1a8323ec4b0",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.20/README.md",
+      "localSha256": "0ba12cfc2c4698ab0d20907340282237c8f14232492c35f6158f85f65cde5833",
+      "publicSha256": "0ba12cfc2c4698ab0d20907340282237c8f14232492c35f6158f85f65cde5833",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.20/tools/run_checks_020.py",
+      "localSha256": "e68b69de86e48170453c0b0feae2538ccbf46c934d6abd8e0f38228dbe0089ba",
+      "publicSha256": "e68b69de86e48170453c0b0feae2538ccbf46c934d6abd8e0f38228dbe0089ba",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.20/tools/sink_checker_strict.py",
+      "localSha256": "6b48bd03d224a1f2781ea6d5284b1e02381bbcb837f0192a906210599bbe78b5",
+      "publicSha256": "6b48bd03d224a1f2781ea6d5284b1e02381bbcb837f0192a906210599bbe78b5",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.20/vectors/c29-controls.json",
+      "localSha256": "b1f6c45374c5b5580844f664ddb1ef288fd27d09ff8cb4194faa1e611dcb5b38",
+      "publicSha256": "b1f6c45374c5b5580844f664ddb1ef288fd27d09ff8cb4194faa1e611dcb5b38",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.20/vectors/v2-deferred-experiments.json",
+      "localSha256": "2591a3a6eede3587881283a36cd3b6e619c8129ad387b63837e7c232ffb2f45f",
+      "publicSha256": "2591a3a6eede3587881283a36cd3b6e619c8129ad387b63837e7c232ffb2f45f",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/reviews/REVIEW-0.20.md",
+      "localSha256": "3716a2b433a52ae0029a6face16c78d311a5111cc011e5099152867795a314aa",
+      "publicSha256": "3716a2b433a52ae0029a6face16c78d311a5111cc011e5099152867795a314aa",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.20/run-results-0.20.json",
+      "localSha256": "f87710014cec5afc40044fb7717b77511b2a68a12a6440db1c1255d518f963bf",
+      "publicSha256": "f87710014cec5afc40044fb7717b77511b2a68a12a6440db1c1255d518f963bf",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.20/sink-grammar-independent-probes.py",
+      "localSha256": "dff4946b79699c89ade4728b65a8c40953cf579e8644990b69c938248201fcc9",
+      "publicSha256": "dff4946b79699c89ade4728b65a8c40953cf579e8644990b69c938248201fcc9",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.20/sink-grammar-independent-probes.json",
+      "localSha256": "9e3ced0f1669fb5098533dfbf7cb4d14d2d2f3fbef7a15c7d35ccaff2f379aad",
+      "publicSha256": "9e3ced0f1669fb5098533dfbf7cb4d14d2d2f3fbef7a15c7d35ccaff2f379aad",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/tasks/task-018.md",
+      "localSha256": "da3c14f0301c35d7641c6a335b8f738f9bbbb599cfbbcab380c6b0a1d1e6c703",
+      "publicSha256": "da3c14f0301c35d7641c6a335b8f738f9bbbb599cfbbcab380c6b0a1d1e6c703",
+      "publicationCurated": false
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "bab5ee950cdc88a9e1c658cceedbaf2941d1d6db937803ffda608287d6a5cdb7",
-      "publicSha256": "92bc9e85985277502cfdc31af4ed7581e023eb42dbc02c15466ea2e62bd2bfd7",
+      "localSha256": "8ce84379c42777f3c4147c762659dcb113eb5edac68e6b41d387cb830d9eaade",
+      "publicSha256": "b6275518c9f9c499b9b810e480c31823e18d10da424a21f89b1f97cc57904722",
       "publicationCurated": true
     }
   ]

@@ -1,7 +1,7 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.19-reviewed-revise-C29",
-  "latestCompletedRevision": "0.18",
+  "status": "0.20-reviewed-V2-partial",
+  "latestCompletedRevision": "0.20",
   "issues": [
     {
       "id": "C01",
@@ -199,7 +199,7 @@
     },
     {
       "id": "C29",
-      "status": "open",
+      "status": "closed-spec-tooling",
       "evidence": "review-001/REVIEW-0.19.md; sink-unknown-terminal-probe.json -> no violation for invalid terminal",
       "decision": "Closed sink event grammar and strict counters; preserve LC goldens/control detection"
     }
@@ -301,6 +301,11 @@
       "revision": "0.19",
       "result": "493pass23recorded0fail; independent29pass andC29counterexampleFAIL -> revise; accepted0.18",
       "evidence": "review-001/REVIEW-0.19.md"
+    },
+    {
+      "revision": "0.20",
+      "result": "570 pass,76 recorded,0fail; independent23/23; V2Partial,39Partial2NotStarted0Complete; owners unchanged",
+      "evidence": "review-001/REVIEW-0.20.md"
     }
   ],
   "githubHandoff": {
@@ -314,5 +319,5 @@
     "commit": "c0abce5",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6036136929"
   },
-  "nextAction": "Claude repair C29 in new0.20; then V3/V4 and final specification completeness audit, ownerquestionsunapproved."
+  "nextAction": "Continue V3 thenV4 and final completeness audit, not production; ownerquestionsunapproved."
 }
