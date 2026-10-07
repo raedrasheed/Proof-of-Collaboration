@@ -1,6 +1,6 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.12-verified-spec-incomplete-owner-decisions-open",
+  "status": "0.13-reviewed-revision-required-C26",
   "latestCompletedRevision": "m1-draft-0.12",
   "issues": [
     {
@@ -158,6 +158,12 @@
       "status": "closed-spec-tooling",
       "evidence": "0.11 World:8physical pocol:epoch: names -> newF6 ->9 whilelimit8, violations[]; REVIEW-0.11.md",
       "decision": "0.12 physicalnamespace gate/invariants independently17/17; strictC24 24/24; all237pass64recorded0fail; REVIEW-0.12.md"
+    },
+    {
+      "id": "C26",
+      "status": "open",
+      "evidence": "run_checks_013.py:165 metadata status collides with record status positionalargument; 309pass99recorded1fail, laterE4checks notexecuted",
+      "decision": "New0.14 diagnostic-onlyrepair andfullrerun, preservingfailed0.13"
     }
   ],
   "history": [
@@ -222,6 +228,11 @@
       "revision": "0.12",
       "result": "237pass64recorded0fail; independentnamespace17/17 andstrictnames/types24/24; E1-E3 partial; owners unchanged",
       "evidence": "review-001/REVIEW-0.12.md"
+    },
+    {
+      "revision": "0.13",
+      "result": "309pass99recorded1FAIL exit1; independent30/30pass; reviseC26; latestaccepted0.12",
+      "evidence": "review-001/REVIEW-0.13.md"
     }
   ],
   "githubHandoff": {
@@ -232,7 +243,7 @@
     "pullRequest": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2",
     "branch": "work/m1-import",
     "checkout": "coordination/shared-repo",
-    "commit": "54dc45b",
+    "commit": "c0abce5",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6036136929"
   },
   "nextAction": "Continue E4-E7 storage specifications/fixtures, then V2-V4; no production or owner policy approval."
