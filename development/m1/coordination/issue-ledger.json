@@ -1,6 +1,6 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.9-verified-spec-incomplete-owner-decisions-open",
+  "status": "0.10-reviewed-revision-required-C24",
   "latestCompletedRevision": "m1-draft-0.9",
   "issues": [
     {
@@ -146,6 +146,12 @@
       "status": "closed-spec-tooling",
       "evidence": "0.7 step.completed e_checks fails: snapshot-invariants.json looked up in 0.6 but belongs to 0.4",
       "decision": "0.8 input hashes and comparison/regressions verified: 261 pass, 3 recorded, 0 fail; REVIEW-0.8.md"
+    },
+    {
+      "id": "C24",
+      "status": "open",
+      "evidence": "review-001/epoch-independent-probes-0.10.json:7/24fail; trailing LF accepted by strictname parsers and bool accepted as numeric fields",
+      "decision": "Claude must repair reference tooling in new0.11; preserve0.10 and rerun all schedules; no owner policy change"
     }
   ],
   "history": [
@@ -195,18 +201,23 @@
       "revision": "0.9",
       "result": "197 pass,38 recorded,0 fail; independent31/31; Q1-Q4 partial,31 partial10 notstarted0 complete; owners unchanged",
       "evidence": "review-001/REVIEW-0.9.md"
+    },
+    {
+      "revision": "0.10",
+      "result": "86pass27recorded0fail inrunner; independent17pass7fail -> revise, latestaccepted remains0.9",
+      "evidence": "review-001/REVIEW-0.10.md"
     }
   ],
   "githubHandoff": {
     "repository": "https://github.com/raedrasheed/Proof-of-Collaboration",
-    "state": "published import and completed cycle 0.8",
-    "activeWrites": "m1-draft-0.7 only",
+    "state": "published completed cycle0.9",
+    "activeWrites": "none; completed0.9 reviewed and published",
     "publicExclusions": "Private CLI transcripts, original dialogue history, secrets, dependencies and runtime binaries",
     "pullRequest": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2",
     "branch": "work/m1-import",
     "checkout": "coordination/shared-repo",
-    "commit": "24aec0066ad7b39e3a423bd45f8952d75ea2b6c4",
+    "commit": "54dc45b",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6036136929"
   },
-  "nextAction": "Continue sequential E1-E3 specs/reference fixtures, then E4-E7 and V2-V4; preserve owners/full gate; publish sanitized cycles toPR2."
+  "nextAction": "C24 strict-name/type repair in0.11, then E4-E7/V2-V4; owners unchanged."
 }
