@@ -1611,9 +1611,93 @@
       "publicationCurated": true
     },
     {
+      "path": "m1-draft-0.16/annex/E6-E7.md",
+      "localSha256": "a11eb96d6580d9e07006bcf236c1df2abfe59f277007d6d50c2a904446787324",
+      "publicSha256": "a11eb96d6580d9e07006bcf236c1df2abfe59f277007d6d50c2a904446787324",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.16/M1-SPEC-0.16-AMENDMENT.md",
+      "localSha256": "01ccd01f4486534d96af5671edb5e321650832ceac03076df3dc64dca0b04caf",
+      "publicSha256": "01ccd01f4486534d96af5671edb5e321650832ceac03076df3dc64dca0b04caf",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.16/M1-STATUS-0.16.md",
+      "localSha256": "372ea38ddb2103ffd5946d665b174c6e4b5de709cd047d1c82d20f4b4be5a209",
+      "publicSha256": "372ea38ddb2103ffd5946d665b174c6e4b5de709cd047d1c82d20f4b4be5a209",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.16/README.md",
+      "localSha256": "f874e5b73d3902c9d762651d8506bc2c9e79aa4ec05664c7055b83684835602e",
+      "publicSha256": "f874e5b73d3902c9d762651d8506bc2c9e79aa4ec05664c7055b83684835602e",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.16/tools/admin_ref.py",
+      "localSha256": "45b0df5faf0cd42b83f4230959ed523b5bb447c9083f2429dfae81531a65fd2c",
+      "publicSha256": "45b0df5faf0cd42b83f4230959ed523b5bb447c9083f2429dfae81531a65fd2c",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.16/tools/run_checks_016.py",
+      "localSha256": "bd5cca020415a91a95d2304b6ff788f68c229b8daf9d9c3d7cd1da2c5e8762e9",
+      "publicSha256": "bd5cca020415a91a95d2304b6ff788f68c229b8daf9d9c3d7cd1da2c5e8762e9",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.16/tools/sites_ref.py",
+      "localSha256": "78756b16de5dcdd2bc4251356cb3489713491dc7dd16fbe69536bc31d42bfd9b",
+      "publicSha256": "78756b16de5dcdd2bc4251356cb3489713491dc7dd16fbe69536bc31d42bfd9b",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.16/vectors/e6-admin.json",
+      "localSha256": "ffa461a11fc70620111cf79f8821b9632fa4cfa6038041f42207739d043be2f8",
+      "publicSha256": "ffa461a11fc70620111cf79f8821b9632fa4cfa6038041f42207739d043be2f8",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.16/vectors/e6e7-adapters.json",
+      "localSha256": "3e11390ef981024fb853e058f8fedff2282284d02c6ee2d27ee430335ba4f619",
+      "publicSha256": "3e11390ef981024fb853e058f8fedff2282284d02c6ee2d27ee430335ba4f619",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.16/vectors/e6e7-ledger.json",
+      "localSha256": "f5e8cb09141b59bbfb635f686c4796dd68f252df09833fa56994995df7d68b49",
+      "publicSha256": "f5e8cb09141b59bbfb635f686c4796dd68f252df09833fa56994995df7d68b49",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.16/vectors/e7-assumption-violations.json",
+      "localSha256": "0e7e0d45092c14fedfd0bc1896e2f60b1bf0de2aae867af0af3d40524dc0a0f1",
+      "publicSha256": "0e7e0d45092c14fedfd0bc1896e2f60b1bf0de2aae867af0af3d40524dc0a0f1",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/reviews/REVIEW-0.16.md",
+      "localSha256": "5efc19a93aca88916499cfc0fd6083b74b11bcc4009fb0fd527c9a05c7188ce6",
+      "publicSha256": "5efc19a93aca88916499cfc0fd6083b74b11bcc4009fb0fd527c9a05c7188ce6",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.16/run-results-0.16.json",
+      "localSha256": "fca3e773324f9346d86aab4a0956fa07a70a70fa6b15417e8e7476e9483001bd",
+      "publicSha256": "fca3e773324f9346d86aab4a0956fa07a70a70fa6b15417e8e7476e9483001bd",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/tasks/task-014.md",
+      "localSha256": "7386146ba344ed3d6e5b68d04d043518a4a87824d2529a8742b37b0c61506286",
+      "publicSha256": "7386146ba344ed3d6e5b68d04d043518a4a87824d2529a8742b37b0c61506286",
+      "publicationCurated": false
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "aa1d77d11ed1c8191a0b980fdb849688f80e50a396e5396a4f3ca504b00eaf40",
-      "publicSha256": "b19314d78e6ba7d71cc0d31a50f1ca0a1b29efb5b022eb70f45ae36bcaae7920",
+      "localSha256": "5a7602d7202ff74232736db1d6af5051508f51ec10f06739d1588cfde75c85e3",
+      "publicSha256": "a6bac5228dc3ff50fe330923898deca01d158f4d9b823ebfe912859e06250493",
       "publicationCurated": true
     }
   ]

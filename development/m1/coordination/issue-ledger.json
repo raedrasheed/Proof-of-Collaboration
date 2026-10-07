@@ -1,6 +1,6 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.15-verified-assumption-scoped-spec-incomplete",
+  "status": "0.16-reviewed-revise-C27",
   "latestCompletedRevision": "m1-draft-0.15",
   "issues": [
     {
@@ -176,6 +176,12 @@
       "status": "proposed-review-or-owner-decision",
       "evidence": "NodeTextEncoder keysD800,D801 ->sameEFBFBDbytes andnonlosslessRoundTrip",
       "decision": "No silentnormalization; proposedscalarvalidation beforepersistence requiresbaseline reconciliation"
+    },
+    {
+      "id": "C27",
+      "status": "open",
+      "evidence": "review-001/REVIEW-0.16.md; independent runner 2 FAIL",
+      "decision": "Repair truncated adminEarlyRelease final golden; preserve exact 6000 witness and full retry timeline"
     }
   ],
   "history": [
@@ -255,6 +261,11 @@
       "revision": "0.15",
       "result": "365pass118recorded0fail exit0; C26closed; E4-E5Partial,36Partial5NotStarted0Complete; representationsunapproved",
       "evidence": "review-001/REVIEW-0.15.md"
+    },
+    {
+      "revision": "0.16",
+      "result": "944pass140recorded2FAIL exit1; C27 truncated faulty-path golden; revise; accepted0.15",
+      "evidence": "review-001/REVIEW-0.16.md"
     }
   ],
   "githubHandoff": {
@@ -268,5 +279,5 @@
     "commit": "c0abce5",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6036136929"
   },
-  "nextAction": "Continue E6-E7 thenV2-V4; representationproposalsunapproved, no production orownerpolicydecisions."
+  "nextAction": "Claude repair C27 in new0.17, reconcile x12b technical fixture discrepancy, then independent review; continue V2-V4."
 }
