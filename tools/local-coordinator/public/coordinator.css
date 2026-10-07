@@ -1,0 +1,10 @@
+.connection{font-size:13px;color:#67798a}.connection.lost{color:#8c2938;font-weight:600}
+.facts{display:grid;grid-template-columns:max-content 1fr;gap:6px 18px;margin:0}.facts dt{font-weight:600;font-size:14px;color:#3b5266}.facts dd{margin:0;font-size:14px;overflow-wrap:anywhere}
+.plain{margin:8px 0;padding-inline-start:18px;font-size:13px}.row{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;align-items:center}.row select{width:auto;min-height:49px}
+.sub{font-size:16px;margin:24px 0 8px}.item{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:8px 0;font-size:14px}.item .meta{font-size:12px;color:#67798a;direction:ltr;text-align:right}
+.state{display:inline-block;font-size:12px;padding:2px 8px;border-radius:5px;background:#eef2f6;margin-inline-start:8px}.state.running{background:#e6f5f3;color:#076b64}.state.failed,.state.interrupted{background:#fff1f1;color:#8c2938}
+.owner-card{border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0}.owner-card.test{border-style:dashed}.owner-card h3{font-size:16px;margin:0 0 6px}.owner-card .options label{font-weight:400;display:flex;gap:8px;align-items:flex-start}
+.owner-card input[type=radio]{width:auto;margin-top:6px}.answer{font-size:13px;color:#076b64}
+.message .summary{margin:0 0 8px}.message .meta{font-size:12px;color:#67798a;direction:ltr;text-align:left;overflow-wrap:anywhere}.message .badge.reviewer{background:#edf0fb;color:#435e9d}.message .badge.coordinator{background:#f4f0e6;color:#7a5b16}
+pre.tech{direction:ltr;text-align:left;font:12px/1.6 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#f8fafb;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:420px;overflow:auto}
+.entry-kind{font-size:11px;color:#435e9d;direction:ltr;text-align:left;margin:10px 0 2px}

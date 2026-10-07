@@ -1,0 +1,7 @@
+# Private runtime state must never be committed (it normally lives outside the repo,
+# in <workspace>/coordination/ui-control).
+ui-control/
+connection.json
+*.lease
+*.lock
+node_modules/

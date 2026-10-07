@@ -1,0 +1,177 @@
+// Loopback-only HTTP adapter. Security pattern adapted from PoCol Dialogue 0.3.6
+// (app.mjs): 127.0.0.1 bind, strict Host/Origin, random token delivered in the URL
+// fragment, timingSafeEqual comparison, CSP, no-store, fixed static file map.
+// Added here: a separate reviewer capability that is never sent to the browser,
+// JSON content-type/size limits, and the persisted broker behind every request.
+import http from 'node:http';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { timingSafeEqual } from 'node:crypto';
+import { BrokerError, Controller } from './broker.mjs';
+import { findClaude } from './worker.mjs';
+import { newToken, writeJsonAtomic, isoNow } from './util.mjs';
+import { redact, redactDeep, registerSecret } from './redact.mjs';
+
+const base = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC = path.join(base, '..', 'public');
+const BODY_MAX = 64 * 1024;
+const STATIC = new Map([
+  ['/', [path.join(PUBLIC, 'index.html'), 'text/html; charset=utf-8']],
+  ['/app.js', [path.join(PUBLIC, 'app.js'), 'text/javascript; charset=utf-8']],
+  ['/style.css', [path.join(base, '..', 'dialogue-style.css'), 'text/css; charset=utf-8']],
+  ['/coordinator.css', [path.join(PUBLIC, 'coordinator.css'), 'text/css; charset=utf-8']],
+]);
+const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; font-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+function tokenOk(supplied, expected) {
+  const a = Buffer.from(String(supplied || '')), b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let size = 0, failed = false;
+    req.on('data', (c) => {
+      if (failed) return;
+      size += c.length;
+      if (size > BODY_MAX) { failed = true; reject(new BrokerError(413, 'الطلب أكبر من الحد المسموح.')); req.resume(); }
+      else chunks.push(c);
+    });
+    req.on('end', () => {
+      if (failed) return;
+      try {
+        const v = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null');
+        if (!v || typeof v !== 'object' || Array.isArray(v)) return reject(new BrokerError(400, 'يجب أن يكون الطلب كائن JSON.'));
+        resolve(v);
+      } catch { reject(new BrokerError(400, 'صيغة JSON غير صالحة.')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+/**
+ * Create the HTTP app. Returns { server, controlToken, reviewerToken }.
+ * The control token is for the browser; the reviewer token is for the host coordinator only.
+ */
+export function createApp({ controller, controlToken = newToken(), reviewerToken = newToken() }) {
+  registerSecret(controlToken); registerSecret(reviewerToken);
+  const browserPost = {
+    '/api/guidance': (b) => controller.submitGuidance(b),
+    '/api/owner-answer': (b) => controller.submitOwnerAnswer(b),
+    '/api/author-job': (b) => controller.requestAuthorJob({ mode: b.mode, note: b.note, idempotencyKey: b.idempotencyKey }),
+    '/api/retry': (b) => controller.requestAuthorJob({ mode: b.mode, note: b.note, idempotencyKey: b.idempotencyKey, retryOf: b.retryOf }),
+    '/api/pause': (b) => controller.pause(b),
+    '/api/resume': (b) => controller.resume(b),
+  };
+  const reviewerPost = {
+    '/api/reviewer/attach': (b) => controller.attach(b),
+    '/api/reviewer/heartbeat': () => controller.heartbeat(),
+    '/api/reviewer/detach': () => controller.detach(),
+    '/api/reviewer/claim': (b) => controller.claim(b),
+    '/api/reviewer/ack': (b) => controller.ack(b),
+    '/api/reviewer/review': (b) => controller.review(b),
+  };
+
+  const server = http.createServer(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', CSP);
+    const send = (status, data) => {
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(redactDeep(data)));
+    };
+    try {
+      const port = server.address().port;
+      const host = `127.0.0.1:${port}`, origin = `http://${host}`;
+      if (req.headers.host !== host) return send(403, { error: 'مضيف غير مسموح.' });
+      const url = new URL(req.url, origin);
+      const isReviewer = url.pathname.startsWith('/api/reviewer/');
+      if (isReviewer) {
+        // The reviewer capability is for the host coordinator process, never for a browser page.
+        if (req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined) return send(403, { error: 'واجهة المراجع لا تقبل طلبات المتصفح.' });
+        if (!tokenOk(req.headers['x-pocol-reviewer'], reviewerToken)) return send(403, { error: 'رمز المراجع غير صالح.' });
+      } else {
+        if (req.headers.origin !== undefined && req.headers.origin !== origin) return send(403, { error: 'مصدر غير مسموح.' });
+        if (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(req.headers['sec-fetch-site'])) return send(403, { error: 'مصدر غير مسموح.' });
+      }
+      if (req.method === 'GET' && STATIC.has(url.pathname)) {
+        const [file, type] = STATIC.get(url.pathname);
+        res.writeHead(200, { 'Content-Type': type }); res.end(readFileSync(file)); return;
+      }
+      if (!isReviewer && !tokenOk(req.headers['x-pocol-control'], controlToken)) return send(403, { error: 'افتح الرابط الذي طبعه الخادم في نافذة التشغيل.' });
+      if (req.method === 'GET' && url.pathname === '/api/state') return send(200, controller.view());
+      if (req.method === 'GET' && url.pathname === '/api/history') return send(200, { cards: controller.timelineCards(), timelineSig: controller.timelineSig() });
+      if (req.method === 'GET' && url.pathname === '/api/reviewer/queue') return send(200, { items: controller.reviewerQueue(), status: controller.reviewerStatus() });
+      const table = isReviewer ? reviewerPost : browserPost;
+      if (req.method === 'POST' && Object.hasOwn(table, url.pathname)) {
+        if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) return send(415, { error: 'المطلوب application/json.' });
+        if (!isReviewer && req.headers.origin !== origin) return send(403, { error: 'طلبات التحكم تتطلب ترويسة Origin من الصفحة المحلية.' });
+        const body = await readBody(req);
+        return send(200, table[url.pathname](body));
+      }
+      return send(404, { error: 'المسار غير موجود.' });
+    } catch (e) {
+      const status = e instanceof BrokerError ? e.status : 500;
+      if (!res.headersSent) send(status, { error: redact(status === 500 ? 'خطأ داخلي في الخادم؛ راجع server.log.' : e.message) });
+      if (status === 500) controller.log({ event: 'http.error', message: String(e?.message || e) });
+    }
+  });
+  server.requestTimeout = 30_000;
+  server.headersTimeout = 15_000;
+  return { server, controlToken, reviewerToken };
+}
+
+function arg(name) {
+  const i = process.argv.indexOf(name);
+  return i > 0 ? process.argv[i + 1] : undefined;
+}
+
+export function resolveWorkspace(explicit) {
+  const candidates = explicit ? [explicit] : [process.cwd(), path.resolve(base, '..', '..', '..', '..', '..')];
+  for (const c of candidates) if (existsSync(path.join(c, 'coordination', 'issue-ledger.json'))) return path.resolve(c);
+  throw new Error('لم يُعثر على coordination/issue-ledger.json. استخدم --workspace بمسار مساحة العمل.');
+}
+
+export async function main() {
+  if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('Node.js 22 أو أحدث مطلوب.');
+  const workspace = resolveWorkspace(arg('--workspace'));
+  let claudeBin = null, claudeNote = null;
+  try { claudeBin = findClaude(arg('--claude-bin')); } catch (e) { claudeNote = e.message; }
+  const controller = new Controller({ workspace, sessionId: arg('--claude-session') || null, claudeBin });
+  controller.acquireService(null);
+  controller.recover();
+  const { server, controlToken, reviewerToken } = createApp({ controller });
+  const port = Number(arg('--port') || 0);
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
+  const actual = server.address().port;
+  controller.acquireService(actual);
+  const url = `http://127.0.0.1:${actual}/#${controlToken}`;
+  const connection = {
+    url, port: actual, pid: process.pid, startedAt: isoNow(), workspace,
+    reviewerApi: `http://127.0.0.1:${actual}/api/reviewer/`, reviewerHeader: 'X-PoCol-Reviewer', reviewerToken,
+    stateFile: controller.stateFile, logFile: controller.logFile, claudeBin, claudeNote,
+    noteAr: 'ملف خاص بالمنسق المضيف. لا تنشره ولا تضفه إلى Git.',
+  };
+  writeJsonAtomic(path.join(controller.uiDir, 'connection.json'), connection);
+  controller.log({ event: 'server.started', port: actual, pid: process.pid, claudeAvailable: Boolean(claudeBin) });
+  console.log('\nمنسق PoCol المحلي (M1)\nافتح هذا الرابط المحلي في المتصفح:\n' + url);
+  console.log('\nسجل الخادم: ' + controller.logFile + '\nالحالة المحفوظة: ' + controller.stateFile +
+    '\nمعلومات الاتصال الخاصة بالمنسق المضيف: ' + path.join(controller.uiDir, 'connection.json'));
+  if (claudeNote) console.log('\nتنبيه: ' + claudeNote + ' (العرض والطابور يعملان؛ تشغيل مهام المؤلف معطل).');
+  console.log('\nأبقِ النافذة مفتوحة. Ctrl+C يوقف الخادم ولا يقتل مهمة مؤلف قائمة.\n');
+  let closing = false;
+  const close = () => {
+    if (closing) return; closing = true;
+    controller.stop(); controller.releaseService();
+    controller.log({ event: 'server.stopped' });
+    server.close(); server.closeAllConnections();
+  };
+  process.on('SIGINT', close); process.on('SIGTERM', close);
+}
+
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((e) => { console.error(redact(String(e.message))); process.exitCode = 1; });
+}
