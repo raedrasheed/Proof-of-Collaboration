@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
 import { BrokerError, Controller } from './broker.mjs';
 import { findClaude } from './worker.mjs';
+import { Notifier } from './notifier.mjs';
 import { newToken, writeJsonAtomic, isoNow } from './util.mjs';
 import { redact, redactDeep, registerSecret } from './redact.mjs';
 
@@ -63,6 +64,7 @@ export function createApp({ controller, controlToken = newToken(), reviewerToken
     '/api/retry': (b) => controller.requestAuthorJob({ mode: b.mode, note: b.note, idempotencyKey: b.idempotencyKey, retryOf: b.retryOf }),
     '/api/pause': (b) => controller.pause(b),
     '/api/resume': (b) => controller.resume(b),
+    '/api/notify-retry': (b) => controller.retryNotification({ notificationId: b.notificationId, idempotencyKey: b.idempotencyKey }),
   };
   const reviewerPost = {
     '/api/reviewer/attach': (b) => controller.attach(b),
@@ -140,7 +142,11 @@ export async function main() {
   const workspace = resolveWorkspace(arg('--workspace'));
   let claudeBin = null, claudeNote = null;
   try { claudeBin = findClaude(arg('--claude-bin')); } catch (e) { claudeNote = e.message; }
-  const controller = new Controller({ workspace, sessionId: arg('--claude-session') || null, claudeBin });
+  // Host transport: `codex queue --remote unix:// --thread <existing>` only. Paths and thread come
+  // from the operator's command line (or CODEX_THREAD_ID), never from the browser.
+  const notifier = new Notifier({ codexBin: arg('--codex-bin') || null, threadId: arg('--codex-thread') || process.env.CODEX_THREAD_ID || null, ws: workspace });
+  // Notifications are held until connection.json (which the message points to) is written.
+  const controller = new Controller({ workspace, sessionId: arg('--claude-session') || null, claudeBin, notifier, holdNotifications: true });
   controller.acquireService(null);
   controller.recover();
   const { server, controlToken, reviewerToken } = createApp({ controller });
@@ -153,14 +159,19 @@ export async function main() {
     url, port: actual, pid: process.pid, startedAt: isoNow(), workspace,
     reviewerApi: `http://127.0.0.1:${actual}/api/reviewer/`, reviewerHeader: 'X-PoCol-Reviewer', reviewerToken,
     stateFile: controller.stateFile, logFile: controller.logFile, claudeBin, claudeNote,
-    noteAr: 'ملف خاص بالمنسق المضيف. لا تنشره ولا تضفه إلى Git.',
+    hostNotifier: notifier.describe(),
+    noteAr: 'ملف خاص بالمنسق المضيف. لا تنشره ولا تضفه إلى Git. وصول الإشعار ليس اتصالًا ولا استلامًا ولا مراجعة؛ الاتصال يكون باستدعاء attach فعليًا.',
   };
-  writeJsonAtomic(path.join(controller.uiDir, 'connection.json'), connection);
-  controller.log({ event: 'server.started', port: actual, pid: process.pid, claudeAvailable: Boolean(claudeBin) });
+  writeJsonAtomic(controller.connectionFile, connection);
+  controller.releaseNotifications();
+  controller.log({ event: 'server.started', port: actual, pid: process.pid, claudeAvailable: Boolean(claudeBin), notifierConfigured: notifier.configured().ok });
   console.log('\nمنسق PoCol المحلي (M1)\nافتح هذا الرابط المحلي في المتصفح:\n' + url);
   console.log('\nسجل الخادم: ' + controller.logFile + '\nالحالة المحفوظة: ' + controller.stateFile +
     '\nمعلومات الاتصال الخاصة بالمنسق المضيف: ' + path.join(controller.uiDir, 'connection.json'));
   if (claudeNote) console.log('\nتنبيه: ' + claudeNote + ' (العرض والطابور يعملان؛ تشغيل مهام المؤلف معطل).');
+  const nc = notifier.configured();
+  console.log(nc.ok ? `\nإشعار المنسق المضيف: codex queue --remote unix:// إلى الخيط القائم …${notifier.threadId.slice(-8)}`
+    : '\nتنبيه: ' + nc.reason + ' (الطلبات تُحفظ وتظهر حالة الإشعار في الصفحة).');
   console.log('\nأبقِ النافذة مفتوحة. Ctrl+C يوقف الخادم ولا يقتل مهمة مؤلف قائمة.\n');
   let closing = false;
   const close = () => {

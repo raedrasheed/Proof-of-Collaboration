@@ -1,9 +1,9 @@
 // Persisted control broker for the CURRENT host coordinator. It never reviews, never
 // creates agent turns on its own, and never starts a reviewer process. Browser requests
 // and the host coordinator's reviewer API go through this one persisted state.
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, closeSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { appendLog, bound, isoNow, newId, pidAlive, readJson, sha256, writeJsonAtomic } from './util.mjs';
+import { appendLog, bound, decodeText, isoNow, newId, pidAlive, readJson, sha256, writeJsonAtomic } from './util.mjs';
 import { redact, redactDeep } from './redact.mjs';
 import { loadHistory, loadCheckResults, parseReceipt } from './history.mjs';
 import { findQuestion, OWNER_QUESTIONS } from './owner.mjs';
@@ -12,26 +12,42 @@ import { PLANNED_DIR, TASK_FILE, Worker } from './worker.mjs';
 const KEY_RE = /^[A-Za-z0-9_-]{8,100}$/;
 const TEXT_MAX = 8000, OPEN_ITEMS_MAX = 200, EVENTS_MAX = 500;
 const LEASE_MIN = 15_000, LEASE_MAX = 600_000;
+const STDERR_TAIL = 4096, STDERR_SHOWN = 2000;
+const NOTIFY_RETRYABLE = ['failed', 'uncertain', 'notConfigured'];
 
 export class BrokerError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 const fail = (status, msg) => { throw new BrokerError(status, msg); };
 
+/** Launch errors made actionable: ENOENT from spawn means the executable (or cwd) was not found. */
+function describeLaunchError(msg) {
+  const m = redact(String(msg));
+  return /\bENOENT\b/.test(m) ? `لم يُعثر على ملف claude التنفيذي أو مجلد العمل (ENOENT): ${m}` : m;
+}
+
 function emptyState(now) {
   return { schema: 'pocol-local-coordinator/1', createdAt: isoNow(now), paused: false, pauseRequestedAt: null,
-    items: {}, order: [], keys: {}, reviewer: null, currentJob: null, reviews: [], ownerAnswers: {}, events: [] };
+    items: {}, order: [], keys: {}, reviewer: null, currentJob: null, reviews: [], ownerAnswers: {}, notifications: {}, events: [] };
 }
 
 export class Controller {
+  /**
+   * notifier: optional host transport ({ configured(), describe(), send(info) -> Promise }).
+   * holdNotifications: create notification records but send nothing until releaseNotifications()
+   * (the server holds them until connection.json, which the message points to, is written).
+   */
   constructor({ workspace, uiDir = path.join(workspace, 'coordination', 'ui-control'), sessionId = null, claudeBin = null,
-    spawnImpl, isAlive = pidAlive, now = () => Date.now(), watchMs = 2000 }) {
+    spawnImpl, isAlive = pidAlive, now = () => Date.now(), watchMs = 2000, notifier = null, holdNotifications = false }) {
     this.ws = workspace; this.uiDir = uiDir; this.now = now; this.isAlive = isAlive; this.watchMs = watchMs;
     mkdirSync(uiDir, { recursive: true });
     this.stateFile = path.join(uiDir, 'state.json');
     this.logFile = path.join(uiDir, 'server.log');
     this.cacheFile = path.join(uiDir, 'history-cache.json');
     this.state = readJson(this.stateFile, null) || emptyState(now());
+    this.state.notifications ??= {};
+    this.connectionFile = path.join(uiDir, 'connection.json');
+    this.notifier = notifier; this.notifyHeld = holdNotifications; this.inflight = new Set();
     this.ledgerFile = path.join(workspace, 'coordination', 'issue-ledger.json');
     this.sessionId = sessionId || readJson(this.ledgerFile, {})?.activeAuthor?.claudeSessionId || null;
     this.worker = new Worker({ ws: workspace, uiDir, claudeBin, spawnImpl, isAlive, log: (r) => this.log(r) });
@@ -65,9 +81,11 @@ export class Controller {
 
   // ---------- restart recovery (never spawns) ----------
   recover() {
+    this.recoverNotifications();
     const r = this.worker.recover();
     const jobId = r.lease?.jobId ?? this.state.currentJob;
     const item = jobId ? this.state.items[jobId] : null;
+    let interrupted = null;
     if (r.state === 'alive') {
       this.state.currentJob = r.lease.jobId;
       if (item) item.status = 'running';
@@ -76,14 +94,15 @@ export class Controller {
     } else if (r.state === 'finished') {
       this.finishJob(r.lease.jobId, { code: r.result.is_error ? 1 : 0, recovered: true });
     } else if (r.state === 'interrupted') {
-      if (item) { item.status = 'interrupted'; item.endedAt = isoNow(this.now()); }
+      if (item) { item.status = 'interrupted'; item.endedAt = isoNow(this.now()); this.attachStderr(item); interrupted = item; }
       this.worker.release(r.lease.jobId); this.state.currentJob = null;
       this.event('worker.interrupted', { jobId: r.lease.jobId, pid: r.lease.pid });
     } else if (this.state.currentJob && item && item.status === 'running') {
-      item.status = 'interrupted'; this.state.currentJob = null;
+      item.status = 'interrupted'; item.endedAt = isoNow(this.now()); this.state.currentJob = null; interrupted = item;
       this.event('worker.interrupted', { jobId: item.id, reason: 'no lease file' });
     }
     this.save();
+    if (interrupted) this.notifyHost(interrupted.id, 'jobFinished');
   }
 
   watch() {
@@ -122,9 +141,13 @@ export class Controller {
     return text;
   }
 
+  // A duplicate key returns before anything is queued or notified; a new item is persisted
+  // (by _add) before its one host notification is even recorded.
   submitGuidance({ text, idempotencyKey }) {
     const ex = this._existing(idempotencyKey); if (ex) return { item: ex, duplicate: true };
-    return { item: this._add('guidance', idempotencyKey, { text: this._text(text) }), duplicate: false };
+    const item = this._add('guidance', idempotencyKey, { text: this._text(text) });
+    this.notifyHost(item.id, 'queued');
+    return { item, duplicate: false };
   }
 
   submitOwnerAnswer({ questionId, choice, note = '', idempotencyKey }) {
@@ -135,6 +158,7 @@ export class Controller {
     const item = this._add('ownerAnswer', idempotencyKey, { questionId, choice, note, testOnly: Boolean(q.testOnly) });
     this.state.ownerAnswers[questionId] = { itemId: item.id, choice, at: item.createdAt, status: 'queued', testOnly: Boolean(q.testOnly) };
     this.save();
+    this.notifyHost(item.id, 'queued');
     return { item, duplicate: false };
   }
 
@@ -145,7 +169,9 @@ export class Controller {
       const prev = this.state.items[retryOf];
       if (!prev || prev.kind !== 'authorJob' || !['failed', 'interrupted'].includes(prev.status)) fail(409, 'لا توجد مهمة فاشلة أو متوقفة بهذا المعرف.');
     }
-    return { item: this._add('authorJob', idempotencyKey, { mode, note: note ? this._text(note) : '', retryOf }), duplicate: false };
+    const item = this._add('authorJob', idempotencyKey, { mode, note: note ? this._text(note) : '', retryOf });
+    this.notifyHost(item.id, 'queued');
+    return { item, duplicate: false };
   }
 
   pause({ idempotencyKey }) {
@@ -283,14 +309,18 @@ export class Controller {
     const block = this.dispatchBlock();
     if (block) { next.blockedReason = block; this.save(); return null; }
     if (next.dispatch.plannedDir && existsSync(path.join(this.ws, next.dispatch.plannedDir))) {
-      next.status = 'failed'; next.endedAt = isoNow(this.now()); next.error = 'المجلد المخطط أصبح موجودًا قبل البدء.'; this.save(); return null;
+      next.status = 'failed'; next.endedAt = isoNow(this.now()); next.error = 'المجلد المخطط أصبح موجودًا قبل البدء.'; this.save();
+      this.notifyHost(next.id, 'jobFinished');
+      return null;
     }
     next.dispatch.sessionId = this.sessionId;
     let lease;
     try { lease = this.worker.start(next, (r) => { this.finishJob(next.id, r); this.save(); }); }
     catch (e) {
-      next.status = 'failed'; next.endedAt = isoNow(this.now()); next.error = redact(String(e.message));
-      this.event('worker.startFailed', { itemId: next.id }); this.save(); return null;
+      next.status = 'failed'; next.endedAt = isoNow(this.now()); next.error = describeLaunchError(e.message);
+      this.event('worker.startFailed', { itemId: next.id }); this.save();
+      this.notifyHost(next.id, 'jobFinished');
+      return null;
     }
     next.status = 'running'; next.startedAt = lease.startedAt; next.pid = lease.pid; next.blockedReason = null;
     this.state.currentJob = next.id;
@@ -302,21 +332,153 @@ export class Controller {
   finishJob(jobId, { code = null, error = null, recovered = false } = {}) {
     const i = this.state.items[jobId];
     const res = this.worker.receiptResult(jobId);
+    let ended = false;
     if (i && i.status === 'running' || i && recovered) {
       i.status = res && !res.is_error && (code === 0 || recovered) ? 'completed' : 'failed';
-      i.endedAt = isoNow(this.now()); i.exitCode = code; if (error) i.error = redact(error);
-      if (!res) i.error = i.error || 'لم يكتب Claude نتيجة نهائية في الإيصال.';
+      i.endedAt = isoNow(this.now()); i.exitCode = code; if (error) i.error = describeLaunchError(error);
+      if (i.status === 'failed') this.attachStderr(i);
+      if (!res) i.error = i.error || (i.stderrExcerpt ? `لم يكتب Claude نتيجة نهائية في الإيصال. آخر stderr: ${i.stderrExcerpt}` : 'لم يكتب Claude نتيجة نهائية في الإيصال، ولا يوجد stderr.');
+      ended = true;
     }
     this.worker.release(jobId);
     if (this.state.currentJob === jobId) this.state.currentJob = null;
     this.event('worker.finished', { jobId, status: i?.status, exitCode: code });
+    // One review request per job: repeated exit/error/watch callbacks never enqueue twice.
+    if (ended) this.notifyHost(jobId, 'jobFinished');
   }
+
+  /**
+   * Bounded, redacted tail of a job's private stderr.log, kept on the item so a failed CLI
+   * invocation (e.g. a session that no longer exists) shows an actionable error. The raw file
+   * itself is never served.
+   */
+  stderrExcerpt(jobId) {
+    const f = path.join(this.uiDir, 'jobs', jobId, 'stderr.log');
+    let fd = null;
+    try {
+      const size = statSync(f).size;
+      if (!size) return null;
+      const len = Math.min(size, STDERR_TAIL);
+      const buf = Buffer.alloc(len);
+      fd = openSync(f, 'r');
+      readSync(fd, buf, 0, len, size - len);
+      let text = decodeText(buf);
+      if (size > len) text = text.slice(text.indexOf('\n') + 1);        // drop a partial first line (could be half a secret)
+      text = redact(text).trim();                                        // redact before cutting, keep the tail (the actual error)
+      if (!text) return null;
+      return text.length > STDERR_SHOWN ? `… [قُصّ أوله] ${text.slice(-STDERR_SHOWN)}` : text;
+    } catch { return null; }
+    finally { if (fd !== null) try { closeSync(fd); } catch { /* closed */ } }
+  }
+  attachStderr(item) { const ex = this.stderrExcerpt(item.id); if (ex) item.stderrExcerpt = ex; }
 
   jobSummary(item) {
     const f = path.join(this.uiDir, 'jobs', item.id, 'receipt.jsonl');
-    if (!existsSync(f)) return null;
+    if (!existsSync(f)) return item.stderrExcerpt ? { result: null, toolCalls: 0, entries: [], lastAt: null, stderrExcerpt: item.stderrExcerpt } : null;
     const p = parseReceipt(readFileSync(f).toString('utf8'));
-    return { result: p.result, toolCalls: p.toolCalls, entries: p.entries.slice(-60), lastAt: p.lastAt };
+    return { result: p.result, toolCalls: p.toolCalls, entries: p.entries.slice(-60), lastAt: p.lastAt, stderrExcerpt: item.stderrExcerpt ?? null };
+  }
+
+  // ---------- host notification transport (separate from reviewer presence, claim, ack, review) ----------
+  /**
+   * Record and send at most one notification per (reason, item). The record — and its attempt
+   * marked 'sending' — is persisted before any process is launched, so a restart can only find
+   * an attempt as 'uncertain', never replay it.
+   */
+  notifyHost(itemId, reason) {
+    const id = `${reason}:${itemId}`;
+    if (this.state.notifications[id]) return this.state.notifications[id];
+    const n = { id, itemId, reason, createdAt: isoNow(this.now()), status: 'held', attempts: [], error: null, deliveredAt: null, queueId: null, output: null };
+    this.state.notifications[id] = n;
+    if (this.notifyHeld) { this.event('notify.held', { notificationId: id }); this.save(); return n; }
+    this._sendNotification(n, 'auto');
+    return n;
+  }
+
+  /** Send notifications created while held (server start, before connection.json existed). */
+  releaseNotifications() {
+    this.notifyHeld = false;
+    for (const n of Object.values(this.state.notifications)) if (n.status === 'held') this._sendNotification(n, 'auto');
+  }
+
+  _sendNotification(n, trigger) {
+    const cfg = this.notifier ? this.notifier.configured() : { ok: false, reason: 'لم يُضبط ناقل الإشعار (--codex-bin و--codex-thread)؛ الطلب محفوظ ولم يُرسل إشعار.' };
+    const attempt = { n: n.attempts.length + 1, trigger, startedAt: isoNow(this.now()), status: 'sending', endedAt: null, error: null };
+    n.attempts.push(attempt);
+    if (n.attempts.length > 20) n.attempts.splice(0, n.attempts.length - 20);
+    if (!cfg.ok) {
+      attempt.status = n.status = 'notConfigured'; attempt.endedAt = attempt.startedAt; attempt.error = n.error = redact(String(cfg.reason));
+      this.event('notify.notConfigured', { notificationId: n.id }); this.save();
+      return null;
+    }
+    n.status = 'sending'; n.error = null;
+    this.event('notify.sending', { notificationId: n.id, attempt: attempt.n, trigger });
+    this.save();                                                        // durable BEFORE the launch
+    const item = this.state.items[n.itemId];
+    const info = { itemId: n.itemId, reason: n.reason, kind: item?.kind ?? null, status: item?.status ?? null, connectionPath: this.connectionFile };
+    let p;
+    try { p = Promise.resolve(this.notifier.send(info)); } catch (e) { p = Promise.resolve({ ok: false, error: String(e?.message || e) }); }
+    const done = p.then((r) => this._notifyResult(n.id, attempt.n, r), (e) => this._notifyResult(n.id, attempt.n, { ok: false, error: String(e?.message || e) }))
+      .finally(() => this.inflight.delete(done));
+    this.inflight.add(done);
+    return done;
+  }
+
+  _notifyResult(id, attemptNo, r = {}) {
+    const n = this.state.notifications[id];
+    const a = n?.attempts.find((x) => x.n === attemptNo);
+    if (!a || a.status !== 'sending') return;                          // completes once
+    a.endedAt = isoNow(this.now());
+    const output = r.output ? redact(bound(String(r.output), 2000)) : null;
+    const stderr = r.stderr ? redact(bound(String(r.stderr), 2000)) : null;
+    if (r.ok) {
+      a.status = n.status = 'delivered';
+      n.deliveredAt = a.endedAt; n.queueId = r.queueId ? redact(String(r.queueId)) : null; n.output = output; n.error = null;
+      a.queueId = n.queueId;
+    } else {
+      a.status = n.status = r.uncertain ? 'uncertain' : 'failed';
+      a.error = n.error = redact(bound(`${r.error || 'فشل غير معروف'}${stderr ? ' · stderr: ' + stderr : ''}`, 3000));
+      n.output = output;
+    }
+    this.event(`notify.${n.status}`, { notificationId: id, attempt: attemptNo });
+    this.save();
+  }
+
+  /** Explicit retry from the browser for the same item; never automatic. */
+  retryNotification({ notificationId, idempotencyKey }) {
+    if (!KEY_RE.test(idempotencyKey || '')) fail(400, 'مفتاح الطلب غير صالح.');
+    const n = typeof notificationId === 'string' ? this.state.notifications[notificationId] : null;
+    if (!n) fail(404, 'إشعار غير موجود.');
+    n.retryKeys ??= [];
+    if (n.retryKeys.includes(idempotencyKey)) return { notification: n, duplicate: true };
+    if (!NOTIFY_RETRYABLE.includes(n.status)) fail(409, n.status === 'delivered' ? 'سُلّم الإشعار بالفعل.' : `لا يمكن إعادة إشعار بحالة ${n.status}.`);
+    n.retryKeys.push(idempotencyKey);
+    if (n.retryKeys.length > 20) n.retryKeys.splice(0, n.retryKeys.length - 20);
+    this._sendNotification(n, 'explicitRetry');
+    return { notification: n, duplicate: false };
+  }
+
+  /** After a restart: an attempt that was 'sending' is uncertain, never resent automatically. */
+  recoverNotifications() {
+    let changed = false;
+    for (const n of Object.values(this.state.notifications)) {
+      if (n.status !== 'sending') continue;
+      const a = n.attempts.at(-1);
+      if (a && a.status === 'sending') { a.status = 'uncertain'; a.endedAt = isoNow(this.now()); a.error = 'توقف الخادم أثناء الإرسال.'; }
+      n.status = 'uncertain'; n.error = 'توقف الخادم أثناء الإرسال؛ لا يُعرف هل وصل الإشعار. لا إعادة تلقائية؛ أعد الإرسال صراحة إن لزم (قد يتكرر الإشعار).';
+      this.event('notify.uncertainAfterRestart', { notificationId: n.id });
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
+  /** Resolves when no notification attempt is in flight (tests, shutdown). */
+  async notifyIdle() { while (this.inflight.size) await Promise.allSettled([...this.inflight]); }
+
+  notifierStatus() {
+    const d = this.notifier?.describe?.() ?? null;
+    const cfg = this.notifier ? this.notifier.configured() : { ok: false, reason: 'لم يُضبط ناقل الإشعار.' };
+    return { configured: cfg.ok, reason: cfg.ok ? null : cfg.reason, remote: d?.remote ?? null, threadSuffix: d?.threadId ? String(d.threadId).slice(-8) : null, held: this.notifyHeld };
   }
 
   // ---------- read models ----------
@@ -437,6 +599,8 @@ export class Controller {
     return redactDeep({
       status: this.statusPanel(), pauseState: this.pauseState(), reviewer: this.reviewerStatus(), waiting: this.waitingReason(),
       items, reviews: this.state.reviews.slice(-50), timelineSig: this.timelineSig(), owner: this.ownerView(), events: this.state.events.slice(-40),
+      notifier: this.notifierStatus(),
+      notifications: Object.values(this.state.notifications).slice(-200).map(({ retryKeys, ...n }) => n),
     });
   }
 }

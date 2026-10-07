@@ -33,6 +33,11 @@ const WAIT_AR = { idle: 'لا شيء معلق', workerRunning: 'مهمة الم�
   waitingReviewerAttach: 'المنسق المضيف غير متصل (دورة Codex الحالية غير نشطة)؛ الطلبات محفوظة وتنتظر اتصاله',
   dispatchBlocked: 'مهمة موافق عليها لكنها محجوبة؛ انظر السبب في الطابور', retryAvailable: 'رُوجعت المهمة الفاشلة؛ يمكن طلب إعادة صريحة' };
 const PAUSE_AR = { active: 'يعمل', draining: 'إيقاف مطلوب؛ ينتظر انتهاء المهمة الجارية عند حد آمن', paused: 'متوقف مؤقتًا' };
+// Notification delivery is a transport state only; it is never shown as a claim, an ack or a review.
+const NOTIFY_AR = { held: 'محجوز حتى يكتمل تشغيل الخادم', sending: 'جارٍ الإرسال إلى خيط Codex القائم',
+  delivered: 'وصل إلى طابور خيط Codex القائم (هذا ليس استلامًا ولا مراجعة)', failed: 'فشل الإرسال؛ الطلب نفسه محفوظ',
+  uncertain: 'غير مؤكد: توقف الخادم أو انتهت المهلة أثناء الإرسال؛ الإعادة قد تكرر الإشعار', notConfigured: 'الناقل غير مضبوط؛ الطلب محفوظ ولم يُرسل إشعار' };
+const NOTIFY_REASON_AR = { queued: 'طلب جديد', jobFinished: 'طلب مراجعة لمهمة انتهت' };
 const REVIEWER_AR = { attached: 'متصل', expired: 'انتهت مهلة الاتصال؛ لا مراجعة جارية الآن', disconnected: 'غير متصل' };
 
 function renderStatus(v) {
@@ -44,6 +49,8 @@ function renderStatus(v) {
   const w = s.activeWorker;
   $('activeWorker').textContent = w ? `مهمة ${w.mode} · pid ${na(w.pid)} · بدأت ${na(w.startedAt)}` : `لا يوجد · سجل المنسق: ${s.ledgerActiveAuthor ? `${na(s.ledgerActiveAuthor.task)} (${na(s.ledgerActiveAuthor.state)})` : 'غير متاح'}`;
   $('reviewer').textContent = `${REVIEWER_AR[v.reviewer.status] || v.reviewer.status}${v.reviewer.heartbeatAt ? ' · آخر نبضة ' + v.reviewer.heartbeatAt : ''}`;
+  const nt = v.notifier;
+  $('notifier').textContent = nt.configured ? `مضبوط · codex queue --remote ${nt.remote} · الخيط …${nt.threadSuffix}${nt.held ? ' · محجوز مؤقتًا' : ''}` : `غير مضبوط: ${nt.reason}`;
   $('pauseState').textContent = PAUSE_AR[v.pauseState] || v.pauseState;
   $('waiting').textContent = WAIT_AR[v.waiting] || v.waiting;
   $('findings').replaceChildren(...s.openFindings.map((f) => el('li', `${f.id} (${f.status}): ${f.decision || ''}`)));
@@ -64,6 +71,16 @@ function renderQueue(v) {
     if (i.kind === 'ownerAnswer') d.append(el('p', `${i.payload.questionId}: ${i.payload.choice}${i.payload.testOnly ? ' (اختبار فقط)' : ''}${i.payload.note ? ' · ' + i.payload.note : ''}`));
     if (i.kind === 'authorJob') d.append(el('p', `النوع: ${i.payload.mode}${i.dispatch?.plannedDir ? ' · المجلد ' + i.dispatch.plannedDir : ''}${i.blockedReason ? ' · محجوب: ' + i.blockedReason : ''}${i.error ? ' · خطأ: ' + i.error : ''}`));
     if (i.receipt?.result) d.append(el('pre', i.receipt.result.text || '(لا يوجد نص نتيجة)', 'tech'));
+    if (i.stderrExcerpt) { d.append(el('div', 'مقتطف stderr (محجوب الأسرار، مختصر):', 'entry-kind'), el('pre', i.stderrExcerpt, 'tech')); }
+    for (const n of v.notifications.filter((x) => x.itemId === i.id)) {
+      const last = n.attempts.at(-1);
+      d.append(el('p', `إشعار المنسق المضيف (${NOTIFY_REASON_AR[n.reason] || n.reason}): ${NOTIFY_AR[n.status] || n.status}${last ? ' · محاولة ' + last.n + ' · ' + (last.endedAt || last.startedAt) : ''}${n.queueId ? ' · معرف الطابور ' + n.queueId : ''}${n.error ? ' · ' + n.error : ''}`, 'muted'));
+      if (['failed', 'uncertain', 'notConfigured'].includes(n.status)) {
+        const b = el('button', 'إعادة إرسال الإشعار صراحة (للطلب نفسه)', 'secondary');
+        b.addEventListener('click', () => act(`notify-${n.id}-${n.attempts.length}`, '/api/notify-retry', { notificationId: n.id }));
+        d.append(b);
+      }
+    }
     if (i.kind === 'authorJob' && ['completed', 'failed', 'interrupted'].includes(i.status)) {
       const rv = i.reviewId ? v.reviews.find((r) => r.id === i.reviewId) : null;
       d.append(el('p', i.reviewId ? `رُوجعت فعليًا: ${rv ? rv.verdict + ' · ' + rv.reviewerId + ' · ' + rv.at : i.reviewId}` : 'لم تُراجع بعد؛ لن تبدأ أي مهمة أخرى قبل مراجعة Codex الفعلية.', 'muted'));
