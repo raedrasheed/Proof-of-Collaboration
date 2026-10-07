@@ -1,12 +1,12 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.14-reviewed-revision-required-C26-name-collision",
-  "latestCompletedRevision": "m1-draft-0.12",
+  "status": "0.15-verified-assumption-scoped-spec-incomplete",
+  "latestCompletedRevision": "m1-draft-0.15",
   "issues": [
     {
       "id": "C01",
       "status": "open",
-      "evidence": "0.12 scope:34partial7notstarted0complete; E4-E7,V2-V4 remain and realbrowser/implementation gates unexecuted",
+      "evidence": "0.15 scope36partial5notstarted0complete; E6-E7,V2-V4 remain andcodecproposals/gates unapproved",
       "decision": "Full spec gate applies; missing work must be completed, no implementation carve-out."
     },
     {
@@ -161,9 +161,21 @@
     },
     {
       "id": "C26",
-      "status": "open",
+      "status": "closed-spec-tooling",
       "evidence": "run_checks_013.py:165 metadata status collides with record status positionalargument; 309pass99recorded1fail, laterE4checks notexecuted;0.14 name keyword collideswithcheck() ->347pass113recorded3fail,9E4checks missing",
-      "decision": "New0.14 diagnostic-onlyrepair andfullrerun, preservingfailed0.13"
+      "decision": "0.15 safe record/check logger,365pass118recorded0fail,all9omittedchecks nowexecuted; REVIEW-0.15.md"
+    },
+    {
+      "id": "CR-E4-01",
+      "status": "proposed-review-or-owner-decision",
+      "evidence": "0.13 codec onlyJSsafeinteger valueepochs; baselineu64max exceedsJS precision",
+      "decision": "No approval; prepare concrete representation preservingu64range, review beforepolicychange"
+    },
+    {
+      "id": "CR-E4-02",
+      "status": "proposed-review-or-owner-decision",
+      "evidence": "NodeTextEncoder keysD800,D801 ->sameEFBFBDbytes andnonlosslessRoundTrip",
+      "decision": "No silentnormalization; proposedscalarvalidation beforepersistence requiresbaseline reconciliation"
     }
   ],
   "history": [
@@ -238,6 +250,11 @@
       "revision": "0.14",
       "result": "347pass113recorded3FAIL exit1; secondnamecollision andcoverageguards expose9missingchecks; reviseC26",
       "evidence": "review-001/REVIEW-0.14.md"
+    },
+    {
+      "revision": "0.15",
+      "result": "365pass118recorded0fail exit0; C26closed; E4-E5Partial,36Partial5NotStarted0Complete; representationsunapproved",
+      "evidence": "review-001/REVIEW-0.15.md"
     }
   ],
   "githubHandoff": {
@@ -251,5 +268,5 @@
     "commit": "c0abce5",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6036136929"
   },
-  "nextAction": "Continue E4-E7 storage specifications/fixtures, then V2-V4; no production or owner policy approval."
+  "nextAction": "Continue E6-E7 thenV2-V4; representationproposalsunapproved, no production orownerpolicydecisions."
 }

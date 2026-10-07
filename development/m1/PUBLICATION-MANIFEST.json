@@ -1569,9 +1569,51 @@
       "publicationCurated": true
     },
     {
+      "path": "m1-draft-0.15/M1-SPEC-0.15-AMENDMENT.md",
+      "localSha256": "a413ace780fffe37be5d1e06912619a9bb9b44a609f444fbccabdd6068b0202a",
+      "publicSha256": "a413ace780fffe37be5d1e06912619a9bb9b44a609f444fbccabdd6068b0202a",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.15/M1-STATUS-0.15.md",
+      "localSha256": "002f44ec413db4110b0acf1baca9789b2c89ffb66692f0eca36830913abaa07a",
+      "publicSha256": "002f44ec413db4110b0acf1baca9789b2c89ffb66692f0eca36830913abaa07a",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.15/README.md",
+      "localSha256": "d554b8a967e0ee0c65efaec6fc24a96ff250ba909ec1562131d2f8157a749d3d",
+      "publicSha256": "d554b8a967e0ee0c65efaec6fc24a96ff250ba909ec1562131d2f8157a749d3d",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.15/tools/run_checks_015.py",
+      "localSha256": "2124f92d623230f3c9b55c4586c8061182638587c894b9b10013decf5aac7bc6",
+      "publicSha256": "2124f92d623230f3c9b55c4586c8061182638587c894b9b10013decf5aac7bc6",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/reviews/REVIEW-0.15.md",
+      "localSha256": "cde866e9b18f4bd6c14c0732407fe92741597e89bb129e98cd2a41c75c5ba920",
+      "publicSha256": "cde866e9b18f4bd6c14c0732407fe92741597e89bb129e98cd2a41c75c5ba920",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.15/run-results-0.15.json",
+      "localSha256": "848053910626027d600c791568140aec4a779f3bcc189af470b15a04591efa1c",
+      "publicSha256": "848053910626027d600c791568140aec4a779f3bcc189af470b15a04591efa1c",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/tasks/task-013.md",
+      "localSha256": "675491885666b1c7702d2c9404f3dbfc93243779860e17c23bbe819ebc7f4fc1",
+      "publicSha256": "b3c54a14ee15bf03dc9f674dc743c78c04991cfddbf839821db8332760c58ea0",
+      "publicationCurated": true
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "727476e8e9479e83549be3b56b147798b7c76719fea4c6ed93f769c4c68547da",
-      "publicSha256": "dd93f90cf253fa3f22eb96201926a20a73e047175759ca619b22cba5cb80b58c",
+      "localSha256": "aa1d77d11ed1c8191a0b980fdb849688f80e50a396e5396a4f3ca504b00eaf40",
+      "publicSha256": "b19314d78e6ba7d71cc0d31a50f1ca0a1b29efb5b022eb70f45ae36bcaae7920",
       "publicationCurated": true
     }
   ]
