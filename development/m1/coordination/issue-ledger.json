@@ -1,6 +1,6 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.13-reviewed-revision-required-C26",
+  "status": "0.14-reviewed-revision-required-C26-name-collision",
   "latestCompletedRevision": "m1-draft-0.12",
   "issues": [
     {
@@ -162,7 +162,7 @@
     {
       "id": "C26",
       "status": "open",
-      "evidence": "run_checks_013.py:165 metadata status collides with record status positionalargument; 309pass99recorded1fail, laterE4checks notexecuted",
+      "evidence": "run_checks_013.py:165 metadata status collides with record status positionalargument; 309pass99recorded1fail, laterE4checks notexecuted;0.14 name keyword collideswithcheck() ->347pass113recorded3fail,9E4checks missing",
       "decision": "New0.14 diagnostic-onlyrepair andfullrerun, preservingfailed0.13"
     }
   ],
@@ -233,6 +233,11 @@
       "revision": "0.13",
       "result": "309pass99recorded1FAIL exit1; independent30/30pass; reviseC26; latestaccepted0.12",
       "evidence": "review-001/REVIEW-0.13.md"
+    },
+    {
+      "revision": "0.14",
+      "result": "347pass113recorded3FAIL exit1; secondnamecollision andcoverageguards expose9missingchecks; reviseC26",
+      "evidence": "review-001/REVIEW-0.14.md"
     }
   ],
   "githubHandoff": {
