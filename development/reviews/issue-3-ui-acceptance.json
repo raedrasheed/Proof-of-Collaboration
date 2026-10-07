@@ -2,7 +2,7 @@
   "schema": "pocol-local-ui-acceptance/1",
   "author": "Claude Code",
   "independentReviewer": "Codex current local coordinator",
-  "verifiedAt": "2026-10-07T11:42:26.834Z",
+  "verifiedAt": "2026-10-07T12:07:43.585Z",
   "tools": {
     "node": "v22.13.1",
     "chrome": "154.0.8037.95",
@@ -16,19 +16,23 @@
   "unit": {
     "command": "npm test --prefix tools/local-coordinator",
     "exitCode": 0,
-    "total": 59,
-    "passed": 59,
+    "total": 63,
+    "passed": 63,
     "failed": 0,
     "skipped": 0
   },
   "browser": {
     "method": "Actual installed Chrome, actual resumed Claude -p with default permissions, existing host reviewer API and existing-thread queue transport",
-    "startedAt": "2026-10-07T11:41:57.242Z",
-    "endedAt": "2026-10-07T11:42:26.834Z",
+    "startedAt": "2026-10-07T12:07:16.454Z",
+    "endedAt": "2026-10-07T12:07:43.585Z",
     "exitCode": 0,
     "checks": [
       {
         "name": "Actual saved M1 0.8 status 261/3/0, UTF-8 RTL, fragment removed",
+        "result": "PASS"
+      },
+      {
+        "name": "Actual browser/API special-key requests deduplicate to one item and one real host notification",
         "result": "PASS"
       },
       {
@@ -68,8 +72,9 @@
         "result": "PASS"
       }
     ],
-    "existingHostNotificationReceipts": 4,
-    "privateAuthorReceiptSha256": "e2deac34eb441a92d480ed7c95ad1fa3e9a14ac9c80171d98f53eae3bb8b7268",
+    "coreCycleHostNotificationReceipts": 4,
+    "specialKeyHostNotificationReceipts": 1,
+    "privateAuthorReceiptSha256": "1fac1a3b3d1b98d0c9f2a9748989b89cc0a1242cea320d18b3f2f3f49095ca39",
     "savedIndependentM1CheckSha256": "16e9756b3abcac424a00bf1f0ce6f765f38376f71e4b6c3a7c3863bbdf90fe5e"
   },
   "failureRecovery": {
@@ -96,7 +101,8 @@
   "additionalAdversarialChecks": {
     "emptyOwnerLock": "Refused and preserved",
     "staleOwnerRecovery": "Exclusive mutex and owner re-read; stale evidence retained",
-    "repeatedNotificationRetries": "27 explicit injected failures; monotonic IDs, no stuck sending; old keys deduplicated after history trim and reload"
+    "repeatedNotificationRetries": "27 explicit injected failures; monotonic IDs, no stuck sending; old keys deduplicated after history trim and reload",
+    "specialKeys": "__proto__, constructor and other valid keys safely deduplicate across save/reload; actual browser/API special-key request produced one item and one real notification"
   },
   "oneCommandRestart": {
     "command": "node tools/local-coordinator/src/server.mjs --workspace <existing workspace>",
@@ -143,7 +149,7 @@
     },
     {
       "path": "tools/local-coordinator/src/broker.mjs",
-      "sha256": "ebf0b272b9e5331e62610b30b424aecf5217ebee399853fccdd8e9bb5a62bb7e"
+      "sha256": "1674c99ba677d5995bd475d2149596dedb78321e78edc1c3db11d6116da4ca1e"
     },
     {
       "path": "tools/local-coordinator/src/history.mjs",
@@ -175,7 +181,7 @@
     },
     {
       "path": "tools/local-coordinator/test/broker.test.mjs",
-      "sha256": "314d7125a31df2b6daa4b8d42d1679d560edd3867f138a5930dc5ea25aefcc5d"
+      "sha256": "cd0326ce69eed46a68df722901137eb0c20aa1342165566029c9df74593ec0fe"
     },
     {
       "path": "tools/local-coordinator/test/helpers.mjs",
@@ -187,7 +193,7 @@
     },
     {
       "path": "tools/local-coordinator/test/notifier.test.mjs",
-      "sha256": "a559d0f12908470d40aea507c5fcec2a2b02966c8d1559e3e0dcd09cfb4f17b4"
+      "sha256": "82896e748bc137cd97f17d75c34cf02d7e76ace0fcfaa3f188b829a97a994ea2"
     },
     {
       "path": "tools/local-coordinator/test/server.test.mjs",

@@ -57,7 +57,7 @@ for (const kind of ['guidance', 'authorJob']) {
   test(`special idempotency keys on ${kind}: one item and one notification per key, also after reload`, () => {
     const { ws, c, ctl, sp } = setup();
     const submit = (x, key) => (kind === 'guidance' ? x.submitGuidance({ text: `note ${key}`, idempotencyKey: key }) : x.requestAuthorJob({ mode: 'smoke', idempotencyKey: key }));
-    const ids = {};
+    const ids = Object.create(null);                                   // a plain {} would drop ids['__proto__'] (the very bug under test)
     for (const key of SPECIAL_KEYS) {
       const a = submit(ctl, key), b = submit(ctl, key);
       assert.equal(a.duplicate, false, `${key}: first is new`);
