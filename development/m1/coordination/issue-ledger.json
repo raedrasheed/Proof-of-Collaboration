@@ -1,12 +1,12 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.8-verified-spec-incomplete-owner-decisions-open",
-  "latestCompletedRevision": "m1-draft-0.8",
+  "status": "0.9-verified-spec-incomplete-owner-decisions-open",
+  "latestCompletedRevision": "m1-draft-0.9",
   "issues": [
     {
       "id": "C01",
       "status": "open",
-      "evidence": "Annex checklist: 4 partial, 37 not started; baseline lines 4955 onward",
+      "evidence": "0.9 independently reviewed:31 partial,10 notstarted,0 complete; E1-E7/V2-V4 remain, real implementation/browser gates unexecuted",
       "decision": "Full spec gate applies; missing work must be completed, no implementation carve-out."
     },
     {
@@ -190,13 +190,23 @@
     {
       "revision": "0.8",
       "result": "261 pass, 3 recorded, 0 fail; C23 closed; all remaining M1 scope and owner decisions unchanged"
+    },
+    {
+      "revision": "0.9",
+      "result": "197 pass,38 recorded,0 fail; independent31/31; Q1-Q4 partial,31 partial10 notstarted0 complete; owners unchanged",
+      "evidence": "review-001/REVIEW-0.9.md"
     }
   ],
   "githubHandoff": {
     "repository": "https://github.com/raedrasheed/Proof-of-Collaboration",
-    "state": "draft PR open; completed cycle 0.8 ready to publish",
+    "state": "published import and completed cycle 0.8",
     "activeWrites": "m1-draft-0.7 only",
     "publicExclusions": "Private CLI transcripts, original dialogue history, secrets, dependencies and runtime binaries",
-    "pullRequest": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2"
-  }
+    "pullRequest": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2",
+    "branch": "work/m1-import",
+    "checkout": "coordination/shared-repo",
+    "commit": "24aec0066ad7b39e3a423bd45f8952d75ea2b6c4",
+    "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6036136929"
+  },
+  "nextAction": "Continue sequential E1-E3 specs/reference fixtures, then E4-E7 and V2-V4; preserve owners/full gate; publish sanitized cycles toPR2."
 }
