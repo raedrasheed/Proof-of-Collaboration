@@ -1773,9 +1773,87 @@
       "publicationCurated": false
     },
     {
+      "path": "m1-draft-0.18/annex/C28-CAPTURE.md",
+      "localSha256": "0ca879bda0918e272ad69f4ff6b0d22bda17428db649c5acfb239dbea0ffee1e",
+      "publicSha256": "0ca879bda0918e272ad69f4ff6b0d22bda17428db649c5acfb239dbea0ffee1e",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.18/M1-SPEC-0.18-AMENDMENT.md",
+      "localSha256": "96682448bb3839a28af4319e73093ea24f1d9ee9118426b1d9090fef23246b7c",
+      "publicSha256": "96682448bb3839a28af4319e73093ea24f1d9ee9118426b1d9090fef23246b7c",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.18/M1-STATUS-0.18.md",
+      "localSha256": "b61825870fd1f720cf8e44272b180ec98773bb1a8ab1222c631a7dec3bd36916",
+      "publicSha256": "b61825870fd1f720cf8e44272b180ec98773bb1a8ab1222c631a7dec3bd36916",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.18/README.md",
+      "localSha256": "f519c0f7ff34623b279527916073550c08f23b0ddd67f74edad318ca28b930e5",
+      "publicSha256": "f519c0f7ff34623b279527916073550c08f23b0ddd67f74edad318ca28b930e5",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.18/tools/observe_capture.py",
+      "localSha256": "9c7346742405446f309d6d59f5b8fd5fb04414d40d3d15411d40139f0b728864",
+      "publicSha256": "9c7346742405446f309d6d59f5b8fd5fb04414d40d3d15411d40139f0b728864",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.18/tools/run_checks_018.py",
+      "localSha256": "08ffa72ae74ff74b6e5298934670c4a46d06ac8a83b2223a8fc7b6c6038b9cfa",
+      "publicSha256": "08ffa72ae74ff74b6e5298934670c4a46d06ac8a83b2223a8fc7b6c6038b9cfa",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/reviews/REVIEW-0.18.md",
+      "localSha256": "6775e64bbcc29d918b49774dfd975d236628976367ca8a0fecdb21dbdf5b0519",
+      "publicSha256": "6775e64bbcc29d918b49774dfd975d236628976367ca8a0fecdb21dbdf5b0519",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.18/run-results-0.18.json",
+      "localSha256": "b315e3f885d0a1d65012b039cf892e93c2c71b8b7386b83b24ce28afaa3006f1",
+      "publicSha256": "b315e3f885d0a1d65012b039cf892e93c2c71b8b7386b83b24ce28afaa3006f1",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.18/snapshot-alias-counterexample.py",
+      "localSha256": "5e05ae6e8f7d2254705ec63980a6727c1596010cc140816ef58206899b12ca96",
+      "publicSha256": "5e05ae6e8f7d2254705ec63980a6727c1596010cc140816ef58206899b12ca96",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.18/snapshot-alias-counterexample.json",
+      "localSha256": "f17c264201b69ee1026682981b1b71aad816bc409931097490e5576de8bae2ff",
+      "publicSha256": "f17c264201b69ee1026682981b1b71aad816bc409931097490e5576de8bae2ff",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.18/snapshot-capture-independent-probe.py",
+      "localSha256": "336c23e07688098b5b8003cda93987c2cecbb3cb00a2dc46cfcc0ff8136517f8",
+      "publicSha256": "336c23e07688098b5b8003cda93987c2cecbb3cb00a2dc46cfcc0ff8136517f8",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.18/snapshot-capture-independent-probe.json",
+      "localSha256": "2ff06a2517e06cfb89ddef971ccbbc69cb562875217f2ea4b49984b7671aefd9",
+      "publicSha256": "2ff06a2517e06cfb89ddef971ccbbc69cb562875217f2ea4b49984b7671aefd9",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/tasks/task-016.md",
+      "localSha256": "aca014594dcac57d19ebe63ce18f5f7ef9c39e00dfcd7b2ba45891d003a20e8b",
+      "publicSha256": "aca014594dcac57d19ebe63ce18f5f7ef9c39e00dfcd7b2ba45891d003a20e8b",
+      "publicationCurated": false
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "50d109a0fd3fbfd70b22df4e2addb498a93742adf61669276e793bfa2f408b26",
-      "publicSha256": "5c86066e5a16d6964db3271a3e44c567fb6a1fad9a99c2ce4c31413b7a715ec4",
+      "localSha256": "2cfa2d4c7c8e3a5d70dfd83173a1c2d13db249f614f1238d0b816ebdb5c42047",
+      "publicSha256": "3616f18ddd44fb3bb000ec25eb9394cbea68830b5c419a58cf767515567a66db",
       "publicationCurated": true
     }
   ]

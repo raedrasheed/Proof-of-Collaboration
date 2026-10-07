@@ -1,7 +1,7 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.17-reviewed-revise-C28",
-  "latestCompletedRevision": "m1-draft-0.15",
+  "status": "0.18-reviewed-scoped-E6-E7-partial",
+  "latestCompletedRevision": "0.18",
   "issues": [
     {
       "id": "C01",
@@ -185,7 +185,7 @@
     },
     {
       "id": "C28",
-      "status": "open",
+      "status": "closed-spec-tooling",
       "evidence": "review-001/REVIEW-0.17.md; past5000 cell mutates to include6000",
       "decision": "Deep-copy each nested observation at capture, regression for future mutation; preserve prior files"
     },
@@ -283,6 +283,11 @@
       "revision": "0.17",
       "result": "1037pass156recorded1FAIL exit1; C27closed,C28 snapshot alias; revise; accepted0.15",
       "evidence": "review-001/REVIEW-0.17.md"
+    },
+    {
+      "revision": "0.18",
+      "result": "1060pass168recorded0fail exit0; independentC28 4/4,site21/21 applicable;38Partial3NotStarted0Complete; RF-E6-1unapproved",
+      "evidence": "review-001/REVIEW-0.18.md"
     }
   ],
   "githubHandoff": {
@@ -296,5 +301,5 @@
     "commit": "c0abce5",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6036136929"
   },
-  "nextAction": "Claude repair C28 in new0.18, then independent review and V2-V4."
+  "nextAction": "Continue V2 LogClient thenV3-V4 specifications/fixtures, owner-independent; RF-E6-1 question pending, noapproval."
 }
