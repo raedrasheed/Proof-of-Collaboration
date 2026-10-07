@@ -1311,9 +1311,75 @@
       "publicationCurated": true
     },
     {
+      "path": "m1-draft-0.11/M1-SPEC-0.11-AMENDMENT.md",
+      "localSha256": "835a2605fc032896057cf7d0ed3970174f9d408afb18e6f97c468b2a0ba5ba6b",
+      "publicSha256": "835a2605fc032896057cf7d0ed3970174f9d408afb18e6f97c468b2a0ba5ba6b",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.11/M1-STATUS-0.11.md",
+      "localSha256": "93247305aa492e766c60efd8d2e476f938717db8971d048ea79a601b7db5d2e3",
+      "publicSha256": "93247305aa492e766c60efd8d2e476f938717db8971d048ea79a601b7db5d2e3",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.11/README.md",
+      "localSha256": "3ce703c96cc70eb69db87abf29cd2a850b2c2d14fa358f3bda04f093d2936130",
+      "publicSha256": "3ce703c96cc70eb69db87abf29cd2a850b2c2d14fa358f3bda04f093d2936130",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.11/tools/run_checks_011.py",
+      "localSha256": "6ae5585b59662cacca5f101039263ab8046753591832f0850fbd99218597f422",
+      "publicSha256": "6ae5585b59662cacca5f101039263ab8046753591832f0850fbd99218597f422",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.11/tools/sr_ref.py",
+      "localSha256": "78f163b077e1e1175d192ae668ba373c561e8cedc8bd6f1b22af23b5b42e3d48",
+      "publicSha256": "78f163b077e1e1175d192ae668ba373c561e8cedc8bd6f1b22af23b5b42e3d48",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.11/vectors/c24-regressions.json",
+      "localSha256": "ac44e52cd31195b79868e9f266eb53a571b92089e41f3a6a8aba5443ecdebec7",
+      "publicSha256": "ac44e52cd31195b79868e9f266eb53a571b92089e41f3a6a8aba5443ecdebec7",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/reviews/REVIEW-0.11.md",
+      "localSha256": "523bdfc71c014c5308e1f4dce67d9837487a6ed85bccd3f38986f130b651e7b4",
+      "publicSha256": "523bdfc71c014c5308e1f4dce67d9837487a6ed85bccd3f38986f130b651e7b4",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.11/run-results-0.11.json",
+      "localSha256": "b60a6946dd8dfd2dd10e78400ecaabde6bead56edc71cebd4e25863dbfcea893",
+      "publicSha256": "b60a6946dd8dfd2dd10e78400ecaabde6bead56edc71cebd4e25863dbfcea893",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.11/epoch-independent-probes-0.11.json",
+      "localSha256": "7368e3a329568295a5c72fe65dfd1d4e5f722432074195007f6f99a70bc69495",
+      "publicSha256": "7368e3a329568295a5c72fe65dfd1d4e5f722432074195007f6f99a70bc69495",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.11/namespace-independent-probe-0.11.json",
+      "localSha256": "ad0e163832136746d4df102396150df97cdd59e77994a0090052f1a9e4285224",
+      "publicSha256": "ad0e163832136746d4df102396150df97cdd59e77994a0090052f1a9e4285224",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/tasks/task-009.md",
+      "localSha256": "3e93b1f856872e57adf82874d0e30f8f56fadb4bf15942ac01e2f2f20a6d809a",
+      "publicSha256": "260b052188e4be0db5d4afec8181a5eca4b907928fb6c74bb52a6666a6126bde",
+      "publicationCurated": true
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "e5060f1d0efade59c19620aa97c6a1207865463476e9509e80d0b3503a3ced46",
-      "publicSha256": "6784079836790568f1475143876a7db5d9ecb3f9f02dcb65075c83b552dda711",
+      "localSha256": "ff607c2ee1885398295b81231e52084f99366c0fbad8793c029b594b66c48f70",
+      "publicSha256": "119f23e93515b93b82642a0e8ebdad7086608d51d7df836ba97ebfe229917d41",
       "publicationCurated": true
     }
   ]

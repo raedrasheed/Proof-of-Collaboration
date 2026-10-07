@@ -1,6 +1,6 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.10-reviewed-revision-required-C24",
+  "status": "0.11-reviewed-revision-required-C25",
   "latestCompletedRevision": "m1-draft-0.9",
   "issues": [
     {
@@ -149,9 +149,15 @@
     },
     {
       "id": "C24",
-      "status": "open",
+      "status": "closed-spec-tooling",
       "evidence": "review-001/epoch-independent-probes-0.10.json:7/24fail; trailing LF accepted by strictname parsers and bool accepted as numeric fields",
-      "decision": "Claude must repair reference tooling in new0.11; preserve0.10 and rerun all schedules; no owner policy change"
+      "decision": "0.11 strictnames/bools passed original24/24 probes; full inheritedsuite211pass48recorded0fail; REVIEW-0.11.md"
+    },
+    {
+      "id": "C25",
+      "status": "open",
+      "evidence": "0.11 World:8physical pocol:epoch: names -> newF6 ->9 whilelimit8, violations[]; REVIEW-0.11.md",
+      "decision": "Separate raw namespacecount fromcanonicalepochmax; maintainbaselineEN gate andphysicalcountinvariants innewrevision"
     }
   ],
   "history": [
@@ -206,6 +212,11 @@
       "revision": "0.10",
       "result": "86pass27recorded0fail inrunner; independent17pass7fail -> revise, latestaccepted remains0.9",
       "evidence": "review-001/REVIEW-0.10.md"
+    },
+    {
+      "revision": "0.11",
+      "result": "211pass48recorded0fail; independentC24 24/24pass; C25 namespacebudgetcounterexample -> revise",
+      "evidence": "review-001/REVIEW-0.11.md"
     }
   ],
   "githubHandoff": {
