@@ -2773,6 +2773,12 @@
       "localSha256": "0c815a0663739cd4d09707788b10304bcc81d14665282ea81c765b145af54c09",
       "publicSha256": "dc8947ff34ddc05df0587b8834288b6425b2b43e0f73a0a7baa87bfa9214fe95",
       "publicationCurated": true
+    },
+    {
+      "path": "m1-draft-0.25/tools/js_number_probe.cjs",
+      "localSha256": "416ac24a14655900609320fc0c8749dbf1761bebb47728fbbc1c1fcbcd8cd6e8",
+      "publicSha256": "416ac24a14655900609320fc0c8749dbf1761bebb47728fbbc1c1fcbcd8cd6e8",
+      "publicationCurated": false
     }
   ]
 }
