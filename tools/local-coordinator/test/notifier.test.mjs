@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Controller } from '../src/broker.mjs';
@@ -118,6 +118,64 @@ test('failed delivery: honest redacted error, no automatic retry, explicit retry
   assert.equal(n.sends.length, 2);
   assert.equal(ctl.state.notifications[id].status, 'delivered');
   assert.throws(() => ctl.retryNotification({ notificationId: id, idempotencyKey: 'notify-retry-03' }), /سُلّم/);
+});
+
+test('more than 25 explicit failed retries: unique increasing attempts, none stuck, old keys never resend (also after reload)', async () => {
+  const n = fakeNotifier({ results: Array.from({ length: 40 }, () => ({ ok: false, code: 1, error: 'daemon down' })) });
+  const { ws, c, ctl } = setup({ notifier: n });
+  const { item } = ctl.submitGuidance({ text: 'x', idempotencyKey: 'notify-many-base' });
+  await ctl.notifyIdle();
+  const id = `queued:${item.id}`;
+  const keys = [];
+  for (let k = 1; k <= 27; k++) {
+    const key = `notify-many-${String(k).padStart(3, '0')}`;
+    keys.push(key);
+    assert.equal(ctl.retryNotification({ notificationId: id, idempotencyKey: key }).duplicate, false);
+    await ctl.notifyIdle();
+    assert.equal(ctl.state.notifications[id].status, 'failed', `retry ${k} completed (not stuck sending)`);
+  }
+  const rec = ctl.state.notifications[id];
+  assert.equal(n.sends.length, 28);
+  assert.equal(rec.attemptSeq, 28);
+  assert.equal(rec.attempts.length, 20, 'display history is bounded');
+  assert.deepEqual(rec.attempts.map((a) => a.n), Array.from({ length: 20 }, (_, k) => k + 9), 'unique, increasing, newest kept');
+  assert.ok(rec.attempts.every((a) => a.status === 'failed'));
+  for (const key of keys) assert.equal(ctl.retryNotification({ notificationId: id, idempotencyKey: key }).duplicate, true, `old key ${key}`);
+  assert.equal(n.sends.length, 28, 'old accepted keys never cause another attempt');
+  const n2 = fakeNotifier();
+  const b = setup({ ws, c, notifier: n2 }).ctl;
+  b.recover();
+  for (const key of keys) assert.equal(b.retryNotification({ notificationId: id, idempotencyKey: key }).duplicate, true);
+  assert.equal(n2.sends.length, 0, 'nor after a reload');
+  b.retryNotification({ notificationId: id, idempotencyKey: 'notify-many-new01' });
+  await b.notifyIdle();
+  assert.equal(n2.sends.length, 1);
+  assert.equal(b.state.notifications[id].attemptSeq, 29);
+  assert.equal(b.state.notifications[id].status, 'delivered');
+});
+
+test('state written before the fix migrates: counter from the highest attempt, legacy keys kept', async () => {
+  const ws = makeWorkspace(); const c = clock();
+  const uiDir = path.join(ws, 'coordination', 'ui-control');
+  mkdirSync(uiDir, { recursive: true });
+  const itemId = '0f0e0d0c-0b0a-4908-8706-050403020101';
+  const id = `queued:${itemId}`;
+  const attempts = Array.from({ length: 20 }, (_, k) => ({ n: k + 2, status: 'failed', startedAt: 't', endedAt: 't' }));   // old trimmed history 2..21
+  writeFileSync(path.join(uiDir, 'state.json'), JSON.stringify({
+    schema: 'pocol-local-coordinator/1', paused: false, items: { [itemId]: { id: itemId, kind: 'guidance', status: 'queued', payload: { text: 'x' } } },
+    order: [itemId], keys: {}, reviewer: null, currentJob: null, reviews: [], ownerAnswers: {}, events: [],
+    notifications: { [id]: { id, itemId, reason: 'queued', status: 'failed', attempts, retryKeys: ['legacy-key-0001'] } },
+  }));
+  const n = fakeNotifier();
+  const { ctl } = setup({ ws, c, notifier: n });
+  assert.equal(ctl.retryNotification({ notificationId: id, idempotencyKey: 'legacy-key-0001' }).duplicate, true);
+  assert.equal(n.sends.length, 0);
+  ctl.retryNotification({ notificationId: id, idempotencyKey: 'fresh-key-00001' });
+  await ctl.notifyIdle();
+  const rec = ctl.state.notifications[id];
+  assert.equal(rec.attempts.at(-1).n, 22, 'continues after the highest prior attempt');
+  assert.equal(rec.status, 'delivered');
+  assert.equal(new Set(rec.attempts.map((a) => a.n)).size, rec.attempts.length);
 });
 
 test('no transport configured: request saved, honest notConfigured state', async () => {

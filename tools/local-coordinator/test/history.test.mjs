@@ -60,6 +60,23 @@ test('tool text is kept as inert data and the frontend has no executable HTML si
   assert.ok(!/\.\s*(?:innerHTML|outerHTML)\b/.test(app.replace(/\/\/[^\n]*/g, '')), 'no innerHTML/outerHTML property use (read or write) outside comments');
 });
 
+test('RTL layout: technical fragments are isolated LTR <bdi> text nodes, Arabic prose stays text', () => {
+  const app = readFileSync(path.join(here, '..', 'public', 'app.js'), 'utf8');
+  // The isolation helper builds a bdi with dir=ltr and sets only textContent.
+  assert.match(app, /function ltr\(text\) \{ const b = document\.createElement\('bdi'\); b\.dir = 'ltr'; b\.textContent = String\(text\); return b; \}/);
+  assert.match(app, /document\.createTextNode\(String\(p\)\)/, 'Arabic prose parts are plain text nodes');
+  // Status timestamps, source paths, the CLI command and IDs go through the LTR wrapper.
+  for (const frag of ['L(s.updatedAt)', 'L(c.executedAtUtc)', 'L(c.source)', 'L(c.revision)', 'L(`codex queue --remote ${nt.remote}`)',
+    'L(w.startedAt)', 'L(v.reviewer.heartbeatAt)', 'L(i.id)', 'L(i.createdAt)', 'L(i.dispatch.plannedDir)', 'L(n.queueId)',
+    'L(`source: ${c.source}`)', 'L(`time: ${c.time ?? \'unavailable\'}`)', 'L(q.answer.at)']) {
+    assert.ok(app.includes(frag), `isolated: ${frag}`);
+  }
+  // The mixed status lines are no longer assigned as one bidi-unsafe string.
+  assert.ok(!/\$\('(latestCheck|activeWorker|reviewer|notifier|updatedAt)'\)\.textContent\s*=/.test(app));
+  // Still no executable HTML sink anywhere (comments excluded).
+  assert.ok(!SINK.test(app.replace(/\/\/[^\n]*/g, '')));
+});
+
 test('history cards: roles, missing timestamps marked, hashes and commit attached', () => {
   const ws = makeWorkspace();
   const { cards } = loadHistory(ws);

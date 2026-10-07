@@ -14,6 +14,7 @@ const TEXT_MAX = 8000, OPEN_ITEMS_MAX = 200, EVENTS_MAX = 500;
 const LEASE_MIN = 15_000, LEASE_MAX = 600_000;
 const STDERR_TAIL = 4096, STDERR_SHOWN = 2000;
 const NOTIFY_RETRYABLE = ['failed', 'uncertain', 'notConfigured'];
+const ATTEMPTS_SHOWN = 20, RETRY_KEYS_MAX = 10_000;
 
 export class BrokerError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -46,6 +47,13 @@ export class Controller {
     this.cacheFile = path.join(uiDir, 'history-cache.json');
     this.state = readJson(this.stateFile, null) || emptyState(now());
     this.state.notifications ??= {};
+    this.state.notifyRetryKeys ??= {};
+    for (const n of Object.values(this.state.notifications)) {
+      // Migration: attempt counter from the highest attempt seen; per-record key lists into the durable registry.
+      n.attemptSeq = Math.max(n.attemptSeq ?? 0, ...(n.attempts || []).map((x) => Number(x.n) || 0));
+      for (const k of n.retryKeys || []) this.state.notifyRetryKeys[k] ??= { notificationId: n.id, attempt: null, at: null };
+      delete n.retryKeys;
+    }
     this.connectionFile = path.join(uiDir, 'connection.json');
     this.notifier = notifier; this.notifyHeld = holdNotifications; this.inflight = new Set();
     this.ledgerFile = path.join(workspace, 'coordination', 'issue-ledger.json');
@@ -64,20 +72,98 @@ export class Controller {
     this.log({ event: kind, ...detail });
   }
 
-  /** Single running service per ui-control directory. A stale lock (dead pid) is taken over and recorded. */
+  // ---------- single service per ui-control directory ----------
+  // The lock names its owner: pid plus a random token for THIS Controller instance. Only the
+  // instance holding that token may update or remove it (another Controller in the same
+  // process is not the owner). An empty, partial or malformed lock is never taken over: its
+  // writer may still be between open('wx') and write. A lock whose owner pid is dead is taken
+  // over only under an exclusive recovery mutex, after re-reading it unchanged, and the old
+  // content is preserved as evidence. Nothing is deleted recursively.
+
+  _readLockRaw(file) { try { return readFileSync(file, 'utf8'); } catch (e) { return e.code === 'ENOENT' ? null : undefined; } }
+  _parseLock(raw) {
+    if (typeof raw !== 'string') return null;
+    try {
+      const j = JSON.parse(raw);
+      if (!j || typeof j !== 'object' || !Number.isInteger(j.pid) || j.pid <= 0) return null;
+      if (j.owner !== undefined && (typeof j.owner !== 'string' || !j.owner)) return null;
+      return j;                                                         // a legacy lock without owner still names its pid
+    } catch { return null; }
+  }
+  _lockInfo(port) { return { pid: process.pid, owner: this.serviceOwner, startedAt: this.serviceStartedAt, port, updatedAt: isoNow(this.now()) }; }
+
   acquireService(port) {
     const lock = path.join(this.uiDir, 'service.lock');
-    const info = { pid: process.pid, startedAt: isoNow(this.now()), port };
-    try { const fd = openSync(lock, 'wx', 0o600); writeFileSync(fd, JSON.stringify(info)); closeSync(fd); }
-    catch {
-      const old = readJson(lock, {});
-      if (old.pid && old.pid !== process.pid && this.isAlive(old.pid)) fail(409, `خدمة المنسق تعمل بالفعل (pid ${old.pid}).`);
-      writeJsonAtomic(lock, info);
-      if (old.pid !== process.pid) this.event('service.staleLockRecovered', { previousPid: old.pid ?? null });
+    this.serviceOwner ??= newId();
+    this.serviceStartedAt ??= isoNow(this.now());
+    if (this.serviceOwned) {
+      // Normal second call (the real port is known now): update only our own, still-current lock.
+      const cur = this._parseLock(this._readLockRaw(lock));
+      if (!cur || cur.owner !== this.serviceOwner) { this.serviceOwned = false; fail(409, 'قفل الخدمة لم يعد مملوكًا لهذه النسخة؛ لن يُكتب فوقه.'); }
+      writeJsonAtomic(lock, this._lockInfo(port));
+      return;
     }
-    this.serviceLock = lock;
+    let fd = null;
+    try { fd = openSync(lock, 'wx', 0o600); }
+    catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      return this._contendLock(lock, port);
+    }
+    try { writeFileSync(fd, JSON.stringify(this._lockInfo(port))); }
+    catch (e) { try { closeSync(fd); } catch { /* closed */ } fd = null; try { unlinkSync(lock); } catch { /* gone */ } throw e; }
+    finally { if (fd !== null) closeSync(fd); }
+    this.serviceLock = lock; this.serviceOwned = true;
   }
-  releaseService() { if (this.serviceLock) try { unlinkSync(this.serviceLock); } catch { /* gone */ } }
+
+  _contendLock(lock, port) {
+    const raw = this._readLockRaw(lock);
+    if (raw === null) fail(409, 'قفل الخدمة تغيّر أثناء الفحص؛ أعد المحاولة.');
+    const old = this._parseLock(raw);
+    if (!old) {
+      this.event('service.lockUnreadable', { length: typeof raw === 'string' ? raw.length : null });
+      fail(409, `قفل الخدمة فارغ أو غير صالح (${lock}). قد تكون خدمة أخرى في طور البدء؛ لن يُستولى عليه تلقائيًا. إن تأكدت أنه قديم فاحذف هذا الملف يدويًا.`);
+    }
+    // Same pid is this very process, so alive by definition: another Controller here owns it.
+    if (old.pid === process.pid || this.isAlive(old.pid)) fail(409, `خدمة المنسق تعمل بالفعل (pid ${old.pid}).`);
+    this._takeOverStale(lock, raw, old, port);
+  }
+
+  /** Stale takeover under an exclusive mutex; the lock must still be exactly what was judged stale. */
+  _takeOverStale(lock, rawSeen, old, port) {
+    const mutex = `${lock}.recovery`;
+    const me = JSON.stringify({ pid: process.pid, owner: this.serviceOwner, at: isoNow(this.now()) });
+    let mfd;
+    try { mfd = openSync(mutex, 'wx', 0o600); }
+    catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      const holder = this._parseLock(this._readLockRaw(mutex));
+      fail(409, holder && this.isAlive(holder.pid)
+        ? `استعادة قفل الخدمة جارية في عملية أخرى (pid ${holder.pid}).`
+        : `يوجد ملف استعادة متروك (${mutex}). لن يُستولى عليه تلقائيًا؛ احذفه يدويًا بعد التأكد من عدم وجود خدمة تعمل.`);
+    }
+    try { writeFileSync(mfd, me); } finally { closeSync(mfd); }
+    try {
+      const now = this._readLockRaw(lock);
+      if (now !== rawSeen) fail(409, 'تغيّر قفل الخدمة أثناء الاستعادة؛ لم يُستولَ عليه.');
+      const evidence = path.join(this.uiDir, `service.lock.stale-${isoNow(this.now()).replace(/[:.]/g, '-')}-${newId().slice(0, 8)}.json`);
+      writeFileSync(evidence, rawSeen, { flag: 'wx', mode: 0o600 });
+      writeJsonAtomic(lock, this._lockInfo(port));
+      this.serviceLock = lock; this.serviceOwned = true;
+      this.event('service.staleLockRecovered', { previousPid: old.pid, previousOwner: old.owner ?? null, evidence: path.basename(evidence) });
+    } finally {
+      // Remove the mutex only if it is still ours.
+      if (this._readLockRaw(mutex) === me) try { unlinkSync(mutex); } catch { /* gone */ }
+    }
+  }
+
+  /** Remove the lock only if this instance still owns it; a successor's lock is never touched. */
+  releaseService() {
+    if (!this.serviceOwned) return;
+    this.serviceOwned = false;
+    const cur = this._parseLock(this._readLockRaw(this.serviceLock));
+    if (cur && cur.owner === this.serviceOwner) { try { unlinkSync(this.serviceLock); } catch { /* gone */ } }
+    else this.log({ event: 'service.releaseSkipped', reason: 'lock not owned by this instance' });
+  }
 
   // ---------- restart recovery (never spawns) ----------
   recover() {
@@ -403,9 +489,12 @@ export class Controller {
 
   _sendNotification(n, trigger) {
     const cfg = this.notifier ? this.notifier.configured() : { ok: false, reason: 'لم يُضبط ناقل الإشعار (--codex-bin و--codex-thread)؛ الطلب محفوظ ولم يُرسل إشعار.' };
-    const attempt = { n: n.attempts.length + 1, trigger, startedAt: isoNow(this.now()), status: 'sending', endedAt: null, error: null };
+    // Attempt numbers come from a persistent counter, never from the (trimmed) display history,
+    // so they are unique and increasing for the life of the notification.
+    n.attemptSeq = Math.max(n.attemptSeq ?? 0, ...n.attempts.map((x) => Number(x.n) || 0)) + 1;
+    const attempt = { n: n.attemptSeq, trigger, startedAt: isoNow(this.now()), status: 'sending', endedAt: null, error: null };
     n.attempts.push(attempt);
-    if (n.attempts.length > 20) n.attempts.splice(0, n.attempts.length - 20);
+    if (n.attempts.length > ATTEMPTS_SHOWN) n.attempts.splice(0, n.attempts.length - ATTEMPTS_SHOWN);
     if (!cfg.ok) {
       attempt.status = n.status = 'notConfigured'; attempt.endedAt = attempt.startedAt; attempt.error = n.error = redact(String(cfg.reason));
       this.event('notify.notConfigured', { notificationId: n.id }); this.save();
@@ -426,7 +515,8 @@ export class Controller {
 
   _notifyResult(id, attemptNo, r = {}) {
     const n = this.state.notifications[id];
-    const a = n?.attempts.find((x) => x.n === attemptNo);
+    const matches = n ? n.attempts.filter((x) => x.n === attemptNo) : [];
+    const a = matches.length === 1 ? matches[0] : null;                // unique attempt, or nothing is changed
     if (!a || a.status !== 'sending') return;                          // completes once
     a.endedAt = isoNow(this.now());
     const output = r.output ? redact(bound(String(r.output), 2000)) : null;
@@ -444,17 +534,23 @@ export class Controller {
     this.save();
   }
 
-  /** Explicit retry from the browser for the same item; never automatic. */
+  /**
+   * Explicit retry from the browser for the same item; never automatic. Every accepted retry key
+   * is kept in a durable registry that is never trimmed, so an old key can never trigger another
+   * attempt. The registry has an explicit hard limit instead of silently forgetting keys.
+   */
   retryNotification({ notificationId, idempotencyKey }) {
     if (!KEY_RE.test(idempotencyKey || '')) fail(400, 'مفتاح الطلب غير صالح.');
+    const prior = this.state.notifyRetryKeys[idempotencyKey];
+    if (prior) return { notification: this.state.notifications[prior.notificationId] ?? null, duplicate: true };
     const n = typeof notificationId === 'string' ? this.state.notifications[notificationId] : null;
     if (!n) fail(404, 'إشعار غير موجود.');
-    n.retryKeys ??= [];
-    if (n.retryKeys.includes(idempotencyKey)) return { notification: n, duplicate: true };
     if (!NOTIFY_RETRYABLE.includes(n.status)) fail(409, n.status === 'delivered' ? 'سُلّم الإشعار بالفعل.' : `لا يمكن إعادة إشعار بحالة ${n.status}.`);
-    n.retryKeys.push(idempotencyKey);
-    if (n.retryKeys.length > 20) n.retryKeys.splice(0, n.retryKeys.length - 20);
-    this._sendNotification(n, 'explicitRetry');
+    if (Object.keys(this.state.notifyRetryKeys).length >= RETRY_KEYS_MAX) {
+      fail(507, `بلغ سجل مفاتيح إعادة الإشعار حده الصريح (${RETRY_KEYS_MAX}). لن تُنسى مفاتيح قديمة؛ أرشف ui-control/state.json يدويًا قبل أي إعادة جديدة.`);
+    }
+    this.state.notifyRetryKeys[idempotencyKey] = { notificationId: n.id, attempt: (n.attemptSeq ?? 0) + 1, at: isoNow(this.now()) };
+    this._sendNotification(n, 'explicitRetry');                        // persists the key together with the attempt
     return { notification: n, duplicate: false };
   }
 
@@ -600,7 +696,7 @@ export class Controller {
       status: this.statusPanel(), pauseState: this.pauseState(), reviewer: this.reviewerStatus(), waiting: this.waitingReason(),
       items, reviews: this.state.reviews.slice(-50), timelineSig: this.timelineSig(), owner: this.ownerView(), events: this.state.events.slice(-40),
       notifier: this.notifierStatus(),
-      notifications: Object.values(this.state.notifications).slice(-200).map(({ retryKeys, ...n }) => n),
+      notifications: Object.values(this.state.notifications).slice(-200),
     });
   }
 }

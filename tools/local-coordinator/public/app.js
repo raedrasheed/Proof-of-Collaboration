@@ -19,10 +19,26 @@ async function api(url, data) {
   return body;
 }
 
-function el(tag, text, cls) { const n = document.createElement(tag); if (text !== undefined && text !== null) n.textContent = String(text); if (cls) n.className = cls; return n; }
+function el(tag, text, cls) { const n = document.createElement(tag); if (text !== undefined && text !== null) n.textContent = String(text); if (cls) n.className = cls; if (cls === 'tech') n.dir = 'auto'; return n; }
 function showError(t) { $('error').textContent = t || ''; $('error').hidden = !t; }
 function setConnection(ok, text) { $('connection').textContent = text; $('connection').classList.toggle('lost', !ok); }
 const na = (v) => (v === null || v === undefined || v === '' ? 'غير متاح' : String(v));
+
+// Mixed Arabic/technical lines. Arabic prose stays plain text nodes; every English or numeric
+// fragment (time, path, ID, hash, command, count) is its own <bdi dir="ltr"> holding a text node,
+// so the RTL layout cannot reorder it. Text only: textContent / createTextNode.
+const L = (v) => ({ ltr: na(v) });
+function ltr(text) { const b = document.createElement('bdi'); b.dir = 'ltr'; b.textContent = String(text); return b; }
+function mixed(node, parts) {
+  node.replaceChildren(...parts.filter((p) => p !== null && p !== undefined && p !== false && p !== '')
+    .map((p) => (typeof p === 'object' ? ltr(p.ltr) : document.createTextNode(String(p)))));
+  return node;
+}
+function elm(tag, parts, cls) { const n = document.createElement(tag); if (cls) n.className = cls; return mixed(n, parts); }
+/** English-only technical line: one LTR element. */
+function elLtr(tag, text, cls) { const n = el(tag, text, cls); n.dir = 'ltr'; return n; }
+/** Segments (each an array of parts) joined by " · ". */
+const joined = (segments) => segments.filter(Boolean).flatMap((s, k) => (k ? [' · ', ...s] : s));
 
 const STATE_AR = { queued: 'في الطابور', claimed: 'استلمه المنسق', acknowledged: 'أكد المنسق الاستلام', approved: 'وافق المنسق؛ ينتظر التشغيل', running: 'قيد التشغيل',
   completed: 'اكتمل؛ ينتظر مراجعة Codex', reviewed: 'رُوجع', failed: 'فشل', interrupted: 'انقطع', cancelled: 'أُلغي' };
@@ -43,14 +59,21 @@ const REVIEWER_AR = { attached: 'متصل', expired: 'انتهت مهلة الا
 function renderStatus(v) {
   const s = v.status;
   $('phase').textContent = s.phaseAr;
-  $('updatedAt').textContent = s.updatedAt;
+  mixed($('updatedAt'), [L(s.updatedAt)]);
   const c = s.latestCheck;
-  $('latestCheck').textContent = c ? `المسودة ${c.revision}: ${c.summary.passed} ناجح، ${c.summary.recorded} مسجل، ${c.summary.failed} فاشل · ${na(c.executedAtUtc)} · ${c.source}` : 'غير متاح (لا يوجد ملف نتائج محفوظ)';
+  mixed($('latestCheck'), c
+    ? joined([['المسودة ', L(c.revision), ': ', L(c.summary.passed), ' ناجح، ', L(c.summary.recorded), ' مسجل، ', L(c.summary.failed), ' فاشل'], [L(c.executedAtUtc)], [L(c.source)]])
+    : ['غير متاح (لا يوجد ملف نتائج محفوظ)']);
   const w = s.activeWorker;
-  $('activeWorker').textContent = w ? `مهمة ${w.mode} · pid ${na(w.pid)} · بدأت ${na(w.startedAt)}` : `لا يوجد · سجل المنسق: ${s.ledgerActiveAuthor ? `${na(s.ledgerActiveAuthor.task)} (${na(s.ledgerActiveAuthor.state)})` : 'غير متاح'}`;
-  $('reviewer').textContent = `${REVIEWER_AR[v.reviewer.status] || v.reviewer.status}${v.reviewer.heartbeatAt ? ' · آخر نبضة ' + v.reviewer.heartbeatAt : ''}`;
+  const la = s.ledgerActiveAuthor;
+  mixed($('activeWorker'), w
+    ? joined([['مهمة ', L(w.mode)], [L(`pid ${na(w.pid)}`)], ['بدأت ', L(w.startedAt)]])
+    : joined([['لا يوجد'], ['سجل المنسق: ', ...(la ? [L(la.task), ' (', L(la.state), ')'] : ['غير متاح'])]]));
+  mixed($('reviewer'), joined([[REVIEWER_AR[v.reviewer.status] || v.reviewer.status], v.reviewer.heartbeatAt ? ['آخر نبضة ', L(v.reviewer.heartbeatAt)] : null]));
   const nt = v.notifier;
-  $('notifier').textContent = nt.configured ? `مضبوط · codex queue --remote ${nt.remote} · الخيط …${nt.threadSuffix}${nt.held ? ' · محجوز مؤقتًا' : ''}` : `غير مضبوط: ${nt.reason}`;
+  mixed($('notifier'), nt.configured
+    ? joined([['مضبوط'], [L(`codex queue --remote ${nt.remote}`)], ['الخيط ', L(`…${nt.threadSuffix}`)], nt.held ? ['محجوز مؤقتًا'] : null])
+    : ['غير مضبوط: ', nt.reason]);
   $('pauseState').textContent = PAUSE_AR[v.pauseState] || v.pauseState;
   $('waiting').textContent = WAIT_AR[v.waiting] || v.waiting;
   $('findings').replaceChildren(...s.openFindings.map((f) => el('li', `${f.id} (${f.status}): ${f.decision || ''}`)));
@@ -68,22 +91,30 @@ function renderQueue(v) {
     head.append(el('span', STATE_AR[i.status] || i.status, `state ${i.status}`));
     d.append(head);
     if (i.payload?.text) d.append(el('p', i.payload.text));
-    if (i.kind === 'ownerAnswer') d.append(el('p', `${i.payload.questionId}: ${i.payload.choice}${i.payload.testOnly ? ' (اختبار فقط)' : ''}${i.payload.note ? ' · ' + i.payload.note : ''}`));
-    if (i.kind === 'authorJob') d.append(el('p', `النوع: ${i.payload.mode}${i.dispatch?.plannedDir ? ' · المجلد ' + i.dispatch.plannedDir : ''}${i.blockedReason ? ' · محجوب: ' + i.blockedReason : ''}${i.error ? ' · خطأ: ' + i.error : ''}`));
+    if (i.kind === 'ownerAnswer') d.append(elm('p', joined([[L(i.payload.questionId), ': ', L(i.payload.choice), i.payload.testOnly ? ' (اختبار فقط)' : null], i.payload.note ? [i.payload.note] : null])));
+    if (i.kind === 'authorJob') {
+      d.append(elm('p', joined([['النوع: ', L(i.payload.mode)], i.dispatch?.plannedDir ? ['المجلد ', L(i.dispatch.plannedDir)] : null,
+        i.blockedReason ? ['محجوب: ', i.blockedReason] : null])));
+      if (i.error) d.append(el('p', 'خطأ:', 'muted'), el('pre', i.error, 'tech'));
+    }
     if (i.receipt?.result) d.append(el('pre', i.receipt.result.text || '(لا يوجد نص نتيجة)', 'tech'));
     if (i.stderrExcerpt) { d.append(el('div', 'مقتطف stderr (محجوب الأسرار، مختصر):', 'entry-kind'), el('pre', i.stderrExcerpt, 'tech')); }
     for (const n of v.notifications.filter((x) => x.itemId === i.id)) {
       const last = n.attempts.at(-1);
-      d.append(el('p', `إشعار المنسق المضيف (${NOTIFY_REASON_AR[n.reason] || n.reason}): ${NOTIFY_AR[n.status] || n.status}${last ? ' · محاولة ' + last.n + ' · ' + (last.endedAt || last.startedAt) : ''}${n.queueId ? ' · معرف الطابور ' + n.queueId : ''}${n.error ? ' · ' + n.error : ''}`, 'muted'));
+      d.append(elm('p', joined([[`إشعار المنسق المضيف (${NOTIFY_REASON_AR[n.reason] || n.reason}): ${NOTIFY_AR[n.status] || n.status}`],
+        last ? ['محاولة ', L(last.n)] : null, last ? [L(last.endedAt || last.startedAt)] : null, n.queueId ? ['معرف الطابور ', L(n.queueId)] : null]), 'muted'));
+      if (n.error) d.append(el('pre', n.error, 'tech'));
       if (['failed', 'uncertain', 'notConfigured'].includes(n.status)) {
         const b = el('button', 'إعادة إرسال الإشعار صراحة (للطلب نفسه)', 'secondary');
-        b.addEventListener('click', () => act(`notify-${n.id}-${n.attempts.length}`, '/api/notify-retry', { notificationId: n.id }));
+        b.addEventListener('click', () => act(`notify-${n.id}-${n.attemptSeq ?? n.attempts.length}`, '/api/notify-retry', { notificationId: n.id }));
         d.append(b);
       }
     }
     if (i.kind === 'authorJob' && ['completed', 'failed', 'interrupted'].includes(i.status)) {
       const rv = i.reviewId ? v.reviews.find((r) => r.id === i.reviewId) : null;
-      d.append(el('p', i.reviewId ? `رُوجعت فعليًا: ${rv ? rv.verdict + ' · ' + rv.reviewerId + ' · ' + rv.at : i.reviewId}` : 'لم تُراجع بعد؛ لن تبدأ أي مهمة أخرى قبل مراجعة Codex الفعلية.', 'muted'));
+      d.append(elm('p', i.reviewId
+        ? ['رُوجعت فعليًا: ', ...(rv ? joined([[L(rv.verdict)], [L(rv.reviewerId)], [L(rv.at)]]) : [L(i.reviewId)])]
+        : ['لم تُراجع بعد؛ لن تبدأ أي مهمة أخرى قبل مراجعة Codex الفعلية.'], 'muted'));
     }
     // A failed or interrupted job keeps its retry button after its review; the retry still
     // needs the coordinator's approval and only starts once the failure has been reviewed.
@@ -92,7 +123,7 @@ function renderQueue(v) {
       b.addEventListener('click', () => act(`retry-${i.id}`, '/api/retry', { mode: i.payload.mode, retryOf: i.id, note: 'إعادة صريحة لمهمة فاشلة' }));
       d.append(b);
     }
-    d.append(el('div', `${i.id} · ${i.createdAt}`, 'meta'));
+    d.append(elm('div', joined([[L(i.id)], [L(i.createdAt)]]), 'meta'));
     return d;
   }));
 }
@@ -121,7 +152,7 @@ function renderOwner(v) {
       act(`owner-${q.id}`, '/api/owner-answer', { questionId: q.id, choice: chosen.value, note: note.value });
     });
     card.append(opts, note, send);
-    if (q.answer) card.append(el('p', `آخر إجابة محفوظة: ${q.answer.choice} · ${STATE_AR[q.answer.status] || q.answer.status} · ${q.answer.at}`, 'answer'));
+    if (q.answer) card.append(elm('p', ['آخر إجابة محفوظة: ', ...joined([[L(q.answer.choice)], [STATE_AR[q.answer.status] || q.answer.status], [L(q.answer.at)]])], 'answer'));
     return card;
   }));
 }
@@ -136,15 +167,15 @@ function renderHistory(cards) {
     const [label, cls] = ROLE[c.role] || [c.role, ''];
     h.append(el('span', label, `badge ${cls}`), el('span', c.current ? 'حالية' : 'تاريخية', 'badge'), el('span', c.summaryAr));
     a.append(h);
-    a.append(el('p', [`time: ${c.time ?? 'unavailable'}${c.timeNote ? ' (' + c.timeNote + ')' : ''}`, c.jobId ? `job: ${c.jobId}` : null,
-      c.verdict ? `verdict: ${c.verdict}` : null, c.reviewerId ? `reviewer: ${c.reviewerId}` : null,
-      c.task ? `task: ${c.task}` : null, c.revision ? `revision: ${c.revision}` : null,
-      c.sha256 ? `sha256: ${c.sha256.slice(0, 16)}…` : null, c.commit ? `commit: ${String(c.commit).slice(0, 12)}` : null, `source: ${c.source}`].filter(Boolean).join(' · '), 'meta'));
+    a.append(elm('p', joined([[L(`time: ${c.time ?? 'unavailable'}`), c.timeNote ? ` (${c.timeNote})` : null], c.jobId ? [L(`job: ${c.jobId}`)] : null,
+      c.verdict ? [L(`verdict: ${c.verdict}`)] : null, c.reviewerId ? [L(`reviewer: ${c.reviewerId}`)] : null,
+      c.task ? [L(`task: ${c.task}`)] : null, c.revision ? [L(`revision: ${c.revision}`)] : null,
+      c.sha256 ? [L(`sha256: ${c.sha256.slice(0, 16)}…`)] : null, c.commit ? [L(`commit: ${String(c.commit).slice(0, 12)}`)] : null, [L(`source: ${c.source}`)]]), 'meta'));
     const det = el('details'); det.append(el('summary', 'النص التقني (بالإنجليزية)'));
-    if (c.result) { det.append(el('div', `result · error=${c.result.isError} · turns=${na(c.result.numTurns)} · permission denials=${c.result.permissionDenials.length}`, 'entry-kind'), el('pre', c.result.text || '(empty)', 'tech')); }
+    if (c.result) { det.append(elLtr('div', `result · error=${c.result.isError} · turns=${na(c.result.numTurns)} · permission denials=${c.result.permissionDenials.length}`, 'entry-kind'), el('pre', c.result.text || '(empty)', 'tech')); }
     for (const e of c.technical || []) {
-      if (e.kind === 'tool_use') det.append(el('div', `tool call: ${e.name} ${e.at ? '· ' + e.at : ''}`, 'entry-kind'), el('pre', JSON.stringify(e.input, null, 1), 'tech'));
-      else det.append(el('div', `${e.kind}${e.isError ? ' (error)' : ''} ${e.at ? '· ' + e.at : ''}`, 'entry-kind'), el('pre', e.text, 'tech'));
+      if (e.kind === 'tool_use') det.append(elLtr('div', `tool call: ${e.name} ${e.at ? '· ' + e.at : ''}`, 'entry-kind'), el('pre', JSON.stringify(e.input, null, 1), 'tech'));
+      else det.append(elLtr('div', `${e.kind}${e.isError ? ' (error)' : ''} ${e.at ? '· ' + e.at : ''}`, 'entry-kind'), el('pre', e.text, 'tech'));
     }
     if (c.truncatedEntries) det.append(el('p', `حُذف ${c.truncatedEntries} إدخالًا أقدم من العرض.`, 'muted'));
     a.append(det);

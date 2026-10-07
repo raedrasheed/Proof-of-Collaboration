@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { Controller } from '../src/broker.mjs';
 import { clock, fakeSpawner, makeWorkspace, resultLine } from './helpers.mjs';
@@ -176,15 +176,91 @@ test('restart: a live child is re-attached, never duplicated', () => {
   ctl2.stop();
 });
 
-test('stale service lock is taken over; a live one refuses', () => {
+// ---------- service lock (UI07) ----------
+const DEAD = 999999;
+const lockDir = (ws) => path.join(ws, 'coordination', 'ui-control');
+const lockFile = (ws) => path.join(lockDir(ws), 'service.lock');
+const readLock = (ws) => readFileSync(lockFile(ws), 'utf8');
+
+test('stale service lock is taken over with evidence; a live one refuses', () => {
   const { ws } = setup();
-  const uiDir = path.join(ws, 'coordination', 'ui-control');
-  writeFileSync(path.join(uiDir, 'service.lock'), JSON.stringify({ pid: 999999 }));
+  const stale = JSON.stringify({ pid: DEAD });
+  writeFileSync(lockFile(ws), stale);
   const a = new Controller({ workspace: ws, isAlive: () => false });
   a.acquireService(1);
   assert.ok(a.state.events.some((e) => e.kind === 'service.staleLockRecovered'));
-  writeFileSync(path.join(uiDir, 'service.lock'), JSON.stringify({ pid: 4242 }));
+  assert.equal(JSON.parse(readLock(ws)).owner, a.serviceOwner);
+  const evidence = readdirSync(lockDir(ws)).filter((f) => f.startsWith('service.lock.stale-'));
+  assert.equal(evidence.length, 1, 'stale lock content preserved');
+  assert.equal(readFileSync(path.join(lockDir(ws), evidence[0]), 'utf8'), stale);
+  assert.equal(existsSync(`${lockFile(ws)}.recovery`), false, 'recovery mutex released');
+  writeFileSync(lockFile(ws), JSON.stringify({ pid: 4242, owner: 'other-service' }));
   const b = new Controller({ workspace: ws, isAlive: (p) => p === 4242 });
+  assert.throws(() => b.acquireService(2), /تعمل بالفعل/);
+});
+
+test('empty or malformed lock fails closed even when every pid looks dead', () => {
+  const { ws } = setup();
+  for (const bad of ['', '{"pid":', '{"pid":"4242"}', '{"pid":0}', '{"pid":4242,"owner":5}', 'null']) {
+    writeFileSync(lockFile(ws), bad);
+    const c = new Controller({ workspace: ws, isAlive: () => false });
+    assert.throws(() => c.acquireService(1), /فارغ أو غير صالح/, `refuses ${JSON.stringify(bad)}`);
+    assert.equal(readLock(ws), bad, 'the lock is left untouched (its writer may still be initializing)');
+  }
+  assert.equal(readdirSync(lockDir(ws)).filter((f) => f.startsWith('service.lock.stale-')).length, 0);
+});
+
+test('two controllers in the same process: no shared ownership; owner updates port and releases', () => {
+  const { ws } = setup();
+  const a = new Controller({ workspace: ws, isAlive: () => false });   // isAlive is not what protects a same-pid owner
+  const b = new Controller({ workspace: ws, isAlive: () => false });
+  a.acquireService(null);
+  assert.throws(() => b.acquireService(null), /تعمل بالفعل/);
+  b.releaseService();
+  assert.equal(JSON.parse(readLock(ws)).owner, a.serviceOwner, 'a non-owner release does nothing');
+  a.acquireService(4321);                                                // normal second call with the real port
+  const cur = JSON.parse(readLock(ws));
+  assert.equal(cur.port, 4321); assert.equal(cur.owner, a.serviceOwner);
+  a.releaseService();
+  assert.equal(existsSync(lockFile(ws)), false);
+});
+
+test('release never removes a successor lock; a replaced owner cannot update it', () => {
+  const { ws } = setup();
+  const a = new Controller({ workspace: ws, isAlive: () => false });
+  a.acquireService(1);
+  const successor = JSON.stringify({ pid: 4242, owner: 'successor-owner', port: 2 });
+  writeFileSync(lockFile(ws), successor);
+  assert.throws(() => a.acquireService(3), /لم يعد مملوكًا/);
+  assert.equal(readLock(ws), successor);
+  a.releaseService();
+  assert.equal(readLock(ws), successor, 'foreign lock survives release');
+});
+
+test('competing stale recovery: one mutex holder at a time; a late recoverer re-reads and stops', () => {
+  const { ws } = setup();
+  const stale = JSON.stringify({ pid: DEAD, owner: 'dead-owner' });
+  const mutex = `${lockFile(ws)}.recovery`;
+  const alive = (p) => p !== DEAD;
+  writeFileSync(lockFile(ws), stale);
+  // (1) another live process is recovering right now
+  writeFileSync(mutex, JSON.stringify({ pid: process.pid, owner: 'other-recoverer' }));
+  const a = new Controller({ workspace: ws, isAlive: alive });
+  assert.throws(() => a.acquireService(1), /استعادة قفل الخدمة جارية/);
+  assert.equal(readLock(ws), stale); assert.ok(existsSync(mutex), 'a foreign mutex is not removed');
+  // (2) an abandoned mutex fails closed
+  writeFileSync(mutex, JSON.stringify({ pid: DEAD, owner: 'dead-recoverer' }));
+  assert.throws(() => a.acquireService(1), /متروك/);
+  assert.equal(readLock(ws), stale);
+  unlinkSync(mutex);                                                     // the operator's manual step
+  // (3) both judged the same stale lock; a wins, b re-reads under the mutex and stops
+  const b = new Controller({ workspace: ws, isAlive: alive });
+  a.acquireService(1);
+  assert.equal(JSON.parse(readLock(ws)).owner, a.serviceOwner);
+  b.serviceOwner = 'b-owner'; b.serviceStartedAt = 'x';
+  assert.throws(() => b._takeOverStale(lockFile(ws), stale, JSON.parse(stale), 2), /تغيّر قفل الخدمة/);
+  assert.equal(JSON.parse(readLock(ws)).owner, a.serviceOwner, 'the winner keeps the lock');
+  assert.equal(existsSync(mutex), false, 'b removed only its own mutex');
   assert.throws(() => b.acquireService(2), /تعمل بالفعل/);
 });
 
