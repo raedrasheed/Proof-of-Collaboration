@@ -9,62 +9,31 @@
       "id": "neg-version-256",
       "manifest": "0xf84f82010080f849f8478b2f696e6465782e68746d6c016fa027c02dac108feef56130154f3c74951ba4e96b15ccbedb6e66bef4a6e825e451d7d694bffcaeb40682a2dfe0d39de9eee7d1f20891ad3b6f",
       "manifestLength": 81,
-      "rule": "struct.int",
-      "stage": "structure",
-      "isolation": "next",
-      "nextRuleWhenDisabled": "manifest.version",
-      "expected": {
-        "result": "reject",
-        "firstRule": "struct.int",
-        "stage": "structure",
-        "requests": 0
-      }
+      "rule": "struct.int", "stage": "structure", "isolation": "next", "nextRuleWhenDisabled": "manifest.version",
+      "expected": {"result": "reject", "firstRule": "struct.int", "stage": "structure", "requests": 0}
     },
     {
       "id": "neg-version-257",
       "manifest": "0xf84f82010180f849f8478b2f696e6465782e68746d6c016fa027c02dac108feef56130154f3c74951ba4e96b15ccbedb6e66bef4a6e825e451d7d694bffcaeb40682a2dfe0d39de9eee7d1f20891ad3b6f",
       "manifestLength": 81,
-      "rule": "struct.int",
-      "stage": "structure",
-      "isolation": "next",
-      "nextRuleWhenDisabled": "manifest.version",
-      "expected": {
-        "result": "reject",
-        "firstRule": "struct.int",
-        "stage": "structure",
-        "requests": 0
-      },
+      "rule": "struct.int", "stage": "structure", "isolation": "next", "nextRuleWhenDisabled": "manifest.version",
+      "expected": {"result": "reject", "firstRule": "struct.int", "stage": "structure", "requests": 0},
       "note": "257 mod 256 = 1: a validator truncating to u8 would accept this manifest"
     },
     {
       "id": "neg-version-leading-zero",
       "manifest": "0xf84d0080f849f8478b2f696e6465782e68746d6c016fa027c02dac108feef56130154f3c74951ba4e96b15ccbedb6e66bef4a6e825e451d7d694bffcaeb40682a2dfe0d39de9eee7d1f20891ad3b6f",
       "manifestLength": 79,
-      "rule": "struct.int",
-      "stage": "structure",
-      "isolation": "next",
-      "nextRuleWhenDisabled": "manifest.version",
-      "expected": {
-        "result": "reject",
-        "firstRule": "struct.int",
-        "stage": "structure",
-        "requests": 0
-      },
+      "rule": "struct.int", "stage": "structure", "isolation": "next", "nextRuleWhenDisabled": "manifest.version",
+      "expected": {"result": "reject", "firstRule": "struct.int", "stage": "structure", "requests": 0},
       "note": "version 0 encoded as the single byte 0x00 instead of 0x80"
     },
     {
       "id": "neg-version-255",
       "manifest": "0xf84e81ff80f849f8478b2f696e6465782e68746d6c016fa027c02dac108feef56130154f3c74951ba4e96b15ccbedb6e66bef4a6e825e451d7d694bffcaeb40682a2dfe0d39de9eee7d1f20891ad3b6f",
       "manifestLength": 80,
-      "rule": "manifest.version",
-      "stage": "semantic",
-      "isolation": "full",
-      "expected": {
-        "result": "reject",
-        "firstRule": "manifest.version",
-        "stage": "semantic",
-        "requests": 0
-      },
+      "rule": "manifest.version", "stage": "semantic", "isolation": "full",
+      "expected": {"result": "reject", "firstRule": "manifest.version", "stage": "semantic", "requests": 0},
       "note": "largest u8: passes struct.int, fails manifest.version"
     }
   ]

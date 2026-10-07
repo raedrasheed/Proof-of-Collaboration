@@ -1,6 +1,6 @@
 # Public import and reproduction boundary
 
-This tree imports curated local M1 filesystem snapshots through draft 0.7. The original workspace remains unchanged. No prior Git history is claimed.
+This tree imports curated local M1 filesystem snapshots through draft 0.8. The original workspace remains unchanged. No prior Git history is claimed.
 
 PUBLICATION-MANIFEST.json records local/public SHA256 and whether a file was curated. Raw agent sessions, original private dialogue history, explicit private-key/seed values, personal home paths, downloaded packages, runtimes and caches are not published. Approved project baseline documents and English restored specifications are included; private historical quotes are removed from the restoration JSON.
 

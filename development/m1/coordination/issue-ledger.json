@@ -1,7 +1,7 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.7-reviewed-revision-required",
-  "latestCompletedRevision": "m1-draft-0.7",
+  "status": "0.8-verified-spec-incomplete-owner-decisions-open",
+  "latestCompletedRevision": "m1-draft-0.8",
   "issues": [
     {
       "id": "C01",
@@ -143,9 +143,9 @@
     },
     {
       "id": "C23",
-      "status": "open",
+      "status": "closed-spec-tooling",
       "evidence": "0.7 step.completed e_checks fails: snapshot-invariants.json looked up in 0.6 but belongs to 0.4",
-      "decision": "Claude must fix source revision reference; publish failure honestly"
+      "decision": "0.8 input hashes and comparison/regressions verified: 261 pass, 3 recorded, 0 fail; REVIEW-0.8.md"
     }
   ],
   "history": [
@@ -186,12 +186,17 @@
     {
       "revision": "0.7",
       "result": "252 entries: 249 pass, 2 recorded, 1 FAIL; C20-C22 remedies pass; C23 reference-path failure remains"
+    },
+    {
+      "revision": "0.8",
+      "result": "261 pass, 3 recorded, 0 fail; C23 closed; all remaining M1 scope and owner decisions unchanged"
     }
   ],
   "githubHandoff": {
     "repository": "https://github.com/raedrasheed/Proof-of-Collaboration",
-    "state": "active author turn005 checkpointed before repository fetch",
+    "state": "draft PR open; completed cycle 0.8 ready to publish",
     "activeWrites": "m1-draft-0.7 only",
-    "publicExclusions": "Private CLI transcripts, original dialogue history, secrets, dependencies and runtime binaries"
+    "publicExclusions": "Private CLI transcripts, original dialogue history, secrets, dependencies and runtime binaries",
+    "pullRequest": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2"
   }
 }

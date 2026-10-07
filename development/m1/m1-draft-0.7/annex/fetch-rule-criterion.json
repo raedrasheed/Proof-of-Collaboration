@@ -14,48 +14,16 @@
   "fixtures": {
     "status": "Expected verdicts for future CI (Phase D/A); not executed (no ESLint or dependency-cruiser install is permitted).",
     "cases": [
-      {
-        "source": "fetch('http://x/')",
-        "expected": "violation (fetch)"
-      },
-      {
-        "source": "globalThis.fetch('http://x/')",
-        "expected": "violation (globalThis)"
-      },
-      {
-        "source": "self['fetch']('http://x/')",
-        "expected": "violation (self)"
-      },
-      {
-        "source": "const g = globalThis; g['fe' + 'tch']('http://x/')",
-        "expected": "violation (globalThis): the 0.5 residual is now flagged"
-      },
-      {
-        "source": "Reflect.get(globalThis, 'fetch')('http://x/')",
-        "expected": "violation (Reflect, globalThis)"
-      },
-      {
-        "source": "navigator.sendBeacon('http://x/', '')",
-        "expected": "violation (navigator)"
-      },
-      {
-        "source": "({}).constructor.constructor('return this')().fetch('http://x/')",
-        "expected": "no static violation; C2 runtime test: throws EvalError under the MV3 CSP"
-      },
-      {
-        "source": "function f(fetch) { return fetch('x') }",
-        "expected": "no violation: fetch is a local parameter, not the global"
-      },
-      {
-        "source": "import { request } from '../net/HttpTransport'",
-        "file": "src/content/ChunkFetcher.ts",
-        "expected": "allowed (listed importer)"
-      },
-      {
-        "source": "fetch(url, init)",
-        "file": "src/net/HttpTransport.ts",
-        "expected": "allowed (ignored file)"
-      }
+      {"source": "fetch('http://x/')", "expected": "violation (fetch)"},
+      {"source": "globalThis.fetch('http://x/')", "expected": "violation (globalThis)"},
+      {"source": "self['fetch']('http://x/')", "expected": "violation (self)"},
+      {"source": "const g = globalThis; g['fe' + 'tch']('http://x/')", "expected": "violation (globalThis): the 0.5 residual is now flagged"},
+      {"source": "Reflect.get(globalThis, 'fetch')('http://x/')", "expected": "violation (Reflect, globalThis)"},
+      {"source": "navigator.sendBeacon('http://x/', '')", "expected": "violation (navigator)"},
+      {"source": "({}).constructor.constructor('return this')().fetch('http://x/')", "expected": "no static violation; C2 runtime test: throws EvalError under the MV3 CSP"},
+      {"source": "function f(fetch) { return fetch('x') }", "expected": "no violation: fetch is a local parameter, not the global"},
+      {"source": "import { request } from '../net/HttpTransport'", "file": "src/content/ChunkFetcher.ts", "expected": "allowed (listed importer)"},
+      {"source": "fetch(url, init)", "file": "src/net/HttpTransport.ts", "expected": "allowed (ignored file)"}
     ]
   }
 }

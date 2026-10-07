@@ -34,236 +34,39 @@
     "10: params [[[[[[[]]]]]]] (depth 9)",
     "11: eth_call with one string param padded so the text is exactly 65537 bytes"
   ],
-  "validKinds": [
-    "rpc_read",
-    "wallet_req",
-    "storage_set",
-    "nav"
-  ],
-  "badKinds": [
-    "rpc",
-    "RPC_READ",
-    "",
-    "wallet",
-    "nav ",
-    "storage"
-  ],
-  "proto": [
-    "__proto__",
-    "constructor",
-    "hasOwnProperty",
-    "toString"
-  ],
-  "strs": [
-    "",
-    "a",
-    "latest",
-    "pending",
-    "0x",
-    "0x0",
-    "0x01",
-    "k",
-    "https://example.org/",
-    "http://example.org/",
-    "javascript:alert(1)",
-    "/",
-    "/about.html",
-    "about.html",
-    "\u0000",
-    "ETH"
-  ],
-  "keys": [
-    "to",
-    "from",
-    "data",
-    "input",
-    "gas",
-    "value",
-    "fromBlock",
-    "toBlock",
-    "address",
-    "topics",
-    "blockHash",
-    "x"
-  ],
+  "validKinds": ["rpc_read", "wallet_req", "storage_set", "nav"],
+  "badKinds": ["rpc", "RPC_READ", "", "wallet", "nav ", "storage"],
+  "proto": ["__proto__", "constructor", "hasOwnProperty", "toString"],
+  "strs": ["", "a", "latest", "pending", "0x", "0x0", "0x01", "k", "https://example.org/", "http://example.org/", "javascript:alert(1)", "/", "/about.html", "about.html", "\u0000", "ETH"],
+  "keys": ["to", "from", "data", "input", "gas", "value", "fromBlock", "toBlock", "address", "topics", "blockHash", "x"],
   "matrixMethods": {
-    "rpc_read": [
-      "eth_blockNumber",
-      "eth_call",
-      "eth_chainId",
-      "eth_estimateGas",
-      "eth_feeHistory",
-      "eth_gasPrice",
-      "eth_getBalance",
-      "eth_getBlockByHash",
-      "eth_getBlockByNumber",
-      "eth_getCode",
-      "eth_getLogs",
-      "eth_getStorageAt",
-      "eth_getTransactionByHash",
-      "eth_getTransactionCount",
-      "eth_getTransactionReceipt",
-      "eth_maxPriorityFeePerGas",
-      "net_version",
-      "web3_clientVersion"
-    ],
-    "wallet_req": [
-      "eth_accounts",
-      "eth_chainId",
-      "eth_requestAccounts",
-      "eth_sendTransaction"
-    ],
-    "storage_set": [
-      "site_storageClear",
-      "site_storageSet"
-    ],
-    "nav": [
-      "site_navigate",
-      "site_openExternal"
-    ]
+    "rpc_read": ["eth_blockNumber", "eth_call", "eth_chainId", "eth_estimateGas", "eth_feeHistory", "eth_gasPrice", "eth_getBalance", "eth_getBlockByHash", "eth_getBlockByNumber", "eth_getCode", "eth_getLogs", "eth_getStorageAt", "eth_getTransactionByHash", "eth_getTransactionCount", "eth_getTransactionReceipt", "eth_maxPriorityFeePerGas", "net_version", "web3_clientVersion"],
+    "wallet_req": ["eth_accounts", "eth_chainId", "eth_requestAccounts", "eth_sendTransaction"],
+    "storage_set": ["site_storageClear", "site_storageSet"],
+    "nav": ["site_navigate", "site_openExternal"]
   },
-  "names": [
-    "eth_blockNumber",
-    "eth_call",
-    "eth_chainId",
-    "eth_estimateGas",
-    "eth_feeHistory",
-    "eth_gasPrice",
-    "eth_getBalance",
-    "eth_getBlockByHash",
-    "eth_getBlockByNumber",
-    "eth_getCode",
-    "eth_getLogs",
-    "eth_getStorageAt",
-    "eth_getTransactionByHash",
-    "eth_getTransactionCount",
-    "eth_getTransactionReceipt",
-    "eth_maxPriorityFeePerGas",
-    "net_version",
-    "web3_clientVersion",
-    "eth_accounts",
-    "eth_requestAccounts",
-    "eth_sendTransaction",
-    "site_storageSet",
-    "site_storageClear",
-    "site_navigate",
-    "site_openExternal",
-    "eth_sendRawTransaction",
-    "eth_sign",
-    "personal_sign",
-    "eth_signTypedData_v4",
-    "wallet_addEthereumChain",
-    "wallet_switchEthereumChain",
-    "eth_subscribe",
-    "eth_newFilter",
-    "eth_getFilterChanges",
-    "debug_traceTransaction",
-    "txpool_content",
-    "admin_peers",
-    "anvil_setCode",
-    "evm_mine",
-    "eth_getProof",
-    "pocol_submitShare",
-    "pocol_getTemplate",
-    "pocol_getHeaders",
-    "pocol_getParams",
-    "pocol_getLogs",
-    "pocol_getTiming",
-    "pocol_getRpcStats",
-    "eth_syncing",
-    "eth_coinbase",
-    "eth_mining",
-    "eth_protocolVersion",
-    "eth_createAccessList",
-    "net_listening",
-    "net_peerCount",
-    "anvil_mine",
-    "evm_increaseTime",
-    "site_unknown"
-  ],
+  "names": ["eth_blockNumber", "eth_call", "eth_chainId", "eth_estimateGas", "eth_feeHistory", "eth_gasPrice", "eth_getBalance", "eth_getBlockByHash", "eth_getBlockByNumber", "eth_getCode", "eth_getLogs", "eth_getStorageAt", "eth_getTransactionByHash", "eth_getTransactionCount", "eth_getTransactionReceipt", "eth_maxPriorityFeePerGas", "net_version", "web3_clientVersion",
+            "eth_accounts", "eth_requestAccounts", "eth_sendTransaction", "site_storageSet", "site_storageClear", "site_navigate", "site_openExternal",
+            "eth_sendRawTransaction", "eth_sign", "personal_sign", "eth_signTypedData_v4", "wallet_addEthereumChain", "wallet_switchEthereumChain", "eth_subscribe", "eth_newFilter", "eth_getFilterChanges", "debug_traceTransaction", "txpool_content", "admin_peers", "anvil_setCode", "evm_mine", "eth_getProof",
+            "pocol_submitShare", "pocol_getTemplate", "pocol_getHeaders", "pocol_getParams", "pocol_getLogs", "pocol_getTiming", "pocol_getRpcStats",
+            "eth_syncing", "eth_coinbase", "eth_mining", "eth_protocolVersion", "eth_createAccessList", "net_listening", "net_peerCount", "anvil_mine", "evm_increaseTime", "site_unknown"],
   "samples": {
-    "eth_blockNumber": [],
-    "eth_chainId": [],
-    "eth_gasPrice": [],
-    "net_version": [],
-    "web3_clientVersion": [],
-    "eth_maxPriorityFeePerGas": [],
-    "eth_accounts": [],
-    "eth_requestAccounts": [],
-    "site_storageClear": [],
-    "eth_getBalance": [
-      "0x1111111111111111111111111111111111111111",
-      "latest"
-    ],
-    "eth_getCode": [
-      "0x1111111111111111111111111111111111111111",
-      "latest"
-    ],
-    "eth_getTransactionCount": [
-      "0x1111111111111111111111111111111111111111",
-      "latest"
-    ],
-    "eth_getStorageAt": [
-      "0x1111111111111111111111111111111111111111",
-      "0x0000000000000000000000000000000000000000000000000000000000000002",
-      "latest"
-    ],
-    "eth_getBlockByNumber": [
-      "latest",
-      false
-    ],
-    "eth_getBlockByHash": [
-      "0x2222222222222222222222222222222222222222222222222222222222222222",
-      false
-    ],
-    "eth_getTransactionByHash": [
-      "0x2222222222222222222222222222222222222222222222222222222222222222"
-    ],
-    "eth_getTransactionReceipt": [
-      "0x2222222222222222222222222222222222222222222222222222222222222222"
-    ],
-    "eth_call": [
-      {
-        "to": "0x1111111111111111111111111111111111111111",
-        "data": "0x"
-      },
-      "latest"
-    ],
-    "eth_estimateGas": [
-      {
-        "to": "0x1111111111111111111111111111111111111111"
-      }
-    ],
-    "eth_feeHistory": [
-      "0x4",
-      "latest",
-      [
-        25,
-        75
-      ]
-    ],
-    "eth_getLogs": [
-      {
-        "fromBlock": "0x1",
-        "toBlock": "0x2"
-      }
-    ],
-    "eth_sendTransaction": [
-      {
-        "from": "0x1111111111111111111111111111111111111111",
-        "to": "0x1111111111111111111111111111111111111111",
-        "value": "0x1"
-      }
-    ],
-    "site_storageSet": [
-      "k",
-      "v"
-    ],
-    "site_navigate": [
-      "/about.html"
-    ],
-    "site_openExternal": [
-      "https://example.org/"
-    ]
+    "eth_blockNumber": [], "eth_chainId": [], "eth_gasPrice": [], "net_version": [], "web3_clientVersion": [], "eth_maxPriorityFeePerGas": [], "eth_accounts": [], "eth_requestAccounts": [], "site_storageClear": [],
+    "eth_getBalance": ["0x1111111111111111111111111111111111111111", "latest"],
+    "eth_getCode": ["0x1111111111111111111111111111111111111111", "latest"],
+    "eth_getTransactionCount": ["0x1111111111111111111111111111111111111111", "latest"],
+    "eth_getStorageAt": ["0x1111111111111111111111111111111111111111", "0x0000000000000000000000000000000000000000000000000000000000000002", "latest"],
+    "eth_getBlockByNumber": ["latest", false],
+    "eth_getBlockByHash": ["0x2222222222222222222222222222222222222222222222222222222222222222", false],
+    "eth_getTransactionByHash": ["0x2222222222222222222222222222222222222222222222222222222222222222"],
+    "eth_getTransactionReceipt": ["0x2222222222222222222222222222222222222222222222222222222222222222"],
+    "eth_call": [{"to": "0x1111111111111111111111111111111111111111", "data": "0x"}, "latest"],
+    "eth_estimateGas": [{"to": "0x1111111111111111111111111111111111111111"}],
+    "eth_feeHistory": ["0x4", "latest", [25, 75]],
+    "eth_getLogs": [{"fromBlock": "0x1", "toBlock": "0x2"}],
+    "eth_sendTransaction": [{"from": "0x1111111111111111111111111111111111111111", "to": "0x1111111111111111111111111111111111111111", "value": "0x1"}],
+    "site_storageSet": ["k", "v"],
+    "site_navigate": ["/about.html"],
+    "site_openExternal": ["https://example.org/"]
   }
 }

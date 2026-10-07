@@ -1,31 +1,67 @@
 {
-  "package": "M1 draft 0.7",
-  "executedAtUtc": "2026-10-07T09:54:59+00:00",
+  "package": "M1 draft 0.8 (C23 repair of 0.7)",
+  "executedAtUtc": "2026-10-07T10:27:07+00:00",
   "environment": {
     "python": "3.11.1",
     "executable": "D:\\PoCol-Development\\coordination\\runtime\\python311\\python.exe",
     "platform": "Windows-10-10.0.19045-SP0",
     "thirdPartyPackages": "none"
   },
+  "inheritance": "0.7 steps run unchanged from m1-draft-0.7/tools/run_checks_07.py; e_checks replaced by e_checks_08 (U3 source path)",
   "evidenceKind": "reference models of the specification text only",
   "notExecuted": [
-    "MaliciousHttp server, real sockets, Chrome stream reader, TestHooks (MR1-MR12 future parts)",
-    "Chrome BR20c/BR20d runs and C measurements",
-    "browser/MV3 extension, DNR",
-    "anvil/pocold, eth_call getter, MPT",
-    "ESLint/dependency-cruiser and the C2/C3 runtime tests",
+    "browser / MV3 extension, DNR",
+    "MaliciousHttp over sockets, TestHooks",
+    "anvil / pocold / eth_call getter / MPT",
+    "ESLint / dependency-cruiser",
     "real transactions"
   ],
   "summary": {
-    "checks": 252,
-    "passed": 249,
-    "recorded": 2,
-    "failed": 1,
-    "seconds": 35.5
+    "checks": 264,
+    "passed": 261,
+    "recorded": 3,
+    "failed": 0,
+    "seconds": 34.2
   },
   "results": [
     {
       "check": "keccak.selftest",
+      "status": "pass"
+    },
+    {
+      "check": "lineage.sha256 m1-draft-0.4/vectors/snapshot-invariants.json",
+      "status": "pass",
+      "expected": "760ef12403607d628149999be3f0a5adb5908608c35d03d8525f8c591418f957",
+      "got": "760ef12403607d628149999be3f0a5adb5908608c35d03d8525f8c591418f957"
+    },
+    {
+      "check": "lineage.sha256 m1-draft-0.3/vectors/snapshot-mock-scenarios.json",
+      "status": "pass",
+      "expected": "b1602db9256512ad2f40ca4d374c40ee55b39aa34be8758a9a426869a86a484a",
+      "got": "b1602db9256512ad2f40ca4d374c40ee55b39aa34be8758a9a426869a86a484a"
+    },
+    {
+      "check": "lineage.sha256 m1-draft-0.7/vectors/snapshot-e-cases.json",
+      "status": "pass",
+      "expected": "1b875889f6044f0732be744fd390e850751cd8d3149e201006eefdebb634f47e",
+      "got": "1b875889f6044f0732be744fd390e850751cd8d3149e201006eefdebb634f47e"
+    },
+    {
+      "check": "lineage.sha256 m1-draft-0.7/tools/run_checks_07.py",
+      "status": "pass",
+      "expected": "badd6e346db21b0ff6463a9ae3e670e8b0f896c73d1db286bc41f7b782cbc8fa",
+      "got": "badd6e346db21b0ff6463a9ae3e670e8b0f896c73d1db286bc41f7b782cbc8fa"
+    },
+    {
+      "check": "c23.wrongPathAbsent m1-draft-0.6/vectors/snapshot-invariants.json",
+      "status": "pass"
+    },
+    {
+      "check": "c23.sourceHasU3",
+      "status": "pass"
+    },
+    {
+      "check": "c23.other06ReferenceResolves profile-race-cases.json",
       "status": "pass"
     },
     {
@@ -1704,9 +1740,58 @@
       "overlapMax": 4
     },
     {
-      "check": "step.completed e_checks",
-      "status": "FAIL",
-      "exception": "FileNotFoundError: [Errno 2] No such file or directory: 'D:\\\\PoCol-Development\\\\coordination\\\\review-001\\\\m1-draft-0.6\\\\vectors\\\\snapshot-invariants.json'"
+      "check": "snapshotE.selector",
+      "status": "recorded",
+      "signature": "websiteSnapshot(uint32)",
+      "selector": "0x22d1f9a5"
+    },
+    {
+      "check": "snapshotE.E-1a-honest-A",
+      "status": "pass",
+      "got": {
+        "result": "render",
+        "frames": 1,
+        "manifestHash": "M_A1",
+        "mixed": false
+      }
+    },
+    {
+      "check": "snapshotE.E-1b-honest-B",
+      "status": "pass",
+      "got": {
+        "result": "render",
+        "frames": 1,
+        "manifestHash": "M_B2",
+        "mixed": false
+      }
+    },
+    {
+      "check": "snapshotE.E-1c-A-B-A-single-call",
+      "status": "pass",
+      "got": [
+        "M_A1",
+        "M_B2",
+        "M_A1"
+      ]
+    },
+    {
+      "check": "snapshotE.E-2-dishonest-rp-fabrication",
+      "status": "pass",
+      "got": {
+        "result": "render",
+        "frames": 1,
+        "manifestHash": "M_EVIL",
+        "mixed": false
+      }
+    },
+    {
+      "check": "snapshotE.E-3-undefined-status",
+      "status": "pass",
+      "got": {
+        "result": "stateInvariant",
+        "invariant": "state.statusDomain",
+        "frames": 0
+      }
     },
     {
       "check": "fetchRule.C1 names the global object and constructors",
