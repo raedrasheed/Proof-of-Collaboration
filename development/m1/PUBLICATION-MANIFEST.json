@@ -2157,9 +2157,93 @@
       "publicationCurated": false
     },
     {
+      "path": "m1-draft-0.22/annex/C30-PARSER-DEPTH.md",
+      "localSha256": "c785da2841c6833abaea9acfff51ffc2ed232ce64b08115f40f96ec333bb7e63",
+      "publicSha256": "c785da2841c6833abaea9acfff51ffc2ed232ce64b08115f40f96ec333bb7e63",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.22/M1-SPEC-0.22-AMENDMENT.md",
+      "localSha256": "89e6e3ad9efe5e98303c8b8a9e49bd7fbf544e8b95c6220cc2b31cf7dbc4a57a",
+      "publicSha256": "89e6e3ad9efe5e98303c8b8a9e49bd7fbf544e8b95c6220cc2b31cf7dbc4a57a",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.22/M1-STATUS-0.22.md",
+      "localSha256": "3da654635912b30287ad259d7bc5a5a24c583195785f89b46e55bd67d7e1bb2b",
+      "publicSha256": "3da654635912b30287ad259d7bc5a5a24c583195785f89b46e55bd67d7e1bb2b",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.22/README.md",
+      "localSha256": "c3b81a824a1ed1776f7e39e78c84e6ffa9255a69678ee5fee30c223b4e8dbb4a",
+      "publicSha256": "c3b81a824a1ed1776f7e39e78c84e6ffa9255a69678ee5fee30c223b4e8dbb4a",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.22/tools/iterative_parse.py",
+      "localSha256": "742e1936ead8fda8521db7a3ae01baa94e335dd8295ec77a30b09b8ddeb7034a",
+      "publicSha256": "742e1936ead8fda8521db7a3ae01baa94e335dd8295ec77a30b09b8ddeb7034a",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.22/tools/run_checks_022.py",
+      "localSha256": "e9e3ff5352125e2ecd0f3f8f8301ec1a30f35cc0e8d7c693c105eadf68c78fb8",
+      "publicSha256": "e9e3ff5352125e2ecd0f3f8f8301ec1a30f35cc0e8d7c693c105eadf68c78fb8",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.22/vectors/c30-depth.json",
+      "localSha256": "728d8b4ac88c0212d8b1cb6224c5f834f923619e1c32320dcf1eae120fb72464",
+      "publicSha256": "728d8b4ac88c0212d8b1cb6224c5f834f923619e1c32320dcf1eae120fb72464",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.22/vectors/v3-e05-supplement.json",
+      "localSha256": "cd8ead8d8d0293bf5a48ef6113fafe09c8babd5e4516d5176905325ac8ce0cdb",
+      "publicSha256": "cd8ead8d8d0293bf5a48ef6113fafe09c8babd5e4516d5176905325ac8ce0cdb",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/reviews/REVIEW-0.22.md",
+      "localSha256": "27a440cd77c1b19819b2b87d34a710d8daa6c770bad3a30eb322382350bf1604",
+      "publicSha256": "27a440cd77c1b19819b2b87d34a710d8daa6c770bad3a30eb322382350bf1604",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.22/run-results-0.22.json",
+      "localSha256": "38207274261e10399aca5a620fc494b12d6194e16ddd6a1efa3747704392bb2a",
+      "publicSha256": "38207274261e10399aca5a620fc494b12d6194e16ddd6a1efa3747704392bb2a",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.22/genesis-iterative-independent-probes.py",
+      "localSha256": "1ba3ecc5dc1d4ba89f91589a0c8392447edcdbe5bc18c53f9ba24b7757e6759c",
+      "publicSha256": "1ba3ecc5dc1d4ba89f91589a0c8392447edcdbe5bc18c53f9ba24b7757e6759c",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.22/genesis-iterative-independent-probes.json",
+      "localSha256": "b264bfa1a5c3d881c2f30f0931fbd4258a57609108efa1ba16bd8097e102079c",
+      "publicSha256": "b264bfa1a5c3d881c2f30f0931fbd4258a57609108efa1ba16bd8097e102079c",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.22/genesis-iterative-independent-probes-initial-expectation.json",
+      "localSha256": "3292a6f98fa941819f58edb2a24d5e71109045e7d51056ac53f1a42b29220cf2",
+      "publicSha256": "3292a6f98fa941819f58edb2a24d5e71109045e7d51056ac53f1a42b29220cf2",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/tasks/task-020.md",
+      "localSha256": "369e900efb5c82cf8767109c1cdb0fe9f7828fac901ced5f2a565238b84becd7",
+      "publicSha256": "369e900efb5c82cf8767109c1cdb0fe9f7828fac901ced5f2a565238b84becd7",
+      "publicationCurated": false
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "0029139bef387ff25f3d081f3ead07da63eb5ee664722d53d081b0d9ab5bf8cf",
-      "publicSha256": "782ce28ba52081bef8cd096bc4de9e13602df377f7c0ca8f8b276b15712a4a43",
+      "localSha256": "796059b47265c03ae2fff2af4db4ee8db6925477b9df6f86c1af35767f89a41b",
+      "publicSha256": "de5e690f9cf81054ca6a90657b945ec84847e4166cffe02e455c1443fec63c9e",
       "publicationCurated": true
     }
   ]
