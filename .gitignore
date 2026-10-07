@@ -1,0 +1,16 @@
+**/node_modules/
+**/runtime/
+**/target/
+**/__pycache__/
+**/.venv/
+**/.env*
+**/.claude/
+**/.codex/
+*.jsonl
+*.exe
+*.dll
+*.pyd
+*.pyc
+*.whl
+**/keys-txa*.json
+**/txa-node-check.json

@@ -1,0 +1,197 @@
+{
+  "schema": "pocol-m1-coordination/1",
+  "status": "0.7-reviewed-revision-required",
+  "latestCompletedRevision": "m1-draft-0.7",
+  "issues": [
+    {
+      "id": "C01",
+      "status": "open",
+      "evidence": "Annex checklist: 4 partial, 37 not started; baseline lines 4955 onward",
+      "decision": "Full spec gate applies; missing work must be completed, no implementation carve-out."
+    },
+    {
+      "id": "C02",
+      "status": "resolved",
+      "evidence": "py --version points to missing <local-user-home>\\MiniConda3\\python.exe; where.exe python found none",
+      "decision": "Portable Python 3.11.1 obtained in workspace; independently reran 212/212 checks in disposable copy. No original results overwritten."
+    },
+    {
+      "id": "C03",
+      "status": "closed-spec-model",
+      "evidence": "rlp_strict.py recursive decoder without depth bound",
+      "decision": "0.3 remedy independently reviewed and adversarial probe verified; see review-001/REVIEW-0.3.md. No production certification."
+    },
+    {
+      "id": "C04",
+      "status": "closed-spec-model",
+      "evidence": "m1paths.py int(digits) on unbounded selector",
+      "decision": "0.3 remedy independently reviewed and adversarial probe verified; see review-001/REVIEW-0.3.md. No production certification."
+    },
+    {
+      "id": "C05",
+      "status": "closed-spec-model",
+      "evidence": "Provider.get counts distinct addresses but re-invokes on each reference",
+      "decision": "0.3 remedy independently reviewed and adversarial probe verified; see review-001/REVIEW-0.3.md. No production certification."
+    },
+    {
+      "id": "C06",
+      "status": "open",
+      "evidence": "Spec 4.2 U05/E03 unverified proof support and heavy budget, missing mocks",
+      "decision": "Cannot freeze snapshot guarantee without evidence and baseline reconciliation."
+    },
+    {
+      "id": "C07",
+      "status": "open",
+      "evidence": "U01/U02/U10/U14/U16 owner choices",
+      "decision": "Remain proposed pending concrete owner decisions; U15 defaults to full gate."
+    },
+    {
+      "id": "C08",
+      "status": "closed-provenance-verified",
+      "evidence": "Raw baseline SHA256 differs from recorded design ID",
+      "decision": "Original completed source run located read-only in D:/PoCol; computed SHA256(JSON.stringify({sections,decisions,risks})) matches approved e8a19ecb design ID; all 12 exported sections and decisions match. See source-provenance-verified.json."
+    },
+    {
+      "id": "C09",
+      "status": "open",
+      "evidence": "T1-12 first setCurrent(n) lacks noncurrent precondition; T1-10 slot-diff text ambiguous; model version u8 unspecified in prose",
+      "decision": "Claude must correct test/spec ambiguity in separate revision."
+    },
+    {
+      "id": "F01-F26",
+      "status": "open",
+      "evidence": "Both original reports and 0.2 dispositions",
+      "decision": "No automatic closure from agreement or saved author tests."
+    },
+    {
+      "id": "C10",
+      "status": "closed-spec",
+      "evidence": "review-001/REVIEW-0.3.md; independent-probes-0.3.json",
+      "decision": "0.4 remedy reviewed; see REVIEW-0.4.md. No production verification."
+    },
+    {
+      "id": "C11",
+      "status": "closed-spec",
+      "evidence": "review-001/REVIEW-0.3.md; independent-probes-0.3.json",
+      "decision": "0.4 remedy reviewed; see REVIEW-0.4.md. No production verification."
+    },
+    {
+      "id": "C12",
+      "status": "open",
+      "evidence": "review-001/REVIEW-0.3.md; independent-probes-0.3.json",
+      "decision": "Claude turn 002 must address in new revision"
+    },
+    {
+      "id": "C13",
+      "status": "closed-restoration",
+      "evidence": "review-001/REVIEW-0.3.md; independent-probes-0.3.json",
+      "decision": "Original historical test IDs restored and reconciled; substitute ADD-M1-01 withdrawn. See REVIEW-0.6.md"
+    },
+    {
+      "id": "C14",
+      "status": "closed-spec-tooling",
+      "evidence": "review-001/REVIEW-0.4.md; independent-probes-0.4.json",
+      "decision": "0.6 remedy independently executed and reviewed; see REVIEW-0.6.md"
+    },
+    {
+      "id": "C15",
+      "status": "closed-spec-model",
+      "evidence": "review-001/REVIEW-0.4.md; independent-probes-0.4.json",
+      "decision": "0.5 remedy reviewed with native URL oracle/model fixtures and explicit limitations; see REVIEW-0.5.md. No production/MPT verification."
+    },
+    {
+      "id": "C16",
+      "status": "closed-spec-model",
+      "evidence": "review-001/REVIEW-0.4.md; independent-probes-0.4.json",
+      "decision": "0.5 remedy reviewed with native URL oracle/model fixtures and explicit limitations; see REVIEW-0.5.md. No production/MPT verification."
+    },
+    {
+      "id": "C17",
+      "status": "closed-spec-model",
+      "evidence": "review-001/REVIEW-0.4.md; independent-probes-0.4.json",
+      "decision": "0.5 remedy reviewed with native URL oracle/model fixtures and explicit limitations; see REVIEW-0.5.md. No production/MPT verification."
+    },
+    {
+      "id": "C18",
+      "status": "closed-spec-model",
+      "evidence": "review-001/REVIEW-0.4.md; independent-probes-0.4.json",
+      "decision": "0.5 remedy reviewed with native URL oracle/model fixtures and explicit limitations; see REVIEW-0.5.md. No production/MPT verification."
+    },
+    {
+      "id": "C19",
+      "status": "closed-spec-tooling",
+      "evidence": "review-001/id-number-probe.json; id-number-oracle.json",
+      "decision": "0.6 remedy independently executed and reviewed; see REVIEW-0.6.md"
+    },
+    {
+      "id": "C20",
+      "status": "closed-spec-model",
+      "evidence": "review-001/REVIEW-0.6.md; rule-disable-probe.json; epoch-probe.json",
+      "decision": "0.7 model remedies executed; see REVIEW-0.7.md. No production validation."
+    },
+    {
+      "id": "C21",
+      "status": "closed-spec-model",
+      "evidence": "review-001/REVIEW-0.6.md; rule-disable-probe.json; epoch-probe.json",
+      "decision": "0.7 model remedies executed; see REVIEW-0.7.md. No production validation."
+    },
+    {
+      "id": "C22",
+      "status": "closed-spec-model",
+      "evidence": "review-001/REVIEW-0.6.md; rule-disable-probe.json; epoch-probe.json",
+      "decision": "0.7 model remedies executed; see REVIEW-0.7.md. No production validation."
+    },
+    {
+      "id": "C23",
+      "status": "open",
+      "evidence": "0.7 step.completed e_checks fails: snapshot-invariants.json looked up in 0.6 but belongs to 0.4",
+      "decision": "Claude must fix source revision reference; publish failure honestly"
+    }
+  ],
+  "history": [
+    {
+      "revision": "connectivity-2026-10-07",
+      "result": "POCOL_CLI_OK",
+      "exitCode": 0
+    },
+    {
+      "revision": "review-0.2-independent",
+      "result": "212/212 rerun pass; independent probes confirm C03 C04 C05; see review-001/REVIEW.md"
+    },
+    {
+      "revision": "0.3",
+      "result": "335 entries: 333 pass, 2 recorded, 0 fail; C03-C05 closed for specification models; C10-C13 added; 51 protected hashes unchanged"
+    },
+    {
+      "revision": "hash-triad-expanded",
+      "result": "611 sample hashes agree: Rust sha3 0.9.1, @noble/hashes 1.7.1, pycryptodome 3.24.0; 486 positive file content hashes independently verified",
+      "evidence": "hash-triad/*expanded-result.json"
+    },
+    {
+      "revision": "0.4",
+      "result": "216 pass, 1 recorded, 1 FAIL; independent URL oracle and pending identity probes found gaps; exact proof schema review required"
+    },
+    {
+      "revision": "source-provenance-recovery",
+      "result": "Original source approval and design hash independently verified; no original Dialogue files modified"
+    },
+    {
+      "revision": "0.5",
+      "result": "347 pass, 3 recorded, 1 FAIL (C14 prefix); txA cryptographic cross-check passed; historical definitions recovered; C19 added"
+    },
+    {
+      "revision": "0.6",
+      "result": "188 pass/1 recorded/1 checker failure; BR16 matches; C14 C19 closed; restored X3 accepted; mutant traversal and epoch capture findings added"
+    },
+    {
+      "revision": "0.7",
+      "result": "252 entries: 249 pass, 2 recorded, 1 FAIL; C20-C22 remedies pass; C23 reference-path failure remains"
+    }
+  ],
+  "githubHandoff": {
+    "repository": "https://github.com/raedrasheed/Proof-of-Collaboration",
+    "state": "active author turn005 checkpointed before repository fetch",
+    "activeWrites": "m1-draft-0.7 only",
+    "publicExclusions": "Private CLI transcripts, original dialogue history, secrets, dependencies and runtime binaries"
+  }
+}
