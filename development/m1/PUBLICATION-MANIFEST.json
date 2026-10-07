@@ -1695,9 +1695,87 @@
       "publicationCurated": false
     },
     {
+      "path": "m1-draft-0.17/annex/C27-RFE61.md",
+      "localSha256": "7315aa3344bfe223013104ce1a0d6aa427c8de71a7ec3b61a83a39248e23e913",
+      "publicSha256": "7315aa3344bfe223013104ce1a0d6aa427c8de71a7ec3b61a83a39248e23e913",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.17/M1-SPEC-0.17-AMENDMENT.md",
+      "localSha256": "a0c171eb3dfe1f633c8da1fc28f402f20e74a613034910a1b737ffd6f646beb3",
+      "publicSha256": "a0c171eb3dfe1f633c8da1fc28f402f20e74a613034910a1b737ffd6f646beb3",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.17/M1-STATUS-0.17.md",
+      "localSha256": "6ce0cc53abb82615cbcb3450cd813b1b7f486db77b848a9eea23d22448c57826",
+      "publicSha256": "6ce0cc53abb82615cbcb3450cd813b1b7f486db77b848a9eea23d22448c57826",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.17/README.md",
+      "localSha256": "1e4f8cce9b44484b355b412be5ce6067bf8e0078f9f42acc2a972f39a81b6e05",
+      "publicSha256": "1e4f8cce9b44484b355b412be5ce6067bf8e0078f9f42acc2a972f39a81b6e05",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.17/tools/admin_trace.py",
+      "localSha256": "9b042e6bf43cc50b46ba243e140aa2c6e971e981bed2e94ff351302279faaa1d",
+      "publicSha256": "9b042e6bf43cc50b46ba243e140aa2c6e971e981bed2e94ff351302279faaa1d",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.17/tools/run_checks_017.py",
+      "localSha256": "3f5adbe2f324dac7a5641082c0ce7c1df2067f167b4f2da49b866dc021fa0468",
+      "publicSha256": "3f5adbe2f324dac7a5641082c0ce7c1df2067f167b4f2da49b866dc021fa0468",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.17/vectors/c27-x9-early-release.json",
+      "localSha256": "f6858bff9afb640dd8e44c57557493c8dbffd0dfacf7c0d6fda257f68e6cf47a",
+      "publicSha256": "f6858bff9afb640dd8e44c57557493c8dbffd0dfacf7c0d6fda257f68e6cf47a",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.17/vectors/rf-e6-1-x12-timelines.json",
+      "localSha256": "c09d80318e32a68bb371e56bac95506acef4cd550f4f6a37e8384425621b13b8",
+      "publicSha256": "c09d80318e32a68bb371e56bac95506acef4cd550f4f6a37e8384425621b13b8",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/reviews/REVIEW-0.17.md",
+      "localSha256": "e2554e63d354bdd6e37d1c7f6adcb5fe050f3027c046b05a39ad6c85ec5d4ab2",
+      "publicSha256": "e2554e63d354bdd6e37d1c7f6adcb5fe050f3027c046b05a39ad6c85ec5d4ab2",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.17/run-results-0.17.json",
+      "localSha256": "66cf34a194fef0ca5c0ecad4c0fb85e4088f3aae734bc525e2b2f74c2cd811d3",
+      "publicSha256": "66cf34a194fef0ca5c0ecad4c0fb85e4088f3aae734bc525e2b2f74c2cd811d3",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.17/site-independent-probes.py",
+      "localSha256": "feaa9bf16d89897e6ff502616e1a574b5555ea7bd612072e3669145bda84fd52",
+      "publicSha256": "feaa9bf16d89897e6ff502616e1a574b5555ea7bd612072e3669145bda84fd52",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.17/site-independent-probes-0.16.json",
+      "localSha256": "bb1cd262c1652209331c385041a4deed5b7bd9595ecf4230894a9c79e89e4134",
+      "publicSha256": "bb1cd262c1652209331c385041a4deed5b7bd9595ecf4230894a9c79e89e4134",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/tasks/task-015.md",
+      "localSha256": "04b119dafb85cdc80d53d9c3d5659ee56f944080c7a9c3ed980ea8e3a6744be1",
+      "publicSha256": "04b119dafb85cdc80d53d9c3d5659ee56f944080c7a9c3ed980ea8e3a6744be1",
+      "publicationCurated": false
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "5a7602d7202ff74232736db1d6af5051508f51ec10f06739d1588cfde75c85e3",
-      "publicSha256": "a6bac5228dc3ff50fe330923898deca01d158f4d9b823ebfe912859e06250493",
+      "localSha256": "50d109a0fd3fbfd70b22df4e2addb498a93742adf61669276e793bfa2f408b26",
+      "publicSha256": "5c86066e5a16d6964db3271a3e44c567fb6a1fad9a99c2ce4c31413b7a715ec4",
       "publicationCurated": true
     }
   ]
