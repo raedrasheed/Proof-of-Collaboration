@@ -1851,9 +1851,129 @@
       "publicationCurated": false
     },
     {
+      "path": "m1-draft-0.19/annex/V2-LOGCLIENT.md",
+      "localSha256": "473edb1e173777fba12605c01f94d1319793833a1140c0d4313b4b610a98542c",
+      "publicSha256": "473edb1e173777fba12605c01f94d1319793833a1140c0d4313b4b610a98542c",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.19/M1-SPEC-0.19-AMENDMENT.md",
+      "localSha256": "5874c2113915ff14893fdc809d1c65afac068f59787c15d24e100798668e0a3a",
+      "publicSha256": "5874c2113915ff14893fdc809d1c65afac068f59787c15d24e100798668e0a3a",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.19/M1-STATUS-0.19.md",
+      "localSha256": "7e43d5998baf5aa7dc1ceb3d16b0b781021dea9572d7b197f833bc94d960c059",
+      "publicSha256": "7e43d5998baf5aa7dc1ceb3d16b0b781021dea9572d7b197f833bc94d960c059",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.19/README.md",
+      "localSha256": "e3ae6e166838432adc67af6259e61576c4ea46783822b1aebbd9dee2373f9fe9",
+      "publicSha256": "e3ae6e166838432adc67af6259e61576c4ea46783822b1aebbd9dee2373f9fe9",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.19/tools/logclient_ref.py",
+      "localSha256": "7a93269cfd6a929524d14557bc940e5a6fbd45e86c542dd3b37c42939751d714",
+      "publicSha256": "7a93269cfd6a929524d14557bc940e5a6fbd45e86c542dd3b37c42939751d714",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.19/tools/run_checks_019.py",
+      "localSha256": "5388b7dd69c59df3fff830558ff6729454ffd6957662e2733698768b54b21cd6",
+      "publicSha256": "5388b7dd69c59df3fff830558ff6729454ffd6957662e2733698768b54b21cd6",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.19/vectors/lc-cases.json",
+      "localSha256": "7aeaadcc8d965d398e5dcd02b4b8cb919bec987c83b15fe98adf4012ee69bbe9",
+      "publicSha256": "7aeaadcc8d965d398e5dcd02b4b8cb919bec987c83b15fe98adf4012ee69bbe9",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.19/vectors/lc-data.json",
+      "localSha256": "67ba99131f53640d4f6c5b4434f9389dd35ee788df239a2abfef7e16df53b5be",
+      "publicSha256": "67ba99131f53640d4f6c5b4434f9389dd35ee788df239a2abfef7e16df53b5be",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.19/vectors/lc-sink-controls.json",
+      "localSha256": "65687a1990f1be94b462d81a78cb841fd3e496f34f708511107a67006e91ae16",
+      "publicSha256": "65687a1990f1be94b462d81a78cb841fd3e496f34f708511107a67006e91ae16",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.19/vectors/lc-step-table.json",
+      "localSha256": "cdd0d2cfc185623a87080b970b9c08d1ad6a516702f8be42ce1bcdd522cc9fdf",
+      "publicSha256": "cdd0d2cfc185623a87080b970b9c08d1ad6a516702f8be42ce1bcdd522cc9fdf",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/reviews/REVIEW-0.19.md",
+      "localSha256": "4bc7e342f31bec21525797abf298793b51ed4fcad58042de01524fdd456ea608",
+      "publicSha256": "4bc7e342f31bec21525797abf298793b51ed4fcad58042de01524fdd456ea608",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.19/run-results-0.19.json",
+      "localSha256": "ffc9debab53169fb7a40f543ab138b6a68fb79b34c1eb365a43acb44f1020d8e",
+      "publicSha256": "ffc9debab53169fb7a40f543ab138b6a68fb79b34c1eb365a43acb44f1020d8e",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.19/logclient-independent-probes-prepared.py",
+      "localSha256": "85f87bfa8fcee380721b53627a51455b37c151969d3c6960adb2d9611f873aef",
+      "publicSha256": "85f87bfa8fcee380721b53627a51455b37c151969d3c6960adb2d9611f873aef",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.19/logclient-independent-probes-0.19.json",
+      "localSha256": "057fc496bc1e3f99a45d65962288d9402341225e8f576db2802bed21cf09868b",
+      "publicSha256": "057fc496bc1e3f99a45d65962288d9402341225e8f576db2802bed21cf09868b",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.19/sink-unknown-terminal-probe.py",
+      "localSha256": "e7700193f771092dfe3075140db267b32391c47ad61add794fb1c20c901192b8",
+      "publicSha256": "e7700193f771092dfe3075140db267b32391c47ad61add794fb1c20c901192b8",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.19/sink-unknown-terminal-probe.json",
+      "localSha256": "37734c05d25391d76faf85258cbe5ce25bb4e707b4474a9d20cc41ae96826d51",
+      "publicSha256": "37734c05d25391d76faf85258cbe5ce25bb4e707b4474a9d20cc41ae96826d51",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.19/LEDGER-RECONCILIATION-C09-C12.md",
+      "localSha256": "f90a3c228a39be67e29efd884c0299326a66ba292e6366f022122507e4d290a5",
+      "publicSha256": "f90a3c228a39be67e29efd884c0299326a66ba292e6366f022122507e4d290a5",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.19/ledger-bound-independent-probe.py",
+      "localSha256": "17d03400086f0662af3b813b9e7c8ad5a88b3c3ec3ca7103ba3cdede13afa013",
+      "publicSha256": "17d03400086f0662af3b813b9e7c8ad5a88b3c3ec3ca7103ba3cdede13afa013",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.19/ledger-bound-independent-probe.json",
+      "localSha256": "5b98910686903571f6867c686843b0998a6162bfe3177971a7c4aa203248217c",
+      "publicSha256": "5b98910686903571f6867c686843b0998a6162bfe3177971a7c4aa203248217c",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/tasks/task-017.md",
+      "localSha256": "95242f630d3e0f3a587228cd9ef2f6553dda858bb2735ac5c272a78bdaf82123",
+      "publicSha256": "95242f630d3e0f3a587228cd9ef2f6553dda858bb2735ac5c272a78bdaf82123",
+      "publicationCurated": false
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "2cfa2d4c7c8e3a5d70dfd83173a1c2d13db249f614f1238d0b816ebdb5c42047",
-      "publicSha256": "3616f18ddd44fb3bb000ec25eb9394cbea68830b5c419a58cf767515567a66db",
+      "localSha256": "bab5ee950cdc88a9e1c658cceedbaf2941d1d6db937803ffda608287d6a5cdb7",
+      "publicSha256": "92bc9e85985277502cfdc31af4ed7581e023eb42dbc02c15466ea2e62bd2bfd7",
       "publicationCurated": true
     }
   ]
