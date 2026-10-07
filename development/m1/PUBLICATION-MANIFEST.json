@@ -2415,9 +2415,147 @@
       "publicationCurated": false
     },
     {
+      "path": "m1-draft-0.24/annex/C31-X8-EVALUATOR.md",
+      "localSha256": "448146c27827663c788112b14926e43fb829501eff2a10f5c377280d870dfecc",
+      "publicSha256": "448146c27827663c788112b14926e43fb829501eff2a10f5c377280d870dfecc",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/M1-SPEC-0.24-AMENDMENT.md",
+      "localSha256": "29e38d859df122d5e4b5eb786dd0b09e978e13d47292db806b79b49399a8ab30",
+      "publicSha256": "29e38d859df122d5e4b5eb786dd0b09e978e13d47292db806b79b49399a8ab30",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/M1-STATUS-0.24.md",
+      "localSha256": "ca52c07bb9e964b7e6fc19c25e422d9ebec197596721ac2f844965e58d9887a1",
+      "publicSha256": "ca52c07bb9e964b7e6fc19c25e422d9ebec197596721ac2f844965e58d9887a1",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/pages-supplemental/C7-P1/index.html",
+      "localSha256": "063d065263b17f5266fe1eed5fc96bae9965bcd8fc80960b9681e36c5501dbcf",
+      "publicSha256": "063d065263b17f5266fe1eed5fc96bae9965bcd8fc80960b9681e36c5501dbcf",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/pages-supplemental/C7-P1/main.js",
+      "localSha256": "c3aae4507d3ee9131c725ebea297ff56ef06f0132d80be51f9d78b23a9d04341",
+      "publicSha256": "c3aae4507d3ee9131c725ebea297ff56ef06f0132d80be51f9d78b23a9d04341",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/pages-supplemental/C7-P2/index.html",
+      "localSha256": "7ea0f15ee1baf2f1f91ff232b6b18e2ef194c770d02f3b53e4cf71b26da168b6",
+      "publicSha256": "7ea0f15ee1baf2f1f91ff232b6b18e2ef194c770d02f3b53e4cf71b26da168b6",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/pages-supplemental/C7-P2/main.js",
+      "localSha256": "751eb575893968e6071b418e8c5faa3476d7c3a60d3a298da882f74ec986ec32",
+      "publicSha256": "751eb575893968e6071b418e8c5faa3476d7c3a60d3a298da882f74ec986ec32",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/pages-supplemental/C7-P3/index.html",
+      "localSha256": "11308995a5f39288a74143b6e05f845270b4abb7074289ca0de5e5287a2c32d9",
+      "publicSha256": "11308995a5f39288a74143b6e05f845270b4abb7074289ca0de5e5287a2c32d9",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/pages-supplemental/C7-P3/main.js",
+      "localSha256": "e8c8dd063f7310c53a279df43779a073a99a029055a77893d73b6531c0683d66",
+      "publicSha256": "e8c8dd063f7310c53a279df43779a073a99a029055a77893d73b6531c0683d66",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/pages-supplemental/C7-P4/index.html",
+      "localSha256": "bc4e86a207477f683e81f475f76302181241b354445b253af938d972b4daf1ae",
+      "publicSha256": "bc4e86a207477f683e81f475f76302181241b354445b253af938d972b4daf1ae",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/pages-supplemental/C7-P4/main.js",
+      "localSha256": "22564818245647dae727014d4ad60d0e70f24c44337e732dc23ff8b957b6ada4",
+      "publicSha256": "22564818245647dae727014d4ad60d0e70f24c44337e732dc23ff8b957b6ada4",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/pages-supplemental/C7-P5/index.html",
+      "localSha256": "2aee076feb8e728aa08989efe1391325855501f17e617edae75fca33f108ca8d",
+      "publicSha256": "2aee076feb8e728aa08989efe1391325855501f17e617edae75fca33f108ca8d",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/pages-supplemental/C7-P5/main.js",
+      "localSha256": "c426eb5cf82cf1219143735c649077d7789822c540866655a9be55f778139d29",
+      "publicSha256": "c426eb5cf82cf1219143735c649077d7789822c540866655a9be55f778139d29",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/README.md",
+      "localSha256": "235f24df5aff2d7faa95aa4235dcf30e9cd41bbd3567e6e92910bb9637872628",
+      "publicSha256": "235f24df5aff2d7faa95aa4235dcf30e9cd41bbd3567e6e92910bb9637872628",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/tools/run_checks_024.py",
+      "localSha256": "db4eeb62c16bc912648ff828365aa32ce0d2fe6fbbaa30a98578f9a5f2000075",
+      "publicSha256": "db4eeb62c16bc912648ff828365aa32ce0d2fe6fbbaa30a98578f9a5f2000075",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/tools/x8_eval_v2.py",
+      "localSha256": "8e8fc36e59d4cf0eb19cf82f24d86e17f7e49c5f6fccd8a8ae5182424227fb76",
+      "publicSha256": "8e8fc36e59d4cf0eb19cf82f24d86e17f7e49c5f6fccd8a8ae5182424227fb76",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/vectors/c31-controls.json",
+      "localSha256": "ca6a78666b30f23e17722a57a75e40ff3013ae10dcf489d9081e1ea319ed4c0f",
+      "publicSha256": "ca6a78666b30f23e17722a57a75e40ff3013ae10dcf489d9081e1ea319ed4c0f",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.24/vectors/c7-path-plan.json",
+      "localSha256": "73ae66665941c8b57a6629b1584786ba7deeb6cd9235d09c3450e744f26bfc64",
+      "publicSha256": "73ae66665941c8b57a6629b1584786ba7deeb6cd9235d09c3450e744f26bfc64",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/reviews/REVIEW-0.24.md",
+      "localSha256": "e8c712073756544817204f4baee1a1cb15db78763d861dd6639c263364e9c37e",
+      "publicSha256": "e8c712073756544817204f4baee1a1cb15db78763d861dd6639c263364e9c37e",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.24/run-results-0.24.json",
+      "localSha256": "90e5c2efb580e61e55eff39a7e3049067335edebae688ce776d3c36bae0f6720",
+      "publicSha256": "90e5c2efb580e61e55eff39a7e3049067335edebae688ce776d3c36bae0f6720",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.24/x8-integrity-independent-probes.py",
+      "localSha256": "e24298a2fe6f069f02eb0d00c143cefaa3c828b5cc10b204a7f5e4cd9aaa7132",
+      "publicSha256": "e24298a2fe6f069f02eb0d00c143cefaa3c828b5cc10b204a7f5e4cd9aaa7132",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.24/x8-independent-probes-0.24.json",
+      "localSha256": "088cf12ebf9608154006e503e44e54972fddaee4c55c20eb1ac1268f903711a8",
+      "publicSha256": "088cf12ebf9608154006e503e44e54972fddaee4c55c20eb1ac1268f903711a8",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/tasks/task-022.md",
+      "localSha256": "251f2112482d50668743e30b5c632cd8b5eedae14a38f08933c8bf23b94b25a1",
+      "publicSha256": "251f2112482d50668743e30b5c632cd8b5eedae14a38f08933c8bf23b94b25a1",
+      "publicationCurated": false
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "1377a0c0ed9aebd7e631d31f991a45024a094cffdba930314cad300b103f0bff",
-      "publicSha256": "30d4ca5963a9a7ecf6f0cf6b2b6f9156ae71be951eac67d50af40e0fc1c496cf",
+      "localSha256": "adf72c5f76feea683de375e389d0f67557888b7c6a9da23d6d981b1e5fb2482c",
+      "publicSha256": "a3062f9b1a37bfb34dca86ed34bedb0381424af75e61f9acd4fc9105f2e9e8f9",
       "publicationCurated": true
     }
   ]

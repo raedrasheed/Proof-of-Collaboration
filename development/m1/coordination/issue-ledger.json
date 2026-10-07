@@ -1,7 +1,7 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.23-reviewed-revise-C31",
-  "latestCompletedRevision": "0.22",
+  "status": "0.24-reviewed-all-annexes-started-audit-required",
+  "latestCompletedRevision": "0.24",
   "issues": [
     {
       "id": "C01",
@@ -211,7 +211,7 @@
     },
     {
       "id": "C31",
-      "status": "open",
+      "status": "closed-spec-tooling",
       "evidence": "review-001/x8-independent-probes-0.23.json: recordedK0reach+emptyduplicate ->PASS",
       "decision": "Validate duplicate/unknown/malformed observation windows; never erase evidence of reach. Complete C7 per-path sensitivity definition."
     }
@@ -333,18 +333,23 @@
       "revision": "0.23",
       "result": "104pass29recorded0fail;8JS syntaxpass; independent36pass1FAIL C31 ->revise; accepted0.22",
       "evidence": "review-001/REVIEW-0.23.md"
+    },
+    {
+      "revision": "0.24",
+      "result": "196pass49recorded0fail; independent45/45; fiveC7scripts syntaxpass; V4Partial41Partial0NotStarted0Complete; fullaudit/owner decisions still required",
+      "evidence": "review-001/REVIEW-0.24.md"
     }
   ],
   "githubHandoff": {
     "repository": "https://github.com/raedrasheed/Proof-of-Collaboration",
-    "state": "published completed cycle0.9",
+    "state": "completed0.23 published;0.24 reviewed and prepared for publication",
     "activeWrites": "none; completed0.9 reviewed and published",
     "publicExclusions": "Private CLI transcripts, original dialogue history, secrets, dependencies and runtime binaries",
     "pullRequest": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2",
     "branch": "work/m1-import",
     "checkout": "coordination/shared-repo",
-    "commit": "c0abce5",
-    "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6036136929"
+    "commit": "a910e5a",
+    "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6043966949"
   },
-  "nextAction": "Claude repair C31 in new0.24; then consolidated M1spec/fixture audit and owner decision packet; no production."
+  "nextAction": "Consolidated M1spec/fixture acceptance audit, F01-F26 dispositions, existing/new hash freeze evidence, concrete representation alternatives and owner decision packet; no production."
 }
