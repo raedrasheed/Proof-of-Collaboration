@@ -43,6 +43,63 @@ test('duplicate guidance submissions create one queued item', () => {
   assert.equal(ctl.state.order.length, 1);
 });
 
+// UI09: valid idempotency keys that name Object.prototype members are ordinary keys.
+const SPECIAL_KEYS = ['__proto__', 'constructor', 'toString', 'hasOwnProperty', '__defineGetter__', 'valueOf_'];
+
+function assertPrototypesUntouched() {
+  assert.equal(Object.getPrototypeOf({}), Object.prototype);
+  assert.deepEqual(Object.keys(Object.prototype), []);
+  assert.equal(typeof ({}).toString, 'function');
+  assert.equal(typeof ({}).hasOwnProperty, 'function');
+}
+
+for (const kind of ['guidance', 'authorJob']) {
+  test(`special idempotency keys on ${kind}: one item and one notification per key, also after reload`, () => {
+    const { ws, c, ctl, sp } = setup();
+    const submit = (x, key) => (kind === 'guidance' ? x.submitGuidance({ text: `note ${key}`, idempotencyKey: key }) : x.requestAuthorJob({ mode: 'smoke', idempotencyKey: key }));
+    const ids = {};
+    for (const key of SPECIAL_KEYS) {
+      const a = submit(ctl, key), b = submit(ctl, key);
+      assert.equal(a.duplicate, false, `${key}: first is new`);
+      assert.equal(b.duplicate, true, `${key}: second is a duplicate`);
+      assert.equal(b.item.id, a.item.id, `${key}: same item`);
+      ids[key] = a.item.id;
+    }
+    assert.equal(new Set(Object.values(ids)).size, SPECIAL_KEYS.length, 'distinct keys, distinct items');
+    assert.equal(ctl.state.order.length, SPECIAL_KEYS.length);
+    assert.equal(Object.keys(ctl.state.notifications).length, SPECIAL_KEYS.length, 'one host notification per item');
+    assert.equal(Object.getPrototypeOf(ctl.state.keys), null);
+    for (const key of SPECIAL_KEYS) assert.ok(Object.hasOwn(ctl.state.keys, key), `${key} stored as an own entry`);
+    assert.equal(sp.calls.length, 0, 'nothing dispatched: no approval was given');
+    assertPrototypesUntouched();
+    assert.match(readFileSync(path.join(ctl.uiDir, 'state.json'), 'utf8'), /"__proto__": "/, 'the key is persisted');
+    // Reload: the same keys still dedupe to the same items; nothing is rewritten or re-queued.
+    const { ctl2, sp2 } = restart(ws, c);
+    ctl2.recover();
+    assert.equal(Object.getPrototypeOf(ctl2.state.keys), null);
+    for (const key of SPECIAL_KEYS) {
+      const again = submit(ctl2, key);
+      assert.equal(again.duplicate, true, `${key}: duplicate after reload`);
+      assert.equal(again.item.id, ids[key]);
+    }
+    assert.equal(ctl2.state.order.length, SPECIAL_KEYS.length);
+    assert.equal(Object.keys(ctl2.state.notifications).length, SPECIAL_KEYS.length);
+    assert.equal(sp2.calls.length, 0);
+    assertPrototypesUntouched();
+  });
+}
+
+test('ordinary UUID idempotency keys behave exactly as before', () => {
+  const { ws, c, ctl } = setup();
+  const key = '3f1c9a2e-7b4d-4e8a-9c21-5d6e7f809a1b';
+  const a = ctl.submitGuidance({ text: 'x', idempotencyKey: key });
+  const b = ctl.submitGuidance({ text: 'x', idempotencyKey: key });
+  assert.equal(a.duplicate, false); assert.equal(b.duplicate, true); assert.equal(b.item.id, a.item.id);
+  const { ctl2 } = restart(ws, c);
+  assert.equal(ctl2.submitGuidance({ text: 'x', idempotencyKey: key }).item.id, a.item.id);
+  assert.equal(ctl2.state.order.length, 1);
+});
+
 test('author job: one spawn, no replay, next job waits for the actual review', () => {
   const { ctl, sp } = setup();
   const r1 = ctl.requestAuthorJob({ mode: 'smoke', idempotencyKey: 'job-key-00001' });

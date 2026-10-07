@@ -178,6 +178,47 @@ test('state written before the fix migrates: counter from the highest attempt, l
   assert.equal(new Set(rec.attempts.map((a) => a.n)).size, rec.attempts.length);
 });
 
+test('special keys: item and retry keys dedup, stay tied to their own notification, survive reload', async () => {
+  const fail = () => ({ ok: false, code: 1, error: 'daemon down' });
+  const n = fakeNotifier({ results: [fail(), fail(), fail(), fail()] });
+  const { ws, c, ctl } = setup({ notifier: n });
+  const g1 = ctl.submitGuidance({ text: 'one', idempotencyKey: '__proto__' }).item;
+  const g2 = ctl.submitGuidance({ text: 'two', idempotencyKey: 'constructor' }).item;
+  assert.equal(ctl.submitGuidance({ text: 'one', idempotencyKey: '__proto__' }).item.id, g1.id);
+  await ctl.notifyIdle();
+  assert.equal(n.sends.length, 2, 'one notification per item');
+  const id1 = `queued:${g1.id}`, id2 = `queued:${g2.id}`;
+  assert.equal(ctl.retryNotification({ notificationId: id1, idempotencyKey: 'toString' }).duplicate, false);
+  await ctl.notifyIdle();
+  const dup = ctl.retryNotification({ notificationId: id1, idempotencyKey: 'toString' });
+  assert.equal(dup.duplicate, true); assert.equal(dup.notification.id, id1);
+  const cross = ctl.retryNotification({ notificationId: id2, idempotencyKey: 'toString' });
+  assert.equal(cross.duplicate, true, 'an accepted key never causes another attempt');
+  assert.equal(cross.notification.id, id1, 'the key stays tied to the notification it was accepted for');
+  assert.equal(ctl.retryNotification({ notificationId: id2, idempotencyKey: '__proto__' }).duplicate, false, 'retry keys are their own namespace');
+  await ctl.notifyIdle();
+  assert.equal(n.sends.length, 4);
+  assert.deepEqual(n.sends.slice(2).map((s) => s.itemId), [g1.id, g2.id]);
+  assert.equal(Object.getPrototypeOf(ctl.state.notifyRetryKeys), null);
+  assert.throws(() => ctl.retryNotification({ notificationId: 'constructor', idempotencyKey: 'fresh-key-0001' }), /غير موجود/, 'inherited names are not notifications');
+  assert.throws(() => ctl.retryNotification({ notificationId: '__proto__', idempotencyKey: 'fresh-key-0002' }), /غير موجود/);
+  assert.equal(Object.getPrototypeOf({}), Object.prototype);
+  assert.deepEqual(Object.keys(Object.prototype), []);
+
+  const n2 = fakeNotifier();
+  const b = setup({ ws, c, notifier: n2 }).ctl;
+  b.recover();
+  assert.equal(Object.getPrototypeOf(b.state.notifyRetryKeys), null);
+  assert.equal(b.retryNotification({ notificationId: id1, idempotencyKey: 'toString' }).notification.id, id1);
+  const after = b.retryNotification({ notificationId: id2, idempotencyKey: '__proto__' });
+  assert.equal(after.duplicate, true); assert.equal(after.notification.id, id2);
+  assert.equal(b.submitGuidance({ text: 'one', idempotencyKey: '__proto__' }).item.id, g1.id);
+  assert.equal(b.submitGuidance({ text: 'two', idempotencyKey: 'constructor' }).duplicate, true);
+  await b.notifyIdle();
+  assert.equal(n2.sends.length, 0, 'no replay, no automatic retry after reload');
+  assert.equal(b.state.order.length, 2);
+});
+
 test('no transport configured: request saved, honest notConfigured state', async () => {
   const ws = makeWorkspace();
   const ctl = new Controller({ workspace: ws, isAlive: () => false });

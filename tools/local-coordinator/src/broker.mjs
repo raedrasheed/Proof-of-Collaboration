@@ -27,9 +27,18 @@ function describeLaunchError(msg) {
   return /\bENOENT\b/.test(m) ? `لم يُعثر على ملف claude التنفيذي أو مجلد العمل (ENOENT): ${m}` : m;
 }
 
+/**
+ * Dictionary for maps keyed by browser-supplied strings (idempotency keys). It has no
+ * prototype, so valid keys such as '__proto__', 'constructor' or 'toString' are ordinary own
+ * entries: they cannot reach Object.prototype, collide with inherited members or bypass dedup.
+ * Copying a loaded map keeps every existing entry (JSON.parse already made them own properties).
+ */
+const dict = (src) => Object.assign(Object.create(null), src && typeof src === 'object' && !Array.isArray(src) ? src : {});
+const own = (map, key) => (Object.hasOwn(map, key) ? map[key] : undefined);
+
 function emptyState(now) {
   return { schema: 'pocol-local-coordinator/1', createdAt: isoNow(now), paused: false, pauseRequestedAt: null,
-    items: {}, order: [], keys: {}, reviewer: null, currentJob: null, reviews: [], ownerAnswers: {}, notifications: {}, events: [] };
+    items: {}, order: [], keys: dict(), reviewer: null, currentJob: null, reviews: [], ownerAnswers: {}, notifications: {}, notifyRetryKeys: dict(), events: [] };
 }
 
 export class Controller {
@@ -47,7 +56,9 @@ export class Controller {
     this.cacheFile = path.join(uiDir, 'history-cache.json');
     this.state = readJson(this.stateFile, null) || emptyState(now());
     this.state.notifications ??= {};
-    this.state.notifyRetryKeys ??= {};
+    // Loaded (or new) key maps become null-prototype dictionaries; their entries are kept as they are.
+    this.state.keys = dict(this.state.keys);
+    this.state.notifyRetryKeys = dict(this.state.notifyRetryKeys);
     for (const n of Object.values(this.state.notifications)) {
       // Migration: attempt counter from the highest attempt seen; per-record key lists into the durable registry.
       n.attemptSeq = Math.max(n.attemptSeq ?? 0, ...(n.attempts || []).map((x) => Number(x.n) || 0));
@@ -209,8 +220,8 @@ export class Controller {
   // ---------- idempotent submissions (browser) ----------
   _existing(key) {
     if (!KEY_RE.test(key || '')) fail(400, 'مفتاح الطلب (idempotencyKey) غير صالح.');
-    const id = this.state.keys[key];
-    return id ? this.state.items[id] : null;
+    const id = own(this.state.keys, key);
+    return typeof id === 'string' ? own(this.state.items, id) ?? null : null;
   }
   _add(kind, key, payload) {
     const open = this.state.order.filter((id) => !['acknowledged', 'reviewed', 'cancelled'].includes(this.state.items[id].status)).length;
@@ -541,9 +552,9 @@ export class Controller {
    */
   retryNotification({ notificationId, idempotencyKey }) {
     if (!KEY_RE.test(idempotencyKey || '')) fail(400, 'مفتاح الطلب غير صالح.');
-    const prior = this.state.notifyRetryKeys[idempotencyKey];
-    if (prior) return { notification: this.state.notifications[prior.notificationId] ?? null, duplicate: true };
-    const n = typeof notificationId === 'string' ? this.state.notifications[notificationId] : null;
+    const prior = own(this.state.notifyRetryKeys, idempotencyKey);
+    if (prior) return { notification: own(this.state.notifications, prior.notificationId) ?? null, duplicate: true };
+    const n = typeof notificationId === 'string' ? own(this.state.notifications, notificationId) ?? null : null;
     if (!n) fail(404, 'إشعار غير موجود.');
     if (!NOTIFY_RETRYABLE.includes(n.status)) fail(409, n.status === 'delivered' ? 'سُلّم الإشعار بالفعل.' : `لا يمكن إعادة إشعار بحالة ${n.status}.`);
     if (Object.keys(this.state.notifyRetryKeys).length >= RETRY_KEYS_MAX) {
