@@ -1,0 +1,207 @@
+{
+  "schema": "pocol-local-ui-acceptance/1",
+  "author": "Claude Code",
+  "independentReviewer": "Codex current local coordinator",
+  "verifiedAt": "2026-10-07T12:07:43.585Z",
+  "tools": {
+    "node": "v22.13.1",
+    "chrome": "154.0.8037.95",
+    "playwright": "1.51.1",
+    "claudeCode": "2.1.292",
+    "codexCLI": "0.160.0",
+    "existingCodexDaemon": "0.160.1",
+    "git": "2.31.1.windows.1",
+    "githubCLI": "2.63.2"
+  },
+  "unit": {
+    "command": "npm test --prefix tools/local-coordinator",
+    "exitCode": 0,
+    "total": 63,
+    "passed": 63,
+    "failed": 0,
+    "skipped": 0
+  },
+  "browser": {
+    "method": "Actual installed Chrome, actual resumed Claude -p with default permissions, existing host reviewer API and existing-thread queue transport",
+    "startedAt": "2026-10-07T12:07:16.454Z",
+    "endedAt": "2026-10-07T12:07:43.585Z",
+    "exitCode": 0,
+    "checks": [
+      {
+        "name": "Actual saved M1 0.8 status 261/3/0, UTF-8 RTL, fragment removed",
+        "result": "PASS"
+      },
+      {
+        "name": "Actual browser/API special-key requests deduplicate to one item and one real host notification",
+        "result": "PASS"
+      },
+      {
+        "name": "UI guidance double click creates one item; actual host claim/ack; HTML inert",
+        "result": "PASS"
+      },
+      {
+        "name": "Test-only owner answer delivered to actual coordinator; real policies unanswered",
+        "result": "PASS"
+      },
+      {
+        "name": "Pause drains actual running Claude without killing it",
+        "result": "PASS"
+      },
+      {
+        "name": "Real resumed Claude response independently matches saved revision and result counts",
+        "result": "PASS"
+      },
+      {
+        "name": "Four real one-shot codex queue receipts delivered into the same existing host thread",
+        "result": "PASS"
+      },
+      {
+        "name": "Actual Codex review automatically appears as separate live timeline card",
+        "result": "PASS"
+      },
+      {
+        "name": "Resume recorded; reload restores receipt/review without another agent call",
+        "result": "PASS"
+      },
+      {
+        "name": "No reviewer/control secret or hidden-thinking event in browser state; no JS errors",
+        "result": "PASS"
+      },
+      {
+        "name": "Every checkpointed original M1/baseline/fixture file retains its exact hash",
+        "result": "PASS"
+      }
+    ],
+    "coreCycleHostNotificationReceipts": 4,
+    "specialKeyHostNotificationReceipts": 1,
+    "privateAuthorReceiptSha256": "1fac1a3b3d1b98d0c9f2a9748989b89cc0a1242cea320d18b3f2f3f49095ca39",
+    "savedIndependentM1CheckSha256": "16e9756b3abcac424a00bf1f0ce6f765f38376f71e4b6c3a7c3863bbdf90fe5e"
+  },
+  "failureRecovery": {
+    "method": "Isolated local broker test workspace; actual claude -p rejects deliberately nonexistent session; no replay after restart; explicit browser retry uses original workspace/session; host independently checks response and records review",
+    "startedAt": "2026-10-07T11:46:17.773Z",
+    "endedAt": "2026-10-07T11:46:47.262Z",
+    "exitCode": 0,
+    "expectedFirstCLIExitCode": 1,
+    "checks": [
+      {
+        "name": "Actual claude -p nonexistent-session failure visible; job and receipt persisted",
+        "result": "PASS"
+      },
+      {
+        "name": "Restart imports failure/checkpoint without replaying original call",
+        "result": "PASS"
+      },
+      {
+        "name": "Explicit browser retry resumes saved state with real original Claude session and actual review",
+        "result": "PASS"
+      }
+    ]
+  },
+  "additionalAdversarialChecks": {
+    "emptyOwnerLock": "Refused and preserved",
+    "staleOwnerRecovery": "Exclusive mutex and owner re-read; stale evidence retained",
+    "repeatedNotificationRetries": "27 explicit injected failures; monotonic IDs, no stuck sending; old keys deduplicated after history trim and reload",
+    "specialKeys": "__proto__, constructor and other valid keys safely deduplicate across save/reload; actual browser/API special-key request produced one item and one real notification"
+  },
+  "oneCommandRestart": {
+    "command": "node tools/local-coordinator/src/server.mjs --workspace <existing workspace>",
+    "verified": true,
+    "threadEnvironmentRemovedForTest": true,
+    "savedPrivateHostConfigurationUsed": true,
+    "noOldTokensRestored": true
+  },
+  "m1": {
+    "revision": "m1-draft-0.8",
+    "checkpointedFiles": 139,
+    "changedFiles": 0,
+    "originalLedgerUnchanged": true,
+    "realOwnerQuestionsAnswered": 0,
+    "complete": false
+  },
+  "limits": [
+    "Local verification, not GitHub CI or deployment.",
+    "Requires the existing local Codex daemon and the existing unarchived coordinator thread; no alternative agent is started if unavailable.",
+    "Queue delivery is separate from claim/ack/review. Actual reviewer activity is recorded through the separate private capability and expires; no review is fabricated.",
+    "Internal model reasoning and raw private transcripts are excluded; missing historical timestamps remain unavailable.",
+    "Scoped CLI automatic approvals retain normal permission controls; they are not a filesystem sandbox."
+  ],
+  "testedSourceFiles": [
+    {
+      "path": "tools/local-coordinator/dialogue-style.css",
+      "sha256": "014f75f4c3740cb90c12f985259a301e9b304d8ca089690d6a2eec26715ab022"
+    },
+    {
+      "path": "tools/local-coordinator/package.json",
+      "sha256": "3194ab329564e3afdc7c1f4509728a6f125ed09b784914d562174bad9bb18747"
+    },
+    {
+      "path": "tools/local-coordinator/public/app.js",
+      "sha256": "689b5bdc9a871f64f14d80ac108de0635e68f1334d1aec02e266b46e57c83161"
+    },
+    {
+      "path": "tools/local-coordinator/public/coordinator.css",
+      "sha256": "4e2f3387605f75870df7c1ee2f9e11859ab8f2de3fc0907c35198c370f224cf5"
+    },
+    {
+      "path": "tools/local-coordinator/public/index.html",
+      "sha256": "74473926407f80c7282d69d99f4d246518d02c8360d6176d40d99a88b8b25b77"
+    },
+    {
+      "path": "tools/local-coordinator/src/broker.mjs",
+      "sha256": "1674c99ba677d5995bd475d2149596dedb78321e78edc1c3db11d6116da4ca1e"
+    },
+    {
+      "path": "tools/local-coordinator/src/history.mjs",
+      "sha256": "391529994aecd09492c499102915e8d8a1207b6c5bb3d7b3429d3b64af8ab80d"
+    },
+    {
+      "path": "tools/local-coordinator/src/notifier.mjs",
+      "sha256": "bd66acc8c4f9a1fdc1376ed4f661f1c1405a87c753445006182caa290adb0ae1"
+    },
+    {
+      "path": "tools/local-coordinator/src/owner.mjs",
+      "sha256": "31bc3d10b81d8ef17f39a82241bd585959dbf37c9484a1d7b53ceb313d641971"
+    },
+    {
+      "path": "tools/local-coordinator/src/redact.mjs",
+      "sha256": "22300deda016a0d42290354be4287312a229f1149efb0d77d2bd51f5773338c7"
+    },
+    {
+      "path": "tools/local-coordinator/src/server.mjs",
+      "sha256": "1b8114c0857a754453e3f26b61f344a72399d30b9376e705138558938986c36b"
+    },
+    {
+      "path": "tools/local-coordinator/src/util.mjs",
+      "sha256": "628faaaeba7cb533cb0e351e393746c1e157901bd548228672e4d14e639c84b6"
+    },
+    {
+      "path": "tools/local-coordinator/src/worker.mjs",
+      "sha256": "c9f35bca549398cded8840a80af0c81b7653900d67bb733665bcd3ccfc124aa4"
+    },
+    {
+      "path": "tools/local-coordinator/test/broker.test.mjs",
+      "sha256": "cd0326ce69eed46a68df722901137eb0c20aa1342165566029c9df74593ec0fe"
+    },
+    {
+      "path": "tools/local-coordinator/test/helpers.mjs",
+      "sha256": "a382991c066322d8e3e1c3dae78cc941ab102034b9d6dcec78d2d77de4d4c94a"
+    },
+    {
+      "path": "tools/local-coordinator/test/history.test.mjs",
+      "sha256": "bfc2ae8838aac08961944dd55403b5aee7708aa8699dcdd8eddad85bb0071d17"
+    },
+    {
+      "path": "tools/local-coordinator/test/notifier.test.mjs",
+      "sha256": "82896e748bc137cd97f17d75c34cf02d7e76ace0fcfaa3f188b829a97a994ea2"
+    },
+    {
+      "path": "tools/local-coordinator/test/server.test.mjs",
+      "sha256": "8dfbb3d3ca250a2a39e0b4ecfef373cada37f5c0a290fae910b233af932a8c19"
+    },
+    {
+      "path": "tools/local-coordinator/test/worker.test.mjs",
+      "sha256": "ebfc18767d9c30abb56138e527680bc91527beb15c6c2cd43d4a8c43828a203e"
+    }
+  ]
+}
