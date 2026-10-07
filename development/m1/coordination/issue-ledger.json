@@ -1,6 +1,6 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.20-reviewed-V2-partial",
+  "status": "0.21-reviewed-revise-C30",
   "latestCompletedRevision": "0.20",
   "issues": [
     {
@@ -202,6 +202,12 @@
       "status": "closed-spec-tooling",
       "evidence": "review-001/REVIEW-0.19.md; sink-unknown-terminal-probe.json -> no violation for invalid terminal",
       "decision": "Closed sink event grammar and strict counters; preserve LC goldens/control detection"
+    },
+    {
+      "id": "C30",
+      "status": "open",
+      "evidence": "review-001/genesis-depth-independent-probe.json:4291bytes/depth1500 ->RecursionError",
+      "decision": "Nonrecursive GenesisSpec framing parser; preserve structural/integer error precedence and all old fixtures"
     }
   ],
   "history": [
@@ -306,6 +312,11 @@
       "revision": "0.20",
       "result": "570 pass,76 recorded,0fail; independent23/23; V2Partial,39Partial2NotStarted0Complete; owners unchanged",
       "evidence": "review-001/REVIEW-0.20.md"
+    },
+    {
+      "revision": "0.21",
+      "result": "Canonical-root110pass29recorded0fail; initialcopy-pathguardfailure preserved; independentC30 FAIL; E05three-library K1-K3/GSV1 pass; revise, accepted0.20",
+      "evidence": "review-001/REVIEW-0.21.md"
     }
   ],
   "githubHandoff": {
@@ -319,5 +330,5 @@
     "commit": "c0abce5",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6036136929"
   },
-  "nextAction": "Continue V3 thenV4 and final completeness audit, not production; ownerquestionsunapproved."
+  "nextAction": "Claude repair C30 in new0.22; then restored X8 fixtures and final completeness audit; ownerquestionsunapproved."
 }
