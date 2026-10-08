@@ -130,3 +130,8 @@ C32 crashes are repaired: 26 independent malformed cases pass. Prepared suite:24
 ## M1 review - revision 0.28
 
 Qualified specification corrections accepted.33 prepared checks and21 independent timing branches pass;68 saved files from0.26/0.27 are unchanged. Rate-cap policy is explicitly unapproved, compatibility formulas conditional, and6000ms means retry sleep only. Source SHA bound remains13 despite verified3355 distinct full-window evaluations. Recommend owner approval of explicit3355 category bounds, rate cap0..2000ms, and a whole-load10s deadline through the verdict including computation. None is adopted; earlier owner decisions also remain pending. Current repair/review scope is complete, fullM1 is owner-blocked. No merge or deployment.
+
+
+## Owner decision guide after0.28
+
+Nine pending choices are explained in Arabic in the live dashboard and in bilingual saved guides. No owner answer was recorded. The current Codex whole-load-through-verdict recommendation is distinguished from the older Claude per-request recommendation. U14 must explicitly define covered operations and reconcile the proof-read caps. Independent audit confirms139original protected files unchanged, all nine decision IDs represented, and no further author repair identified in the reviewed scope. Named owner blockers remain.

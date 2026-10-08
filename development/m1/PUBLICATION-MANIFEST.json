@@ -3207,9 +3207,27 @@
       "publicationCurated": false
     },
     {
+      "path": "coordination/owner/OWNER-DECISIONS-AFTER-0.28-AR.md",
+      "localSha256": "8983c747007b48be5786c2a55f8cc408937f60a7950a0edc7443458ef31a072b",
+      "publicSha256": "8983c747007b48be5786c2a55f8cc408937f60a7950a0edc7443458ef31a072b",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/owner/OWNER-DECISIONS-AFTER-0.28-EN.md",
+      "localSha256": "00d3e3df88f3fa30381b7b17047eec26b0f6a6b46ec54e0abd9b4cb54e5c7c31",
+      "publicSha256": "00d3e3df88f3fa30381b7b17047eec26b0f6a6b46ec54e0abd9b4cb54e5c7c31",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.28/OWNER-DECISION-AUDIT-AFTER-0.28.json",
+      "localSha256": "2cc7b79929148e4f897c356cc6260729cdb7a6410206561c7988671b5a733013",
+      "publicSha256": "2cc7b79929148e4f897c356cc6260729cdb7a6410206561c7988671b5a733013",
+      "publicationCurated": false
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "0f5023ace42283bd2db04e188157ff7c8cebef2a3219b1161ab525470ed1671b",
-      "publicSha256": "b5926754374d1eb5681a03322f9c45dbb0d90e60da0648d63bafb75ee3271a7e",
+      "localSha256": "9e03ca53c4616e4cacf0d2bdebb04152b76195960cf2bf8efc9fb55cef1aba6d",
+      "publicSha256": "47f5c5124db4f9a9094c148643a5ca98c47c1ba3e44763d084ce70e2409c66e3",
       "publicationCurated": true
     }
   ]
