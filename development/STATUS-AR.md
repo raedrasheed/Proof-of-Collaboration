@@ -120,3 +120,8 @@ Claude مسؤول عن التأليف والتعديلات؛ Codex يراجع و
 ## M1 review - revision 0.26
 
 Resumed the completed author task without a duplicate job. The prepared suite passed 302 checks with 75 recorded entries and zero failures. Independent verification matched 1027 ASERT cases, 347 hash preimages and 135 signatures. Review verdict: revise. Three malformed busy replies crash the reference checker (C32). A valid 256-share header requires 258 SHA-256 evaluations, conflicting with the source bound of 13; the proposed 27-call explanation also omits share hashes (V1-SHA-COST). The dashboard and evidence ledger record both blockers. Named owner decisions remain pending; M1 is not accepted. No production implementation, merge or deployment.
+
+
+## M1 review - revision 0.27
+
+C32 crashes are repaired: 26 independent malformed cases pass. Prepared suite:248 passed,72 recorded,zero failures. Independent SHA/retry observations18, hashes3677, signatures31 and ASERT1027 all pass. Full-window SHA accounting is3355 cached calls/unique inputs and6721 uncached calls. The source bound remains13 and requires owner authorization to amend. Review requests correction of the proposed rate-delay cap and the claim that6000ms retry sleep proves a10s overall load deadline. U14 and other owner decisions remain open. No merge or deployment.

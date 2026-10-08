@@ -2961,9 +2961,165 @@
       "publicationCurated": false
     },
     {
+      "path": "m1-draft-0.27/annex/C32-RPC-ERROR-ENVELOPE.md",
+      "localSha256": "42e11273269f58b5cd98d9ec0e173c3a441cbea0542943c2a6da1535e6725cfd",
+      "publicSha256": "42e11273269f58b5cd98d9ec0e173c3a441cbea0542943c2a6da1535e6725cfd",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/annex/V1-SHA-COST.md",
+      "localSha256": "df9c37379ef744cef6b30c9a7d697443eaede66c99480fce0dd72ee8b40c548c",
+      "publicSha256": "df9c37379ef744cef6b30c9a7d697443eaede66c99480fce0dd72ee8b40c548c",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/audit/consolidation-0.27.json",
+      "localSha256": "0fed3de5f7c823d02af7ae98c648735363601c86e5153eba52678fe92ac3f70c",
+      "publicSha256": "0fed3de5f7c823d02af7ae98c648735363601c86e5153eba52678fe92ac3f70c",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/M1-DECISION-PACKET-0.27-AR.md",
+      "localSha256": "173282ddaf7765f0fc8139e507e121ef0b2168e66707affa1b71e8e664593232",
+      "publicSha256": "173282ddaf7765f0fc8139e507e121ef0b2168e66707affa1b71e8e664593232",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/M1-SPEC-0.27-AMENDMENT.md",
+      "localSha256": "a5f317805081faaee83acfad00981b8e38da3d10888aa3c98e6f38ccd95f9905",
+      "publicSha256": "a5f317805081faaee83acfad00981b8e38da3d10888aa3c98e6f38ccd95f9905",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/M1-STATUS-0.27.md",
+      "localSha256": "4b1430d99a9512036990adf4ebe328254412a87de64c68566bdeb1dc0c0eeb93",
+      "publicSha256": "4b1430d99a9512036990adf4ebe328254412a87de64c68566bdeb1dc0c0eeb93",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/owner/V1-SHA-COST-CHANGE-REQUEST.md",
+      "localSha256": "8e078ce7ae07e3c8e31673cc6f8536aa2243c8140d98b2da3781f2cac2cf21e0",
+      "publicSha256": "8e078ce7ae07e3c8e31673cc6f8536aa2243c8140d98b2da3781f2cac2cf21e0",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/README.md",
+      "localSha256": "0f7a475d3624fbdd762587ab28c4cad8d6ec77156bf39bd69be02abc24ee7565",
+      "publicSha256": "0f7a475d3624fbdd762587ab28c4cad8d6ec77156bf39bd69be02abc24ee7565",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/tools/run_checks_027.py",
+      "localSha256": "30039cb1d48237ece53c4f809074ec2e06567f851c25dc62c4df440cc8aa1ce4",
+      "publicSha256": "30039cb1d48237ece53c4f809074ec2e06567f851c25dc62c4df440cc8aa1ce4",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/tools/v1_ref_027.py",
+      "localSha256": "56eac33b4a3dd8782a8e8f37ee92a2ad47a938266cfe402876a2bf52c6d34d49",
+      "publicSha256": "56eac33b4a3dd8782a8e8f37ee92a2ad47a938266cfe402876a2bf52c6d34d49",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/vectors/c32-error-cases.json",
+      "localSha256": "f3db94c25175045567b7d6b4cd727484781055cb305fa7d829387d8932a181e9",
+      "publicSha256": "f3db94c25175045567b7d6b4cd727484781055cb305fa7d829387d8932a181e9",
+      "publicationCurated": false
+    },
+    {
+      "path": "m1-draft-0.27/vectors/v1-sha-accounting.json",
+      "localSha256": "beddb1e38d5d5cd90c6351f651a83c8db4a024338b58944b2d7cf5eb0e94be4b",
+      "publicSha256": "beddb1e38d5d5cd90c6351f651a83c8db4a024338b58944b2d7cf5eb0e94be4b",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/reviews/REVIEW-0.27.md",
+      "localSha256": "d39e8837f818a8dffe51343e84376dac5857c5dec7af2fa1514847ce6dc81094",
+      "publicSha256": "d39e8837f818a8dffe51343e84376dac5857c5dec7af2fa1514847ce6dc81094",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/run-results-0.27.json",
+      "localSha256": "000738339963ea27e4419bff4b686b65f31f6be35bb7909f82e92f21c5c504cf",
+      "publicSha256": "000738339963ea27e4419bff4b686b65f31f6be35bb7909f82e92f21c5c504cf",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/busy-independent-probes.py",
+      "localSha256": "80661e8be5d89b5a4bde4ec4d28cf6a92339887ca161e0c9b29832dd25744a5b",
+      "publicSha256": "80661e8be5d89b5a4bde4ec4d28cf6a92339887ca161e0c9b29832dd25744a5b",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/busy-independent-probes-0.27.json",
+      "localSha256": "904fcfe64de381c2c6ee362e59ad92be5e6a0e33f5f26a581e1e721f183909ae",
+      "publicSha256": "904fcfe64de381c2c6ee362e59ad92be5e6a0e33f5f26a581e1e721f183909ae",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/v1-sha-independent-0.27.py",
+      "localSha256": "cc679f485bd911bb03b5e3e0b4807d63f498c2c785c23de09c79a272d025f85b",
+      "publicSha256": "cc679f485bd911bb03b5e3e0b4807d63f498c2c785c23de09c79a272d025f85b",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/v1-sha-independent-0.27.json",
+      "localSha256": "32862887b320ab5ea39f0bd08da0c3f53d6a22f91e864a345636a018d8fde64b",
+      "publicSha256": "32862887b320ab5ea39f0bd08da0c3f53d6a22f91e864a345636a018d8fde64b",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/v1-hash-independent-0.27.mjs",
+      "localSha256": "6e9dda822e9ed3a90cb90b15f7402c0bd1a98e9fbef3e25ff878f778355ab16a",
+      "publicSha256": "6e9dda822e9ed3a90cb90b15f7402c0bd1a98e9fbef3e25ff878f778355ab16a",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/v1-hash-independent-0.27.json",
+      "localSha256": "3bceaffed18d385816201ce9c16314272f93666a8974fbae1c31fe68b54446b9",
+      "publicSha256": "3bceaffed18d385816201ce9c16314272f93666a8974fbae1c31fe68b54446b9",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/v1-signatures-0.27.tsv",
+      "localSha256": "62045fd558be6293bde906e489bf39c4185be5db8934c14758a90fea7109dcfc",
+      "publicSha256": "62045fd558be6293bde906e489bf39c4185be5db8934c14758a90fea7109dcfc",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/v1-signatures-independent-0.27.json",
+      "localSha256": "131c788ca37d939680f314f865dd0d792a2c660dae02e89ece91086aa36be120",
+      "publicSha256": "131c788ca37d939680f314f865dd0d792a2c660dae02e89ece91086aa36be120",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/asert-native-comparison-0.27.json",
+      "localSha256": "b183c80d27f93f4ef987a5c6636a2fb2cde43e945e13b4fec4f819e33d542b1e",
+      "publicSha256": "b183c80d27f93f4ef987a5c6636a2fb2cde43e945e13b4fec4f819e33d542b1e",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/hash-freeze-v1-0.27.json",
+      "localSha256": "e77b22ab5a01ab078eef843f59df40f523153b6554a911b00e32ae9c4391d8dd",
+      "publicSha256": "e77b22ab5a01ab078eef843f59df40f523153b6554a911b00e32ae9c4391d8dd",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/evidence/0.27/v1-transcripts-0.27.json",
+      "localSha256": "409dbc5c55145a4884a95c6354e66db53a67cad88642d841400e9ba956d3e753",
+      "publicSha256": "409dbc5c55145a4884a95c6354e66db53a67cad88642d841400e9ba956d3e753",
+      "publicationCurated": false
+    },
+    {
+      "path": "coordination/tasks/task-025.md",
+      "localSha256": "6035da78a835e89630d35201c20cc47e84fb83c60225278f3418b5d736d185b6",
+      "publicSha256": "6035da78a835e89630d35201c20cc47e84fb83c60225278f3418b5d736d185b6",
+      "publicationCurated": false
+    },
+    {
       "path": "coordination/issue-ledger.json",
-      "localSha256": "98b31bd00227a348721452b0a8f9ecc0b740429d51d8c3fde4d497d3394726d5",
-      "publicSha256": "6b7acc3dd3dc336da4fade5fe5e8f0cab406cb9afc2db08983f83acb36baae86",
+      "localSha256": "25f236a1a114063d50e957b7fc9b27bf1f6d8d7e59a002af481fdcb6a84f5a3d",
+      "publicSha256": "ae58c5ba71795a872debfe2fced92f7a10f6a3fc212f62d8284edc62c682ed1c",
       "publicationCurated": true
     }
   ]

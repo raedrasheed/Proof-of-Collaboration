@@ -1,7 +1,7 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.26-reviewed-revise-V1-error-handling-and-source-cost",
-  "latestCompletedRevision": "0.26",
+  "status": "0.27-reviewed-qualified-repair-policy-text-revision",
+  "latestCompletedRevision": "0.27",
   "issues": [
     {
       "id": "C01",
@@ -231,15 +231,27 @@
     },
     {
       "id": "C32",
-      "status": "open-reference-defect",
-      "evidence": "review-001/v1-malformed-error-probes-0.26.json: three uncaught exceptions",
-      "decision": "Validate malformed -32021 data/delay; return controlled viewIncomplete/no frame; no new author job started"
+      "status": "closed-reference-repair",
+      "evidence": [
+        "coordination/review-001/REVIEW-0.27.md",
+        "coordination/review-001/busy-independent-probes-0.27.json"
+      ],
+      "decision": "0.27: root independent malformed corpus26/26 plus prepared41 cases; crashes repaired. P-C32-2 policy remains unapproved."
     },
     {
       "id": "V1-SHA-COST",
       "status": "open-source-clarification",
       "evidence": "review-001/v1-share-work-probe-0.26.json: valid single header uses258SHA; h20 uses27; source claims<=13",
       "decision": "Do not relax baseline bound; include share verification in accurate worst-case accounting and seek authorized clarification"
+    },
+    {
+      "id": "P-C32-2",
+      "status": "open-owner-client-policy",
+      "revision": "0.27",
+      "decision": "Rate retry cap [0,2000] is proposed, not source-approved. Route owner alternatives; no total-load deadline proof from retry sleep.",
+      "evidence": [
+        "coordination/review-001/REVIEW-0.27.md"
+      ]
     }
   ],
   "history": [
@@ -374,6 +386,24 @@
       "revision": "0.26",
       "result": "302pass75recorded0fail in preparedsuite; independentASERT1027/1027, hashes347/347, Rustsignatures135/135; malformedbusy3FAIL; validsharecase258SHA ->reviseV1; ownerdecisions unchanged",
       "evidence": "review-001/REVIEW-0.26.md"
+    },
+    {
+      "revision": "0.27",
+      "task": "025",
+      "verdict": "revise-qualified-repair",
+      "prepared": {
+        "passed": 248,
+        "recorded": 72,
+        "failed": 0
+      },
+      "independent": {
+        "malformed": 26,
+        "shaAndRetry": 18,
+        "hashes": 3677,
+        "signatures": 31,
+        "asert": 1027
+      },
+      "decision": "C32 crash fix and SHA accounting verified; source SHA bound and rate cap await owner; deadline wording requires correction."
     }
   ],
   "githubHandoff": {
@@ -387,7 +417,7 @@
     "commit": "23265e6",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6044378979"
   },
-  "nextAction": "Review completed; V1 error handling and source SHA cost clarification require revision, and named owner answers remain pending. Do not replay completedauthor0.26; use explicit newrevision task if authorized.",
+  "nextAction": "Author new 0.28 to correct retry policy/deadline claims and explicitly route rate cap; no owner source change adopted.",
   "reviewerDecisions": {
     "revision": "0.25",
     "reviewer": "Codex existing host",
@@ -1006,6 +1036,6 @@
     },
     "requiredNext": "New V1 specification/fixtures and consolidated criteria computed with these actual decisions; owner votes remain open"
   },
-  "latestReviewedRevision": "0.26",
+  "latestReviewedRevision": "0.27",
   "latestAcceptedRevision": "0.25"
 }
