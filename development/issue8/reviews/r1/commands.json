@@ -1,0 +1,17 @@
+[
+  {
+    "name": "adapter-tests",
+    "args": [
+      "node",
+      "--test",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\adapter.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\boundaries.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\broker-client.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\gh.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\journal.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\protocol.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\sanitize.test.mjs"
+    ],
+    "exitCode": 1
+  }
+]

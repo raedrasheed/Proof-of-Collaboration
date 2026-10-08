@@ -1,0 +1,13 @@
+{
+  "workspaceRoot": "D:\\PoCol-Development",
+  "connectionPath": "D:\\PoCol-Development\\coordination\\ui-control\\connection.json",
+  "stateDir": "D:\\PoCol-Development\\coordination\\ui-control\\github-inbox",
+  "checkpointPath": "D:\\PoCol-Development\\coordination\\checkpoints\\devnet-policy-blocker.json",
+  "ghBin": "C:\\Program Files\\GitHub CLI\\gh.exe",
+  "owner": "raedrasheed",
+  "repo": "Proof-of-Collaboration",
+  "issue": 8,
+  "ownerLogin": "raedrasheed",
+  "ownerId": 36733882,
+  "pollSeconds": 60
+}
