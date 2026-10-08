@@ -1,0 +1,11 @@
+{
+  "oldStoppedBeforeNewStart": true,
+  "newServiceAlive": true,
+  "samePort": true,
+  "sameUrl": true,
+  "sameReviewerCapability": true,
+  "sameHostThread": true,
+  "samePauseState": true,
+  "allPreviousItemsPreserved": true,
+  "runningAuthors": 0
+}

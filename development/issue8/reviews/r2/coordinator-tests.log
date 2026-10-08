@@ -1,0 +1,440 @@
+TAP version 13
+# Subtest: duplicate guidance submissions create one queued item
+ok 1 - duplicate guidance submissions create one queued item
+  ---
+  duration_ms: 127.3954
+  ...
+# Subtest: special idempotency keys on guidance: one item and one notification per key, also after reload
+ok 2 - special idempotency keys on guidance: one item and one notification per key, also after reload
+  ---
+  duration_ms: 253.713
+  ...
+# Subtest: special idempotency keys on authorJob: one item and one notification per key, also after reload
+ok 3 - special idempotency keys on authorJob: one item and one notification per key, also after reload
+  ---
+  duration_ms: 105.2748
+  ...
+# Subtest: ordinary UUID idempotency keys behave exactly as before
+ok 4 - ordinary UUID idempotency keys behave exactly as before
+  ---
+  duration_ms: 75.553
+  ...
+# Subtest: author job: one spawn, no replay, next job waits for the actual review
+ok 5 - author job: one spawn, no replay, next job waits for the actual review
+  ---
+  duration_ms: 244.5921
+  ...
+# Subtest: failed author turn needs an actual review before any dispatch; retry stays available after it
+ok 6 - failed author turn needs an actual review before any dispatch; retry stays available after it
+  ---
+  duration_ms: 226.896
+  ...
+# Subtest: a worker start failure leaves no lease and must be reviewed
+ok 7 - a worker start failure leaves no lease and must be reviewed
+  ---
+  duration_ms: 121.4487
+  ...
+# Subtest: pause drains to the job boundary, preserves state, and resume dispatches
+ok 8 - pause drains to the job boundary, preserves state, and resume dispatches
+  ---
+  duration_ms: 2042.3343
+  ...
+# Subtest: restart: finished child is imported without spawning
+ok 9 - restart: finished child is imported without spawning
+  ---
+  duration_ms: 208.9246
+  ...
+# Subtest: restart: dead child without a result is interrupted, reviewed, then explicitly retried
+ok 10 - restart: dead child without a result is interrupted, reviewed, then explicitly retried
+  ---
+  duration_ms: 139.8676
+  ...
+# Subtest: restart: a live child is re-attached, never duplicated
+ok 11 - restart: a live child is re-attached, never duplicated
+  ---
+  duration_ms: 106.7397
+  ...
+# Subtest: stale service lock is taken over with evidence; a live one refuses
+ok 12 - stale service lock is taken over with evidence; a live one refuses
+  ---
+  duration_ms: 181.0214
+  ...
+# Subtest: empty or malformed lock fails closed even when every pid looks dead
+ok 13 - empty or malformed lock fails closed even when every pid looks dead
+  ---
+  duration_ms: 137.8408
+  ...
+# Subtest: two controllers in the same process: no shared ownership; owner updates port and releases
+ok 14 - two controllers in the same process: no shared ownership; owner updates port and releases
+  ---
+  duration_ms: 66.4752
+  ...
+# Subtest: release never removes a successor lock; a replaced owner cannot update it
+ok 15 - release never removes a successor lock; a replaced owner cannot update it
+  ---
+  duration_ms: 61.0594
+  ...
+# Subtest: competing stale recovery: one mutex holder at a time; a late recoverer re-reads and stops
+ok 16 - competing stale recovery: one mutex holder at a time; a late recoverer re-reads and stops
+  ---
+  duration_ms: 158.9237
+  ...
+# Subtest: ledger with an uncheckpointed author blocks dispatch
+ok 17 - ledger with an uncheckpointed author blocks dispatch
+  ---
+  duration_ms: 76.0486
+  ...
+# Subtest: author dispatch plan is validated; browser text never becomes CLI arguments
+ok 18 - author dispatch plan is validated; browser text never becomes CLI arguments
+  ---
+  duration_ms: 75.3593
+  ...
+# Subtest: reviewer attachment expires honestly and an absent host blocks dispatch
+ok 19 - reviewer attachment expires honestly and an absent host blocks dispatch
+  ---
+  duration_ms: 320.9055
+  ...
+# Subtest: current receipts and actual reviews appear as timestamped Claude/Codex cards
+ok 20 - current receipts and actual reviews appear as timestamped Claude/Codex cards
+  ---
+  duration_ms: 329.0079
+  ...
+# Subtest: owner answers are queued, never approved; UI-TEST is test-only
+ok 21 - owner answers are queued, never approved; UI-TEST is test-only
+  ---
+  duration_ms: 217.4481
+  ...
+# Subtest: a valid saved loopback connection for this workspace is reused: same port and capabilities
+ok 22 - a valid saved loopback connection for this workspace is reused: same port and capabilities
+  ---
+  duration_ms: 72.4817
+  ...
+# Subtest: invalid saved connections fail closed: never reused, explicit reason, no capability in the notice
+ok 23 - invalid saved connections fail closed: never reused, explicit reason, no capability in the notice
+  ---
+  duration_ms: 856.5039
+  ...
+# Subtest: --fresh-connection and a different --port create new capabilities; a bad --port is refused
+ok 24 - --fresh-connection and a different --port create new capabilities; a bad --port is refused
+  ---
+  duration_ms: 186.2771
+  ...
+# Subtest: a reused connection keeps the open browser working and the reviewer API unreachable from the browser
+ok 25 - a reused connection keeps the open browser working and the reviewer API unreachable from the browser
+  ---
+  duration_ms: 2189.8005
+  ...
+# Subtest: a saved valid connection never bypasses the single-service lock
+ok 26 - a saved valid connection never bypasses the single-service lock
+  ---
+  duration_ms: 39.7759
+  ...
+# Subtest: default off: without saved standing authorization a review queues no continuation and notifies nothing
+ok 27 - default off: without saved standing authorization a review queues no continuation and notifies nothing
+  ---
+  duration_ms: 278.166
+  ...
+# Subtest: enabled: exactly one durable continuation item and one fixed notification per actual review, also after restart
+ok 28 - enabled: exactly one durable continuation item and one fixed notification per actual review, also after restart
+  ---
+  duration_ms: 227.718
+  ...
+# Subtest: policy: default off; every missing, malformed, complete or blocked-without-ready-item ledger disables it
+ok 29 - policy: default off; every missing, malformed, complete or blocked-without-ready-item ledger disables it
+  ---
+  duration_ms: 2.7986
+  ...
+# Subtest: completion: a complete worklist suppresses the callback after an actual review
+ok 30 - completion: a complete worklist suppresses the callback after an actual review
+  ---
+  duration_ms: 191.1826
+  ...
+# Subtest: pause defers the continuation; a manual resume decides it once; stop suppresses
+ok 31 - pause defers the continuation; a manual resume decides it once; stop suppresses
+  ---
+  duration_ms: 1958.7989
+  ...
+# Subtest: gates: an active writer or an open continuation suppresses; an acknowledged one allows the next
+ok 32 - gates: an active writer or an open continuation suppresses; an acknowledged one allows the next
+  ---
+  duration_ms: 588.0899
+  ...
+# Subtest: second author: dispatched only AFTER the actual first review, through claim/ack, with a matching reviewed ledger; every gate still blocks
+ok 33 - second author: dispatched only AFTER the actual first review, through claim/ack, with a matching reviewed ledger; every gate still blocks
+  ---
+  duration_ms: 469.6837
+  ...
+# Subtest: ledger: unknown, unreviewed or mismatched inactive states stay blocked
+ok 34 - ledger: unknown, unreviewed or mismatched inactive states stay blocked
+  ---
+  duration_ms: 377.4272
+  ...
+# Subtest: restart at durable boundaries: a pending review is decided once; a half-recorded item is finished, never duplicated
+ok 35 - restart at durable boundaries: a pending review is decided once; a half-recorded item is finished, never duplicated
+  ---
+  duration_ms: 172.5474
+  ...
+# Subtest: legacy reviews saved before the update never trigger a continuation
+ok 36 - legacy reviews saved before the update never trigger a continuation
+  ---
+  duration_ms: 324.9338
+  ...
+# Subtest: a continuation send interrupted by a restart is uncertain and never retried automatically
+ok 37 - a continuation send interrupted by a restart is uncertain and never retried automatically
+  ---
+  duration_ms: 224.5607
+  ...
+# Subtest: continuation ack: bad plans are refused, an ack without a plan starts nothing, a second ack is refused
+ok 38 - continuation ack: bad plans are refused, an ack without a plan starts nothing, a second ack is refused
+  ---
+  duration_ms: 140.5432
+  ...
+# Subtest: the continuation message is fixed, server-side and points the existing thread at the saved authority
+ok 39 - the continuation message is fixed, server-side and points the existing thread at the saved authority
+  ---
+  duration_ms: 1.8258
+  ...
+# Subtest: authority display is read-only, from safe ledger fields, and separate from owner answers
+ok 40 - authority display is read-only, from safe ledger fields, and separate from owner answers
+  ---
+  duration_ms: 270.7352
+  ...
+# Subtest: an acknowledged item older than the 100-item view is still returned with its actual ack note
+ok 41 - an acknowledged item older than the 100-item view is still returned with its actual ack note
+  ---
+  duration_ms: 2496.0156
+  ...
+# Subtest: a linked job and its actual review past the view resolve; only allowlisted fields leave the broker
+ok 42 - a linked job and its actual review past the view resolve; only allowlisted fields leave the broker
+  ---
+  duration_ms: 1969.6695
+  ...
+# Subtest: authentication, Host, Origin, Sec-Fetch-Site, method and query are enforced; missing is 404
+ok 43 - authentication, Host, Origin, Sec-Fetch-Site, method and query are enforced; missing is 404
+  ---
+  duration_ms: 107.389
+  ...
+# Subtest: projection unit: allowlist, bounds, redaction
+ok 44 - projection unit: allowlist, bounds, redaction
+  ---
+  duration_ms: 1.3168
+  ...
+# Subtest: UTF-16 receipt: allowlist keeps visible text, drops hidden reasoning and raw payloads
+ok 45 - UTF-16 receipt: allowlist keeps visible text, drops hidden reasoning and raw payloads
+  ---
+  duration_ms: 30.5283
+  ...
+# Subtest: secrets are masked: private key in tool input, mnemonic in result, registered tokens
+ok 46 - secrets are masked: private key in tool input, mnemonic in result, registered tokens
+  ---
+  duration_ms: 31.857
+  ...
+# Subtest: sink detector catches real sinks and ignores comments that name them
+ok 47 - sink detector catches real sinks and ignores comments that name them
+  ---
+  duration_ms: 3.1797
+  ...
+# Subtest: tool text is kept as inert data and the frontend has no executable HTML sink
+ok 48 - tool text is kept as inert data and the frontend has no executable HTML sink
+  ---
+  duration_ms: 18.0018
+  ...
+# Subtest: RTL layout: technical fragments are isolated LTR <bdi> text nodes, Arabic prose stays text
+ok 49 - RTL layout: technical fragments are isolated LTR <bdi> text nodes, Arabic prose stays text
+  ---
+  duration_ms: 2.0747
+  ...
+# Subtest: history cards: roles, missing timestamps marked, hashes and commit attached
+ok 50 - history cards: roles, missing timestamps marked, hashes and commit attached
+  ---
+  duration_ms: 94.5885
+  ...
+# Subtest: source history reload uses the cache and never invokes an agent
+ok 51 - source history reload uses the cache and never invokes an agent
+  ---
+  duration_ms: 158.5454
+  ...
+# Subtest: saved check results and the fixed status panel come from files
+ok 52 - saved check results and the fixed status panel come from files
+  ---
+  duration_ms: 199.0382
+  ...
+# Subtest: nothing is sent before the item and the attempt are durable; delivery is not attach/claim/ack
+ok 53 - nothing is sent before the item and the attempt are durable; delivery is not attach/claim/ack
+  ---
+  duration_ms: 93.1035
+  ...
+# Subtest: duplicate idempotency key never re-queues or re-notifies; pause/resume do not notify
+ok 54 - duplicate idempotency key never re-queues or re-notifies; pause/resume do not notify
+  ---
+  duration_ms: 121.449
+  ...
+# Subtest: restart during a send: the attempt becomes uncertain and is never replayed; explicit retry reuses the item
+ok 55 - restart during a send: the attempt becomes uncertain and is never replayed; explicit retry reuses the item
+  ---
+  duration_ms: 122.6146
+  ...
+# Subtest: held notifications (server start) are sent once on release, not before
+ok 56 - held notifications (server start) are sent once on release, not before
+  ---
+  duration_ms: 91.1807
+  ...
+# Subtest: failed delivery: honest redacted error, no automatic retry, explicit retry, duplicate retry ignored
+ok 57 - failed delivery: honest redacted error, no automatic retry, explicit retry, duplicate retry ignored
+  ---
+  duration_ms: 79.0907
+  ...
+# Subtest: more than 25 explicit failed retries: unique increasing attempts, none stuck, old keys never resend (also after reload)
+ok 58 - more than 25 explicit failed retries: unique increasing attempts, none stuck, old keys never resend (also after reload)
+  ---
+  duration_ms: 419.146
+  ...
+# Subtest: state written before the fix migrates: counter from the highest attempt, legacy keys kept
+ok 59 - state written before the fix migrates: counter from the highest attempt, legacy keys kept
+  ---
+  duration_ms: 95.075
+  ...
+# Subtest: special keys: item and retry keys dedup, stay tied to their own notification, survive reload
+ok 60 - special keys: item and retry keys dedup, stay tied to their own notification, survive reload
+  ---
+  duration_ms: 114.983
+  ...
+# Subtest: no transport configured: request saved, honest notConfigured state
+ok 61 - no transport configured: request saved, honest notConfigured state
+  ---
+  duration_ms: 154.4626
+  ...
+# Subtest: job completion requests a review exactly once, even with repeated callbacks
+ok 62 - job completion requests a review exactly once, even with repeated callbacks
+  ---
+  duration_ms: 149.3976
+  ...
+# Subtest: failed CLI run: bounded, redacted stderr excerpt is visible; executable-not-found is explicit
+ok 63 - failed CLI run: bounded, redacted stderr excerpt is visible; executable-not-found is explicit
+  ---
+  duration_ms: 383.758
+  ...
+# Subtest: real transport: fixed queue command against the existing thread, no shell, bounded output
+ok 64 - real transport: fixed queue command against the existing thread, no shell, bounded output
+  ---
+  duration_ms: 10.7106
+  ...
+# Subtest: real transport: launch error, non-zero exit and timeout are reported honestly
+ok 65 - real transport: launch error, non-zero exit and timeout are reported honestly
+  ---
+  duration_ms: 118.2138
+  ...
+# Subtest: real transport: configuration and message are validated; never built from browser input
+ok 66 - real transport: configuration and message are validated; never built from browser input
+  ---
+  duration_ms: 6.0525
+  ...
+# Subtest: real transport through the broker: browser text and secrets never reach the command line
+ok 67 - real transport through the broker: browser text and secrets never reach the command line
+  ---
+  duration_ms: 33.9852
+  ...
+# Subtest: static page served with CSP; API requires the control token
+ok 68 - static page served with CSP; API requires the control token
+  ---
+  duration_ms: 396.9621
+  ...
+# Subtest: wrong Host and cross-origin writes are refused
+ok 69 - wrong Host and cross-origin writes are refused
+  ---
+  duration_ms: 98.7686
+  ...
+# Subtest: content type, body size and unknown paths
+ok 70 - content type, body size and unknown paths
+  ---
+  duration_ms: 53.1474
+  ...
+# Subtest: duplicate POST with the same idempotency key returns the same item
+ok 71 - duplicate POST with the same idempotency key returns the same item
+  ---
+  duration_ms: 78.5175
+  ...
+# Subtest: reviewer API: separate token, no browser origin, then claim and ack
+ok 72 - reviewer API: separate token, no browser origin, then claim and ack
+  ---
+  duration_ms: 112.752
+  ...
+# Subtest: a review recorded through the reviewer API reaches the browser timeline on the next poll
+ok 73 - a review recorded through the reviewer API reaches the browser timeline on the next poll
+  ---
+  duration_ms: 251.888
+  ...
+# Subtest: saved notifier fallback reads only codexBin and threadId; never tokens or other settings
+ok 74 - saved notifier fallback reads only codexBin and threadId; never tokens or other settings
+  ---
+  duration_ms: 25.2368
+  ...
+# Subtest: notifier settings precedence: argument > environment > saved; saved used only as fallback
+ok 75 - notifier settings precedence: argument > environment > saved; saved used only as fallback
+  ---
+  duration_ms: 0.837
+  ...
+# Subtest: missing or corrupt connection file gives nothing and an honest notConfigured notifier
+ok 76 - missing or corrupt connection file gives nothing and an honest notConfigured notifier
+  ---
+  duration_ms: 70.1501
+  ...
+# Subtest: saved values are validated by the existing Notifier, exactly like explicit ones
+ok 77 - saved values are validated by the existing Notifier, exactly like explicit ones
+  ---
+  duration_ms: 59.5073
+  ...
+# Subtest: capability set (--tools) is explicit; scoped allow/deny and default permissions kept
+ok 78 - capability set (--tools) is explicit; scoped allow/deny and default permissions kept
+  ---
+  duration_ms: 6.2316
+  ...
+# Subtest: smoke prompt follows the ledger to the latest saved review result; it assumes no revision
+ok 79 - smoke prompt follows the ledger to the latest saved review result; it assumes no revision
+  ---
+  duration_ms: 1.0761
+  ...
+# Subtest: invalid plan or session fails before any lease or spawn
+ok 80 - invalid plan or session fails before any lease or spawn
+  ---
+  duration_ms: 9.1451
+  ...
+# Subtest: job directory failure happens before the lease
+ok 81 - job directory failure happens before the lease
+  ---
+  duration_ms: 7.9781
+  ...
+# Subtest: spawn throwing after the lease: lease removed, no completion, next start works
+ok 82 - spawn throwing after the lease: lease removed, no completion, next start works
+  ---
+  duration_ms: 16.8756
+  ...
+# Subtest: failure after spawn stops the child and releases the lease
+ok 83 - failure after spawn stops the child and releases the lease
+  ---
+  duration_ms: 12.4757
+  ...
+# Subtest: exit and error both firing complete the job exactly once
+ok 84 - exit and error both firing complete the job exactly once
+  ---
+  duration_ms: 23.8619
+  ...
+# Subtest: one lease at a time; release only removes the matching job lease
+ok 85 - one lease at a time; release only removes the matching job lease
+  ---
+  duration_ms: 23.5924
+  ...
+# Subtest: explicit claude path must be a real executable file (.exe on Windows, never .cmd)
+ok 86 - explicit claude path must be a real executable file (.exe on Windows, never .cmd)
+  ---
+  duration_ms: 9.5441
+  ...
+1..86
+# tests 86
+# suites 0
+# pass 86
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 10361.7985

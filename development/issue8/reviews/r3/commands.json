@@ -1,0 +1,35 @@
+[
+  {
+    "name": "adapter-tests",
+    "exitCode": 0,
+    "args": [
+      "node",
+      "--test",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\adapter.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\backup-recovery.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\boundaries.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\broker-client.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\gh.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\journal.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\outage.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\protocol.test.mjs",
+      "coordination\\issue8-repo\\tools\\github-inbox\\test\\sanitize.test.mjs"
+    ]
+  },
+  {
+    "name": "coordinator-tests",
+    "exitCode": 0,
+    "args": [
+      "node",
+      "--test",
+      "coordination\\issue8-repo\\tools\\local-coordinator\\test\\broker.test.mjs",
+      "coordination\\issue8-repo\\tools\\local-coordinator\\test\\connection.test.mjs",
+      "coordination\\issue8-repo\\tools\\local-coordinator\\test\\continuation.test.mjs",
+      "coordination\\issue8-repo\\tools\\local-coordinator\\test\\github-item.test.mjs",
+      "coordination\\issue8-repo\\tools\\local-coordinator\\test\\history.test.mjs",
+      "coordination\\issue8-repo\\tools\\local-coordinator\\test\\notifier.test.mjs",
+      "coordination\\issue8-repo\\tools\\local-coordinator\\test\\server.test.mjs",
+      "coordination\\issue8-repo\\tools\\local-coordinator\\test\\worker.test.mjs"
+    ]
+  }
+]

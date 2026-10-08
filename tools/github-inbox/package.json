@@ -1,0 +1,14 @@
+{
+  "name": "pocol-github-inbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Outbound-only GitHub issue #8 transport adapter for the local PoCol coordinator (polling, idempotent delivery, marked replies). Not an agent loop.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/protocol.test.mjs test/sanitize.test.mjs test/gh.test.mjs test/broker-client.test.mjs test/journal.test.mjs test/adapter.test.mjs test/boundaries.test.mjs test/outage.test.mjs test/backup-recovery.test.mjs",
+    "once": "node src/cli.mjs --config ../../coordination/ui-control/github-inbox/config.json --once",
+    "status": "node src/cli.mjs --config ../../coordination/ui-control/github-inbox/config.json --status"
+  },
+  "license": "Apache-2.0"
+}

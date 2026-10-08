@@ -1,0 +1,335 @@
+TAP version 13
+# Subtest: non-owner, wrong thread, bot, own output, malformed, oversize and plain comments deliver nothing
+ok 1 - non-owner, wrong thread, bot, own output, malformed, oversize and plain comments deliver nothing
+  ---
+  duration_ms: 46.8288
+  ...
+# Subtest: the pinned owner stays eligible when an app acted on their behalf (attribution, not identity)
+ok 2 - the pinned owner stays eligible when an app acted on their behalf (attribution, not identity)
+  ---
+  duration_ms: 61.1079
+  ...
+# Subtest: owner status request: delivered once, received published once, never completed without an actual host ack
+ok 3 - owner status request: delivered once, received published once, never completed without an actual host ack
+  ---
+  duration_ms: 120.6897
+  ...
+# Subtest: status result is published only from the actual host ack note, exactly once, with the saved LP3 blocker
+ok 4 - status result is published only from the actual host ack note, exactly once, with the saved LP3 blocker
+  ---
+  duration_ms: 104.5584
+  ...
+# Subtest: an ack without a structured note publishes only "acknowledged"; an invalid note is not trusted
+ok 5 - an ack without a structured note publishes only "acknowledged"; an invalid note is not trusted
+  ---
+  duration_ms: 109.5799
+  ...
+# Subtest: claims inside the comment text cannot change any state
+ok 6 - claims inside the comment text cannot change any state
+  ---
+  duration_ms: 167.6815
+  ...
+# Subtest: duplicate request IDs: the earliest comment owns the ID; replays are not delivered
+ok 7 - duplicate request IDs: the earliest comment owns the ID; replays are not delivered
+  ---
+  duration_ms: 75.2675
+  ...
+# Subtest: broker outage, then recovery: one broker item, one received reply
+ok 8 - broker outage, then recovery: one broker item, one received reply
+  ---
+  duration_ms: 75.3164
+  ...
+# Subtest: delivery uncertainty: the broker persisted but the reply was lost; replay returns the same item
+ok 9 - delivery uncertainty: the broker persisted but the reply was lost; replay returns the same item
+  ---
+  duration_ms: 86.9605
+  ...
+# Subtest: publication uncertainty: marker reconciliation; a repost needs a later complete scan AND the minimum age
+ok 10 - publication uncertainty: marker reconciliation; a repost needs a later complete scan AND the minimum age
+  ---
+  duration_ms: 199.6916
+  ...
+# Subtest: restart on the same state directory produces no duplicate delivery or publication
+ok 11 - restart on the same state directory produces no duplicate delivery or publication
+  ---
+  duration_ms: 136.1644
+  ...
+# Subtest: crash between saving "posting" and the post: restart reconciles from the marker
+ok 12 - crash between saving "posting" and the post: restart reconciles from the marker
+  ---
+  duration_ms: 98.6192
+  ...
+# Subtest: guidance work states come only from actual broker job and review records
+ok 13 - guidance work states come only from actual broker job and review records
+  ---
+  duration_ms: 255.0218
+  ...
+# Subtest: completed only with an actual accepted review; blocked only from an actual failure
+ok 14 - completed only with an actual accepted review; blocked only from an actual failure
+  ---
+  duration_ms: 150.4385
+  ...
+# Subtest: a refused delivery is published honestly as blocked
+ok 15 - a refused delivery is published honestly as blocked
+  ---
+  duration_ms: 44.2069
+  ...
+# Subtest: pagination is bounded per cycle and the backlog is reported, never dropped
+ok 16 - pagination is bounded per cycle and the backlog is reported, never dropped
+  ---
+  duration_ms: 162.801
+  ...
+# Subtest: I8-04: a full rescan of more than 10 pages continues across cycles and reaches the later pages
+ok 17 - I8-04: a full rescan of more than 10 pages continues across cycles and reaches the later pages
+  ---
+  duration_ms: 281.8261
+  ...
+# Subtest: I8-04: full-scan progress survives a restart
+ok 18 - I8-04: full-scan progress survives a restart
+  ---
+  duration_ms: 164.4154
+  ...
+# Subtest: I8-05: after a broker failure the connection is reloaded; the same idempotency key is reused
+ok 19 - I8-05: after a broker failure the connection is reloaded; the same idempotency key is reused
+  ---
+  duration_ms: 89.4065
+  ...
+# Subtest: I8-05: a failed state read drops the cached client (two reads, two factory calls)
+ok 20 - I8-05: a failed state read drops the cached client (two reads, two factory calls)
+  ---
+  duration_ms: 3.8498
+  ...
+# Subtest: I8-06: an acknowledgement saved after 100 later items is still read (narrow lookup)
+ok 21 - I8-06: an acknowledgement saved after 100 later items is still read (narrow lookup)
+  ---
+  duration_ms: 79.6744
+  ...
+# Subtest: I8-06: a linked job and its actual review beyond the view resolve through the lookup
+ok 22 - I8-06: a linked job and its actual review beyond the view resolve through the lookup
+  ---
+  duration_ms: 87.8211
+  ...
+# Subtest: I8-06: lookups are bounded per cycle and the round-robin position persists
+ok 23 - I8-06: lookups are bounded per cycle and the round-robin position persists
+  ---
+  duration_ms: 1413.4943
+  ...
+# Subtest: I8-06: a missing item stays unresolved and publishes nothing new
+ok 24 - I8-06: a missing item stays unresolved and publishes nothing new
+  ---
+  duration_ms: 98.4063
+  ...
+# Subtest: at most 20 new requests per cycle; the rest follow in later cycles
+ok 25 - at most 20 new requests per cycle; the rest follow in later cycles
+  ---
+  duration_ms: 950.7304
+  ...
+# Subtest: rate limits: Retry-After respected, capped at 900 s, no request before it
+ok 26 - rate limits: Retry-After respected, capped at 900 s, no request before it
+  ---
+  duration_ms: 72.9422
+  ...
+# Subtest: secrets in the comment or in an ack note are masked before the broker and before GitHub
+ok 27 - secrets in the comment or in an ack note are masked before the broker and before GitHub
+  ---
+  duration_ms: 83.0706
+  ...
+# Subtest: an edited, already-seen comment never re-triggers delivery
+ok 28 - an edited, already-seen comment never re-triggers delivery
+  ---
+  duration_ms: 65.9569
+  ...
+# Subtest: a missing or invalid local connection delays delivery and publishes nothing
+ok 29 - a missing or invalid local connection delays delivery and publishes nothing
+  ---
+  duration_ms: 22.2397
+  ...
+# Subtest: the owner-authored adapter replies are never parsed as commands
+ok 30 - the owner-authored adapter replies are never parsed as commands
+  ---
+  duration_ms: 64.1966
+  ...
+# Subtest: control cases: the checker flags unsafe forms and accepts safe ones
+ok 31 - control cases: the checker flags unsafe forms and accepts safe ones
+  ---
+  duration_ms: 7.2304
+  ...
+# Subtest: the real adapter sources pass the checker: one child process, in gh.mjs, without a shell
+ok 32 - the real adapter sources pass the checker: one child process, in gh.mjs, without a shell
+  ---
+  duration_ms: 36.4117
+  ...
+# Subtest: only /api/guidance, /api/state and /api/github-item; no reviewer, author-job, pause or resume calls
+ok 33 - only /api/guidance, /api/state and /api/github-item; no reviewer, author-job, pause or resume calls
+  ---
+  duration_ms: 2.7717
+  ...
+# Subtest: no command interpolation: gh arguments are built from constants and an integer page only
+ok 34 - no command interpolation: gh arguments are built from constants and an integer page only
+  ---
+  duration_ms: 0.5613
+  ...
+# Subtest: connection.json is accepted only through the coordinator validator; both capabilities become redacted
+ok 35 - connection.json is accepted only through the coordinator validator; both capabilities become redacted
+  ---
+  duration_ms: 294.4173
+  ...
+# Subtest: requests: fixed loopback paths, exact Host/Origin, control capability; error kinds
+ok 36 - requests: fixed loopback paths, exact Host/Origin, control capability; error kinds
+  ---
+  duration_ms: 443.9278
+  ...
+# Subtest: an older coordinator without the lookup endpoint is reported as unsupported, not as a missing item
+ok 37 - an older coordinator without the lookup endpoint is reported as unsupported, not as a missing item
+  ---
+  duration_ms: 28.8422
+  ...
+# Subtest: nothing listening: unreachable, never an external fallback
+ok 38 - nothing listening: unreachable, never an external fallback
+  ---
+  duration_ms: 33.0424
+  ...
+# Subtest: I8-05 (real HTTP): the coordinator restarts on a new port and capability; the adapter reloads connection.json and keeps the key
+ok 39 - I8-05 (real HTTP): the coordinator restarts on a new port and capability; the adapter reloads connection.json and keeps the key
+  ---
+  duration_ms: 267.8767
+  ...
+# Subtest: fixed argument vectors with a forced hostname; shell:false; windowsHide; the body only on stdin
+ok 40 - fixed argument vectors with a forced hostname; shell:false; windowsHide; the body only on stdin
+  ---
+  duration_ms: 90.831
+  ...
+# Subtest: list parsing: headers, next page, rate information
+ok 41 - list parsing: headers, next page, rate information
+  ---
+  duration_ms: 16.626
+  ...
+# Subtest: I8-03: UTF-8 split across chunks at every byte position is decoded exactly
+ok 42 - I8-03: UTF-8 split across chunks at every byte position is decoded exactly
+  ---
+  duration_ms: 184.6869
+  ...
+# Subtest: I8-03: the stdout cap counts bytes, not characters
+ok 43 - I8-03: the stdout cap counts bytes, not characters
+  ---
+  duration_ms: 3.9702
+  ...
+# Subtest: rate limiting is classified; stderr text (even split UTF-8) is never returned
+ok 44 - rate limiting is classified; stderr text (even split UTF-8) is never returned
+  ---
+  duration_ms: 4.9354
+  ...
+# Subtest: I8-01: a silent child settles by timeout although nothing else keeps the event loop alive
+ok 45 - I8-01: a silent child settles by timeout although nothing else keeps the event loop alive
+  ---
+  duration_ms: 44.6071
+  ...
+# Subtest: I8-01: a child that ignores kill still settles once, by timeout
+ok 46 - I8-01: a child that ignores kill still settles once, by timeout
+  ---
+  duration_ms: 45.3541
+  ...
+# Subtest: stdout beyond the bound is discarded and the process killed
+ok 47 - stdout beyond the bound is discarded and the process killed
+  ---
+  duration_ms: 6.3042
+  ...
+# Subtest: a definite 4xx on post is not uncertain; a 5xx is
+ok 48 - a definite 4xx on post is not uncertain; a 5xx is
+  ---
+  duration_ms: 10.0548
+  ...
+# Subtest: a launch failure means not posted
+ok 49 - a launch failure means not posted
+  ---
+  duration_ms: 6.9738
+  ...
+# Subtest: atomic save and load round trip; the previous state is kept as backup
+ok 50 - atomic save and load round trip; the previous state is kept as backup
+  ---
+  duration_ms: 176.7265
+  ...
+# Subtest: corrupt or torn main file falls back to the valid backup
+ok 51 - corrupt or torn main file falls back to the valid backup
+  ---
+  duration_ms: 124.8069
+  ...
+# Subtest: state files that exist but are all invalid never become an empty state
+ok 52 - state files that exist but are all invalid never become an empty state
+  ---
+  duration_ms: 12.2565
+  ...
+# Subtest: activation is false unless root recorded complete end-to-end evidence
+ok 53 - activation is false unless root recorded complete end-to-end evidence
+  ---
+  duration_ms: 26.5038
+  ...
+# Subtest: the lease is exclusive and released without deleting anything
+ok 54 - the lease is exclusive and released without deleting anything
+  ---
+  duration_ms: 32.2436
+  ...
+# Subtest: command parsing: first line only, exact syntax, bounded request ID
+ok 55 - command parsing: first line only, exact syntax, bounded request ID
+  ---
+  duration_ms: 7.3239
+  ...
+# Subtest: classification of comments and the identity rule
+ok 56 - classification of comments and the identity rule
+  ---
+  duration_ms: 1.8661
+  ...
+# Subtest: deterministic keys and markers
+ok 57 - deterministic keys and markers
+  ---
+  duration_ms: 7.0196
+  ...
+# Subtest: guidance text: Arabic transport label, untrusted payload, owner identity, bounded
+ok 58 - guidance text: Arabic transport label, untrusted payload, owner identity, bounded
+  ---
+  duration_ms: 5.77
+  ...
+# Subtest: structured result notes: strict validation
+ok 59 - structured result notes: strict validation
+  ---
+  duration_ms: 9.899
+  ...
+# Subtest: state mapping is derived only from actual broker records
+ok 60 - state mapping is derived only from actual broker records
+  ---
+  duration_ms: 36.8466
+  ...
+# Subtest: LP3 checkpoint summary is sanitized and never includes local IDs
+ok 61 - LP3 checkpoint summary is sanitized and never includes local IDs
+  ---
+  duration_ms: 8.1205
+  ...
+# Subtest: config: pinned scope, derived paths, strict keys
+ok 62 - config: pinned scope, derived paths, strict keys
+  ---
+  duration_ms: 31.5364
+  ...
+# Subtest: public text removes secrets, capabilities, local paths, loopback URLs, IDs, mentions and markers
+ok 63 - public text removes secrets, capabilities, local paths, loopback URLs, IDs, mentions and markers
+  ---
+  duration_ms: 11.2867
+  ...
+# Subtest: control and bidi characters are removed; text is bounded
+ok 64 - control and bidi characters are removed; text is bounded
+  ---
+  duration_ms: 4.4018
+  ...
+# Subtest: evidence URLs: only the pinned repository
+ok 65 - evidence URLs: only the pinned repository
+  ---
+  duration_ms: 0.9353
+  ...
+1..65
+# tests 65
+# suites 0
+# pass 65
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6062.184

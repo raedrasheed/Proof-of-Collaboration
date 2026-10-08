@@ -1,0 +1,298 @@
+TAP version 13
+# Subtest: non-owner, wrong thread, bot, own output, malformed, oversize and plain comments deliver nothing
+ok 1 - non-owner, wrong thread, bot, own output, malformed, oversize and plain comments deliver nothing
+  ---
+  duration_ms: 78.4509
+  ...
+# Subtest: owner status request: delivered once, received published once, never completed without an actual host ack
+ok 2 - owner status request: delivered once, received published once, never completed without an actual host ack
+  ---
+  duration_ms: 888.1892
+  ...
+# Subtest: status result is published only from the actual host ack note, exactly once, with the saved LP3 blocker
+ok 3 - status result is published only from the actual host ack note, exactly once, with the saved LP3 blocker
+  ---
+  duration_ms: 165.9842
+  ...
+# Subtest: an ack without a structured note publishes only "acknowledged"; an invalid note is not trusted
+ok 4 - an ack without a structured note publishes only "acknowledged"; an invalid note is not trusted
+  ---
+  duration_ms: 132.1586
+  ...
+# Subtest: claims inside the comment text cannot change any state
+ok 5 - claims inside the comment text cannot change any state
+  ---
+  duration_ms: 215.9614
+  ...
+# Subtest: duplicate request IDs: the earliest comment owns the ID; replays are not delivered
+ok 6 - duplicate request IDs: the earliest comment owns the ID; replays are not delivered
+  ---
+  duration_ms: 117.3888
+  ...
+# Subtest: broker outage, then recovery: one broker item, one received reply
+ok 7 - broker outage, then recovery: one broker item, one received reply
+  ---
+  duration_ms: 73.4517
+  ...
+# Subtest: delivery uncertainty: the broker persisted but the reply was lost; replay returns the same item
+ok 8 - delivery uncertainty: the broker persisted but the reply was lost; replay returns the same item
+  ---
+  duration_ms: 72.6031
+  ...
+# Subtest: publication uncertainty is reconciled by the hidden marker before any repost
+ok 9 - publication uncertainty is reconciled by the hidden marker before any repost
+  ---
+  duration_ms: 180.6703
+  ...
+# Subtest: restart on the same state directory produces no duplicate delivery or publication
+ok 10 - restart on the same state directory produces no duplicate delivery or publication
+  ---
+  duration_ms: 185.4531
+  ...
+# Subtest: crash between saving "posting" and the post: restart reconciles from the marker
+ok 11 - crash between saving "posting" and the post: restart reconciles from the marker
+  ---
+  duration_ms: 105.7433
+  ...
+# Subtest: guidance work states come only from actual broker job and review records
+ok 12 - guidance work states come only from actual broker job and review records
+  ---
+  duration_ms: 175.6472
+  ...
+# Subtest: completed only with an actual accepted review; blocked only from an actual failure
+ok 13 - completed only with an actual accepted review; blocked only from an actual failure
+  ---
+  duration_ms: 122.1217
+  ...
+# Subtest: a refused delivery is published honestly as blocked
+ok 14 - a refused delivery is published honestly as blocked
+  ---
+  duration_ms: 59.1513
+  ...
+# Subtest: pagination is bounded per cycle and the backlog is reported, never dropped
+ok 15 - pagination is bounded per cycle and the backlog is reported, never dropped
+  ---
+  duration_ms: 173.9563
+  ...
+# Subtest: at most 20 new requests per cycle; the rest follow in later cycles
+ok 16 - at most 20 new requests per cycle; the rest follow in later cycles
+  ---
+  duration_ms: 1002.1766
+  ...
+# Subtest: rate limits: Retry-After respected, capped at 900 s, no request before it
+ok 17 - rate limits: Retry-After respected, capped at 900 s, no request before it
+  ---
+  duration_ms: 62.0824
+  ...
+# Subtest: secrets in the comment or in an ack note are masked before the broker and before GitHub
+ok 18 - secrets in the comment or in an ack note are masked before the broker and before GitHub
+  ---
+  duration_ms: 80.1408
+  ...
+# Subtest: an edited, already-seen comment never re-triggers delivery
+ok 19 - an edited, already-seen comment never re-triggers delivery
+  ---
+  duration_ms: 69.5571
+  ...
+# Subtest: a missing or invalid local connection delays delivery and publishes nothing
+ok 20 - a missing or invalid local connection delays delivery and publishes nothing
+  ---
+  duration_ms: 16.3117
+  ...
+# Subtest: the owner-authored adapter replies are never parsed as commands
+ok 21 - the owner-authored adapter replies are never parsed as commands
+  ---
+  duration_ms: 73.8597
+  ...
+# Subtest: only gh.mjs starts a child process, always without a shell
+not ok 22 - only gh.mjs starts a child process, always without a shell
+  ---
+  duration_ms: 10.5972
+  location: '<workspace>\\coordination\\issue8-repo\\tools\\github-inbox\\test\\boundaries.test.mjs:13:1'
+  failureType: 'testCodeFailure'
+  error: 'gh.mjs uses exec'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///<workspace>/coordination/issue8-repo/tools/github-inbox/test/boundaries.test.mjs:19:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:931:25)
+    Test.start (node:internal/test_runner/test:829:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+  ...
+# Subtest: only /api/guidance and /api/state are used; no reviewer, author-job, pause or resume calls
+ok 23 - only /api/guidance and /api/state are used; no reviewer, author-job, pause or resume calls
+  ---
+  duration_ms: 7.0266
+  ...
+# Subtest: no command interpolation: gh arguments are built from constants and an integer page only
+ok 24 - no command interpolation: gh arguments are built from constants and an integer page only
+  ---
+  duration_ms: 1.5286
+  ...
+# Subtest: connection.json is accepted only through the coordinator validator; both capabilities become redacted
+ok 25 - connection.json is accepted only through the coordinator validator; both capabilities become redacted
+  ---
+  duration_ms: 813.1284
+  ...
+# Subtest: requests: fixed loopback paths, exact Host/Origin, control capability; refusals and busy are classified
+ok 26 - requests: fixed loopback paths, exact Host/Origin, control capability; refusals and busy are classified
+  ---
+  duration_ms: 288.2293
+  ...
+# Subtest: nothing listening: unreachable, never an external fallback
+ok 27 - nothing listening: unreachable, never an external fallback
+  ---
+  duration_ms: 24.8138
+  ...
+# Subtest: fixed argument vectors; shell:false; windowsHide; the comment body only on stdin
+ok 28 - fixed argument vectors; shell:false; windowsHide; the comment body only on stdin
+  ---
+  duration_ms: 19.5947
+  ...
+# Subtest: list parsing: headers, next page, rate information
+ok 29 - list parsing: headers, next page, rate information
+  ---
+  duration_ms: 5.9178
+  ...
+# Subtest: rate limiting is classified; stderr text is never returned
+ok 30 - rate limiting is classified; stderr text is never returned
+  ---
+  duration_ms: 3.406
+  ...
+# Subtest: timeout kills gh; a post with an unknown outcome is reported as uncertain
+not ok 31 - timeout kills gh; a post with an unknown outcome is reported as uncertain
+  ---
+  duration_ms: 3.1788
+  location: '<workspace>\\coordination\\issue8-repo\\tools\\github-inbox\\test\\gh.test.mjs:80:1'
+  failureType: 'cancelledByParent'
+  error: 'Promise resolution is still pending but the event loop has already resolved'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    process.emit (node:events:524:28)
+  ...
+# Subtest: stdout beyond the bound is discarded and the process killed
+not ok 32 - stdout beyond the bound is discarded and the process killed
+  ---
+  duration_ms: 0
+  location: '<workspace>\\coordination\\issue8-repo\\tools\\github-inbox\\test\\gh.test.mjs:90:1'
+  failureType: 'cancelledByParent'
+  error: 'Promise resolution is still pending but the event loop has already resolved'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    process.emit (node:events:524:28)
+  ...
+# Subtest: a definite 4xx on post is not uncertain; a 5xx is
+not ok 33 - a definite 4xx on post is not uncertain; a 5xx is
+  ---
+  duration_ms: 0
+  location: '<workspace>\\coordination\\issue8-repo\\tools\\github-inbox\\test\\gh.test.mjs:99:1'
+  failureType: 'cancelledByParent'
+  error: 'Promise resolution is still pending but the event loop has already resolved'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    process.emit (node:events:524:28)
+  ...
+# Subtest: a launch failure means not posted
+not ok 34 - a launch failure means not posted
+  ---
+  duration_ms: 0
+  location: '<workspace>\\coordination\\issue8-repo\\tools\\github-inbox\\test\\gh.test.mjs:108:1'
+  failureType: 'cancelledByParent'
+  error: 'Promise resolution is still pending but the event loop has already resolved'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    process.emit (node:events:524:28)
+  ...
+# Subtest: atomic save and load round trip; the previous state is kept as backup
+ok 35 - atomic save and load round trip; the previous state is kept as backup
+  ---
+  duration_ms: 59.7615
+  ...
+# Subtest: corrupt or torn main file falls back to the valid backup
+ok 36 - corrupt or torn main file falls back to the valid backup
+  ---
+  duration_ms: 76.5619
+  ...
+# Subtest: state files that exist but are all invalid never become an empty state
+ok 37 - state files that exist but are all invalid never become an empty state
+  ---
+  duration_ms: 57.0752
+  ...
+# Subtest: activation is false unless root recorded complete end-to-end evidence
+ok 38 - activation is false unless root recorded complete end-to-end evidence
+  ---
+  duration_ms: 42.4974
+  ...
+# Subtest: the lease is exclusive and released without deleting anything
+ok 39 - the lease is exclusive and released without deleting anything
+  ---
+  duration_ms: 20.4724
+  ...
+# Subtest: command parsing: first line only, exact syntax, bounded request ID
+ok 40 - command parsing: first line only, exact syntax, bounded request ID
+  ---
+  duration_ms: 24.218
+  ...
+# Subtest: classification of comments
+ok 41 - classification of comments
+  ---
+  duration_ms: 1.5902
+  ...
+# Subtest: deterministic keys and markers
+ok 42 - deterministic keys and markers
+  ---
+  duration_ms: 3.7245
+  ...
+# Subtest: guidance text: Arabic transport label, untrusted payload, owner identity, bounded
+ok 43 - guidance text: Arabic transport label, untrusted payload, owner identity, bounded
+  ---
+  duration_ms: 4.6173
+  ...
+# Subtest: structured result notes: strict validation
+ok 44 - structured result notes: strict validation
+  ---
+  duration_ms: 2.6296
+  ...
+# Subtest: state mapping is derived only from actual broker records
+ok 45 - state mapping is derived only from actual broker records
+  ---
+  duration_ms: 3.9552
+  ...
+# Subtest: LP3 checkpoint summary is sanitized and never includes local IDs
+ok 46 - LP3 checkpoint summary is sanitized and never includes local IDs
+  ---
+  duration_ms: 10.8791
+  ...
+# Subtest: config: pinned scope, derived paths, strict keys
+ok 47 - config: pinned scope, derived paths, strict keys
+  ---
+  duration_ms: 6.0798
+  ...
+# Subtest: public text removes secrets, capabilities, local paths, loopback URLs, IDs, mentions and markers
+ok 48 - public text removes secrets, capabilities, local paths, loopback URLs, IDs, mentions and markers
+  ---
+  duration_ms: 12.1944
+  ...
+# Subtest: control and bidi characters are removed; text is bounded
+ok 49 - control and bidi characters are removed; text is bounded
+  ---
+  duration_ms: 4.9959
+  ...
+# Subtest: evidence URLs: only the pinned repository
+ok 50 - evidence URLs: only the pinned repository
+  ---
+  duration_ms: 0.9914
+  ...
+1..50
+# tests 50
+# suites 0
+# pass 45
+# fail 1
+# cancelled 4
+# skipped 0
+# todo 0
+# duration_ms 4497.9349
