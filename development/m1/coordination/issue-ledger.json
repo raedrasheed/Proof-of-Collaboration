@@ -1,7 +1,7 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.28-independent-review-complete-owner-decisions-block-M1",
-  "latestCompletedRevision": "0.28",
+  "status": "0.29-reviewed-revise-C33-C34-standing-delegation-active",
+  "latestCompletedRevision": "0.29",
   "issues": [
     {
       "id": "C01",
@@ -36,15 +36,17 @@
     },
     {
       "id": "C06",
-      "status": "open",
+      "status": "delegated-overlay-pending-final-verification",
       "evidence": "Spec 4.2 U05/E03 unverified proof support and heavy budget, missing mocks",
-      "decision": "Cannot freeze snapshot guarantee without evidence and baseline reconciliation."
+      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
+      "previousDecisionBeforeDelegation": "Cannot freeze snapshot guarantee without evidence and baseline reconciliation."
     },
     {
       "id": "C07",
-      "status": "open",
+      "status": "delegated-overlay-pending-final-verification",
       "evidence": "U01/U02/U10/U14/U16 owner choices",
-      "decision": "OwnerU01/U02/U10/U14/CR-M1-01/U08/RF-E6-1 unanswered; requiredCONF_DEPTH hasno default or assignedvalue; technicalreviewer choices recorded separately."
+      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
+      "previousDecisionBeforeDelegation": "OwnerU01/U02/U10/U14/CR-M1-01/U08/RF-E6-1 unanswered; requiredCONF_DEPTH hasno default or assignedvalue; technicalreviewer choices recorded separately."
     },
     {
       "id": "C08",
@@ -196,9 +198,10 @@
     },
     {
       "id": "RF-E6-1",
-      "status": "source-reconciliation-proposed-unapproved",
+      "status": "delegated-overlay-pending-final-verification",
       "evidence": "0.17 fulltimeline: op2 retry5001 ->total2 stale drops",
-      "decision": "Recommend supplemental global count2; no baseline change or owner approval"
+      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
+      "previousDecisionBeforeDelegation": "Recommend supplemental global count2; no baseline change or owner approval"
     },
     {
       "id": "C29",
@@ -220,9 +223,10 @@
     },
     {
       "id": "U08-CR",
-      "status": "pending-owner-change-request",
+      "status": "delegated-overlay-pending-final-verification",
       "evidence": "m1-draft-0.2 M1-SPEC P22 calls canonicalmanifest split a newcontract restriction; reference/storage.md does not requireit",
-      "decision": "No reviewerdefaultapproval; owner must choose canonical1-3manifestChunks restriction orbaseline-compatible alternative; clarifyproof/readbudget consequences"
+      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
+      "previousDecisionBeforeDelegation": "No reviewerdefaultapproval; owner must choose canonical1-3manifestChunks restriction orbaseline-compatible alternative; clarifyproof/readbudget consequences"
     },
     {
       "id": "V1-DEFINITIONS",
@@ -241,124 +245,44 @@
     },
     {
       "id": "V1-SHA-COST",
-      "status": "open-source-clarification",
+      "status": "delegated-overlay-pending-final-verification",
       "evidence": [
-        "r",
-        "e",
-        "v",
-        "i",
-        "e",
-        "w",
-        "-",
-        "0",
-        "0",
-        "1",
-        "/",
-        "v",
-        "1",
-        "-",
-        "s",
-        "h",
-        "a",
-        "r",
-        "e",
-        "-",
-        "w",
-        "o",
-        "r",
-        "k",
-        "-",
-        "p",
-        "r",
-        "o",
-        "b",
-        "e",
-        "-",
-        "0",
-        ".",
-        "2",
-        "6",
-        ".",
-        "j",
-        "s",
-        "o",
-        "n",
-        ":",
-        " ",
-        "v",
-        "a",
-        "l",
-        "i",
-        "d",
-        " ",
-        "s",
-        "i",
-        "n",
-        "g",
-        "l",
-        "e",
-        " ",
-        "h",
-        "e",
-        "a",
-        "d",
-        "e",
-        "r",
-        " ",
-        "u",
-        "s",
-        "e",
-        "s",
-        "2",
-        "5",
-        "8",
-        "S",
-        "H",
-        "A",
-        ";",
-        " ",
-        "h",
-        "2",
-        "0",
-        " ",
-        "u",
-        "s",
-        "e",
-        "s",
-        "2",
-        "7",
-        ";",
-        " ",
-        "s",
-        "o",
-        "u",
-        "r",
-        "c",
-        "e",
-        " ",
-        "c",
-        "l",
-        "a",
-        "i",
-        "m",
-        "s",
-        "<",
-        "=",
-        "1",
-        "3",
+        "review-001/v1-share-work-probe-0.26.json: valid single header uses258SHA; h20 uses27; source claims<=13",
         "coordination/review-001/REVIEW-0.28.md"
       ],
-      "decision": "0.27/0.28:3355 distinct full-window SHA calls independently verified. Recommend explicit category bound3355 while retaining every check; owner answer pending, source<=13 untouched."
+      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
+      "evidenceFormattingCorrection": "Recovered previous evidence string that an earlier coordinator append accidentally spread into characters; content retained.",
+      "previousDecisionBeforeDelegation": "0.27/0.28:3355 distinct full-window SHA calls independently verified. Recommend explicit category bound3355 while retaining every check; owner answer pending, source<=13 untouched."
     },
     {
       "id": "P-C32-2",
-      "status": "open-owner-client-policy",
+      "status": "delegated-overlay-pending-final-verification",
       "revision": "0.27",
-      "decision": "0.28: rate cap explicitly routed owner, proposed0..2000ms. No universal source-range or total-load claim; recommend cap plus explicit U14 scope; unanswered.",
+      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
       "evidence": [
         "coordination/review-001/REVIEW-0.27.md",
         "coordination/review-001/REVIEW-0.28.md"
-      ]
+      ],
+      "previousDecisionBeforeDelegation": "0.28: rate cap explicitly routed owner, proposed0..2000ms. No universal source-range or total-load claim; recommend cap plus explicit U14 scope; unanswered."
+    },
+    {
+      "id": "C33",
+      "status": "open-reference-integration-defect",
+      "revision": "0.29",
+      "evidence": [
+        "coordination/review-001/v1-guard-integration-probes-029.json",
+        "coordination/review-001/REVIEW-0.29.md"
+      ],
+      "decision": "Wrong/missingresponseid and duplicateJSONresult can render through DeadlineRpc; integrate shared receive/envelope guard before semantics."
+    },
+    {
+      "id": "C34",
+      "status": "open-checker-negative-case-assertion",
+      "revision": "0.29",
+      "evidence": [
+        "coordination/review-001/m1-draft-0.29/results/run-results-0.29.json"
+      ],
+      "decision": "N05 deliberately sums24575 vsdeclared24576; currentblanket equal-sum assertion is invalid. Preservecase and add explicitexpectednegativeinvariant."
     }
   ],
   "history": [
@@ -441,17 +365,17 @@
     },
     {
       "revision": "0.16",
-      "result": "مراجعة مستقلة: 944 نجاحًا، 140 موثقًا، فشلان؛ مطلوب تعديل جدول الحذف. | 944pass140recorded2FAIL exit1; C27 truncated faulty-path golden; revise; accepted0.15",
+      "result": "\u0645\u0631\u0627\u062c\u0639\u0629 \u0645\u0633\u062a\u0642\u0644\u0629: 944 \u0646\u062c\u0627\u062d\u064b\u0627\u060c 140 \u0645\u0648\u062b\u0642\u064b\u0627\u060c \u0641\u0634\u0644\u0627\u0646\u061b \u0645\u0637\u0644\u0648\u0628 \u062a\u0639\u062f\u064a\u0644 \u062c\u062f\u0648\u0644 \u0627\u0644\u062d\u0630\u0641. | 944pass140recorded2FAIL exit1; C27 truncated faulty-path golden; revise; accepted0.15",
       "evidence": "review-001/REVIEW-0.16.md"
     },
     {
       "revision": "0.17",
-      "result": "مراجعة مستقلة: 1037 نجاحًا، 156 موثقًا، فشل واحد في حفظ لقطة الماضي؛ مطلوب تعديل. | 1037pass156recorded1FAIL exit1; C27closed,C28 snapshot alias; revise; accepted0.15",
+      "result": "\u0645\u0631\u0627\u062c\u0639\u0629 \u0645\u0633\u062a\u0642\u0644\u0629: 1037 \u0646\u062c\u0627\u062d\u064b\u0627\u060c 156 \u0645\u0648\u062b\u0642\u064b\u0627\u060c \u0641\u0634\u0644 \u0648\u0627\u062d\u062f \u0641\u064a \u062d\u0641\u0638 \u0644\u0642\u0637\u0629 \u0627\u0644\u0645\u0627\u0636\u064a\u061b \u0645\u0637\u0644\u0648\u0628 \u062a\u0639\u062f\u064a\u0644. | 1037pass156recorded1FAIL exit1; C27closed,C28 snapshot alias; revise; accepted0.15",
       "evidence": "review-001/REVIEW-0.17.md"
     },
     {
       "revision": "0.18",
-      "result": "مراجعة مستقلة: 1060 نجاحًا، 168 موثقًا، صفر فشل؛ قبول دفعة المواصفات والمتجهات فقط. تعارض x12b وقرارات المالك غير معتمدة. | 1060pass168recorded0fail exit0; independentC28 4/4,site21/21 applicable;38Partial3NotStarted0Complete; RF-E6-1unapproved",
+      "result": "\u0645\u0631\u0627\u062c\u0639\u0629 \u0645\u0633\u062a\u0642\u0644\u0629: 1060 \u0646\u062c\u0627\u062d\u064b\u0627\u060c 168 \u0645\u0648\u062b\u0642\u064b\u0627\u060c \u0635\u0641\u0631 \u0641\u0634\u0644\u061b \u0642\u0628\u0648\u0644 \u062f\u0641\u0639\u0629 \u0627\u0644\u0645\u0648\u0627\u0635\u0641\u0627\u062a \u0648\u0627\u0644\u0645\u062a\u062c\u0647\u0627\u062a \u0641\u0642\u0637. \u062a\u0639\u0627\u0631\u0636 x12b \u0648\u0642\u0631\u0627\u0631\u0627\u062a \u0627\u0644\u0645\u0627\u0644\u0643 \u063a\u064a\u0631 \u0645\u0639\u062a\u0645\u062f\u0629. | 1060pass168recorded0fail exit0; independentC28 4/4,site21/21 applicable;38Partial3NotStarted0Complete; RF-E6-1unapproved",
       "evidence": "review-001/REVIEW-0.18.md"
     },
     {
@@ -526,6 +450,25 @@
         "preservedFiles": 68
       },
       "decision": "Policy claims corrected, conditional fixtures independently verified. No owner choice adopted; fullM1 blocked on named decisions."
+    },
+    {
+      "revision": "0.29",
+      "task": "027",
+      "verdict": "revise",
+      "prepared": {
+        "passed": 609,
+        "recorded": 119,
+        "failed": 4
+      },
+      "independent": {
+        "deadlineCases": 1120,
+        "fullHashTriad": 668,
+        "guardProbes": {
+          "passed": 0,
+          "failed": 3
+        }
+      },
+      "decision": "Nine delegatedtechnical decisions applied,17conventions explicitlyselected; C33/C34 require newrevision. No personalownerapproval."
     }
   ],
   "githubHandoff": {
@@ -539,7 +482,7 @@
     "commit": "23265e6",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6044378979"
   },
-  "nextAction": "Await actual owner answers to V1-SHA-COST, P-C32-2 and U14 plus earlier owner items. No further repair identified in current scope; do not adopt proposals or start a duplicate author job.",
+  "nextAction": "New0.30 focused repairs and conventions; roottests/fullgate; then coordinatorcontinuation improvement, automatically.",
   "reviewerDecisions": {
     "revision": "0.25",
     "reviewer": "Codex existing host",
@@ -1158,7 +1101,7 @@
     },
     "requiredNext": "New V1 specification/fixtures and consolidated criteria computed with these actual decisions; owner votes remain open"
   },
-  "latestReviewedRevision": "0.28",
+  "latestReviewedRevision": "0.29",
   "latestAcceptedRevision": "0.25",
   "latestAcceptedReferenceRevision": "0.28",
   "ownerQuestionsCurrent": {
@@ -1176,5 +1119,29 @@
     "status": "explanations-published-no-owner-answer",
     "recommendationConflict": "Old Claude U14 per-request recommendation explicitly distinguished from current Codex whole-load-through-verdict recommendation; neither adopted."
   },
-  "ownerDependencyClarification": "U14: explicitly settle covered operations and computation endpoint; reconcile CR-M1-01 per-request/cumulative-wait caps. HeaderNetCheck timing remains conditional."
+  "ownerDependencyClarification": "U14: explicitly settle covered operations and computation endpoint; reconcile CR-M1-01 per-request/cumulative-wait caps. HeaderNetCheck timing remains conditional.",
+  "standingAuthorization": {
+    "at": "2026-10-08T08:02:53.390Z",
+    "scope": "M1 specifications, reference models, tests and coordinator improvements; justified reversible technical choices delegated to current coordinator",
+    "autonomousSequentialCycles": true,
+    "delegatedTechnicalDecisions": true,
+    "personalApproval": false,
+    "noProduction": true
+  },
+  "delegatedDecisions": {
+    "register": "coordination/DELEGATED-M1-DECISIONS-029.json",
+    "status": "selected-pending-author-overlay-and-independent-verification",
+    "ids": [
+      "U01",
+      "U02",
+      "U10",
+      "U14",
+      "CR-M1-01",
+      "U08",
+      "RF-E6-1",
+      "V1-SHA-COST",
+      "P-C32-2"
+    ]
+  },
+  "delegatedConventions": "coordination/DELEGATED-M1-CONVENTIONS-030.json"
 }

@@ -135,3 +135,8 @@ Qualified specification corrections accepted.33 prepared checks and21 independen
 ## Owner decision guide after0.28
 
 Nine pending choices are explained in Arabic in the live dashboard and in bilingual saved guides. No owner answer was recorded. The current Codex whole-load-through-verdict recommendation is distinguished from the older Claude per-request recommendation. U14 must explicitly define covered operations and reconcile the proof-read caps. Independent audit confirms139original protected files unchanged, all nine decision IDs represented, and no further author repair identified in the reviewed scope. Named owner blockers remain.
+
+
+## دورة M1 — المسودة 0.29 والتفويض التقني
+
+طُبقت تسعة اختيارات تقنية في مسودة جديدة بموجب تفويض المستخدم الدائم، لا بوصفها موافقات شخصية. نجح609فحوص وسُجل119بندًا وفشل4، جميعها ناتج عن شرط مجموع خاطئ في حالة سلبية N05؛ الرفض المقصود صحيح. نجح1120فحص مستقل للمهلة، واتفقت3مكتبات على668بصمة محسوبة حديثًا. كشفت3حالات مستقلة السماح بالعرض عند معرّف رد خاطئ أو مفقود أو مفتاح resultمكرر. طلبنا تصحيح C33/C34 في مراجعة جديدة، مع17عرفًا تقنيًا موثقًا ومنها ميزانية واحدة لفحص الرؤوس وتحميل المحتوى في تنقل RP. بوابة41صفًا ما زالت غير مكتملة؛ الأدلة والإخفاقات محفوظة، والمتابعة التالية مأذونة تلقائيًا. لا نشر إنتاجي أو معاملات أو دمج.
