@@ -5,6 +5,9 @@
 //! 2-9, an immutable validated fixture chain and a read-only loopback JSON-RPC node. Not full M3,
 //! not consensus, no EVM, no P2P, no transactions, no keys. The V1NET profile is synthetic and
 //! non-bootable.
+//!
+//! LP2 adds `store`: a durable, experimental journal of header *candidates* (scoped H-pre only,
+//! awaiting H-full; never executed, canonical or live consensus) with recovery into new stores.
 
 pub mod asert;
 pub mod chain;
@@ -18,5 +21,6 @@ pub mod http;
 pub mod json;
 pub mod rlp;
 pub mod rpc;
+pub mod store;
 pub mod verify;
 pub mod window;

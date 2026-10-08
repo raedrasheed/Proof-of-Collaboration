@@ -1,12 +1,18 @@
-# lp1-node: LP1 local experimental Rust node (author revision 3, transport 0.36)
+# lp1-node: LP1 local experimental Rust node + LP2 candidate journal (LP2 author revision 1, transport 0.37)
 
 LP1 is a local, experimental M3-foundation slice built on the accepted M1 formats (baseline M1 spec
 0.32). It is **not** an M1 amendment and makes **no** change to the baseline. It is not full M3, not
 consensus and not an EVM. It has no P2P, no transactions, no contracts or publisher, no keys and no
 signing. The M1 contract/publisher phase is **not** claimed as executed.
 
-The m1-draft-0.34, 0.35 and 0.36 folders are only the broker's transport namespace. Root imports the
-code onto the LP1 prototype branch, generates `Cargo.lock`, copies the fixtures, then builds, tests and
+LP2 adds a durable, **experimental** journal of header **candidates**, with a CLI (see "LP2
+candidate journal" below). Candidates are admitted through strict decoding and the scoped H-pre
+checks. They are never H-full, executed, canonical, live or consensus. Status always reports
+`candidate`, `awaiting: "H-full"`, `executedHeight: 0` and `consensus: false`. The fixture headers
+appended in tests are not live block production.
+
+The m1-draft-0.34 to 0.37 folders are only the broker's transport namespace. Root imports the code
+onto the prototype branch, generates `Cargo.lock`, copies the fixtures, then builds, tests and
 reviews. **The author compiled, ran and formatted nothing.** Every acceptance criterion below is
 untested until root runs it.
 
@@ -15,10 +21,18 @@ Revision 2 (0.35) corrected:
 - **LP1-I01:** a raw byte string with non-ASCII text in `src/json.rs` tests, which blocked compilation;
 - **LP1-I02:** request ids now follow the accepted C19 binary64 value semantics.
 
-Revision 3 (0.36) corrects:
+Revision 3 (0.36) corrected:
 
 - **LP1-I04:** the public RLP depth option can no longer request unsafe recursion. The hard ceiling is 16, and larger requests are refused.
 - **LP1-I05:** the adversarial genesis corpus now classifies byte-identical no-op mutants separately from genuinely changed preimages.
+
+LP2 revision 1 (0.37) adds:
+
+- `src/store.rs`;
+- the `store` CLI commands;
+- `tests/store_journal.rs`, `tests/store_process.rs` and `tests/e2e_store.py`.
+
+No LP1 module, fixture, RPC behaviour or LP1 test was changed.
 
 ## Layout
 
@@ -36,9 +50,10 @@ Revision 3 (0.36) corrects:
 | `src/json.rs` | Strict request JSON (see "RPC" below) |
 | `src/rpc.rs` | Read-only router: `eth_chainId`, `eth_blockNumber`, `pocol_getHeaders`; everything else is -32601 |
 | `src/http.rs` | Bounded std-only loopback HTTP/1.1 transport |
-| `src/verify.rs`, `src/main.rs` | Fixture checks and the `lp1-node` binary |
-| `tests/*.rs` | Integration tests that read `fixtures/` at run time; `asert_alloc` (harness=false); seeded adversarial corpus; in-process socket tests |
-| `tests/e2e_http.py` | Process-level end-to-end HTTP check (Python standard library only) |
+| `src/store.rs` | **LP2:** experimental candidate-header journal: format, bounded validating scan, exclusive Windows writer, recovery |
+| `src/verify.rs`, `src/main.rs` | Fixture checks and the `lp1-node` binary (including `store` commands) |
+| `tests/*.rs` | Integration tests that read `fixtures/` at run time; `asert_alloc` (harness=false); seeded adversarial corpus; in-process socket tests; LP2 `store_journal` and `store_process` |
+| `tests/e2e_http.py`, `tests/e2e_store.py` | Process-level end-to-end checks (Python standard library only) |
 
 ## Fixtures (root copies them byte-identically)
 
@@ -90,11 +105,25 @@ target/debug/lp1-node window [--case RW-h20-phase0] [--no-cache]
 target/debug/lp1-node hash
 target/debug/lp1-node asert-batch [--in fixtures/asert-oracle.json] [--out asert-rust.jsonl]
 target/debug/lp1-node serve [--bind 127.0.0.1] [--port 0] [--empty-chain] [--max-requests N] [--max-runtime-ms N] [--conn-timeout-ms 5000]
+target/debug/lp1-node store init    --store NEW_DIR
+target/debug/lp1-node store append  --store DIR (--range A:B | --hex HEADER_RLP_HEX)
+target/debug/lp1-node store status  --store DIR
+target/debug/lp1-node store recover --store DIR --dest NEW_DIR
 python tests/e2e_http.py --bin target/debug/lp1-node.exe --fixtures fixtures
+python tests/e2e_store.py --bin target/debug/lp1-node.exe --fixtures fixtures
 ```
 
 Exit status: 0 means the command's checks passed, 1 means a check failed, and 2 means a usage,
-fixture or bind error.
+fixture or bind error. `store` commands print exactly one JSON line and use these exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | append rejected or not linear; nothing was written |
+| 2 | usage, I/O, busy, bound, metadata, profile mismatch, corrupt, or existing target |
+| 3 | recovery required (`status` prints the verified-prefix status first) |
+
+`--range A:B` takes headers A..=B from the fixture `chain.json`.
 
 `asert-batch` writes one JSON line per oracle row: `{"i", "target"` (32-byte hex), `"early",
 "maxShiftBits", "maxBits", "match"}`, then a summary line. Root can use it for an independent
@@ -205,7 +234,8 @@ includes:
 - signing methods;
 - write and submission methods.
 
-The router holds only a shared reference, and tests compare a state digest before and after.
+The router holds only a shared reference, and tests compare a state digest before and after. The RPC
+serves the LP1 fixture chain only; it does not read the LP2 candidate journal.
 
 **Request JSON rules:**
 
@@ -286,6 +316,159 @@ A client disconnect ends that connection only.
 - resource budgets beyond the fixed limits above;
 - signal-driven graceful shutdown.
 
+## LP2 candidate journal (experimental local storage, not a protocol format)
+
+### What is admitted
+
+A candidate is accepted only if all of the following hold:
+
+- it decodes strictly as a V1 header item;
+- it passes `Window::link` against the store tip (or the genesis parent);
+- it is the next height of this linear store.
+
+`Window::link` covers NetID, items 2–9, height, parent, H_END, signatures, PoW and shares. It runs
+with the ceiling `U256::MAX`: the RP `viewTargetCeil` is a client rule, not admission. No wall clock
+is applied, neither at admission nor during replay. Future and timing rules are LP3/LP6 work.
+
+**Linearity:**
+
+- Replaying the exact current tip is idempotent; nothing is written.
+- Any other input at a stored or skipped height is refused as `notLinear` (`unsupportedByLinearStore`). That is a limit of this store, not a block-invalidity verdict, and nothing is cached.
+
+### Journal format, version 1
+
+The store is one file, `<store>/candidates.lp2j`. All integers are big-endian.
+
+**Metadata (128 bytes):**
+
+| Bytes | Field |
+|---|---|
+| 0..8 | magic `"PCLP2J01"` |
+| 8..12 | version (u32) = 1 |
+| 12..16 | bodyLen (u32) = 72 |
+| 16..48 | SHA-256 of the exact `profile.json` bytes |
+| 48..80 | genesisHash |
+| 80..88 | chainId (u64) |
+| 88..120 | SHA-256 of bytes 0..88 |
+| 120..128 | marker `"LP2META!"` |
+
+**Record i** (120 bytes plus the header):
+
+| Bytes | Field |
+|---|---|
+| 0..4 | magic `"LP2R"` |
+| 4..12 | seq (u64) = height |
+| 12..16 | len (u32), 1..3067 |
+| 16..20 | prefix guard: first 4 bytes of SHA-256(prevChecksum ‖ bytes 0..16) |
+| 20..52 | prevHash: previous blockHash, or genesisHash |
+| 52..84 | blockHash |
+| 84.. | header (exact strict RLP) |
+| +32 | checksum: SHA-256(prevChecksum ‖ bytes 0..84+len) |
+| +4 | marker `"CMT!"` |
+
+prevChecksum starts from the metadata checksum. Records are therefore chained both by block hash and
+by checksum, and every open re-validates every record from genesis. The prefix guard keeps a corrupted
+length in the final record from being mistaken for a torn tail.
+
+### Bounds (checked before allocation)
+
+| Item | Limit |
+|---|---|
+| records | 1024 |
+| journal file | 128 + 1024·3187 bytes |
+| header | 3067 bytes |
+| append batch | 256 headers |
+| profile | 64 KiB |
+
+### Open classification
+
+| Condition | Result |
+|---|---|
+| Fewer than 128 bytes | `metadataIncomplete`. Never reported as an empty successful store. |
+| Any wrong metadata field, checksum or marker | `metadataCorrupt` |
+| Profile bytes, genesis or chainId differ from the store | `profileMismatch` |
+| A complete record with any wrong field, header, hash, checksum or marker | `corrupt`. Never skipped. |
+| A present partial field already inconsistent | `corrupt` |
+| A final record that is a consistent strict prefix | torn tail: the verified prefix plus `recoveryRequired` |
+
+### Writer and reader contracts
+
+**Writer** (`store init`, `store append`):
+
+- Windows only. The journal is opened with `OpenOptionsExt::share_mode(0)`, so no other handle in any process can open it while the writer lives.
+- The OS releases the handle when the process exits or is killed. There are no lock files to go stale.
+- On other platforms the writer returns `unsupportedPlatform`. No portable lock is claimed.
+
+**Reader** (`store status`, and the source side of `store recover`):
+
+- Opens read-only with share mode READ.
+- Fails with `busy` while a writer is live, and keeps writers out while it reads.
+
+**Append:**
+
+- The whole batch is validated first, with no I/O.
+- Each record is then written with `write_all` + `sync_all`. The in-memory tip advances only after both succeed.
+- Atomicity is **per record, not per batch**.
+- Any write or sync error poisons the writer: later appends fail with `poisoned`, and the store must be reopened.
+- A record whose sync failed is not reported committed by that writer. If its complete bytes reached the file, a later open validates and lists it.
+
+**Recovery** (`store recover`):
+
+- Never modifies the source.
+- Copies the verified prefix into a journal in a **new** destination directory, and refuses an existing one.
+- Syncs the file, reopens it with full validation, and confirms the source SHA-256 is unchanged.
+- Does not recover a corrupt (as opposed to torn) source.
+
+### Limitations
+
+- Directory entries are not fsynced; std has no directory sync on Windows. Only the journal file is synced.
+- A crash after `create_dir` but before the metadata sync leaves a directory that reports `noStore` or `metadataIncomplete`. It is never reported as an initialized store, and init refuses to reuse it.
+- This is a bounded experimental journal. It is not the final redb/RetentionStore design, and it may change without migration.
+
+### Tests
+
+**`tests/store_journal.rs` (in process):**
+
+- init/never-overwrite;
+- H1..20 appended in two batches across reopen, with block hashes equal to the LP1 fixture chain;
+- idempotent tip, notLinear, gap and sibling;
+- every invalid mutation leaves the journal SHA unchanged, including a mid-batch failure;
+- exact profile-byte binding;
+- every metadata truncation and byte flip;
+- per-field record flips, oversized and zero lengths, reorder, duplicate, gap and trailing bytes;
+- the file bound;
+- every truncation offset of the final record;
+- recovery to new and existing destinations;
+- a 1500-case seeded corruption corpus that is never clean;
+- write and sync failure injection with poisoning;
+- the in-process exclusive writer.
+
+**`tests/store_process.rs` (Windows, real processes):**
+
+- a second writer and the CLI are refused while a helper process holds the store;
+- the killed holder releases the handle with no lock file left behind;
+- a helper that aborts mid-record leaves the committed prefix plus a torn tail, which the CLI recovers into a new store.
+
+The helper is this test executable re-run with LP2_HELPER_* variables. The node binary has no fault
+options.
+
+**`tests/e2e_store.py` (stdlib):** CLI lifecycle across processes, rejection, mismatch,
+torn/recover/existing destination, corrupt, metadata cases and the file bound.
+
+## Conformance notes and recorded questions
+
+1. **JSON id semantics: resolved in revision 2, and no longer a question.** Revision 1 used exact decimal values, which departed from accepted C19 (LP1-I02). That blocked A6 conformance. Revision 2 implements the accepted binary64 value semantics described under "RPC" above. No M1 change.
+2. **Error-envelope convention.** The -32700, -32600 and -32601 `data.reason` values, and the transport HTTP status codes, are a prototype convention. They are not part of M1, and the reviewer will assess them.
+3. **Nesting bound.** The window's outer-reply decode applies the strict RLP nesting bound of 16, which is also the hard recursion ceiling. A header whose field is a list nested deeper than 16 is therefore `viewIncomplete` here. Python would decode it and report rule 1. Python itself fails with `viewIncomplete` at its recursion limit.
+4. **Genesis wrapped single byte.** A wrapped single byte in the genesis preimage is an L0 framing error here, but gsInt in `netprofile_ref`. Both reject it.
+5. **Load-time chain validation has no wall clock.** viewFuture is not applied at load; it is applied in every window check.
+6. **Fork schedule validation.** The rule that start heights must be strictly ascending and the schedule non-empty is an LP1 loader rule.
+7. **Notifications.** Requests without an id are refused with -32600 `{reason:"id"}` rather than left unanswered.
+8. **LP2 admission uses `Window::link` codes.** A wrong genesis parent hash at height 1 is reported with the RP code `viewGenesis`. This is a reporting label only; admission does not use RP's viewFuture or its ceiling.
+
+Items 2–8 are prototype choices that the review will assess. None of them is claimed as full M3 or
+M7 behaviour.
+
 ## Adversarial corpus (LP1-I05)
 
 The generator applies 1–4 random edits, which can cancel out, so a mutant may be byte-identical to
@@ -300,19 +483,6 @@ The no-op count is pinned at 2, matching the reviewer's independent replay in
 `genesis-noop-independent-v2.json`. Every case is still run through the decoder (no-panic coverage).
 
 Genesis hashing is unchanged.
-
-## Conformance notes and recorded questions
-
-1. **JSON id semantics: resolved in revision 2, and no longer a question.** Revision 1 used exact decimal values, which departed from accepted C19 (LP1-I02). That blocked A6 conformance. Revision 2 implements the accepted binary64 value semantics described under "RPC" above. No M1 change.
-2. **Error-envelope convention.** The -32700, -32600 and -32601 `data.reason` values, and the transport HTTP status codes, are a prototype convention. They are not part of M1, and the reviewer will assess them.
-3. **Nesting bound.** The window's outer-reply decode applies the strict RLP nesting bound of 16, which is also the hard recursion ceiling. A header whose field is a list nested deeper than 16 is therefore `viewIncomplete` here. Python would decode it and report rule 1. Python itself fails with `viewIncomplete` at its recursion limit.
-4. **Genesis wrapped single byte.** A wrapped single byte in the genesis preimage is an L0 framing error here, but gsInt in `netprofile_ref`. Both reject it.
-5. **Load-time chain validation has no wall clock.** viewFuture is not applied at load; it is applied in every window check.
-6. **Fork schedule validation.** The rule that start heights must be strictly ascending and the schedule non-empty is an LP1 loader rule.
-7. **Notifications.** Requests without an id are refused with -32600 `{reason:"id"}` rather than left unanswered.
-
-Items 2–7 are prototype choices that the review will assess. None of them is claimed as full M3 or
-M7 behaviour.
 
 ## Licenses and versions
 
@@ -330,7 +500,7 @@ Pinned dependencies, per `fixtures/LICENSES.json`:
 | serde | 1.0.136 | MIT OR Apache-2.0 |
 
 serde is pulled transitively; it is not a direct dependency. Root records the transitive set from the
-generated `Cargo.lock`.
+generated `Cargo.lock`. LP2 adds no dependency.
 
 The code uses no API newer than Rust 1.58. In particular it avoids:
 
@@ -342,9 +512,14 @@ The code uses no API newer than Rust 1.58. In particular it avoids:
 - `std::hint::black_box`;
 - const `thread_local!`.
 
+LP2 uses `std::os::windows::fs::OpenOptionsExt::share_mode` (stable since Rust 1.10) and
+`env!("CARGO_BIN_EXE_lp1-node")` in integration tests (stable since Rust 1.43).
+
 Non-ASCII text appears only in normal UTF-8 string literals, never in byte-string literals.
 
 ## Acceptance criteria (all untested by the author)
+
+LP1:
 
 - **A0:**
   - `fixtures::verify_provenance` must report all 5 outputs equal to PROVENANCE SHA-256.
@@ -381,3 +556,21 @@ Non-ASCII text appears only in normal UTF-8 string literals, never in byte-strin
   - `http_loopback` tests must pass.
   - `tests/e2e_http.py` must pass against the built binary from a temporary cwd, including bind refusals, limits, timeout, disconnect recovery, and bounded shutdown with exit 0.
 - **A8:** Codex review and root's corrections. No completion is claimed until root passes A0–A8.
+
+LP2 (`LP2-MILESTONE.md`):
+
+- **P0:** all LP1 suites above pass unchanged.
+- **P1:**
+  - `p1_*` tests pass.
+  - `e2e_store.py` passes its lifecycle checks.
+- **P2:** `p2_*` tests pass, plus the rejection and idempotence checks in `e2e_store.py`.
+- **P3:** `p3_*` tests and the corruption corpus pass.
+- **P4:**
+  - `p4_every_truncation_of_the_final_record` passes.
+  - The recovery checks in `e2e_store.py` pass.
+- **P5:** `store_process` passes on Windows.
+- **P6:** both e2e scripts and all seeded corpora pass.
+- **P7:** root's offline locked build, fmt and full test run, with exit codes; Codex's independent journal checks.
+- **P8:** the Arabic dashboard (`LP2-PROGRESS-0.37-AR.md`).
+
+No LP2 acceptance is claimed by the author.
