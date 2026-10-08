@@ -1,41 +1,42 @@
 # PoCol GitHub inbox adapter (issue #8 transport)
 
-**Status: NOT ACTIVE.** This adapter was written as a separate transport task. It is not part of LP3,
-and it is not a retry of the blocked LP3 author dispatch. The author has not run it, and none of its
-tests has been executed. `connectionVerified` stays `false` until root records real end-to-end
-evidence (see "Activation" below).
+**Status: NOT ACTIVE.** This is a separate transport task. It is not LP3, and it does not retry or
+bypass the blocked LP3 author dispatch (task 037).
+
+The author has executed nothing for revision 0.41: no unit tests, no HTTP tests, no live connection,
+and no comment delivered successfully. `connectionVerified` stays `false` until root records real
+end-to-end evidence (see "Activation").
 
 ## What it does
 
 An outbound-only polling adapter (Node 22, standard library only) between one GitHub issue and the
-existing local coordinator.
+existing local coordinator. It is a small poller, not an agent loop.
 
 **Scope:** it is pinned to `raedrasheed/Proof-of-Collaboration`, issue **#8**, owner login
-`raedrasheed`, owner ID **36733882**. A config file must repeat these values exactly; they cannot be
-changed.
+`raedrasheed`, owner ID **36733882**. A config file must repeat these values exactly.
 
-**Reading:** it reads the issue's comments with the operator's existing GitHub CLI (`gh api`, two
-fixed argument vectors). Pages are bounded, and Retry-After and rate-limit headers are respected.
+**GitHub calls:** every `gh` call carries `--hostname github.com`. `GH_HOST` and `GH_REPO` are removed
+from the child environment, so neither config nor environment can redirect requests.
 
 **Accepted comments:** only those where all of the following hold:
 
-- the author is user ID 36733882 with login `raedrasheed`;
-- the author is not a bot or a GitHub App;
-- the comment does not contain the adapter's own marker;
+- the user is of type `User`, with id 36733882 and login `raedrasheed`;
 - the comment is in issue #8;
+- the comment does not contain the adapter's own marker;
 - the body is at most 4000 characters;
-- the **first line** is exactly `/pocol status <request-id>` or `/pocol guidance <request-id>`, where the request ID is 3–64 characters `[A-Za-z0-9._-]` starting alphanumeric.
+- the first line is exactly `/pocol status <request-id>` or `/pocol guidance <request-id>`.
 
-Everything else is recorded as ignored, with a reason. Links and text in comments are untrusted data:
-they are never fetched, executed, or interpolated into a command.
+**Identity:**
 
-**Delivery:** each accepted comment becomes **one** guidance item in the local broker, through the
-existing control API (`POST /api/guidance`). The item is labelled as an untrusted transport payload
-(Arabic and English): it is not an owner approval, not an answer to an owner question, and not a task
-dispatch.
+- `performed_via_github_app` is attribution, not identity. The pinned user stays eligible when an app acted on their behalf.
+- Bots (`type: Bot` or a `[bot]` login), organizations and every other actor are refused.
 
-**Publication:** the adapter publishes replies on issue #8 from **actual broker records only**. Each
-reply carries a deterministic hidden marker.
+**Delivery:** each accepted comment becomes one coordinator guidance item (`POST /api/guidance`). It is
+labelled in Arabic and English as an untrusted transport payload: not an owner approval, not an
+answer to an owner question, and not a dispatch.
+
+**Publication:** replies on issue #8 are published from actual coordinator records only, each with a
+deterministic hidden marker.
 
 ### Never
 
@@ -43,179 +44,188 @@ The adapter never:
 
 - uses the reviewer API (attach, claim, ack, review);
 - requests author jobs, retries, pauses or resumes;
-- acknowledges anything itself;
+- acknowledges anything;
 - dispatches or runs an agent;
 - runs any process other than the configured `gh`;
-- touches the live coordinator process.
+- touches the live coordinator process or the LP3 policy blocker.
+
+## Revision 0.41 corrections
+
+| Finding | Correction |
+|---|---|
+| I8-01 | The `gh` timeout timer is referenced and always cleared on settle, so every run settles within `timeoutMs` even when nothing else keeps the event loop alive. Tests cover a silent child and a child that ignores kill. |
+| I8-02 | The process-boundary test now distinguishes a bare call `exec(...)` from a method call such as `RegExp.prototype.exec`. It requires the single import `import { spawn } from 'node:child_process'` in `gh.mjs` and none elsewhere. Synthetic positive and negative control cases prove that unsafe imports, calls, shells and `fetch` are still caught. |
+| I8-03 | `gh` stdout and stderr are decoded with a streaming UTF-8 decoder: Arabic and emoji split across chunks stay exact (tested at every byte position). The stdout cap counts bytes. Timeout, cap and stderr classification are unchanged. |
+| I8-04 | A full rescan (every 30 cycles) is a persisted walk (`cursor.fullScanPage`). Each cycle continues where the previous one stopped, up to 10 pages, until the last page is reached. It survives restarts. An uncertain publication is reposted only after a later cycle's complete scan through the last page shows no marker, and only once at least 120 s have passed since the attempt. |
+| I8-05 | The coordinator client is created per cycle and dropped after any failure (refused, stale capability, unreachable, uncertain, busy). The next call re-reads and re-validates `connection.json`. Broker idempotency keys are unchanged. A 401/403 is "stale" (retried after reload), never a permanent refusal. A reload is not a permission or policy change. |
+| I8-06 | Requests and linked jobs or reviews beyond the coordinator's 100-item / 50-review browser view are read through the new narrow `GET /api/github-item` (below). At most 10 lookups run per cycle, round-robin with a persisted position, so an acknowledgement saved long ago is still published. |
+
+## Coordinator extension: `GET /api/github-item?itemId=<UUID>` (history fix)
+
+This is a new file, `tools/local-coordinator/src/github-item.mjs`, with one route added to
+`tools/local-coordinator/src/server.mjs`. `broker.mjs` is unchanged.
+
+**Checks:** the route uses the same control checks as `/api/state`:
+
+- exact `Host`;
+- `Origin`, if present, must be exactly the local origin;
+- no cross-site `Sec-Fetch-Site`;
+- the `X-PoCol-Control` capability.
+
+**Query:** exactly one query parameter, `itemId`, which must be a UUID. Anything else is 400. An
+unknown item is 404 with `{"missing":"item"}`. Any method other than GET falls through to 404.
+
+**Response** (read-only, from the controller's in-memory state, never from the state file on disk):
+
+| Field | Content |
+|---|---|
+| `item` | `{ id, kind, status, idempotencyKey, ackNote, reviewId, error, blockedReason }` |
+| `review` | `{ id, jobId, verdict, summaryAr }` only for the review referenced by that item whose `jobId` is the item itself; otherwise `null` |
+
+**Never returned:** payloads, dispatch plans, session IDs, receipts, review texts, notifications,
+capabilities, thread IDs or paths. Strings are bounded and redacted.
+
+**Grants nothing:** no write, approval, author, pause or resume. `/api/state` keeps its existing
+100-item limit.
+
+The adapter's `test/broker-client.test.mjs` checks that an older coordinator without this route
+answers 404 without `missing`, which the client reports as `unsupported`.
 
 ## Identity, idempotency and markers
 
 | Item | Rule |
 |---|---|
-| Broker idempotency key | `gh8-` + first 40 hex characters of SHA-256(`raedrasheed/Proof-of-Collaboration#8#comment:<id>`) |
-| Duplicate request IDs | The earliest accepted comment (lowest ID) owns a request ID. Later comments with the same ID are recorded as `duplicateRequestId` and are neither delivered nor answered. |
-| Edits | A comment is judged once, when first seen. Later edits never re-trigger delivery; they are flagged as `editedAfterSeen`. |
-| Publication marker | `<!-- pocol-github-inbox:v1 key=<32 hex> -->`, with key = SHA-256(repository, issue, comment ID, state). Each (comment, state) is published at most once. Marked comments are never parsed as input. |
+| Broker key | `gh8-` + first 40 hex characters of SHA-256(`raedrasheed/Proof-of-Collaboration#8#comment:<id>`) |
+| Duplicate request IDs | The earliest accepted comment owns a request ID. Later ones are recorded as `duplicateRequestId`, not delivered and not answered. |
+| Edits | A comment is judged once. Later edits only set `editedAfterSeen`. |
+| Marker | `<!-- pocol-github-inbox:v1 key=<32 hex> -->` per (comment, state). Marked comments are never parsed as input. |
 
-**Restart and uncertainty:**
+## Remote states (only from actual coordinator records)
 
-- A delivery is saved as `delivering` before the POST, so replay returns the same broker item (broker deduplication).
-- A publication is saved as `posting` before `gh` runs. After an uncertain outcome (timeout, 5xx, crash), the adapter first looks for its marker on GitHub. It reposts only after a complete scan shows the marker is absent.
-
-## Remote states (honest mapping)
-
-| State | Published only when |
+| State | Published when |
 |---|---|
-| `received` | the broker's `POST /api/guidance` returned the persisted item |
-| awaiting local ack | (not published separately) the broker item is `queued` or `claimed` |
-| `acknowledged` | the broker item is actually `acknowledged` by the host |
-| `completed` / `blocked` (status requests) | the host's ack note starts with `POCOL_GITHUB_RESULT {"mode":"status","state":"completed"\|"blocked","summary":"...","evidence":[...]}`. Reported as **"Completed STATUS REQUEST"**, never as a completed milestone. Evidence must be links into the pinned repository. |
-| `running` | the ack note links a job (`{"mode":"work","jobId":"<broker author job id>"}`) and that broker job is actually `running` |
-| `reviewed` | the linked job has an actual review that is not an accepted completion |
+| `received` | POST guidance returned the persisted item |
+| `acknowledged` | an actual host ack |
+| `completed` / `blocked` (status requests) | the host ack note starts with `POCOL_GITHUB_RESULT {"mode":"status",...}`. Reported as "Completed STATUS REQUEST", never as a milestone. |
+| `running` | the job linked by the ack note (`{"mode":"work","jobId":...}`) is actually running |
+| `reviewed` | the linked job has an actual review that did not accept it |
 | `completed` (work) | the linked job is `reviewed` and its matching review's verdict is `accept` |
-| `blocked` (work) | the linked job actually `failed` or was `interrupted`, has a saved `blockedReason`, or the host's ack note says `{"mode":"work","state":"blocked","summary":"..."}`. Also used when the broker refused a delivery (4xx). |
+| `blocked` (work) | the linked job actually failed or was interrupted, has a saved `blockedReason`, the host note says `{"mode":"work","state":"blocked",...}`, or the coordinator refused a delivery |
 
-Text in a GitHub comment can never set a state. Only the broker records above can.
+Status replies include a sanitized summary of the saved LP3 blocker checkpoint. It is read only;
+nothing is run.
 
-Status replies also include a sanitized summary of the saved LP3 blocker, read from
-`coordination/checkpoints/devnet-policy-blocker.json`: status, blocked step, exact error and the PR #7
-link. Nothing in that checkpoint is ever run.
+## Limits
 
-## Privacy and redaction
-
-**Redaction:** the coordinator's own redactor is reused (`local-coordinator/src/redact.mjs`). Both
-capabilities from `connection.json` are registered with it, and only the control capability is used.
-
-**Published text** additionally goes through an allowlist pass that removes:
-
-- local paths;
-- loopback URLs;
-- 64-hex values;
-- UUIDs (thread, session and broker IDs);
-- control and bidi characters;
-- mentions;
-- HTML comments;
-- `/pocol` line starts.
-
-**Never printed or logged:** tokens, the environment, or `gh` stderr. `gh` stderr is reduced to a fixed
-classification. `gh` uses its own stored credentials; the adapter never reads them.
-
-**Private state** lives only in `coordination/ui-control/github-inbox/`:
-
-- `inbox-journal.json` (with `.bak`)
-- `adapter.log`
-- `activation.json` (written by root, never by the adapter)
-
-**`--status`** prints only counts, request IDs, public comment IDs and states.
-
-## Safety of the process
-
-- **Lease:**
-  - Windows: a named pipe derived from the state directory. A second adapter gets "already running", and the OS releases the pipe when the process ends or is killed. No lock files exist.
-  - Other platforms: a socket file. A leftover socket after a crash is reported, never deleted automatically.
-- **Atomic state:** the state is written to a temp file, fsynced, and renamed into place, with a `.bak` of the previous state. A corrupt main file falls back to a valid backup. If no valid file remains, the adapter refuses to start rather than starting empty.
-- **Bounds per cycle:**
-
-  | Limit | Value |
-  |---|---|
-  | comment pages | 10 (of 100 comments) |
-  | new requests | 20 |
-  | publications | 10 |
-
-  The rest is reported as `backlog` and continued next cycle; nothing is dropped.
-- **Rate limits:** Retry-After and rate-limit reset are honoured, capped at 900 s. Delivery attempts are capped at 20 per request.
-- **Polling:** `--poll` waits `pollSeconds` (minimum 30, default 60). Consecutive failures back off exponentially, capped at 900 s.
-
-## Files
-
-`tools/github-inbox/`:
-
-| Path | Content |
+| Limit | Value |
 |---|---|
-| `src/constants.mjs` | pinned scope, bounds |
-| `src/config.mjs` | strict config |
-| `src/sanitize.mjs` | redaction and allowlist |
-| `src/gh.mjs` | the only child process |
-| `src/broker-client.mjs` | two broker endpoints |
-| `src/journal.mjs` | state and lease |
-| `src/protocol.mjs` | rules, mapping, replies |
-| `src/adapter.mjs` | one cycle |
-| `src/cli.mjs` | command line |
-| `test/*.test.mjs` | `node:test` suites with injected fakes and a real loopback server for the broker client |
-| `config.example.json` | example config |
+| Comment pages per cycle | 10 (100 comments each) |
+| New requests per cycle | 20 |
+| Publications per cycle | 10 |
+| Item lookups per cycle | 10 |
+| Delivery attempts per request | 20 |
+| Comment body | 4000 characters |
+| `gh` stdout | 4 MiB (bytes) |
+| `gh` timeout | 30 s |
+| Rate-limit wait | Retry-After or reset, capped at 900 s |
+| Poll interval | at least 30 s (default 60 s); failures back off exponentially, capped at 900 s |
+| Full rescan | every 30 completed cycles, continued across cycles |
+| Uncertain publication | reposted only after a later complete scan and at least 120 s |
 
-## Commands (root runs these; the author ran nothing)
+Anything beyond a per-cycle limit is reported as `backlog` and continued; nothing is dropped.
+
+**Known limits:**
+
+- Deleted comments can shift pages between rescans.
+- Replies run as the owner's `gh` account; only the marker keeps them from being read as input.
+
+## Local procedures (root)
+
+All paths are relative to `D:\PoCol-Development`. The config lives at
+`coordination\ui-control\github-inbox\config.json`; copy it from `config.example.json` and set `ghBin`.
+
+**Tests**
+
+From `tools\github-inbox`:
 
 ```
-cd tools\github-inbox
 node --test test/protocol.test.mjs test/sanitize.test.mjs test/gh.test.mjs test/broker-client.test.mjs test/journal.test.mjs test/adapter.test.mjs test/boundaries.test.mjs
-copy config.example.json D:\PoCol-Development\coordination\ui-control\github-inbox\config.json
-node src\cli.mjs --config D:\PoCol-Development\coordination\ui-control\github-inbox\config.json --status
-node src\cli.mjs --config D:\PoCol-Development\coordination\ui-control\github-inbox\config.json --once
-node src\cli.mjs --config D:\PoCol-Development\coordination\ui-control\github-inbox\config.json --poll
 ```
 
-Before running, edit `ghBin` in the copied config to the real absolute path of `gh.exe`.
+From `tools\local-coordinator`:
 
-**Exit codes:**
+```
+node --test test/broker.test.mjs test/history.test.mjs test/server.test.mjs test/worker.test.mjs test/notifier.test.mjs test/continuation.test.mjs test/connection.test.mjs test/github-item.test.mjs
+```
 
-| Code | Meaning |
+**Coordinator update (only after review and tests)**
+
+1. Stop the running coordinator with Ctrl+C in its own window.
+2. Start the reviewed source in the same workspace, with no new flags: `node tools\local-coordinator\src\server.mjs`. It reuses the saved `connection.json` (same port and capabilities), the saved state and the single-service lock.
+
+Do not use `--fresh-connection`. Pause, policy, LP3 and the single-writer rule are untouched.
+
+**Adapter: start, run once, status, stop**
+
+| Action | Command or method |
 |---|---|
-| 0 | ok |
-| 1 | the cycle reported an error (see the JSON summary) |
-| 2 | usage, config or lease problem |
+| Status (no network, no lease) | `node tools\github-inbox\src\cli.mjs --config coordination\ui-control\github-inbox\config.json --status` |
+| One cycle | `node tools\github-inbox\src\cli.mjs --config coordination\ui-control\github-inbox\config.json --once` |
+| Polling | `node tools\github-inbox\src\cli.mjs --config coordination\ui-control\github-inbox\config.json --poll` |
+| Stop | Ctrl+C in the adapter's own window. This never pauses the coordinator or touches any item or author. |
 
-**Stop:** stop `--poll` with Ctrl+C in its own window, or by ending that process. This never pauses
-the coordinator, changes any broker item or stops any author.
+**Reset (adapter only)**
 
-## Activation (root only)
+1. Stop the adapter.
+2. Move, do not delete, `coordination\ui-control\github-inbox\inbox-journal.json` and its `.bak` into a dated evidence folder.
 
-The connection becomes active only after a real, harmless round trip:
+After a reset, the adapter starts from an empty journal. Coordinator items keep their keys, so a
+re-delivery returns the same items. Publications are reconciled by marker before any repost.
+
+**Activation (root only, after unit and HTTP tests pass)**
 
 1. The owner posts `/pocol status act-1` on issue #8.
-2. The adapter delivers it, and `received` appears on the issue.
-3. The host acknowledges the broker item through the normal controls, with a `POCOL_GITHUB_RESULT` status note.
-4. The `completed` status reply appears on the issue.
-5. A duplicate comment with the same request ID is ignored.
+2. `received` appears on the issue.
+3. The host acknowledges the item normally, with a `POCOL_GITHUB_RESULT` status note.
+4. The `completed` status reply appears.
+5. A duplicate `/pocol status act-1` is ignored.
 6. After restarting the adapter, nothing is delivered or published twice.
 
-Then root writes `coordination/ui-control/github-inbox/activation.json` by hand:
+Then write `coordination\ui-control\github-inbox\activation.json` by hand:
 
 ```json
 { "connectionVerified": true, "recordedBy": "root", "recordedAt": "<ISO time>",
   "evidence": { "roundtripCommentUrl": "<issue comment URL>", "duplicateCheck": "passed", "restartCheck": "passed" } }
 ```
 
-Test counts, mocks or a single posted comment are not activation evidence.
+Test counts, mocks and a single posted comment are not activation evidence.
 
 ---
 
 ## إعداد سريع (عربي)
 
-**الحالة: غير مفعّل.** هذا محوّل نقل منفصل عن LP3، ولا يعيد محاولة إطلاق مؤلف LP3 المحجوب. لم يشغّل المؤلف أي أمر ولا أي اختبار.
+**الحالة: غير مفعّل.** هذه مهمة نقل منفصلة عن LP3، ولا تعيد محاولة إطلاق مؤلف LP3 المحجوب ولا تتجاوزه. لم يشغّل المؤلف أي اختبار أو اتصال.
 
-**ما يفعله:**
+**تصحيحات 0.41:**
 
-- يقرأ تعليقات العدد #8 في `raedrasheed/Proof-of-Collaboration` عبر `gh` المثبت لديك.
-- يقبل فقط تعليقات المالك `raedrasheed` (المعرف 36733882) التي يبدأ سطرها الأول بـ `/pocol status <معرف>` أو `/pocol guidance <معرف>`.
-- يحفظ كل طلب في الوسيط المحلي عنصرَ توجيه واحدًا، موسومًا بأنه حمولة نقل غير موثوقة، لا موافقة من المالك ولا تشغيل مهمة.
-- ينشر الردود على العدد بعلامة مخفية ثابتة، اعتمادًا على سجلات الوسيط الفعلية وحدها.
+| البند | التصحيح |
+|---|---|
+| I8-01 | مهلة `gh` تنتهي دائمًا حتى دون مقابض أخرى |
+| I8-02 | فحص الحدود يميز `exec` الدالة من `RegExp.exec`، مع حالات تحكم إيجابية وسلبية |
+| I8-03 | فك ترميز UTF-8 متدفق، فلا تتلف العربية والرموز التعبيرية عند تقسيمها |
+| I8-04 | تقدم إعادة المسح الكامل محفوظ عبر الدورات، ولا يُعاد النشر إلا بعد مسح كامل لاحق ومرور 120 ثانية |
+| I8-05 | يُعاد تحميل `connection.json` بعد أي فشل، بالمفاتيح نفسها |
+| I8-06 | قراءة ضيقة جديدة `GET /api/github-item` لعنصر واحد، للعناصر الأقدم من آخر 100 عنصر |
 
-**ما لا يفعله أبدًا:**
+ويبقى المالك المثبت مقبولًا حتى لو نشر تطبيق نيابة عنه، أما البوتات والفاعلون الآخرون فمرفوضون.
 
-- لا يستخدم واجهة المراجع.
-- لا يؤكد أي عنصر ولا يراجعه.
-- لا يطلق مؤلفًا.
-- لا يوقف المنسق ولا يستأنفه.
-- لا يشغّل أي برنامج سوى `gh`.
+**التشغيل:**
 
-**الخطوات:**
-
-1. انسخ `config.example.json` إلى `coordination\ui-control\github-inbox\config.json`، ثم عدّل `ghBin` إلى المسار الكامل لـ `gh.exe`.
-2. من مجلد `tools\github-inbox` شغّل الاختبارات:
-   `node --test test/protocol.test.mjs test/sanitize.test.mjs test/gh.test.mjs test/broker-client.test.mjs test/journal.test.mjs test/adapter.test.mjs test/boundaries.test.mjs`
-3. تحقق من الحالة: `node src\cli.mjs --config <ملف الإعداد> --status`
-4. دورة واحدة: `node src\cli.mjs --config <ملف الإعداد> --once`
-5. استطلاع مستمر: `node src\cli.mjs --config <ملف الإعداد> --poll`. أوقفه بـ Ctrl+C في نافذته فقط؛ هذا لا يوقف المنسق.
-
-**التفعيل:** يبقى `connectionVerified` بقيمة false حتى يجري الجذر رحلة كاملة حقيقية: تعليق المالك ← وصوله إلى الوسيط ← تأكيد المضيف ← رد على GitHub، ثم فحص التكرار وإعادة التشغيل. بعد ذلك يكتب الجذر الملف `activation.json` يدويًا. عدد الاختبارات أو المحاكاة ليس دليل تفعيل.
+- **التحديث:** بعد المراجعة والاختبار، أوقف المنسق بـ Ctrl+C في نافذته، ثم شغّل المصدر المراجَع في المساحة نفسها دون `--fresh-connection`، فيُعاد استخدام الاتصال والحالة المحفوظين.
+- **المحوّل:**
+  - الحالة: `--status`
+  - دورة واحدة: `--once`
+  - استطلاع: `--poll`
+  - الإيقاف: Ctrl+C في نافذته فقط، ولا يوقف المنسق.
+- **إعادة الضبط:** أوقف المحوّل وانقل ملف `inbox-journal.json` ونسخته الاحتياطية إلى مجلد أدلة، ولا تحذفهما.
+- **التفعيل:** لا يكون إلا بعد رحلة حقيقية كاملة مع فحص التكرار وإعادة التشغيل، ثم يكتب الجذر `activation.json` يدويًا.

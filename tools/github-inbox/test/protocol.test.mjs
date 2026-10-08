@@ -14,13 +14,19 @@ test('command parsing: first line only, exact syntax, bounded request ID', () =>
   assert.equal(parseCommand('hello\n/pocol status abc').reason, 'notACommand');
 });
 
-test('classification of comments', () => {
+test('classification of comments and the identity rule', () => {
   assert.equal(classifyComment(comment(1, '/pocol status abc')).accept, true);
   assert.equal(classifyComment({}).reason, 'malformedComment');
   assert.equal(classifyComment(comment(1, '/pocol status abc', { html_url: 'https://github.com/raedrasheed/Proof-of-Collaboration/issues/8#issuecomment-2' })).reason, 'wrongThread');
-  assert.equal(classifyComment(comment(1, '/pocol status abc', { performed_via_github_app: { id: 1 } })).reason, 'bot');
+  // performed_via_github_app is attribution: the pinned User stays eligible ...
+  assert.equal(classifyComment(comment(1, '/pocol status abc', { performed_via_github_app: { id: 1, slug: 'x' } })).accept, true);
+  // ... but it never makes another actor eligible.
+  assert.equal(classifyComment(comment(1, '/pocol status abc', { performed_via_github_app: { id: 1 }, user: { login: 'other', id: 2, type: 'User' } })).reason, 'otherActor');
   assert.equal(classifyComment(comment(1, '/pocol status abc', { user: { login: 'raedrasheed', id: 36733882, type: 'Bot' } })).reason, 'bot');
+  assert.equal(classifyComment(comment(1, '/pocol status abc', { user: { login: 'raedrasheed[bot]', id: 36733882, type: 'User' } })).reason, 'bot');
+  assert.equal(classifyComment(comment(1, '/pocol status abc', { user: { login: 'raedrasheed', id: 36733882, type: 'Organization' } })).reason, 'otherActor');
   assert.equal(classifyComment(comment(1, '/pocol status abc', { user: { login: 'RaedRasheed', id: 36733882, type: 'User' } })).reason, 'otherActor');
+  assert.equal(classifyComment(comment(1, '/pocol status abc', { user: { login: 'raedrasheed', id: 36733883, type: 'User' } })).reason, 'otherActor');
   assert.equal(classifyComment(comment(1, 'x' + marker('0'.repeat(32)))).reason, 'adapterOutput');
 });
 
@@ -68,7 +74,9 @@ test('state mapping is derived only from actual broker records', () => {
   assert.equal(deriveState(rec('status'), view([g('acknowledged', 'thanks')])).state, 'acknowledged');
   assert.equal(deriveState(rec('status'), view([g('acknowledged', 'POCOL_GITHUB_RESULT {"mode":"status","state":"blocked","summary":"policy"}')])).state, 'blocked');
   const note = `POCOL_GITHUB_RESULT {"mode":"work","jobId":"${J}"}`;
-  assert.equal(deriveState(rec('guidance'), view([g('acknowledged', note)])).detail, 'linkedJobNotVisible');
+  const notVisible = deriveState(rec('guidance'), view([g('acknowledged', note)]));
+  assert.equal(notVisible.detail, 'linkedJobNotVisible');
+  assert.equal(notVisible.jobId, J, 'the job ID is exposed for the narrow lookup');
   const job = (status, extra = {}) => ({ id: J, kind: 'authorJob', status, ...extra });
   assert.equal(deriveState(rec('guidance'), view([g('acknowledged', note), job('running')])).state, 'running');
   assert.equal(deriveState(rec('guidance'), view([g('acknowledged', note), job('completed')])).state, 'acknowledged');
@@ -77,7 +85,6 @@ test('state mapping is derived only from actual broker records', () => {
   assert.equal(deriveState(rec('guidance'), view([g('acknowledged', note), job('failed', { reviewId: 'r1' })], [{ id: 'r1', jobId: J, verdict: 'accept' }])).state, 'reviewed', 'accept on a failed job is not completion');
   assert.equal(deriveState(rec('guidance'), view([g('acknowledged', note), job('interrupted')])).state, 'blocked');
   assert.equal(deriveState(rec('guidance'), view([g('acknowledged', 'POCOL_GITHUB_RESULT {"mode":"work","state":"blocked","summary":"needs policy"}')])).state, 'blocked');
-  // The linked job must be an author job: a guidance item ID cannot be passed off as one.
   assert.equal(deriveState(rec('guidance'), view([g('acknowledged', note), { id: J, kind: 'guidance', status: 'acknowledged' }])).detail, 'linkedJobNotVisible');
 });
 

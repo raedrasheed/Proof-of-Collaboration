@@ -2,11 +2,13 @@
 // keys and hidden markers, the guidance text handed to the local broker, the structured result
 // note a host acknowledgement may carry, the honest mapping from ACTUAL broker state to the
 // remote state, and the public reply text. No I/O here.
+//
+// 0.41 identity rule: `performed_via_github_app` is attribution, not identity. A comment whose
+// user is a GitHub User with exactly the pinned id AND login stays eligible even when an app acted
+// on the owner's behalf. Bots (type Bot or a [bot] login) and every other actor stay refused.
 import { sha256 } from '../../local-coordinator/src/util.mjs';
-import { BODY_MAX, COMMAND_RE, ISSUE_API_URL, ISSUE_HTML_URL, MARKER_HEAD, MARKER_RE, PINNED, REPO_FULL } from './constants.mjs';
+import { BODY_MAX, COMMAND_RE, ISSUE_API_URL, ISSUE_HTML_URL, MARKER_HEAD, MARKER_RE, PINNED, REPO_FULL, UUID_RE } from './constants.mjs';
 import { allowedEvidenceUrl, privateText, publicText } from './sanitize.mjs';
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ---------------------------------------------------------------- keys and markers
 
@@ -57,8 +59,8 @@ export function classifyComment(c) {
   if (body.includes(MARKER_HEAD)) return { accept: false, reason: 'adapterOutput' };
   const u = c.user;
   if (!u || typeof u !== 'object') return { accept: false, reason: 'malformedComment' };
-  if (u.type === 'Bot' || /\[bot\]$/i.test(String(u.login || '')) || c.performed_via_github_app) return { accept: false, reason: 'bot' };
-  if (u.id !== PINNED.ownerId || u.login !== PINNED.ownerLogin) return { accept: false, reason: 'otherActor' };
+  if (u.type === 'Bot' || /\[bot\]$/i.test(String(u.login || ''))) return { accept: false, reason: 'bot' };
+  if (u.type !== 'User' || u.id !== PINNED.ownerId || u.login !== PINNED.ownerLogin) return { accept: false, reason: 'otherActor' };
   if (body.length > BODY_MAX) return { accept: false, reason: 'tooLong' };
   const cmd = parseCommand(body);
   if (cmd.reason) return { accept: false, reason: cmd.reason };
@@ -131,10 +133,11 @@ export function parseResultNote(note) {
 // ---------------------------------------------------------------- honest state mapping
 
 /**
- * Derive the remote state of one delivered request from the ACTUAL broker view.
- * Returns { state, detail } where state is null (nothing new can be said: item not visible) or one
- * of: 'awaitingLocalAck', 'acknowledged', 'running', 'reviewed', 'completed', 'blocked'.
- * Nothing in the GitHub comment can influence this; only broker records do.
+ * Derive the remote state of one delivered request from ACTUAL broker records. `view` is the
+ * browser view, possibly augmented by the adapter with items/reviews fetched through the narrow
+ * item lookup (same field names). Returns { state, detail, ... } where state is null (nothing new
+ * can be said: item not visible) or one of: 'awaitingLocalAck', 'acknowledged', 'running',
+ * 'reviewed', 'completed', 'blocked'. Nothing in the GitHub comment can influence this.
  */
 export function deriveState(rec, view) {
   const items = Array.isArray(view?.items) ? view.items : [];
@@ -151,18 +154,18 @@ export function deriveState(rec, view) {
   if (!note || note.invalid || note.mode !== 'work') return { state: 'acknowledged', detail: note?.invalid ? `resultNoteInvalid:${note.invalid}` : 'noStructuredResult' };
   if (note.state === 'blocked') return { state: 'blocked', detail: 'hostBlocked', summary: note.summary };
   const job = items.find((i) => i && i.id === note.jobId && i.kind === 'authorJob');
-  if (!job) return { state: 'acknowledged', detail: 'linkedJobNotVisible' };
+  if (!job) return { state: 'acknowledged', detail: 'linkedJobNotVisible', jobId: note.jobId };
   if (job.reviewId) {
     const reviews = Array.isArray(view.reviews) ? view.reviews : [];
     const rv = reviews.find((r) => r && r.id === job.reviewId && r.jobId === job.id);
-    if (!rv) return { state: 'acknowledged', detail: 'reviewNotVisible' };
+    if (!rv) return { state: 'acknowledged', detail: 'reviewNotVisible', jobId: job.id };
     if (rv.verdict === 'accept' && job.status === 'reviewed') return { state: 'completed', detail: 'acceptedReview', summary: rv.summaryAr };
     return { state: 'reviewed', detail: `review:${rv.verdict}`, summary: rv.summaryAr };
   }
   if (job.status === 'running') return { state: 'running', detail: 'jobRunning' };
   if (['failed', 'interrupted'].includes(job.status)) return { state: 'blocked', detail: `job:${job.status}`, summary: typeof job.error === 'string' ? job.error : null };
   if (typeof job.blockedReason === 'string' && job.blockedReason) return { state: 'blocked', detail: 'jobBlocked', summary: job.blockedReason };
-  return { state: 'acknowledged', detail: `job:${job.status}` };
+  return { state: 'acknowledged', detail: `job:${job.status}`, jobId: job.id };
 }
 
 // ---------------------------------------------------------------- LP3 checkpoint (read only)

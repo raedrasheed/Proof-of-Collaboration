@@ -1,0 +1,82 @@
+[
+  {
+    "path": "tools/github-inbox/README.md",
+    "oldSha256": "3e4269e0e1dd816c4cc4c741196dae701f461a6cf514cfd93f4689e35d3ad100",
+    "newSha256": "b03246e1a1603f096888adc9f57bfa12eb83de8bfc5d314422793936ae121214"
+  },
+  {
+    "path": "tools/github-inbox/src/adapter.mjs",
+    "oldSha256": "069bca1828d369bf5f44e5dedc50e747ab20461f8e37d42f52e6c8a270b3638f",
+    "newSha256": "c76a1eb9487ac506159b9cc7c13ad3cdb47504dd9f3f73afc3b6a6e54320577d"
+  },
+  {
+    "path": "tools/github-inbox/src/broker-client.mjs",
+    "oldSha256": "2f09017b9dc51c0ee72bbce4fed9d180350135fba1caa1eccf011b8b66a5ebf3",
+    "newSha256": "99c3c28925f6e0e43bbbc4214d092ddaaa481b11fb2e66938e1cfe87359c6443"
+  },
+  {
+    "path": "tools/github-inbox/src/constants.mjs",
+    "oldSha256": "b1321a220a54674b9e8a282bd233f66ffc927388ef9f98a1539479a342396a58",
+    "newSha256": "486acb9d5128a735f02e1b54b7f8b4fe43d70ac0d1cae43b61b5eef1f8ec4e84"
+  },
+  {
+    "path": "tools/github-inbox/src/gh.mjs",
+    "oldSha256": "aa8de52870d3a970db665c0b66c899d8c95141f3b04eea9d386af59f5a72d8ae",
+    "newSha256": "a300f58b1035c49d3d711b222f0522e68fa9e92603b5534a38c3e5afe29966bd"
+  },
+  {
+    "path": "tools/github-inbox/src/protocol.mjs",
+    "oldSha256": "4e887b4474f1ae548986ae984db1fac31af4935f09b72670f8be1fe38d97611f",
+    "newSha256": "7ec28d7db1e1a447860998ff1607bf0ee611c76444d12a3fe103db608d869494"
+  },
+  {
+    "path": "tools/github-inbox/test/adapter.test.mjs",
+    "oldSha256": "b56db4d34925ffe7afe6a64117b3fcc04127f9a58258b05c44dd0ddafd8520b3",
+    "newSha256": "a6acefe8b49eaeadfe79c907dde4bad900e000e40ae8f8e6a8a43fc6c776dd19"
+  },
+  {
+    "path": "tools/github-inbox/test/boundaries.test.mjs",
+    "oldSha256": "beb0fb7684eba5302e630a6e628da9fdd2cd41d78d64ecd52a01d3d19a257716",
+    "newSha256": "06f33a588598309c91e56c5e454e7051477aad1e74061876c3766307a4a8904d"
+  },
+  {
+    "path": "tools/github-inbox/test/broker-client.test.mjs",
+    "oldSha256": "f481b7b52c1d7a93049d7c116be37910222575987f3d8e3de5765b594ee37124",
+    "newSha256": "6bf074657d477edeabae729148585d6fbbe52be7c1026a18dd1682f5fe025208"
+  },
+  {
+    "path": "tools/github-inbox/test/gh.test.mjs",
+    "oldSha256": "4201abb5af916136141af131d7799bbfb6e8b55300c3c32bd412d06aaee49ed7",
+    "newSha256": "fa64c668da746415b50b625532d9f025aa5398612af1d9dc6870c57b32f8971a"
+  },
+  {
+    "path": "tools/github-inbox/test/helpers.mjs",
+    "oldSha256": "ca7fb27209ce563c421f51cef0d3cb7d3a45cda06fbc52c00bcec0203b87e89e",
+    "newSha256": "2d896eb582174e776b11b3b6e949cfb3d91ec9349584e2cdbe9ba2363d374435"
+  },
+  {
+    "path": "tools/github-inbox/test/protocol.test.mjs",
+    "oldSha256": "bd4ac0101179fe7b996ac489f33bad5d02606b39529e62790c956e0ef5f7c04a",
+    "newSha256": "aeb35ca32db5a2797c8e1742466bbee296047bf08139a271da53c1c764a5dbfd"
+  },
+  {
+    "path": "tools/local-coordinator/package.json",
+    "oldSha256": "b65ccff1695190b54a6725ce4f4e049079618c8e167f2eb6c69bc0de5d64fd66",
+    "newSha256": "f69a490a1ccf4b8ed6341b946c585c5a386c85144c1cf6249707efd53b3a0a36"
+  },
+  {
+    "path": "tools/local-coordinator/src/github-item.mjs",
+    "oldSha256": null,
+    "newSha256": "3965534a00756401e4e62982bfcc3c8ecc5ce2a98f408d01334ac263217295cf"
+  },
+  {
+    "path": "tools/local-coordinator/src/server.mjs",
+    "oldSha256": "465d7e7ed7a373c5bfdac3a06059a35faa29ad16459c026a437230050547cc93",
+    "newSha256": "f7ee7382079052063c2b2cef938327fa04fa6a830428444d40fe0d01452b3459"
+  },
+  {
+    "path": "tools/local-coordinator/test/github-item.test.mjs",
+    "oldSha256": null,
+    "newSha256": "db1b1f2b89764e54feb254ccf808f94004428b66edf1fb1f2565db7b7d747dcb"
+  }
+]

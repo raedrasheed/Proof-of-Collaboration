@@ -1,0 +1,6 @@
+{
+  "status": "deliveryFailed",
+  "deliveryCalls": 1,
+  "publishesBlocked": false,
+  "recoversWhenHealthy": false
+}

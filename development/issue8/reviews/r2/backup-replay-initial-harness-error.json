@@ -1,0 +1,5 @@
+{
+  "initialObservedPosts": 0,
+  "initialApparentPass": true,
+  "invalidProbeReason": "Initial probe corrupted a guessed filename instead of Journal.main; it did not exercise backup recovery. Corrected Journal.main probe demonstrates one duplicate publication before existing marker reconciliation. Initial console observations retained as harness error, not proof."
+}

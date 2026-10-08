@@ -6,6 +6,9 @@
 // 0.33 patch: a graceful restart may keep the previous local URL (port and capabilities) when the
 // private connection.json is valid for THIS loopback workspace; anything else fails closed to new
 // capabilities with an explicit notice. Capabilities never appear in arguments or logs.
+// 0.41 patch (GitHub issue #8 transport): one read-only GET /api/github-item?itemId=<UUID> behind the
+// same control checks as /api/state, returning the narrow allowlist of src/github-item.mjs. It adds no
+// write, approval, author, pause or resume capability, and /api/state keeps its 100-item limit.
 import http from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -16,6 +19,7 @@ import { findClaude } from './worker.mjs';
 import { Notifier } from './notifier.mjs';
 import { newToken, readJson, writeJsonAtomic, isoNow } from './util.mjs';
 import { redact, redactDeep, registerSecret } from './redact.mjs';
+import { githubItemView, parseItemQuery } from './github-item.mjs';
 
 const base = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(base, '..', 'public');
@@ -111,6 +115,11 @@ export function createApp({ controller, controlToken = newToken(), reviewerToken
       if (!isReviewer && !tokenOk(req.headers['x-pocol-control'], controlToken)) return send(403, { error: 'افتح الرابط الذي طبعه الخادم في نافذة التشغيل.' });
       if (req.method === 'GET' && url.pathname === '/api/state') return send(200, controller.view());
       if (req.method === 'GET' && url.pathname === '/api/history') return send(200, { cards: controller.timelineCards(), timelineSig: controller.timelineSig() });
+      if (req.method === 'GET' && url.pathname === '/api/github-item') {
+        // Read-only narrow projection for the issue #8 transport (see src/github-item.mjs).
+        const view = githubItemView(controller.state, parseItemQuery(url.searchParams));
+        return view ? send(200, view) : send(404, { error: 'عنصر غير موجود.', missing: 'item' });
+      }
       if (req.method === 'GET' && url.pathname === '/api/reviewer/queue') return send(200, { items: controller.reviewerQueue(), status: controller.reviewerStatus() });
       const table = isReviewer ? reviewerPost : browserPost;
       if (req.method === 'POST' && Object.hasOwn(table, url.pathname)) {
