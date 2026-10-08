@@ -1,6 +1,14 @@
 //! Strict canonical RLP (same acceptance as m1-draft-0.2/tools/rlp_strict.py) with an explicit
 //! nesting bound. Decoding borrows from the input; every item keeps its exact raw encoding.
+//!
+//! Depth safety (LP1-I04): the decoder is recursive, one stack frame per nested list, so the
+//! nesting limit is also the recursion limit. `MAX_DEPTH` (16) is a hard prototype ceiling:
+//! `decode_with_depth` accepts any requested limit in `0..=MAX_DEPTH` and refuses a larger request
+//! with `ErrKind::LimitAboveCeiling` before reading the input, so no caller can ask for unsafe
+//! recursion. A limit of `d` admits at most `d` nested lists (0 = byte strings only); deeper
+//! input is `ErrKind::TooDeep`, detected before descending into the offending list.
 
+/// Hard ceiling and default for list nesting (and therefore recursion) depth.
 pub const MAX_DEPTH: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9,6 +17,8 @@ pub enum ErrKind {
     NonCanonical,
     Trailing,
     TooDeep,
+    /// The caller requested a nesting limit above `MAX_DEPTH`; nothing was decoded.
+    LimitAboveCeiling,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +34,7 @@ impl RlpError {
             ErrKind::NonCanonical => "decode.noncanonical",
             ErrKind::Trailing => "decode.trailing",
             ErrKind::TooDeep => "decode.depth",
+            ErrKind::LimitAboveCeiling => "decode.depthLimit",
         }
     }
 }
@@ -117,6 +128,9 @@ fn prefix(b: &[u8], i: usize, end: usize) -> Result<(bool, usize, usize), RlpErr
     Ok((list, s, n))
 }
 
+/// Recursive step. Invariant (guaranteed by `decode_with_depth`): `max_depth <= MAX_DEPTH`, and a
+/// list is only descended into when `depth + 1 <= max_depth`, so recursion never exceeds
+/// `MAX_DEPTH + 1` frames.
 fn item<'a>(b: &'a [u8], i: usize, end: usize, depth: usize, max_depth: usize) -> Result<(Item<'a>, usize), RlpError> {
     let (list, s, n) = prefix(b, i, end)?;
     let stop = s + n;
@@ -136,8 +150,13 @@ fn item<'a>(b: &'a [u8], i: usize, end: usize, depth: usize, max_depth: usize) -
     Ok((Item { raw: &b[i..stop], kind: Kind::List(children) }, stop))
 }
 
-/// Decodes exactly one item spanning all of `b`; at most `max_depth` nested lists.
+/// Decodes exactly one item spanning all of `b`, admitting at most `max_depth` nested lists.
+/// `max_depth` must be in `0..=MAX_DEPTH`; a larger request is refused with
+/// `ErrKind::LimitAboveCeiling` without reading `b` (it is never clamped silently).
 pub fn decode_with_depth(b: &[u8], max_depth: usize) -> Result<Item<'_>, RlpError> {
+    if max_depth > MAX_DEPTH {
+        return Err(err(ErrKind::LimitAboveCeiling, "requested nesting limit above the prototype ceiling 16"));
+    }
     let (it, j) = item(b, 0, b.len(), 0, max_depth)?;
     if j != b.len() {
         return Err(err(ErrKind::Trailing, "trailing bytes"));
@@ -145,6 +164,7 @@ pub fn decode_with_depth(b: &[u8], max_depth: usize) -> Result<Item<'_>, RlpErro
     Ok(it)
 }
 
+/// Decodes with the default (and maximum) nesting limit `MAX_DEPTH`.
 pub fn decode(b: &[u8]) -> Result<Item<'_>, RlpError> {
     decode_with_depth(b, MAX_DEPTH)
 }
@@ -175,7 +195,8 @@ pub fn encode_list_payload(payload: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(payload);
 }
 
-/// Encodes from the decoded structure (not from `raw`); used to prove exact re-encoding.
+/// Encodes from the decoded structure (not from `raw`); used to prove exact re-encoding. Decoded
+/// items are at most `MAX_DEPTH` deep, so this recursion is bounded too.
 pub fn encode(it: &Item<'_>) -> Vec<u8> {
     let mut out = Vec::new();
     encode_into(it, &mut out);
@@ -201,6 +222,21 @@ mod tests {
 
     fn kind(b: &[u8]) -> Option<ErrKind> {
         decode(b).err().map(|e| e.kind)
+    }
+
+    fn kind_at(b: &[u8], limit: usize) -> Option<ErrKind> {
+        decode_with_depth(b, limit).err().map(|e| e.kind)
+    }
+
+    /// `levels` nested lists around an empty list innermost (levels >= 1), built iteratively.
+    fn nested(levels: usize) -> Vec<u8> {
+        let mut v = vec![0xc0u8];
+        for _ in 1..levels {
+            let mut w = Vec::with_capacity(v.len() + 4);
+            encode_list_payload(&v, &mut w);
+            v = w;
+        }
+        v
     }
 
     #[test]
@@ -240,26 +276,49 @@ mod tests {
     }
 
     #[test]
-    fn depth_bound() {
-        // 16 nested lists decode; 17 are rejected without recursion beyond the bound.
-        let mut ok = vec![0xc0u8];
-        for _ in 0..15 {
-            let mut w = vec![0xc0 + ok.len() as u8];
-            w.extend_from_slice(&ok);
-            ok = w;
-        }
+    fn depth_bound_default() {
+        // Exactly 16 nested lists decode with the default limit; 17 are TooDeep.
+        let ok = nested(MAX_DEPTH);
         assert!(decode(&ok).is_ok());
-        let mut deep = vec![0xc0 + ok.len() as u8];
-        deep.extend_from_slice(&ok);
-        assert_eq!(kind(&deep), Some(ErrKind::TooDeep));
-        // A 2000-deep well-formed input (long-form list prefixes) is rejected at the bound, no stack growth.
-        let mut v = vec![0xc0u8];
-        for _ in 0..2000 {
-            let mut w = Vec::with_capacity(v.len() + 4);
-            encode_list_payload(&v, &mut w);
-            v = w;
-        }
+        assert_eq!(encode(&decode(&ok).unwrap()), ok);
+        assert_eq!(kind(&nested(MAX_DEPTH + 1)), Some(ErrKind::TooDeep));
+        // A 2000-deep well-formed input (long-form list prefixes) is TooDeep at the default limit and
+        // at an explicit ceiling request, without recursing past the bound.
+        let v = nested(2000);
         assert_eq!(kind(&v), Some(ErrKind::TooDeep));
-        assert!(decode_with_depth(&v, 2001).is_ok());
+        assert_eq!(kind_at(&v, MAX_DEPTH), Some(ErrKind::TooDeep));
+    }
+
+    #[test]
+    fn depth_requests_above_ceiling_are_refused() {
+        let v = nested(2000);
+        for limit in [MAX_DEPTH + 1, 2000, 2001, usize::MAX] {
+            let e = decode_with_depth(&v, limit).unwrap_err();
+            assert_eq!(e.kind, ErrKind::LimitAboveCeiling, "limit {limit}");
+            assert_eq!(e.code(), "decode.depthLimit");
+        }
+        // Refused independently of the input: even a trivially valid item, or empty input.
+        assert_eq!(kind_at(&[0x80], MAX_DEPTH + 1), Some(ErrKind::LimitAboveCeiling));
+        assert_eq!(kind_at(&[], usize::MAX), Some(ErrKind::LimitAboveCeiling));
+    }
+
+    #[test]
+    fn small_and_zero_limits_are_consistent() {
+        // Limit 0: byte strings only; any list is TooDeep.
+        assert!(decode_with_depth(&[0x80], 0).is_ok());
+        assert!(decode_with_depth(&[0x83, 1, 2, 3], 0).is_ok());
+        assert_eq!(kind_at(&[0xc0], 0), Some(ErrKind::TooDeep));
+        // Malformed input still reports its framing error first at limit 0.
+        assert_eq!(kind_at(&[0x83, 1], 0), Some(ErrKind::Truncated));
+        // For every limit d in 0..=16: d nested lists decode, d + 1 are TooDeep.
+        for d in 0..=MAX_DEPTH {
+            if d > 0 {
+                assert!(decode_with_depth(&nested(d), d).is_ok(), "{d} levels at limit {d}");
+            }
+            assert_eq!(kind_at(&nested(d + 1), d), Some(ErrKind::TooDeep), "{} levels at limit {d}", d + 1);
+        }
+        // Sibling lists do not add depth: [[],[],[]] is depth 2.
+        assert!(decode_with_depth(&[0xc3, 0xc0, 0xc0, 0xc0], 2).is_ok());
+        assert_eq!(kind_at(&[0xc3, 0xc0, 0xc0, 0xc0], 1), Some(ErrKind::TooDeep));
     }
 }

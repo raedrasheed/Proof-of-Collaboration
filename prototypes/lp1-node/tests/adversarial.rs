@@ -15,6 +15,9 @@ use lp1_node::{genesis, header, json, rlp};
 
 const SEED: u64 = 0x4c50_3101_0034_0001;
 
+/// Applies 1..=4 random edits. Edits can cancel out (for example the same bit flipped twice, or a
+/// byte overwritten with its own value), so the result may be byte-identical to `base`; callers that
+/// assert "changed input" properties must classify such no-op mutants separately.
 fn mutate(rng: &mut Rng, base: &[u8]) -> Vec<u8> {
     let mut v = base.to_vec();
     let ops = 1 + rng.below(4);
@@ -99,20 +102,44 @@ fn window_corpus_never_panics() {
     }
 }
 
+/// Number of byte-identical (no-op) mutants this seed produces in the 5000-case genesis corpus.
+/// Independently replayed by the reviewer (coordination/lp1-review-r2/genesis-noop-independent-v2.json:
+/// 2 byte-identical trials, reported there as 2037 and 3053). Pinned so that a change to the
+/// generator or the RNG is noticed rather than silently shifting the corpus.
+const GENESIS_NOOP_MUTANTS: usize = 2;
+
 #[test]
 fn genesis_corpus_never_panics() {
     let mut rng = Rng(SEED ^ 0x9e);
     let p = lp1_node::fixtures::load_profile(&json("profile.json")).unwrap();
-    let mut ok_same = 0;
-    for _ in 0..5_000 {
+    // The unmodified preimage decodes and has the frozen hash: the identity a no-op must reproduce.
+    let base_id = genesis::decode_identity(&p.genesis_pre).unwrap();
+    assert_eq!(base_id.hash, p.genesis_hash);
+    let mut noop_trials: Vec<usize> = Vec::new();
+    let mut changed = 0usize;
+    let mut changed_decoded = 0usize;
+    for trial in 0..5_000 {
         let m = mutate(&mut rng, &p.genesis_pre);
-        if let Ok(id) = genesis::decode_identity(&m) {
-            if id.hash == p.genesis_hash {
-                ok_same += 1;
-            }
+        let res = genesis::decode_identity(&m);
+        if m == p.genesis_pre {
+            // No-op mutant: same bytes must give exactly the same decoded identity and hash.
+            noop_trials.push(trial);
+            assert_eq!(res.as_ref().ok(), Some(&base_id), "no-op trial {trial} decoded differently");
+            continue;
+        }
+        changed += 1;
+        if let Ok(id) = res {
+            changed_decoded += 1;
+            // A genuinely different preimage must not carry the frozen genesis hash.
+            assert_ne!(id.hash, p.genesis_hash, "changed preimage at trial {trial} produced the frozen genesis hash");
         }
     }
-    assert_eq!(ok_same, 0, "a different preimage produced the frozen genesis hash");
+    println!(
+        "{{\"corpus\":\"genesis\",\"seed\":\"{:#x}\",\"trials\":5000,\"noopTrials\":{noop_trials:?},\"changed\":{changed},\"changedDecoded\":{changed_decoded}}}",
+        SEED ^ 0x9e
+    );
+    assert_eq!(noop_trials.len() + changed, 5_000);
+    assert_eq!(noop_trials.len(), GENESIS_NOOP_MUTANTS, "no-op trials {noop_trials:?}");
 }
 
 #[test]

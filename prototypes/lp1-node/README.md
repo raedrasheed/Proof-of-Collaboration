@@ -1,19 +1,24 @@
-# lp1-node: LP1 local experimental Rust node (author revision 2, transport 0.35)
+# lp1-node: LP1 local experimental Rust node (author revision 3, transport 0.36)
 
 LP1 is a local, experimental M3-foundation slice built on the accepted M1 formats (baseline M1 spec
 0.32). It is **not** an M1 amendment and makes **no** change to the baseline. It is not full M3, not
 consensus and not an EVM. It has no P2P, no transactions, no contracts or publisher, no keys and no
 signing. The M1 contract/publisher phase is **not** claimed as executed.
 
-The m1-draft-0.34 and m1-draft-0.35 folders are only the broker's transport namespace. Root imports the
+The m1-draft-0.34, 0.35 and 0.36 folders are only the broker's transport namespace. Root imports the
 code onto the LP1 prototype branch, generates `Cargo.lock`, copies the fixtures, then builds, tests and
 reviews. **The author compiled, ran and formatted nothing.** Every acceptance criterion below is
 untested until root runs it.
 
-Revision 2 (0.35) corrects:
+Revision 2 (0.35) corrected:
 
 - **LP1-I01:** a raw byte string with non-ASCII text in `src/json.rs` tests, which blocked compilation;
 - **LP1-I02:** request ids now follow the accepted C19 binary64 value semantics.
+
+Revision 3 (0.36) corrects:
+
+- **LP1-I04:** the public RLP depth option can no longer request unsafe recursion. The hard ceiling is 16, and larger requests are refused.
+- **LP1-I05:** the adversarial genesis corpus now classifies byte-identical no-op mutants separately from genuinely changed preimages.
 
 ## Layout
 
@@ -21,7 +26,7 @@ Revision 2 (0.35) corrects:
 |---|---|
 | `src/fixed.rs` | `U256` `[u64;4]` and `U512` `[u64;8]`: decimal and `2^N` parsing, shifts, bit length, long division, `work(t)` |
 | `src/asert.rs` | Bounded ASERT: checked `i128` with floor `div_euclid` for dt, e, s and f; `u128` cubic; `U512` X and Y; early exit at s≥256 (MAX) and s≤-257 (1); clamp to 1..MAX; no heap |
-| `src/rlp.rs` | Strict canonical RLP (same acceptance as `rlp_strict.py`), nesting bound 16, exact raw spans, encoder |
+| `src/rlp.rs` | Strict canonical RLP (same acceptance as `rlp_strict.py`), hard nesting ceiling 16 (see "RLP depth" below), exact raw spans, encoder |
 | `src/header.rs` | V1 header item codec: 18-field UT, sig 0/65, nonce 8, at most 256 shares, winnerSig 65; minimal integers, widths, target ≥ 1, UT/ST/HDR size limits; typed re-encode |
 | `src/hashes.rs` | SHA-256 and Keccak-256; TemplateID, powHash and shareHash preimages; sigMsg, winMsg, shareRoot and blockHash; secp256k1 recovery with explicit r/s range, low-S and v∈{0,1}. Verification only. |
 | `src/genesis.rs` | GSV1 identity decode (structure, counts, minimal integers, CP widths, fixed lengths) for binding the profile to the literal 341-byte preimage |
@@ -105,6 +110,30 @@ differential over the 1027 rows. `maxShiftBits` is the native oracle metric max(
 It logs one JSON line per connection on stderr. When a bound is reached it prints
 `{"event":"shutdown","served":N,"reason":"maxRequests"|"maxRuntime"}` and exits with status 0. The
 default port 0 is ephemeral. The server never uses any existing coordinator port or process.
+
+## RLP depth (LP1-I04)
+
+The strict decoder recurses once per nested list, so the nesting limit is also the recursion limit.
+`rlp::MAX_DEPTH = 16` is both the default and a **hard prototype ceiling**.
+
+| Call | Result |
+|---|---|
+| `decode(b)` | Uses limit 16. |
+| `decode_with_depth(b, d)` with `d` in 0..=16 | Admits at most `d` nested lists. Limit 0 means byte strings only. |
+| `decode_with_depth(b, d)` with `d` > 16 | Refused with `ErrKind::LimitAboveCeiling` (`decode.depthLimit`) before the input is read. Never clamped silently. |
+| Input nested deeper than the limit | `ErrKind::TooDeep` (`decode.depth`), detected before descending further. |
+
+As a result, recursion never exceeds 17 frames for any input or request, and no larger thread stack
+is needed. Unit tests cover:
+
+- 16 levels accepted by default and 17 refused;
+- a 2000-level well-formed input refused at the default limit and at an explicit 16;
+- requests of 17, 2000, 2001 and `usize::MAX` refused on that input, and on trivial and empty input;
+- for every d in 0..=16, d levels accepted and d+1 refused;
+- framing errors still reported first at limit 0.
+
+The only internal caller with a smaller limit is the genesis decoder (3). The accepted M1 depth rules
+are unchanged.
 
 ## RP window (A5)
 
@@ -257,11 +286,26 @@ A client disconnect ends that connection only.
 - resource budgets beyond the fixed limits above;
 - signal-driven graceful shutdown.
 
+## Adversarial corpus (LP1-I05)
+
+The generator applies 1–4 random edits, which can cancel out, so a mutant may be byte-identical to
+its base.
+
+The genesis corpus has 5000 deterministic cases with seed `SEED ^ 0x9e`. It classifies each case:
+
+- **No-op mutants** (identical bytes) must decode to exactly the base identity and hash.
+- **Genuinely changed preimages** that decode must **not** carry the frozen genesis hash.
+
+The no-op count is pinned at 2, matching the reviewer's independent replay in
+`genesis-noop-independent-v2.json`. Every case is still run through the decoder (no-panic coverage).
+
+Genesis hashing is unchanged.
+
 ## Conformance notes and recorded questions
 
 1. **JSON id semantics: resolved in revision 2, and no longer a question.** Revision 1 used exact decimal values, which departed from accepted C19 (LP1-I02). That blocked A6 conformance. Revision 2 implements the accepted binary64 value semantics described under "RPC" above. No M1 change.
-2. **Error-envelope convention.** The -32700, -32600 and -32601 `data.reason` values, and the transport HTTP status codes, are a prototype convention. They are not part of M1, and the reviewer will assess them after the code compiles.
-3. **Nesting bound.** The window's outer-reply decode applies the strict RLP nesting bound of 16. A header whose field is a list nested deeper than 16 is therefore `viewIncomplete` here. Python would decode it and report rule 1. Python itself fails with `viewIncomplete` at its recursion limit.
+2. **Error-envelope convention.** The -32700, -32600 and -32601 `data.reason` values, and the transport HTTP status codes, are a prototype convention. They are not part of M1, and the reviewer will assess them.
+3. **Nesting bound.** The window's outer-reply decode applies the strict RLP nesting bound of 16, which is also the hard recursion ceiling. A header whose field is a list nested deeper than 16 is therefore `viewIncomplete` here. Python would decode it and report rule 1. Python itself fails with `viewIncomplete` at its recursion limit.
 4. **Genesis wrapped single byte.** A wrapped single byte in the genesis preimage is an L0 framing error here, but gsInt in `netprofile_ref`. Both reject it.
 5. **Load-time chain validation has no wall clock.** viewFuture is not applied at load; it is applied in every window check.
 6. **Fork schedule validation.** The rule that start heights must be strictly ascending and the schedule non-empty is an LP1 loader rule.
@@ -307,12 +351,13 @@ Non-ASCII text appears only in normal UTF-8 string literals, never in byte-strin
   - The fixture scan for private material must pass.
   - The baseline files must be unchanged; root diffs this.
 - **A1:**
-  - `cargo build --offline` and `cargo test --offline` must pass on 1.58.1 with the generated lock.
+  - `cargo build --offline` and `cargo test --offline` must pass on 1.58.1 with the generated lock, as a full run with no abort.
   - `cargo fmt -- --check` must pass. Root applies canonical rustfmt.
   - Licenses must be recorded, with no target artifacts or binaries in Git.
 - **A2:**
-  - `rlp`/`header` unit tests and `a2_chain_headers_reencode_exactly` must pass.
-  - `adversarial::header_and_rlp_corpus` must pass: seeded, every accepted mutant re-encodes identically, no panic.
+  - `rlp`/`header` unit tests must pass, including `depth_bound_default`, `depth_requests_above_ceiling_are_refused` and `small_and_zero_limits_are_consistent`.
+  - `a2_chain_headers_reencode_exactly` must pass.
+  - `adversarial` must pass in full: the seeded header corpus with every accepted mutant re-encoding identically, and the genesis corpus with no-op classification. No panic anywhere.
 - **A3:**
   - `hashes` unit tests (K1–K3, shape faults) must pass.
   - `a3_signatures_and_hash_oracle` must pass: all 3677 digests recomputed, and every preimage derived from fixture headers.
