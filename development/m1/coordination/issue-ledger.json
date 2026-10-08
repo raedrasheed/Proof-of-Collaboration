@@ -1,7 +1,7 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.29-reviewed-revise-C33-C34-standing-delegation-active",
-  "latestCompletedRevision": "0.29",
+  "status": "0.30-reviewed-revise-C35-C36-standing-delegation-active",
+  "latestCompletedRevision": "0.30",
   "issues": [
     {
       "id": "C01",
@@ -267,22 +267,43 @@
     },
     {
       "id": "C33",
-      "status": "open-reference-integration-defect",
+      "status": "closed-original-reference-defect",
       "revision": "0.29",
       "evidence": [
         "coordination/review-001/v1-guard-integration-probes-029.json",
         "coordination/review-001/REVIEW-0.29.md"
       ],
-      "decision": "Wrong/missingresponseid and duplicateJSONresult can render through DeadlineRpc; integrate shared receive/envelope guard before semantics."
+      "decision": "0.30originalwrong/missingID/duplicateJSON boundary repaired;23independentchecks pass. SeparateC35encodederror-data bound remainsopen."
     },
     {
       "id": "C34",
-      "status": "open-checker-negative-case-assertion",
+      "status": "closed-original-reference-defect",
       "revision": "0.29",
       "evidence": [
         "coordination/review-001/m1-draft-0.29/results/run-results-0.29.json"
       ],
-      "decision": "N05 deliberately sums24575 vsdeclared24576; currentblanket equal-sum assertion is invalid. Preservecase and add explicitexpectednegativeinvariant."
+      "decision": "0.30negativecaseN05and8mutationchecks pass; historicalfailurebinding stillneedsprovenancecoveragefix undernewrevision."
+    },
+    {
+      "id": "C35",
+      "status": "open-reference-json-encoding-defect",
+      "revision": "0.30",
+      "evidence": [
+        "coordination/review-001/error-data-native-comparison-utf8-030.json",
+        "coordination/review-001/guard-independent-030.json",
+        "coordination/review-001/error-data-native-expanded-031.json"
+      ],
+      "decision": "Lone-surrogatedata is6647nativeJSONUTF8bytes vs3347modelbytes; retaineddata causeswrongretry/frame. ExactnativeJSONencoding reference required; no changedbound."
+    },
+    {
+      "id": "C36",
+      "status": "open-evidence-binding-checker-defect",
+      "revision": "0.30",
+      "evidence": [
+        "coordination/review-001/m1-draft-0.30/results/run-results-0.30.json",
+        "coordination/review-001/REVIEW-DECISIONS-0.30.json"
+      ],
+      "decision": "Bindactualmachine-readablereview andparsedliteralprobe fields, not brittleassumedphrases/rawescapedJSON substrings. Preserve6FAILs andcoverage."
     }
   ],
   "history": [
@@ -469,6 +490,24 @@
         }
       },
       "decision": "Nine delegatedtechnical decisions applied,17conventions explicitlyselected; C33/C34 require newrevision. No personalownerapproval."
+    },
+    {
+      "revision": "0.30",
+      "task": "028",
+      "verdict": "revise",
+      "prepared": {
+        "passed": 308,
+        "recorded": 105,
+        "failed": 6
+      },
+      "independent": {
+        "guardAndOriginalC33": 23,
+        "nativeEncoding": {
+          "passed": 2,
+          "failed": 1
+        }
+      },
+      "decision": "OriginalC33/C34repaired; C35exacterrorserializationandC36provenancebindingsneedcorrection. No owneranswers."
     }
   ],
   "githubHandoff": {
@@ -482,7 +521,7 @@
     "commit": "23265e6",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6044378979"
   },
-  "nextAction": "New0.30 focused repairs and conventions; roottests/fullgate; then coordinatorcontinuation improvement, automatically.",
+  "nextAction": "New0.31exactJSONencodingreferenceandactualevidencebindings; independentreviewfull41gate; thencoordinatorcontinuationpatch.",
   "reviewerDecisions": {
     "revision": "0.25",
     "reviewer": "Codex existing host",
@@ -1101,7 +1140,7 @@
     },
     "requiredNext": "New V1 specification/fixtures and consolidated criteria computed with these actual decisions; owner votes remain open"
   },
-  "latestReviewedRevision": "0.29",
+  "latestReviewedRevision": "0.30",
   "latestAcceptedRevision": "0.25",
   "latestAcceptedReferenceRevision": "0.28",
   "ownerQuestionsCurrent": {
