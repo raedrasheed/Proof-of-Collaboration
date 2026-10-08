@@ -1,7 +1,7 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.25-audit-reviewed-V1-authoring-and-owner-choices-remain",
-  "latestCompletedRevision": "0.25",
+  "status": "0.26-reviewed-revise-V1-error-handling-and-source-cost",
+  "latestCompletedRevision": "0.26",
   "issues": [
     {
       "id": "C01",
@@ -228,6 +228,18 @@
       "status": "open-authoring",
       "evidence": "m1-draft-0.25 audit: missingHeaderNetCheckwindow/messages/NX-V3e/f/g",
       "decision": "Claude completes specs/literalfixtures/reference checks in new0.26; absentproductionM3TS notM1blocker"
+    },
+    {
+      "id": "C32",
+      "status": "open-reference-defect",
+      "evidence": "review-001/v1-malformed-error-probes-0.26.json: three uncaught exceptions",
+      "decision": "Validate malformed -32021 data/delay; return controlled viewIncomplete/no frame; no new author job started"
+    },
+    {
+      "id": "V1-SHA-COST",
+      "status": "open-source-clarification",
+      "evidence": "review-001/v1-share-work-probe-0.26.json: valid single header uses258SHA; h20 uses27; source claims<=13",
+      "decision": "Do not relax baseline bound; include share verification in accurate worst-case accounting and seek authorized clarification"
     }
   ],
   "history": [
@@ -357,6 +369,11 @@
       "revision": "0.25",
       "result": "Canonical617pass85recorded0fail; initialcopy artifactpath2fail preserved; new56preimages3librariesmatch; epochcodec10/10+native11/11; qualified59technicaldecisions, U08owner,V1authoring remain",
       "evidence": "review-001/REVIEW-0.25.md"
+    },
+    {
+      "revision": "0.26",
+      "result": "302pass75recorded0fail in preparedsuite; independentASERT1027/1027, hashes347/347, Rustsignatures135/135; malformedbusy3FAIL; validsharecase258SHA ->reviseV1; ownerdecisions unchanged",
+      "evidence": "review-001/REVIEW-0.26.md"
     }
   ],
   "githubHandoff": {
@@ -370,7 +387,7 @@
     "commit": "23265e6",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6044378979"
   },
-  "nextAction": "Claude complete V1 and consolidated qualified decisions in0.26; independently verify; no owner approval, no production.",
+  "nextAction": "Review completed; V1 error handling and source SHA cost clarification require revision, and named owner answers remain pending. Do not replay completedauthor0.26; use explicit newrevision task if authorized.",
   "reviewerDecisions": {
     "revision": "0.25",
     "reviewer": "Codex existing host",
@@ -988,5 +1005,7 @@
       "PB1-PB12": "Adopt the precise supplemental experiment definitions; no waived sensitivity, actual measurements or proof of universal isolation."
     },
     "requiredNext": "New V1 specification/fixtures and consolidated criteria computed with these actual decisions; owner votes remain open"
-  }
+  },
+  "latestReviewedRevision": "0.26",
+  "latestAcceptedRevision": "0.25"
 }

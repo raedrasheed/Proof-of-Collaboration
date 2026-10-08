@@ -115,3 +115,8 @@ Claude مسؤول عن التأليف والتعديلات؛ Codex يراجع و
 ## دورة M1 — المسودة 0.25
 
 التدقيق الكامل: 617 ناجحًا،85 موثقًا،صفر فشل. حفظنا فشل مسار الملف المولد في نسخة المراجعة الأولى، ثم شغّلنا من المصدر دون إسقاط شروط. اتفقت3مكتبات على56مُدخل بصمة جديدًا؛ نجحت10حالات مستقلة لتمثيلepoch و11حالةJavaScript، والسجل الأقصى1442009≤1442048. لا يلزم تغيير لقبول النصوص:الأساس يرفض أصلًا المحارف البديلة المنفردة. سُجلت أحكام تقنية مقيدة دون اختيار سياسات المالك. بقي تأليفV1، وأُحيل قيد تقسيمmanifest إلى1–3قطع(U08) كتغيير يحتاج المالك. لا اكتمالM1 أو تنفيذ إنتاجي أو دمج أو نشر.
+
+
+## M1 review - revision 0.26
+
+Resumed the completed author task without a duplicate job. The prepared suite passed 302 checks with 75 recorded entries and zero failures. Independent verification matched 1027 ASERT cases, 347 hash preimages and 135 signatures. Review verdict: revise. Three malformed busy replies crash the reference checker (C32). A valid 256-share header requires 258 SHA-256 evaluations, conflicting with the source bound of 13; the proposed 27-call explanation also omits share hashes (V1-SHA-COST). The dashboard and evidence ledger record both blockers. Named owner decisions remain pending; M1 is not accepted. No production implementation, merge or deployment.
