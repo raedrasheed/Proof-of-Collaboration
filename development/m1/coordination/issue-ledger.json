@@ -1,7 +1,7 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.30-reviewed-revise-C35-C36-standing-delegation-active",
-  "latestCompletedRevision": "0.30",
+  "status": "0.31-functional-profile-reviewed-C37-historyclosure-pending",
+  "latestCompletedRevision": "0.31",
   "issues": [
     {
       "id": "C01",
@@ -286,24 +286,34 @@
     },
     {
       "id": "C35",
-      "status": "open-reference-json-encoding-defect",
+      "status": "closed-reference-repair",
       "revision": "0.30",
       "evidence": [
         "coordination/review-001/error-data-native-comparison-utf8-030.json",
         "coordination/review-001/guard-independent-030.json",
         "coordination/review-001/error-data-native-expanded-031.json"
       ],
-      "decision": "Lone-surrogatedata is6647nativeJSONUTF8bytes vs3347modelbytes; retaineddata causeswrongretry/frame. ExactnativeJSONencoding reference required; no changedbound."
+      "decision": "0.31nativeJSONcodec:17oracle/sixboundary/ordercases and24independentfullguardchecks pass;6647byteoversizeddata dropped,zero retry/frame."
     },
     {
       "id": "C36",
-      "status": "open-evidence-binding-checker-defect",
+      "status": "closed-reference-repair",
       "revision": "0.30",
       "evidence": [
         "coordination/review-001/m1-draft-0.30/results/run-results-0.30.json",
         "coordination/review-001/REVIEW-DECISIONS-0.30.json"
       ],
-      "decision": "Bindactualmachine-readablereview andparsedliteralprobe fields, not brittleassumedphrases/rawescapedJSON substrings. Preserve6FAILs andcoverage."
+      "decision": "0.31actualreviewJSONandparsedprobeprovenance bind correctly; remainingseparateC37stalesnapshothistorylookup."
+    },
+    {
+      "id": "C37",
+      "status": "open-checker-stale-status-snapshot",
+      "revision": "0.31",
+      "evidence": [
+        "coordination/review-001/m1-draft-0.31/results/run-results-0.31.json",
+        "coordination/review-001/REVIEW-0.31.md"
+      ],
+      "decision": "HF8isrecordedpassafterhistorysnapshot; HF12usesstalehave=>None. Freshcompletedresultclosureandmissing/failedprerequisite mutations required."
     }
   ],
   "history": [
@@ -508,6 +518,22 @@
         }
       },
       "decision": "OriginalC33/C34repaired; C35exacterrorserializationandC36provenancebindingsneedcorrection. No owneranswers."
+    },
+    {
+      "revision": "0.31",
+      "task": "029",
+      "verdict": "revise-history-only",
+      "prepared": {
+        "passed": 280,
+        "recorded": 102,
+        "failed": 1,
+        "codecCalls": 123
+      },
+      "independent": {
+        "guardCases": 24,
+        "failed": 0
+      },
+      "decision": "C35/C36verifiedclosed; effectiveC3/C4/V1reviewed conditionalonC37historicalclosure. No personalapproval."
     }
   ],
   "githubHandoff": {
@@ -521,7 +547,7 @@
     "commit": "23265e6",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6044378979"
   },
-  "nextAction": "New0.31exactJSONencodingreferenceandactualevidencebindings; independentreviewfull41gate; thencoordinatorcontinuationpatch.",
+  "nextAction": "New0.32freshtransitivehistoricalclosure andfinalgate evidence; then coordinatorcontinuationimprovement. Standingauthorizationactive.",
   "reviewerDecisions": {
     "revision": "0.25",
     "reviewer": "Codex existing host",
@@ -1140,7 +1166,7 @@
     },
     "requiredNext": "New V1 specification/fixtures and consolidated criteria computed with these actual decisions; owner votes remain open"
   },
-  "latestReviewedRevision": "0.30",
+  "latestReviewedRevision": "0.31",
   "latestAcceptedRevision": "0.25",
   "latestAcceptedReferenceRevision": "0.28",
   "ownerQuestionsCurrent": {
