@@ -42,7 +42,7 @@ const joined = (segments) => segments.filter(Boolean).flatMap((s, k) => (k ? [' 
 
 const STATE_AR = { queued: 'في الطابور', claimed: 'استلمه المنسق', acknowledged: 'أكد المنسق الاستلام', approved: 'وافق المنسق؛ ينتظر التشغيل', running: 'قيد التشغيل',
   completed: 'اكتمل؛ ينتظر مراجعة Codex', reviewed: 'رُوجع', failed: 'فشل', interrupted: 'انقطع', cancelled: 'أُلغي' };
-const KIND_AR = { guidance: 'توجيه', ownerAnswer: 'إجابة سؤال مالك', authorJob: 'دورة مؤلف' };
+const KIND_AR = { guidance: 'توجيه', ownerAnswer: 'إجابة سؤال مالك', authorJob: 'دورة مؤلف', continuation: 'طلب متابعة بعد مراجعة فعلية' };
 const WAIT_AR = { idle: 'لا شيء معلق', workerRunning: 'مهمة المؤلف قيد التشغيل',
   workerFailed: 'آخر مهمة مؤلف فشلت أو انقطعت؛ بانتظار مراجعة Codex الفعلية لها، ثم إعادة صريحة إن طُلبت',
   waitingReview: 'بانتظار مراجعة Codex الفعلية؛ لن تبدأ دورة أخرى قبلها', waitingCoordinator: 'بانتظار المنسق ليستلم الطلبات',
@@ -53,8 +53,17 @@ const PAUSE_AR = { active: 'يعمل', draining: 'إيقاف مطلوب؛ ينت
 const NOTIFY_AR = { held: 'محجوز حتى يكتمل تشغيل الخادم', sending: 'جارٍ الإرسال إلى خيط Codex القائم',
   delivered: 'وصل إلى طابور خيط Codex القائم (هذا ليس استلامًا ولا مراجعة)', failed: 'فشل الإرسال؛ الطلب نفسه محفوظ',
   uncertain: 'غير مؤكد: توقف الخادم أو انتهت المهلة أثناء الإرسال؛ الإعادة قد تكرر الإشعار', notConfigured: 'الناقل غير مضبوط؛ الطلب محفوظ ولم يُرسل إشعار' };
-const NOTIFY_REASON_AR = { queued: 'طلب جديد', jobFinished: 'طلب مراجعة لمهمة انتهت' };
+const NOTIFY_REASON_AR = { queued: 'طلب جديد', jobFinished: 'طلب مراجعة لمهمة انتهت', continuation: 'طلب متابعة بعد مراجعة فعلية' };
 const REVIEWER_AR = { attached: 'متصل', expired: 'انتهت مهلة الاتصال؛ لا مراجعة جارية الآن', disconnected: 'غير متصل' };
+// Why no continuation request is (or would be) queued. Display only; nothing here changes policy.
+const CONT_AR = { ledgerUnreadable: 'تعذرت قراءة سجل المنسق', noStandingAuthorization: 'لا يوجد تفويض دائم مسجل',
+  autonomousCyclesOff: 'الدورات المتتابعة غير مفعلة في التفويض', noProductionNotTrue: 'شرط «لا إنتاج» غير مسجل صراحة',
+  scopeNotM1: 'نطاق التفويض لا يذكر M1', noWorklist: 'لا توجد قائمة عمل مستقل محفوظة', worklistComplete: 'قائمة العمل مكتملة؛ لا متابعة',
+  worklistNotReady: 'قائمة العمل ليست جاهزة', worklistMalformed: 'قائمة العمل غير صالحة؛ لا متابعة', noIndependentReadyItem: 'لا يوجد عنصر مستقل جاهز',
+  stopped: 'الخادم يتوقف', paused: 'متوقف مؤقتًا؛ تؤجل المتابعة حتى الاستئناف', writerActive: 'يوجد مؤلف أو عقد عامل نشط',
+  unreviewedReceipt: 'يوجد إيصال لم يُراجع بعد', openContinuation: 'يوجد طلب متابعة مفتوح بالفعل' };
+const CONT_STATUS_AR = { pending: 'قيد التقرير', queued: 'أُدرج طلب متابعة واحد', suppressed: 'لم يُدرج', deferredPaused: 'مؤجل بسبب الإيقاف' };
+const yesNo = (b) => (b ? 'نعم' : 'لا');
 
 function renderStatus(v) {
   const s = v.status;
@@ -82,6 +91,31 @@ function renderStatus(v) {
   $('resume').disabled = v.pauseState === 'active';
 }
 
+/** Read-only: standing delegation and continuation progress from safe ledger fields. Never an owner answer. */
+function renderAuthority(v) {
+  const a = v.authority;
+  if (!a) return;
+  const s = a.standing;
+  mixed($('authStanding'), s
+    ? joined([['دورات متتابعة: ', yesNo(s.autonomousSequentialCycles)], ['قرارات تقنية مفوضة: ', yesNo(s.delegatedTechnicalDecisions)],
+      ['لا إنتاج: ', yesNo(s.noProduction)], ['موافقة شخصية من المالك: ', yesNo(s.personalApproval)], s.at ? ['منذ ', L(s.at)] : null])
+    : ['لا يوجد تفويض دائم مسجل']);
+  $('authScope').textContent = s?.scope || 'غير متاح';
+  const w = a.worklist;
+  mixed($('authWorklist'), w
+    ? joined([['الحالة ', L(w.status)], ...(w.items.length ? w.items.map((it) => [L(it.id), ' (', L(it.kind), it.status ? ', ' : '', it.status ? L(it.status) : null, ')']) : [['لا عناصر']])])
+    : ['غير متاح']);
+  const c = a.continuation;
+  const last = c.lastReview;
+  mixed($('authContinuation'), joined([
+    [c.enabled ? 'مسموح بالسياسة المحفوظة' : `غير مسموح: ${CONT_AR[c.reason] || c.reason}`],
+    c.gate && c.enabled ? ['الآن: ', CONT_AR[c.gate] || c.gate] : null,
+    last ? ['آخر مراجعة: ', CONT_STATUS_AR[last.status] || last.status, last.reason ? ` (${CONT_AR[last.reason] || last.reason})` : ''] : null,
+    c.recent.length ? ['طلبات المتابعة: ', L(c.recent.length)] : null,
+  ]));
+  $('authNote').textContent = a.noteAr;
+}
+
 function renderQueue(v) {
   const box = $('queue');
   if (!v.items.length) { box.replaceChildren(el('p', 'لا توجد طلبات بعد.', 'empty')); return; }
@@ -92,8 +126,13 @@ function renderQueue(v) {
     d.append(head);
     if (i.payload?.text) d.append(el('p', i.payload.text));
     if (i.kind === 'ownerAnswer') d.append(elm('p', joined([[L(i.payload.questionId), ': ', L(i.payload.choice), i.payload.testOnly ? ' (اختبار فقط)' : null], i.payload.note ? [i.payload.note] : null])));
+    if (i.kind === 'continuation') {
+      d.append(elm('p', joined([['بعد المراجعة ', L(i.payload.reviewId)], ['العناصر الجاهزة: ', ...i.payload.readyItems.flatMap((x, k) => (k ? [', ', L(x.id)] : [L(x.id)]))],
+        i.nextJobId ? ['الخطوة التي اختارها المنسق: ', L(i.nextJobId)] : null])));
+    }
     if (i.kind === 'authorJob') {
       d.append(elm('p', joined([['النوع: ', L(i.payload.mode)], i.dispatch?.plannedDir ? ['المجلد ', L(i.dispatch.plannedDir)] : null,
+        i.payload.continuationOf ? ['من طلب متابعة ', L(i.payload.continuationOf)] : null,
         i.blockedReason ? ['محجوب: ', i.blockedReason] : null])));
       if (i.error) d.append(el('p', 'خطأ:', 'muted'), el('pre', i.error, 'tech'));
     }
@@ -204,7 +243,7 @@ async function refresh() {
   try {
     const v = await api('/api/state');
     setConnection(true, `متصل بالخادم المحلي · ${new Date().toLocaleTimeString('ar')}`);
-    renderStatus(v); renderQueue(v); renderOwner(v);
+    renderStatus(v); renderAuthority(v); renderQueue(v); renderOwner(v);
     // Current Claude receipts and Codex reviews join the timeline on the ordinary poll:
     // the timeline is refetched whenever the server's signature of current cards changes.
     if (v.timelineSig !== timelineSig) { timelineSig = v.timelineSig; await loadHistory(); }

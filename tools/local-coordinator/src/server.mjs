@@ -3,6 +3,9 @@
 // fragment, timingSafeEqual comparison, CSP, no-store, fixed static file map.
 // Added here: a separate reviewer capability that is never sent to the browser,
 // JSON content-type/size limits, and the persisted broker behind every request.
+// 0.33 patch: a graceful restart may keep the previous local URL (port and capabilities) when the
+// private connection.json is valid for THIS loopback workspace; anything else fails closed to new
+// capabilities with an explicit notice. Capabilities never appear in arguments or logs.
 import http from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -24,6 +27,8 @@ const STATIC = new Map([
   ['/coordinator.css', [path.join(PUBLIC, 'coordinator.css'), 'text/css; charset=utf-8']],
 ]);
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; font-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+const TOKEN_RE = /^[0-9a-f]{64}$/;
+const PORT_MIN = 1024, PORT_MAX = 65535;
 
 function tokenOk(supplied, expected) {
   const a = Buffer.from(String(supplied || '')), b = Buffer.from(expected);
@@ -164,24 +169,75 @@ export function resolveNotifierConfig({ argBin = null, argThread = null, env = p
   };
 }
 
+const sameDir = (a, b, platform) => {
+  const x = path.resolve(a), y = path.resolve(b);
+  return platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y;
+};
+
+/**
+ * Validate the previous private connection.json for reuse. Valid only if it is an object for THIS
+ * workspace whose url, port, reviewerApi, header and both capabilities are exactly the loopback
+ * shapes this server writes, with two different 64-hex capabilities. Returns
+ * { status: 'none' | 'valid' | 'invalid', reason, port, controlToken, reviewerToken }.
+ */
+export function savedConnection(connectionFile, workspace, { platform = process.platform } = {}) {
+  if (!existsSync(connectionFile)) return { status: 'none', reason: 'noFile' };
+  const c = readJson(connectionFile, undefined);
+  const bad = (reason) => ({ status: 'invalid', reason });
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return bad('notAnObject');
+  if (typeof c.workspace !== 'string' || !sameDir(c.workspace, workspace, platform)) return bad('otherWorkspace');
+  if (!Number.isInteger(c.port) || c.port < PORT_MIN || c.port > PORT_MAX) return bad('port');
+  if (!TOKEN_RE.test(c.reviewerToken || '')) return bad('reviewerCapability');
+  const m = typeof c.url === 'string' ? /^http:\/\/127\.0\.0\.1:(\d{1,5})\/#([0-9a-f]{64})$/.exec(c.url) : null;
+  if (!m || Number(m[1]) !== c.port) return bad('url');
+  if (m[2] === c.reviewerToken) return bad('sameCapabilities');
+  if (c.reviewerApi !== `http://127.0.0.1:${c.port}/api/reviewer/` || c.reviewerHeader !== 'X-PoCol-Reviewer') return bad('reviewerApi');
+  return { status: 'valid', reason: null, port: c.port, controlToken: m[2], reviewerToken: c.reviewerToken };
+}
+
+/**
+ * Decide the port and capabilities for this start. Reuse happens only for a valid saved connection,
+ * without --fresh-connection, and when no different --port is requested. An invalid saved file is
+ * never reused: new capabilities are created and the reason is reported (fail closed, actionable).
+ */
+export function resolveConnection({ saved, argPort = null, fresh = false }) {
+  const requested = argPort === null || argPort === undefined || argPort === '' ? null : Number(argPort);
+  if (requested !== null && (!Number.isInteger(requested) || requested < 0 || requested > PORT_MAX)) throw new Error('قيمة --port غير صالحة.');
+  if (!fresh && saved.status === 'valid' && (requested === null || requested === saved.port)) {
+    return { port: saved.port, controlToken: saved.controlToken, reviewerToken: saved.reviewerToken, reused: true, notice: null };
+  }
+  const notice = fresh ? 'طُلب رابط جديد صراحة (--fresh-connection)؛ لم يُعد استخدام الاتصال المحفوظ.'
+    : saved.status === 'invalid' ? `ملف الاتصال المحفوظ غير صالح لهذه المساحة (${saved.reason})؛ لم يُعد استخدام أي رمز منه وأُنشئ رابط جديد. يلزم فتح الرابط الجديد في المتصفح.`
+    : requested !== null && saved.status === 'valid' ? 'طُلب منفذ مختلف؛ أُنشئ رابط جديد.' : null;
+  return { port: requested ?? 0, controlToken: newToken(), reviewerToken: newToken(), reused: false, notice };
+}
+
 export async function main() {
   if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('Node.js 22 أو أحدث مطلوب.');
   const workspace = resolveWorkspace(arg('--workspace'));
   let claudeBin = null, claudeNote = null;
   try { claudeBin = findClaude(arg('--claude-bin')); } catch (e) { claudeNote = e.message; }
+  const connectionFile = path.join(workspace, 'coordination', 'ui-control', 'connection.json');
   // Host transport: `codex queue --remote unix:// --thread <existing>` only. Path and thread come
   // from the operator's command line, CODEX_THREAD_ID, or the previous private connection.json
   // (read BEFORE it is replaced below) — never from the browser.
-  const saved = savedHostNotifier(path.join(workspace, 'coordination', 'ui-control', 'connection.json'));
+  const saved = savedHostNotifier(connectionFile);
   const notifierCfg = resolveNotifierConfig({ argBin: arg('--codex-bin') || null, argThread: arg('--codex-thread') || null, saved });
   const notifier = new Notifier({ codexBin: notifierCfg.codexBin, threadId: notifierCfg.threadId, ws: workspace });
   // Notifications are held until connection.json (which the message points to) is written.
   const controller = new Controller({ workspace, sessionId: arg('--claude-session') || null, claudeBin, notifier, holdNotifications: true });
-  controller.acquireService(null);
+  controller.acquireService(null);                         // a second service fails here, before any connection is reused
+  const conn = resolveConnection({ saved: savedConnection(connectionFile, workspace), argPort: arg('--port') ?? null, fresh: process.argv.includes('--fresh-connection') });
   controller.recover();
-  const { server, controlToken, reviewerToken } = createApp({ controller });
-  const port = Number(arg('--port') || 0);
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
+  const { server, controlToken, reviewerToken } = createApp({ controller, controlToken: conn.controlToken, reviewerToken: conn.reviewerToken });
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(conn.port, '127.0.0.1', resolve); });
+  } catch (e) {
+    controller.stop(); controller.releaseService();
+    throw new Error(conn.reused && e.code === 'EADDRINUSE'
+      ? `المنفذ المحفوظ ${conn.port} مشغول ببرنامج آخر؛ لم يُبدأ الخادم. أوقف ذلك البرنامج أو ابدأ مع --fresh-connection (سيلزم فتح رابط جديد).`
+      : String(e.message));
+  }
   const actual = server.address().port;
   controller.acquireService(actual);
   const url = `http://127.0.0.1:${actual}/#${controlToken}`;
@@ -196,8 +252,10 @@ export async function main() {
   };
   writeJsonAtomic(controller.connectionFile, connection);
   controller.releaseNotifications();
-  controller.log({ event: 'server.started', port: actual, pid: process.pid, claudeAvailable: Boolean(claudeBin), notifierConfigured: notifier.configured().ok });
-  console.log('\nمنسق PoCol المحلي (M1)\nافتح هذا الرابط المحلي في المتصفح:\n' + url);
+  controller.log({ event: 'server.started', port: actual, pid: process.pid, claudeAvailable: Boolean(claudeBin), notifierConfigured: notifier.configured().ok, connectionReused: conn.reused });
+  if (conn.notice) controller.log({ event: 'server.connectionNotReused', notice: conn.notice });
+  console.log('\nمنسق PoCol المحلي (M1)\n' + (conn.reused ? 'أُعيد استخدام الرابط المحلي المحفوظ؛ الصفحة المفتوحة تستمر دون إعادة فتح:\n' : 'افتح هذا الرابط المحلي في المتصفح:\n') + url);
+  if (conn.notice) console.log('\nتنبيه: ' + conn.notice);
   console.log('\nسجل الخادم: ' + controller.logFile + '\nالحالة المحفوظة: ' + controller.stateFile +
     '\nمعلومات الاتصال الخاصة بالمنسق المضيف: ' + path.join(controller.uiDir, 'connection.json'));
   if (claudeNote) console.log('\nتنبيه: ' + claudeNote + ' (العرض والطابور يعملان؛ تشغيل مهام المؤلف معطل).');

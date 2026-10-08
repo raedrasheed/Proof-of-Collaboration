@@ -1,6 +1,13 @@
 // Persisted control broker for the CURRENT host coordinator. It never reviews, never
 // creates agent turns on its own, and never starts a reviewer process. Browser requests
 // and the host coordinator's reviewer API go through this one persisted state.
+//
+// Continuation (0.33 patch): after an ACTUAL review is recorded, and only if the saved ledger
+// carries an explicit standing authorization (autonomousSequentialCycles === true,
+// noProduction === true, scope naming M1) and a ready worklist with at least one M1 item, the
+// broker queues ONE durable 'continuation' item for that review and notifies the SAME existing
+// host thread once. It never reviews, never starts an author by itself and never runs a loop:
+// the host coordinator claims the item and chooses the next action (or none). Default off.
 import { existsSync, mkdirSync, openSync, closeSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { appendLog, bound, decodeText, isoNow, newId, pidAlive, readJson, sha256, writeJsonAtomic } from './util.mjs';
@@ -15,6 +22,11 @@ const LEASE_MIN = 15_000, LEASE_MAX = 600_000;
 const STDERR_TAIL = 4096, STDERR_SHOWN = 2000;
 const NOTIFY_RETRYABLE = ['failed', 'uncertain', 'notConfigured'];
 const ATTEMPTS_SHOWN = 20, RETRY_KEYS_MAX = 10_000;
+// Ledger states that describe an author that is no longer writing. They unblock dispatch ONLY
+// when the ledger names a broker job that this broker persisted and actually reviewed.
+const INACTIVE_REVIEWED = ['reviewed', 'ended', 'finished'];
+const CONT_ID_RE = /^[A-Za-z0-9._-]{1,80}$/, CONT_WORD_RE = /^[A-Za-z]{1,40}$/, CONT_ITEMS_MAX = 20;
+const OPEN_STATUSES = ['queued', 'claimed'];
 
 export class BrokerError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -39,6 +51,34 @@ const own = (map, key) => (Object.hasOwn(map, key) ? map[key] : undefined);
 function emptyState(now) {
   return { schema: 'pocol-local-coordinator/1', createdAt: isoNow(now), paused: false, pauseRequestedAt: null,
     items: {}, order: [], keys: dict(), reviewer: null, currentJob: null, reviews: [], ownerAnswers: {}, notifications: {}, notifyRetryKeys: dict(), events: [] };
+}
+
+/**
+ * The continuation policy from the saved ledger. Off unless every condition holds; anything
+ * missing, malformed, complete or blocked-without-ready-items gives { enabled: false, reason }.
+ */
+export function continuationPolicy(ledger) {
+  const off = (reason) => ({ enabled: false, reason, items: [], worklistStatus: null });
+  if (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)) return off('ledgerUnreadable');
+  const a = ledger.standingAuthorization;
+  if (!a || typeof a !== 'object' || Array.isArray(a)) return off('noStandingAuthorization');
+  if (a.autonomousSequentialCycles !== true) return off('autonomousCyclesOff');
+  if (a.noProduction !== true) return off('noProductionNotTrue');
+  if (typeof a.scope !== 'string' || !/\bM1\b/.test(a.scope)) return off('scopeNotM1');
+  const w = ledger.continuationWork;
+  if (!w || typeof w !== 'object' || Array.isArray(w)) return off('noWorklist');
+  if (w.status === 'complete') return off('worklistComplete');
+  if (!['ready', 'blocked'].includes(w.status)) return off('worklistNotReady');
+  if (!Array.isArray(w.remainingIndependentItems)) return off('worklistMalformed');
+  const items = [];
+  for (const it of w.remainingIndependentItems) {
+    if (!it || typeof it !== 'object' || Array.isArray(it) || !CONT_ID_RE.test(it.id || '') || it.scope !== 'M1'
+      || (it.kind !== undefined && !CONT_WORD_RE.test(String(it.kind)))) return off('worklistMalformed');
+    if (it.status === undefined || it.status === 'ready') items.push({ id: it.id, kind: it.kind ?? null });
+    else if (!['blocked', 'done'].includes(it.status)) return off('worklistMalformed');
+  }
+  if (!items.length) return off('noIndependentReadyItem');
+  return { enabled: true, reason: null, items: items.slice(0, CONT_ITEMS_MAX), worklistStatus: w.status };
 }
 
 export class Controller {
@@ -70,7 +110,7 @@ export class Controller {
     this.ledgerFile = path.join(workspace, 'coordination', 'issue-ledger.json');
     this.sessionId = sessionId || readJson(this.ledgerFile, {})?.activeAuthor?.claudeSessionId || null;
     this.worker = new Worker({ ws: workspace, uiDir, claudeBin, spawnImpl, isAlive, log: (r) => this.log(r) });
-    this.watchTimer = null;
+    this.watchTimer = null; this.stopped = false;
     this.historyAt = 0; this.history = null;
   }
 
@@ -200,6 +240,7 @@ export class Controller {
     }
     this.save();
     if (interrupted) this.notifyHost(interrupted.id, 'jobFinished');
+    this.recoverContinuations();
   }
 
   watch() {
@@ -215,7 +256,7 @@ export class Controller {
     this.watchTimer.unref?.();
   }
 
-  stop() { if (this.watchTimer) clearInterval(this.watchTimer); this.watchTimer = null; }
+  stop() { this.stopped = true; if (this.watchTimer) clearInterval(this.watchTimer); this.watchTimer = null; }
 
   // ---------- idempotent submissions (browser) ----------
   _existing(key) {
@@ -283,6 +324,9 @@ export class Controller {
       this.state.paused = false; this.state.pauseRequestedAt = null;
       this.event('resume', { reason: bound(String(reason), 500) }); this.save();
       this.tryDispatch();
+      // A continuation deferred by the pause is re-evaluated once, for the latest review only.
+      const last = this.state.reviews.at(-1);
+      if (last && last.continuation?.status === 'deferredPaused') this._continueAfterReview(last);
     }
     return { pauseState: this.pauseState() };
   }
@@ -328,26 +372,48 @@ export class Controller {
     return i;
   }
 
-  /** Acknowledge an item. For an author job the coordinator supplies the dispatch plan. */
+  /** The author-mode plan check shared by author-job approval and continuation follow-ups. */
+  _validatePlan(mode, dispatch) {
+    if (mode === 'author') {
+      if (!TASK_FILE.test(dispatch.taskFile || '') || !existsSync(path.join(this.ws, 'coordination', dispatch.taskFile))) fail(400, 'ملف المهمة غير موجود في coordination.');
+      if (!PLANNED_DIR.test(dispatch.plannedDir || '')) fail(400, 'المجلد المخطط يجب أن يكون m1-draft-0.N.');
+      if (existsSync(path.join(this.ws, dispatch.plannedDir))) fail(409, 'المجلد المخطط موجود بالفعل؛ يجب أن يكون جديدًا.');
+    }
+    return { mode, sessionId: this.sessionId, taskFile: mode === 'author' ? dispatch.taskFile : null, plannedDir: mode === 'author' ? dispatch.plannedDir : null };
+  }
+
+  /**
+   * Acknowledge an item. For an author job the coordinator supplies the dispatch plan. For a
+   * continuation item the coordinator MAY supply a plan ({ mode, taskFile, plannedDir }) for the
+   * next author turn it chose; without one the continuation is just acknowledged (no action).
+   */
   ack({ itemId, note = '', dispatch = null }) {
     const i = this.state.items[itemId]; if (!i) fail(404, 'عنصر غير موجود.');
     if (!['queued', 'claimed'].includes(i.status)) fail(409, `لا يمكن تأكيد عنصر بحالة ${i.status}.`);
-    i.ackNote = bound(String(note), 2000); i.ackAt = isoNow(this.now());
     if (i.kind === 'authorJob') {
       if (!dispatch || typeof dispatch !== 'object') fail(400, 'خطة التنفيذ مطلوبة لمهمة المؤلف.');
-      const mode = i.payload.mode;
-      if (mode === 'author') {
-        if (!TASK_FILE.test(dispatch.taskFile || '') || !existsSync(path.join(this.ws, 'coordination', dispatch.taskFile))) fail(400, 'ملف المهمة غير موجود في coordination.');
-        if (!PLANNED_DIR.test(dispatch.plannedDir || '')) fail(400, 'المجلد المخطط يجب أن يكون m1-draft-0.N.');
-        if (existsSync(path.join(this.ws, dispatch.plannedDir))) fail(409, 'المجلد المخطط موجود بالفعل؛ يجب أن يكون جديدًا.');
-      }
-      i.dispatch = { mode, sessionId: this.sessionId, taskFile: mode === 'author' ? dispatch.taskFile : null, plannedDir: mode === 'author' ? dispatch.plannedDir : null };
+      const plan = this._validatePlan(i.payload.mode, dispatch);
+      i.ackNote = bound(String(note), 2000); i.ackAt = isoNow(this.now());
+      i.dispatch = plan;
       i.status = 'approved';
-      this.event('authorJob.approved', { itemId, mode });
+      this.event('authorJob.approved', { itemId, mode: plan.mode });
       this.save();
       this.tryDispatch();
       return this.state.items[itemId];
     }
+    if (i.kind === 'continuation' && dispatch !== null) {
+      if (typeof dispatch !== 'object' || Array.isArray(dispatch) || !['smoke', 'author'].includes(dispatch.mode)) fail(400, 'خطة المتابعة يجب أن تحدد mode بقيمة smoke أو author.');
+      const plan = this._validatePlan(dispatch.mode, dispatch);
+      i.ackNote = bound(String(note), 2000); i.ackAt = isoNow(this.now());
+      const job = this._add('authorJob', `contjob-${i.id}`, { mode: plan.mode, note: '', retryOf: null, continuationOf: i.id });
+      job.dispatch = plan; job.status = 'approved'; job.ackAt = i.ackAt; job.ackNote = 'خطة اختارها المنسق المضيف عبر عنصر المتابعة';
+      i.status = 'acknowledged'; i.nextJobId = job.id;
+      this.event('continuation.nextApproved', { itemId, jobId: job.id, mode: plan.mode });
+      this.save();
+      this.tryDispatch();
+      return i;
+    }
+    i.ackNote = bound(String(note), 2000); i.ackAt = isoNow(this.now());
     i.status = 'acknowledged';
     if (i.kind === 'ownerAnswer') this.state.ownerAnswers[i.payload.questionId].status = 'acknowledged';
     this.event('item.acknowledged', { itemId, kind: i.kind }); this.save();
@@ -357,7 +423,8 @@ export class Controller {
   /**
    * Record the host coordinator's actual review. Completed, failed and interrupted jobs all
    * need one before another job may start. A failed/interrupted job keeps its status after
-   * review so an explicit retry stays possible; nothing is retried automatically.
+   * review so an explicit retry stays possible; nothing is retried automatically. The review is
+   * saved with continuation 'pending' first, so a restart can finish the continuation decision.
    */
   review({ jobId, verdict, summaryAr, text = '' }) {
     const i = this.state.items[jobId]; if (!i || i.kind !== 'authorJob') fail(404, 'مهمة غير موجودة.');
@@ -365,12 +432,61 @@ export class Controller {
     if (!['completed', 'failed', 'interrupted'].includes(i.status)) fail(409, 'لا يمكن مراجعة مهمة لم تنته.');
     if (!['accept', 'revise', 'reject'].includes(verdict)) fail(400, 'حكم المراجعة غير صالح.');
     const review = { id: newId(), jobId, verdict, summaryAr: bound(this._text(summaryAr), 2000), text: bound(String(text), 20000),
-      at: isoNow(this.now()), reviewerId: this.state.reviewer?.id ?? 'host-coordinator', jobStatus: i.status };
+      at: isoNow(this.now()), reviewerId: this.state.reviewer?.id ?? 'host-coordinator', jobStatus: i.status,
+      continuation: { status: 'pending', at: null, reason: null, itemId: null } };
     this.state.reviews.push(review); i.reviewId = review.id; i.reviewedAt = review.at;
     if (i.status === 'completed') i.status = 'reviewed';
     this.event('review.recorded', { jobId, verdict }); this.save();
     this.tryDispatch();
+    this._continueAfterReview(review);
     return review;
+  }
+
+  // ---------- continuation after an actual review ----------
+  continuationPolicy() { return continuationPolicy(readJson(this.ledgerFile, null)); }
+
+  /** Why no continuation may be queued now (null: allowed). Order: stop, pause, policy, writer, unreviewed, open item. */
+  _continuationGate(policy) {
+    if (this.stopped) return 'stopped';
+    if (this.state.paused) return 'paused';
+    if (!policy.enabled) return policy.reason;
+    if (this.state.currentJob || this.worker.readLease()) return 'writerActive';
+    if (this.unreviewedJob()) return 'unreviewedReceipt';
+    if (this.state.order.some((id) => this.state.items[id].kind === 'continuation' && OPEN_STATUSES.includes(this.state.items[id].status))) return 'openContinuation';
+    return null;
+  }
+
+  _continueAfterReview(review) {
+    // An item already persisted for THIS review (a stop between saving the item and the review) is
+    // only finished, never duplicated; its notification record deduplicates as well.
+    if (this._existing(`cont-${review.id}`)) return this._enqueueContinuation(review, null);
+    const policy = this.continuationPolicy();
+    const gate = this._continuationGate(policy);
+    const at = isoNow(this.now());
+    if (gate) {
+      review.continuation = { status: gate === 'paused' ? 'deferredPaused' : 'suppressed', at, reason: gate, itemId: null };
+      this.event('continuation.suppressed', { reviewId: review.id, reason: gate });
+      this.save();
+      return null;
+    }
+    return this._enqueueContinuation(review, policy);
+  }
+
+  /** One item per review: the idempotency key is derived from the review ID, so a restart cannot add a second. */
+  _enqueueContinuation(review, policy) {
+    const key = `cont-${review.id}`;
+    let item = this._existing(key);
+    if (!item) item = this._add('continuation', key, { reviewId: review.id, jobId: review.jobId, verdict: review.verdict, readyItems: policy.items, worklistStatus: policy.worklistStatus });
+    review.continuation = { status: 'queued', at: isoNow(this.now()), reason: null, itemId: item.id };
+    this.event('continuation.queued', { reviewId: review.id, itemId: item.id });
+    this.save();
+    this.notifyHost(item.id, 'continuation');
+    return item;
+  }
+
+  /** After a restart: a review saved as 'pending' (crash before the decision) is decided once now. Legacy reviews have no field and are left alone. */
+  recoverContinuations() {
+    for (const rv of this.state.reviews) if (rv.continuation?.status === 'pending') this._continueAfterReview(rv);
   }
 
   // ---------- dispatch: one author process, only for approved items ----------
@@ -378,8 +494,17 @@ export class Controller {
     const l = readJson(this.ledgerFile, null);
     if (!l) return 'تعذّرت قراءة سجل المنسق (issue-ledger.json).';
     const a = l.activeAuthor;
-    if (a && a.state && a.state !== 'completed') return `السجل يُظهر مؤلفًا نشطًا أو غير مُثبَّت (${a.task ?? '?'}: ${a.state}).`;
-    return null;
+    if (!a || !a.state || a.state === 'completed') return null;
+    if (INACTIVE_REVIEWED.includes(a.state)) {
+      // An ended author is no longer blocking only if the ledger names a broker job that this broker
+      // persisted AND actually reviewed. Unknown, mismatched or unreviewed jobs stay blocked.
+      const j = typeof a.brokerJobId === 'string' ? own(this.state.items, a.brokerJobId) : undefined;
+      const reviewed = j && j.kind === 'authorJob' && j.reviewId && ['reviewed', 'failed', 'interrupted'].includes(j.status)
+        && this.state.reviews.some((r) => r.id === j.reviewId && r.jobId === j.id);
+      if (reviewed) return null;
+      return `السجل يُظهر مؤلفًا منتهيًا (${a.task ?? '?'}: ${a.state}) دون مراجعة وسيط مطابقة محفوظة للمهمة ${a.brokerJobId ?? '?'}.`;
+    }
+    return `السجل يُظهر مؤلفًا نشطًا أو غير مُثبَّت (${a.task ?? '?'}: ${a.state}).`;
   }
 
   /** First finished author job (completed, failed or interrupted) without an actual review. */
@@ -685,6 +810,37 @@ export class Controller {
     return OWNER_QUESTIONS.map((q) => ({ ...q, answer: this.state.ownerAnswers[q.id] ?? null }));
   }
 
+  /**
+   * Read-only display of the standing delegation and continuation progress from SAFE ledger
+   * fields only (booleans, bounded scope text, worklist IDs/kinds/status). It is shown apart from
+   * owner questions and never turns guidance or delegation into an owner answer or approval.
+   */
+  authorityView() {
+    const l = readJson(this.ledgerFile, null);
+    const a = l && typeof l === 'object' ? l.standingAuthorization : null;
+    const w = l && typeof l === 'object' ? l.continuationWork : null;
+    const word = (v, n) => (typeof v === 'string' ? bound(v, n) : null);
+    const policy = continuationPolicy(l);
+    const conts = this.state.order.map((id) => this.state.items[id]).filter((i) => i.kind === 'continuation').slice(-10)
+      .map((i) => ({ id: i.id, status: i.status, reviewId: i.payload?.reviewId ?? null, nextJobId: i.nextJobId ?? null, createdAt: i.createdAt }));
+    return redactDeep({
+      standing: a && typeof a === 'object' && !Array.isArray(a) ? {
+        scope: word(a.scope, 300), at: word(a.at, 40),
+        autonomousSequentialCycles: a.autonomousSequentialCycles === true, delegatedTechnicalDecisions: a.delegatedTechnicalDecisions === true,
+        personalApproval: a.personalApproval === true, noProduction: a.noProduction === true,
+      } : null,
+      worklist: w && typeof w === 'object' && !Array.isArray(w) ? {
+        status: word(w.status, 40),
+        items: Array.isArray(w.remainingIndependentItems) ? w.remainingIndependentItems.slice(0, CONT_ITEMS_MAX)
+          .map((it) => ({ id: word(it?.id, 80), kind: word(it?.kind, 40), scope: word(it?.scope, 20), status: word(it?.status, 20) })) : [],
+      } : null,
+      continuation: { enabled: policy.enabled, reason: policy.reason, gate: this._continuationGate(policy), recent: conts,
+        lastReview: this.state.reviews.at(-1)?.continuation ?? null },
+      latestCompletedRevision: word(l?.latestCompletedRevision, 40),
+      noteAr: 'تفويض دائم مسجل في سجل المنسق، وليس إجابات من المالك ولا موافقة شخصية. إجابات أسئلة المالك تُعرض منفصلة ولا تتغير.',
+    });
+  }
+
   waitingReason() {
     const items = this.state.order.map((id) => this.state.items[id]);
     if (this.state.currentJob) return 'workerRunning';
@@ -708,6 +864,7 @@ export class Controller {
       items, reviews: this.state.reviews.slice(-50), timelineSig: this.timelineSig(), owner: this.ownerView(), events: this.state.events.slice(-40),
       notifier: this.notifierStatus(),
       notifications: Object.values(this.state.notifications).slice(-200),
+      authority: this.authorityView(),
     });
   }
 }

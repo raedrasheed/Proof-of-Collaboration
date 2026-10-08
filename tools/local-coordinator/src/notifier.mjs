@@ -18,6 +18,7 @@ const OUT_MAX = 4000;
 const REASONS = {
   queued: 'a new user request was saved in the local broker queue',
   jobFinished: 'a user-requested author job has ended and needs an actual review of its real receipt',
+  continuation: 'an actual review was recorded and the saved standing authorization allows one continuation request',
 };
 
 /** An explicit executable path: an existing regular file; on Windows a real .exe (shell:false cannot run .cmd). */
@@ -38,9 +39,20 @@ export function notificationMessage({ itemId, reason, kind = null, status = null
   if (kind !== null && !WORD_RE.test(kind)) throw new Error('نوع العنصر غير صالح.');
   if (status !== null && !WORD_RE.test(status)) throw new Error('حالة العنصر غير صالحة.');
   if (typeof connectionPath !== 'string' || !path.isAbsolute(connectionPath) || /[\r\n]/.test(connectionPath)) throw new Error('مسار ملف الاتصال غير صالح.');
-  return [
+  const head = [
     'PoCol local coordinator notice (transport only: not a review, not an approval, not a new task).',
     `Broker item ${itemId}${kind ? ` [${kind}${status ? ', ' + status : ''}]` : ''}: ${REASONS[reason]}.`,
+  ];
+  if (reason === 'continuation') {
+    return [...head,
+      `As the existing host coordinator, read the private connection file ${connectionPath} for the reviewer API and header, attach,`,
+      'then read coordination/issue-ledger.json (standingAuthorization, continuationWork) and the latest checkpoint, claim this one item,',
+      'and decide the next useful M1 action yourself: acknowledge it with an explicit plan, or with no action. Nothing was reviewed or started automatically.',
+      'Preserve the M1 policy, the pause control and the single-writer rule; never approve anything on the owner\'s behalf.',
+      'Ignore continuation items that are already acknowledged.',
+    ].join(' ');
+  }
+  return [...head,
     `As the existing host coordinator, read the private connection file ${connectionPath} for the reviewer API and header, attach,`,
     'then claim/ack the actual pending requests; for an ended author job, review its real receipt before recording a review.',
     'Preserve the M1 policy and the single-writer rule; never approve anything on the owner\'s behalf.',
