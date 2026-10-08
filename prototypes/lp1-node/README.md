@@ -1,14 +1,19 @@
-# lp1-node: LP1 local experimental Rust node (author revision 1, transport 0.34)
+# lp1-node: LP1 local experimental Rust node (author revision 2, transport 0.35)
 
 LP1 is a local, experimental M3-foundation slice built on the accepted M1 formats (baseline M1 spec
 0.32). It is **not** an M1 amendment and makes **no** change to the baseline. It is not full M3, not
 consensus and not an EVM. It has no P2P, no transactions, no contracts or publisher, no keys and no
 signing. The M1 contract/publisher phase is **not** claimed as executed.
 
-The m1-draft-0.34 folder is only the broker's transport namespace. Root imports this exact code onto
-the LP1 prototype branch, generates `Cargo.lock`, copies the fixtures, then builds, tests and reviews.
-**The author compiled, ran and formatted nothing.** Every acceptance criterion below is untested until
-root runs it.
+The m1-draft-0.34 and m1-draft-0.35 folders are only the broker's transport namespace. Root imports the
+code onto the LP1 prototype branch, generates `Cargo.lock`, copies the fixtures, then builds, tests and
+reviews. **The author compiled, ran and formatted nothing.** Every acceptance criterion below is
+untested until root runs it.
+
+Revision 2 (0.35) corrects:
+
+- **LP1-I01:** a raw byte string with non-ASCII text in `src/json.rs` tests, which blocked compilation;
+- **LP1-I02:** request ids now follow the accepted C19 binary64 value semantics.
 
 ## Layout
 
@@ -45,6 +50,9 @@ Root copies `coordination/lp1-inputs/*` into `fixtures/`:
 The author did not rewrite or copy any of them. The binary's default fixture directory is
 `<crate root>/fixtures`, fixed at compile time through `CARGO_MANIFEST_DIR`, so the binary runs from
 any working directory. `--fixtures DIR` overrides it.
+
+The 16 rows of the native C19 id oracle (`coordination/lp1-review-r1/c19-native-oracle.json`) are
+embedded as test constants in `src/json.rs` (`C19_ORACLE`). They are not a fixture file.
 
 The V1NET profile is **synthetic and non-bootable**. Its state, tx, receipts and evidence roots, its
 allocation root, system code hash and M_0 entries are opaque fixture bytes.
@@ -159,6 +167,7 @@ viewFuture runs before ASERT, and the ceil check runs before PoW. **Items 10–1
 
 The -32018 message is `"params"`, as in `m1-draft-0.26/vectors/v1-window-cases.json`. F0–F2 do not
 read state. The chain is immutable, so the head is a per-request snapshot by construction.
+Quantities stay exact: they are hex strings parsed as u64, never floats.
 
 **Every other method returns -32601 `{reason:"unsupported"}` and leaves state unchanged.** This
 includes:
@@ -172,12 +181,35 @@ The router holds only a shared reference, and tests compare a state digest befor
 **Request JSON rules:**
 
 - The body must be valid UTF-8.
-- Duplicate keys are rejected at any depth.
+- The grammar is strict RFC 8259; numbers are kept as raw tokens.
+- Duplicate keys are rejected at any depth, compared after unescaping.
 - Containers may nest at most 16 deep.
 - The HTTP body is at most 4096 bytes.
 - Batches are refused.
 - Members other than jsonrpc, id, method and params are refused.
-- `id` is required. It must be a JSON number whose exact value is an integer in 0..2^32-1. It is echoed normalised (`7.0` → `7`). Booleans, strings, null, fractions and out-of-range values are refused.
+
+**Request id (accepted C19 value semantics, LP1-I02):**
+
+- `id` is required, and must be a JSON number token.
+- Its value is the IEEE-754 binary64 value of the token, as `JSON.parse` / Python `json` compute it. Rust's correctly rounded `str::parse::<f64>` is applied only to tokens that already passed the strict grammar.
+- The value must be finite, integral and in 0..2^32-1. It is echoed normalised to an integer.
+- Booleans, strings and null are refused with -32600 `{reason:"id"}` and `id: null`.
+
+| Id token | Outcome |
+|---|---|
+| `1`, `1.0`, `1e0` | id 1 |
+| `-0`, `-0.0` | id 0 |
+| `1e-400` | id 0 (underflow) |
+| `4294967295.0000000001` | id 4294967295 (rounds down) |
+| `4294967295.9999999999` | refused (rounds to 2^32) |
+| `4294967296` | refused (out of range) |
+| `-1` | refused (negative) |
+| `2.5` | refused (fractional) |
+| `1e400` | refused (overflows to infinity) |
+| `true`, `"2"`, `null` | refused (not a number) |
+
+These are exactly the 16 rows of the native C19 oracle. They are tested in `json::tests` and over
+the router in `rpc::tests::c19_oracle_ids_over_rpc`.
 
 **Prototype wire convention** (LP1 only):
 
@@ -225,15 +257,18 @@ A client disconnect ends that connection only.
 - resource budgets beyond the fixed limits above;
 - signal-driven graceful shutdown.
 
-## Recorded questions (no silent change; none blocks LP1, root/owner decide)
+## Conformance notes and recorded questions
 
-1. **JSON id semantics.** The accepted C19 `integral()` reference works on Python floats. LP1 uses exact decimal value semantics instead. Lexemes whose binary64 rounding is integral but whose exact value is not are refused here. Examples: `1e-400`, `4294967295.0000000001`.
-2. **Error-envelope convention.** The -32700, -32600 and -32601 `data.reason` values, and the transport HTTP status codes, are a prototype convention. They are not part of M1.
+1. **JSON id semantics: resolved in revision 2, and no longer a question.** Revision 1 used exact decimal values, which departed from accepted C19 (LP1-I02). That blocked A6 conformance. Revision 2 implements the accepted binary64 value semantics described under "RPC" above. No M1 change.
+2. **Error-envelope convention.** The -32700, -32600 and -32601 `data.reason` values, and the transport HTTP status codes, are a prototype convention. They are not part of M1, and the reviewer will assess them after the code compiles.
 3. **Nesting bound.** The window's outer-reply decode applies the strict RLP nesting bound of 16. A header whose field is a list nested deeper than 16 is therefore `viewIncomplete` here. Python would decode it and report rule 1. Python itself fails with `viewIncomplete` at its recursion limit.
 4. **Genesis wrapped single byte.** A wrapped single byte in the genesis preimage is an L0 framing error here, but gsInt in `netprofile_ref`. Both reject it.
 5. **Load-time chain validation has no wall clock.** viewFuture is not applied at load; it is applied in every window check.
 6. **Fork schedule validation.** The rule that start heights must be strictly ascending and the schedule non-empty is an LP1 loader rule.
 7. **Notifications.** Requests without an id are refused with -32600 `{reason:"id"}` rather than left unanswered.
+
+Items 2–7 are prototype choices that the review will assess. None of them is claimed as full M3 or
+M7 behaviour.
 
 ## Licenses and versions
 
@@ -263,6 +298,8 @@ The code uses no API newer than Rust 1.58. In particular it avoids:
 - `std::hint::black_box`;
 - const `thread_local!`.
 
+Non-ASCII text appears only in normal UTF-8 string literals, never in byte-string literals.
+
 ## Acceptance criteria (all untested by the author)
 
 - **A0:**
@@ -271,7 +308,7 @@ The code uses no API newer than Rust 1.58. In particular it avoids:
   - The baseline files must be unchanged; root diffs this.
 - **A1:**
   - `cargo build --offline` and `cargo test --offline` must pass on 1.58.1 with the generated lock.
-  - `cargo fmt -- --check` must pass. The author could not run rustfmt, so a formatting-only pass may be needed.
+  - `cargo fmt -- --check` must pass. Root applies canonical rustfmt.
   - Licenses must be recorded, with no target artifacts or binaries in Git.
 - **A2:**
   - `rlp`/`header` unit tests and `a2_chain_headers_reencode_exactly` must pass.
@@ -293,6 +330,7 @@ The code uses no API newer than Rust 1.58. In particular it avoids:
 - **A6:**
   - Chain load must reject mutations.
   - The RPC tests over head 20 and the empty chain must pass.
+  - All 16 C19 oracle id rows must pass, both directly and over RPC.
   - The window check over the node's own RPC must equal the RW-h20 counters.
 - **A7:**
   - `http_loopback` tests must pass.

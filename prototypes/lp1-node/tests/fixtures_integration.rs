@@ -215,7 +215,7 @@ fn a5_mutations_are_rejected() {
     assert_eq!(run(s.with(10, &|x| high_s(&mut x.sig))), ("3", Some(10)));
     assert_eq!(run(s.with(10, &|x| x.sig[64] = 27)), ("3", Some(10)));
     assert_eq!(run(s.with(10, &|x| x.sig.clear())), ("3", Some(10))); // proposer without sig
-    // Winner signature: high-S and bad v are item 8.
+                                                                      // Winner signature: high-S and bad v are item 8.
     assert_eq!(run(s.with(10, &|x| high_s(&mut x.winner_sig))), ("8", Some(10)));
     assert_eq!(run(s.with(10, &|x| x.winner_sig[64] = 2)), ("8", Some(10)));
     // Nonce: pick one whose powHash exceeds the target (item 7, before item 8).
@@ -225,7 +225,8 @@ fn a5_mutations_are_rejected() {
     assert_eq!(run(s.with(10, &|x| x.nonce = pow_fail)), ("7", Some(10)));
     // Shares: order, equality with nonce, T_share, and the 256 bound.
     let t_share = lp1_node::fixed::U512::mul_u256_u64(&h10.target, 32).clamp_u256();
-    let bad_share = (0u64..).find(|k| *k != h10.nonce && U256::from_be_slice(&hashes::sha256(&hashes::tid_nonce_preimage(&tid, *k))).unwrap() > t_share).unwrap();
+    let bad_share =
+        (0u64..).find(|k| *k != h10.nonce && U256::from_be_slice(&hashes::sha256(&hashes::tid_nonce_preimage(&tid, *k))).unwrap() > t_share).unwrap();
     assert_eq!(run(s.with(10, &|x| x.shares = vec![bad_share])), ("9", Some(10)));
     assert_eq!(run(s.with(10, &|x| x.shares = vec![h10.nonce])), ("9", Some(10)));
     assert_eq!(run(s.with(10, &|x| x.shares = vec![5, 5])), ("9", Some(10)));
@@ -251,7 +252,7 @@ fn a5_mutations_are_rejected() {
         ("5", Some(10))
     );
     assert_eq!(run(s.with(10, &|x| x.a = 1)), ("3", Some(10))); // signed with a != 0
-    // Structure: missing reference, swapped heights.
+                                                                // Structure: missing reference, swapped heights.
     assert_eq!(run(outer(&s.items[1..])), ("viewIncomplete", None));
     let mut sw = s.items.clone();
     sw.swap(2, 3);
@@ -349,7 +350,18 @@ fn a6_rpc_over_validated_chain() {
     assert!(err("[\"0x0\",\"0x1\"]").contains("fromZero"));
     assert!(err("[\"0x1\",\"0x0\"]").contains("countRange"));
     assert!(err("[\"0x10000000000000000\",\"0x1\"]").contains("\"params[0]\""));
-    for m in ["eth_sendRawTransaction", "eth_sendTransaction", "eth_accounts", "eth_requestAccounts", "eth_sign", "personal_sign", "eth_signTypedData_v4", "wallet_switchEthereumChain", "eth_getBalance", "pocol_submitBlock"] {
+    for m in [
+        "eth_sendRawTransaction",
+        "eth_sendTransaction",
+        "eth_accounts",
+        "eth_requestAccounts",
+        "eth_sign",
+        "personal_sign",
+        "eth_signTypedData_v4",
+        "wallet_switchEthereumChain",
+        "eth_getBalance",
+        "pocol_submitBlock",
+    ] {
         assert!(call(m, "[\"0x00\"]").contains("\"code\":-32601"), "{m}");
     }
     assert_eq!(n.chain.state_digest(), before);

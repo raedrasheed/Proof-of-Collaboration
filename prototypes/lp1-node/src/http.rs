@@ -206,11 +206,8 @@ fn read_request(s: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, ReqErr>
 }
 
 fn write_response(s: &mut TcpStream, code: u16, body: &str) {
-    let msg = format!(
-        "HTTP/1.1 {code} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        status_text(code),
-        body.len()
-    );
+    let msg =
+        format!("HTTP/1.1 {code} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", status_text(code), body.len());
     let _ = s.set_write_timeout(Some(Duration::from_millis(2000)));
     let _ = s.write_all(msg.as_bytes());
     let _ = s.flush();

@@ -1,6 +1,7 @@
 //! Strict JSON (RFC 8259) for RPC requests: UTF-8 checked first, duplicate object keys rejected at
 //! any depth (compared after unescaping), container nesting <= 16, lone surrogates rejected,
-//! numbers kept as their exact lexeme (never converted through floating point).
+//! numbers kept as their raw lexeme. Only the request id is given a numeric value, and that value
+//! follows the accepted C19 semantics: the IEEE-754 binary64 value of the lexeme (JSON.parse).
 
 pub const MAX_DEPTH: usize = 16;
 
@@ -277,81 +278,28 @@ pub fn parse(bytes: &[u8]) -> Result<JVal, JsonError> {
     Ok(v)
 }
 
-/// Exact value semantics for a JSON number lexeme: Some(v) iff the number's exact decimal value is
-/// an integer in 0..=2^32-1 ("5", "5.0", "5e0", "50e-1", "-0" all give 5 or 0). Never uses floats.
+/// True iff `lex` is exactly one RFC 8259 number token (same grammar the parser uses).
+pub fn is_number_lexeme(lex: &str) -> bool {
+    let mut p = P { b: lex.as_bytes(), i: 0 };
+    p.number().is_ok() && p.i == lex.len()
+}
+
+/// Accepted C19 id value semantics (JSON.parse / Python json + integral_value): the lexeme's
+/// IEEE-754 binary64 value (round-to-nearest-even decimal conversion) must be finite and
+/// integral and lie in 0..=2^32-1; -0 normalises to 0. So "1e-400" (underflow to 0) gives 0,
+/// "4294967295.0000000001" (rounds to 4294967295) gives 4294967295, "4294967295.9999999999"
+/// (rounds to 2^32) and "1e400" (overflow to infinity) are invalid, "2.5" is invalid.
+/// Booleans, strings and null never reach this function (they are not number tokens).
 pub fn integral_u32(lex: &str) -> Option<u32> {
-    let (neg, body) = match lex.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, lex),
-    };
-    let (mant, exp) = match body.find(|c: char| c == 'e' || c == 'E') {
-        Some(k) => (&body[..k], &body[k + 1..]),
-        None => (body, ""),
-    };
-    let (int_part, frac_part) = match mant.split_once('.') {
-        Some((a, b)) => (a, b),
-        None => (mant, ""),
-    };
-    let exp_digits = exp.strip_prefix(|c: char| c == '+' || c == '-').unwrap_or(exp);
-    if int_part.is_empty()
-        || !int_part.bytes().all(|c| c.is_ascii_digit())
-        || !frac_part.bytes().all(|c| c.is_ascii_digit())
-        || !exp_digits.bytes().all(|c| c.is_ascii_digit())
-        || (body.len() > mant.len() && exp_digits.is_empty())
-    {
+    if !is_number_lexeme(lex) {
         return None;
     }
-    let mut digits: Vec<u8> = int_part.bytes().chain(frac_part.bytes()).map(|c| c - b'0').collect();
-    // Exponent, clamped: anything beyond +-10^6 is decided by sign alone below.
-    let e: i64 = if exp.is_empty() {
-        0
-    } else {
-        let (es, ed) = match exp.as_bytes()[0] {
-            b'+' => (1i64, &exp[1..]),
-            b'-' => (-1i64, &exp[1..]),
-            _ => (1i64, exp),
-        };
-        let ed = ed.trim_start_matches('0');
-        if ed.len() > 7 {
-            es * 10_000_000
-        } else if ed.is_empty() {
-            0
-        } else {
-            es * ed.parse::<i64>().ok()?
-        }
-    };
-    let mut scale = e - frac_part.len() as i64;
-    while digits.first() == Some(&0) {
-        digits.remove(0);
-    }
-    if digits.is_empty() {
-        return Some(0);
-    }
-    if neg {
+    // Rust's str -> f64 conversion is correctly rounded (nearest, ties to even), like JSON.parse.
+    let x: f64 = lex.parse().ok()?;
+    if !x.is_finite() || x.fract() != 0.0 || x < 0.0 || x > u32::MAX as f64 {
         return None;
     }
-    while digits.last() == Some(&0) {
-        digits.pop();
-        scale += 1;
-    }
-    if scale < 0 {
-        return None;
-    }
-    if digits.len() as i64 + scale > 10 {
-        return None;
-    }
-    let mut v: u64 = 0;
-    for d in &digits {
-        v = v * 10 + *d as u64;
-    }
-    for _ in 0..scale {
-        v *= 10;
-    }
-    if v > u32::MAX as u64 {
-        None
-    } else {
-        Some(v as u32)
-    }
+    Some(x as u32)
 }
 
 /// JSON string literal for output.
@@ -365,7 +313,7 @@ pub fn quote(s: &str) -> String {
             '\n' => o.push_str("\\n"),
             '\r' => o.push_str("\\r"),
             '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => o.push_str(&format!("{}u{:04x}", '\\', c as u32)),
             c => o.push(c),
         }
     }
@@ -373,27 +321,71 @@ pub fn quote(s: &str) -> String {
     o
 }
 
+/// The 16-row native C19 oracle (coordination/lp1-review-r1/c19-native-oracle.json, Node v22.13.1
+/// JSON.parse): (id lexeme, normalised id or None when invalid).
+#[cfg(test)]
+pub(crate) const C19_ORACLE: [(&str, Option<u32>); 16] = [
+    ("1", Some(1)),
+    ("1.0", Some(1)),
+    ("1e0", Some(1)),
+    ("-0", Some(0)),
+    ("-0.0", Some(0)),
+    ("1e-400", Some(0)),
+    ("4294967295", Some(4294967295)),
+    ("4294967295.0000000001", Some(4294967295)),
+    ("4294967295.9999999999", None),
+    ("4294967296", None),
+    ("-1", None),
+    ("2.5", None),
+    ("true", None),
+    ("\"2\"", None),
+    ("null", None),
+    ("1e400", None),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// One backslash, so escape sequences in test inputs are assembled at run time.
+    const BS: char = '\\';
+
     #[test]
     fn accepts_and_rejects() {
-        assert!(parse(br#"{"a":[1,2,{"b":null}],"c":"é😀"}"#).is_ok());
+        // Raw UTF-8 text (non-ASCII) in a normal string, converted with as_bytes().
+        let utf8 = "{\"a\":[1,2,{\"b\":null}],\"c\":\"é😀\"}";
+        assert!(utf8.bytes().any(|b| b >= 0x80));
+        match parse(utf8.as_bytes()).unwrap().get("c") {
+            Some(JVal::Str(s)) => assert_eq!(s, "é😀"),
+            other => panic!("{other:?}"),
+        }
+        // The same characters as JSON escapes (a surrogate pair for the emoji).
+        let escaped = format!("{{\"c\":\"{BS}u00e9{BS}ud83d{BS}ude00\"}}");
+        assert!(escaped.is_ascii());
+        assert_eq!(parse(escaped.as_bytes()).unwrap().get("c"), Some(&JVal::Str("é😀".to_string())));
         assert_eq!(parse(br#"{"a":1,"a":2}"#), Err(JsonError::DuplicateKey));
-        assert_eq!(parse(br#"{"x":{"a":1,"a":2}}"#), Err(JsonError::DuplicateKey));
+        let esc_dup = format!("{{\"x\":{{\"a\":1,\"{BS}u0061\":2}}}}");
+        assert_eq!(parse(esc_dup.as_bytes()), Err(JsonError::DuplicateKey));
         assert_eq!(parse(br#"[{"k":[{"a":0,"a":0}]}]"#), Err(JsonError::DuplicateKey));
         assert_eq!(parse(b"{\"a\":\"\xff\"}"), Err(JsonError::Utf8));
         assert_eq!(parse(br#"{"a":01}"#), Err(JsonError::Syntax));
         assert_eq!(parse(br#"{"a":1.}"#), Err(JsonError::Syntax));
         assert_eq!(parse(br#"{"a":+1}"#), Err(JsonError::Syntax));
         assert_eq!(parse(br#"{"a":NaN}"#), Err(JsonError::Syntax));
-        assert_eq!(parse(br#"{"a":"\ud800"}"#), Err(JsonError::Syntax));
-        assert_eq!(parse(br#"{"a":"\udc00"}"#), Err(JsonError::Syntax));
+        let lone_hi = format!("{{\"a\":\"{BS}ud800\"}}");
+        assert_eq!(parse(lone_hi.as_bytes()), Err(JsonError::Syntax));
+        let lone_lo = format!("{{\"a\":\"{BS}udc00\"}}");
+        assert_eq!(parse(lone_lo.as_bytes()), Err(JsonError::Syntax));
         assert_eq!(parse(b"{\"a\":\"\x01\"}"), Err(JsonError::Syntax));
         assert_eq!(parse(br#"{} x"#), Err(JsonError::Syntax));
         assert_eq!(parse(br#"{"a":1,}"#), Err(JsonError::Syntax));
         assert_eq!(parse(b""), Err(JsonError::Syntax));
+    }
+
+    #[test]
+    fn quote_escapes_controls() {
+        let q = quote("a\u{1}\"");
+        assert_eq!(q, format!("\"a{BS}u0001{BS}\"\""));
     }
 
     #[test]
@@ -407,26 +399,38 @@ mod tests {
     }
 
     #[test]
-    fn integral_semantics() {
+    fn c19_native_oracle_rows() {
+        for (lex, want) in C19_ORACLE.iter() {
+            assert_eq!(integral_u32(lex), *want, "{lex}");
+        }
+    }
+
+    #[test]
+    fn integral_binary64_semantics() {
         for (lex, want) in [
             ("0", Some(0)),
-            ("-0", Some(0)),
-            ("-0.0e5", Some(0)),
-            ("7", Some(7)),
+            ("-0e5", Some(0)),
             ("7.0", Some(7)),
-            ("7e0", Some(7)),
             ("70e-1", Some(7)),
             ("0.7e1", Some(7)),
-            ("4294967295", Some(u32::MAX)),
             ("4294967295.000", Some(u32::MAX)),
-            ("4294967296", None),
             ("42949672950e-1", Some(u32::MAX)),
-            ("-1", None),
+            ("-1e-400", Some(0)),
+            ("1e-5", None),
             ("1.5", None),
-            ("1e-400", None),
-            ("1e400", None),
             ("1e99999999999", None),
             ("0e99999999999", Some(0)),
+            ("4294967296.0", None),
+            // Not number tokens: refused before any conversion.
+            ("+1", None),
+            (".5", None),
+            ("1.", None),
+            ("01", None),
+            ("inf", None),
+            ("NaN", None),
+            ("1e", None),
+            (" 1", None),
+            ("", None),
         ] {
             assert_eq!(integral_u32(lex), want, "{lex}");
         }

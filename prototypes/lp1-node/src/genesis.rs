@@ -193,14 +193,7 @@ pub fn decode_identity(pre: &[u8]) -> Result<GenesisIdentity, GenesisError> {
         }
         cp_out.push(v);
     }
-    Ok(GenesisIdentity {
-        hash: keccak256(pre),
-        chain_id,
-        cp: cp_out,
-        alloc_root,
-        sys_code_hash,
-        m0_entries: m0.len(),
-    })
+    Ok(GenesisIdentity { hash: keccak256(pre), chain_id, cp: cp_out, alloc_root, sys_code_hash, m0_entries: m0.len() })
 }
 
 #[cfg(test)]

@@ -11,8 +11,9 @@
 //!   -32602 "params"  data {path: "params" | "params[i]"}  (browser.md / br-messages convention)
 //!   -32018 "params"  data {reason: fromZero | countRange | fromAboveHead | beyondHead}
 //!                    (as in m1-draft-0.26/vectors/v1-window-cases.json replyError)
-//! The id must be present and be a JSON number whose exact value is an integer in 0..=2^32-1; it is
-//! echoed in normalised integer form ("7.0" -> 7).
+//! The id must be present and be a JSON number whose accepted C19 value (IEEE-754 binary64, as
+//! JSON.parse) is finite, integral and in 0..=2^32-1; it is echoed normalised ("7.0" -> 7,
+//! "-0" -> 0, "1e-400" -> 0). Booleans, strings and null are refused.
 
 use crate::chain::FixtureChain;
 use crate::hex;
@@ -252,9 +253,38 @@ mod tests {
         assert!(call(&r, r#"[{"jsonrpc":"2.0","id":1,"method":"eth_chainId"}]"#).contains("\"reason\":\"batch\""));
         assert!(call(&r, r#"{"jsonrpc":"2.0","id":1,"id":1,"method":"eth_chainId"}"#).contains("duplicateKey"));
         assert!(call(&r, r#"{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[1]}"#).contains("-32602"));
-        for m in ["eth_sendRawTransaction", "eth_sendTransaction", "eth_accounts", "eth_requestAccounts", "eth_sign", "personal_sign", "wallet_addEthereumChain", "eth_call", "pocol_submit", ""] {
+        for m in [
+            "eth_sendRawTransaction",
+            "eth_sendTransaction",
+            "eth_accounts",
+            "eth_requestAccounts",
+            "eth_sign",
+            "personal_sign",
+            "wallet_addEthereumChain",
+            "eth_call",
+            "pocol_submit",
+            "",
+        ] {
             let resp = call(&r, &format!("{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"{m}\",\"params\":[]}}"));
             assert_eq!(resp, r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"method","data":{"reason":"unsupported"}}}"#);
         }
+    }
+
+    /// Every row of the 16-row native C19 oracle, sent as the request id over the router.
+    #[test]
+    fn c19_oracle_ids_over_rpc() {
+        let c = FixtureChain::empty();
+        let r = Router::new(777002, &c);
+        for (lex, want) in json::C19_ORACLE.iter() {
+            let resp = call(&r, &format!("{{\"jsonrpc\":\"2.0\",\"id\":{lex},\"method\":\"eth_chainId\"}}"));
+            match want {
+                Some(id) => assert_eq!(resp, format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":\"0xbdb2a\"}}"), "{lex}"),
+                None => assert_eq!(resp, r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"request","data":{"reason":"id"}}}"#, "{lex}"),
+            }
+        }
+        // An invalid id is refused even for an otherwise unknown method (id is checked first).
+        assert!(call(&r, r#"{"jsonrpc":"2.0","id":2.5,"method":"eth_sendRawTransaction"}"#).contains("\"reason\":\"id\""));
+        // A valid normalised id is echoed on errors too.
+        assert!(call(&r, r#"{"jsonrpc":"2.0","id":1e-400,"method":"eth_sendRawTransaction"}"#).starts_with("{\"jsonrpc\":\"2.0\",\"id\":0,\"error\""));
     }
 }

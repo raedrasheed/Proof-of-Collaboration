@@ -92,7 +92,13 @@ fn run() -> Result<bool, String> {
                 writeln!(out, "{}", r.to_json()).map_err(|e| e.to_string())?;
             }
             let pass = reports.iter().filter(|r| r.pass()).count();
-            writeln!(out, "{{\"check\":\"window\",\"cache\":{cache},\"cases\":{},\"pass\":{pass},\"itemsNotEvaluated\":\"{}\"}}", reports.len(), window::ITEMS_NOT_EVALUATED).map_err(|e| e.to_string())?;
+            writeln!(
+                out,
+                "{{\"check\":\"window\",\"cache\":{cache},\"cases\":{},\"pass\":{pass},\"itemsNotEvaluated\":\"{}\"}}",
+                reports.len(),
+                window::ITEMS_NOT_EVALUATED
+            )
+            .map_err(|e| e.to_string())?;
             Ok(pass == reports.len())
         }
         "hash" => {

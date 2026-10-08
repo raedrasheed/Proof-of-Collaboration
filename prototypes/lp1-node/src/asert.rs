@@ -104,7 +104,7 @@ mod tests {
         assert_eq!(o.target, tg);
         assert_eq!(o.early, Early::No);
         assert_eq!(o.max_bits, 257); // bits(X) = 240 + 17
-        // dt = -1: e = floor(-65536/600) = -110, s = -1, f = 65426.
+                                     // dt = -1: e = floor(-65536/600) = -110, s = -1, f = 65426.
         let o = run(&tg, -1);
         assert!(o.target < tg);
         // s = 255 (dt = 255*600) stays in the shift path; s = 256 exits high.

@@ -269,7 +269,11 @@ fn headers_of_cases(cases: &Value) -> Vec<Header> {
 /// with this crate's domain functions (TemplateID, powHash, shareHash, blockHash, sigMsg, winMsg,
 /// shareRoot).
 pub fn run_hash_checks(oracle: &Value, cases: &Value) -> Result<HashReport, String> {
-    let k = [("", "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"), ("c0", "1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"), ("80", "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")];
+    let k = [
+        ("", "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"),
+        ("c0", "1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"),
+        ("80", "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),
+    ];
     let known_answers_ok = k.iter().all(|(p, d)| hex::encode(&keccak256(&hex::decode(p).unwrap_or_default())) == *d);
     let mut derived_set: HashSet<(&'static str, Vec<u8>)> = HashSet::new();
     for h in headers_of_cases(cases) {
@@ -309,18 +313,8 @@ pub fn run_hash_checks(oracle: &Value, cases: &Value) -> Result<HashReport, Stri
         }
         let slot = rep.derived.entry(group.to_string()).or_insert((0, 0));
         slot.1 += 1;
-        let key: Option<&'static str> = [
-            "v1.templateId",
-            "v1.powHash",
-            "v1.shareHash",
-            "v1.blockHash",
-            "v1.sigMsg",
-            "v1.winMsg",
-            "v1.shareRoot",
-        ]
-        .iter()
-        .copied()
-        .find(|g| *g == group);
+        let key: Option<&'static str> =
+            ["v1.templateId", "v1.powHash", "v1.shareHash", "v1.blockHash", "v1.sigMsg", "v1.winMsg", "v1.shareRoot"].iter().copied().find(|g| *g == group);
         match key {
             Some(g) if derived_set.contains(&(g, pre.clone())) => slot.0 += 1,
             _ => rep.failures.push(format!("{id}: preimage not derived from fixture headers")),
@@ -353,7 +347,14 @@ pub fn verify_all(dir: &Path, out: &mut dyn Write) -> Result<bool, String> {
     for r in &reports {
         writeln!(out, "{}", r.to_json()).map_err(|e| e.to_string())?;
     }
-    writeln!(out, "{{\"check\":\"window\",\"ok\":{},\"cases\":{},\"pass\":{wpass},\"itemsNotEvaluated\":\"{}\"}}", wpass == reports.len(), reports.len(), window::ITEMS_NOT_EVALUATED).map_err(|e| e.to_string())?;
+    writeln!(
+        out,
+        "{{\"check\":\"window\",\"ok\":{},\"cases\":{},\"pass\":{wpass},\"itemsNotEvaluated\":\"{}\"}}",
+        wpass == reports.len(),
+        reports.len(),
+        window::ITEMS_NOT_EVALUATED
+    )
+    .map_err(|e| e.to_string())?;
     let oracle = fixtures::read_json(dir, "asert-oracle.json")?;
     let mut sink = Vec::new();
     let (rows, matched) = run_asert_rows(&oracle, &mut sink)?;
