@@ -212,18 +212,38 @@ fn p2_invalid_append_leaves_state_unchanged() {
             }
             assert_eq!(w.height(), 7);
         }
-        // Whole batch validated before any write: a bad second element leaves H8 unwritten too.
-        match w.append(&[c[7].clone(), cases[0].0.clone()]) {
-            Err(StoreError::Rejected { index: 1, .. }) => {}
-            other => panic!("{other:?}"),
+        // Whole batch validated before any write (LP2-I01): a valid H8 followed by a genuinely
+        // invalid next-height H9 (winner signature v = 2, item 8). The H9 rejection is reported at
+        // index 1 / height 9, and H8 is not written either.
+        let bad_h9 = mutated(&c[8], &|x| x.winner_sig[64] = 2);
+        assert_eq!(header::decode(&bad_h9).unwrap().h, 9);
+        match w.append(&[c[7].clone(), bad_h9]) {
+            Err(StoreError::Rejected { index: 1, height: Some(9), rule, .. }) => assert_eq!(rule, "8"),
+            other => panic!("want Rejected index 1 height 9 rule 8, got {other:?}"),
         }
+        assert_eq!(w.height(), 7);
+        // A different rule at the batch's second element: H9 whose parent hash does not link to H8.
+        let unlinked_h9 = mutated(&c[8], &|x| x.parent_hash[31] ^= 1);
+        match w.append(&[c[7].clone(), unlinked_h9]) {
+            Err(StoreError::Rejected { index: 1, height: Some(9), rule, .. }) => assert_eq!(rule, "2"),
+            other => panic!("want Rejected index 1 height 9 rule 2, got {other:?}"),
+        }
+        assert_eq!(w.height(), 7);
+        // Separately: a conflicting sibling of the batch's own simulated tip is notLinear, not a
+        // validity verdict, and also leaves nothing written.
+        match w.append(&[c[7].clone(), cases[0].0.clone()]) {
+            Err(StoreError::NotLinear { index: 1, height: 8, tip: 8, .. }) => {}
+            other => panic!("want NotLinear index 1 height 8 tip 8, got {other:?}"),
+        }
+        assert_eq!(w.height(), 7);
         // Bounds before decoding/allocation.
         assert_eq!(w.append(&[vec![0u8; store::MAX_HEADER_BYTES + 1]]).unwrap_err().kind(), "bound");
         assert_eq!(w.append(&vec![c[7].clone(); store::MAX_BATCH + 1]).unwrap_err().kind(), "bound");
         assert_eq!(w.height(), 7);
         assert!(!w.is_poisoned());
     }
-    assert_eq!(store::read_status(&d, &b).unwrap().journal_sha256, sha);
+    let after = store::read_status(&d, &b).unwrap();
+    assert_eq!((after.height, after.journal_sha256), (7, sha));
     // A rejected append does not block a later valid one.
     let mut w = Writer::open(&d, &b).unwrap();
     assert_eq!(w.append(&[c[7].clone()]).unwrap().height, 8);
@@ -376,7 +396,7 @@ fn p4_every_truncation_of_the_final_record() {
         }
     }
     // Through files: writer refuses, recovery copies the prefix into a NEW store, source untouched.
-    for cut in [1usize, 19, 20, store::REC_HEADER_AT + 1, total - 1] {
+    for cut in [1usize, 17, 19, 20, store::REC_HEADER_AT + 1, total - 20, total - 1] {
         let src = tmp.sub(&format!("torn-{cut}"));
         raw_store(&src, &good[..start + cut]);
         let before = journal_bytes(&src);
@@ -400,6 +420,69 @@ fn p4_every_truncation_of_the_final_record() {
         Writer::open(&dest, &b).unwrap().append(&[chain()[1].clone()]).unwrap();
         assert_eq!(store::recover(&src, &dest, &b).unwrap_err().kind(), "exists");
     }
+}
+
+/// LP2-I02: partial prefix guard and partial checksum bytes are compared with the recomputed
+/// digest. Every consistent partial digest is a torn tail (covered for every offset above and
+/// re-asserted here); every flip of any present digest byte is corruption of the final record.
+#[test]
+fn p4_partial_guard_and_checksum_bytes_are_verified() {
+    let tmp = Tmp::new("partial");
+    let d = built_store(&tmp, "s", 2);
+    let good = journal_bytes(&d);
+    let sc = scan_of(&good).unwrap();
+    let last = sc.records[1];
+    let start = last.offset as usize;
+    let len = last.len as usize;
+    let guard_at = store::REC_GUARD_AT;
+    let ck_at = store::REC_HEADER_AT + len;
+    let classify = |m: &[u8]| -> String {
+        match scan_of(m) {
+            Ok(s) if s.tail == Tail::Clean => format!("clean:{}", s.height()),
+            Ok(s) => format!("torn:{}", s.height()),
+            Err(StoreError::Corrupt { seq, reason, .. }) => format!("corrupt:{seq}:{reason}"),
+            Err(e) => e.kind().to_string(),
+        }
+    };
+    // Partial guard: 1..=3 of its 4 bytes present.
+    for present in 1..4usize {
+        let cut = start + guard_at + present;
+        assert_eq!(classify(&good[..cut]), "torn:1", "valid guard prefix of {present} bytes");
+        for j in 0..present {
+            let mut m = good[..cut].to_vec();
+            m[start + guard_at + j] ^= 0x01;
+            assert_eq!(classify(&m), "corrupt:2:prefix guard (magic/seq/len)", "guard byte {j} of {present} present");
+        }
+    }
+    // Partial checksum: 1..=31 of its 32 bytes present (header complete).
+    for present in 1..32usize {
+        let cut = start + ck_at + present;
+        assert_eq!(classify(&good[..cut]), "torn:1", "valid checksum prefix of {present} bytes");
+        for j in 0..present {
+            let mut m = good[..cut].to_vec();
+            m[start + ck_at + j] ^= 0x80;
+            assert_eq!(classify(&m), "corrupt:2:checksum", "checksum byte {j} of {present} present");
+        }
+    }
+    // The two shapes of the reviewer's CLI probes, through files: corrupt (status/recover refuse),
+    // never recoveryRequired, and the evidence file is left untouched.
+    let b = binding();
+    for (name, cut, at) in [("partialGuard", start + guard_at + 3, start + guard_at + 1), ("partialChecksum", start + ck_at + 1, start + ck_at)] {
+        let mut m = good[..cut].to_vec();
+        m[at] ^= 0x5a;
+        let src = tmp.sub(name);
+        raw_store(&src, &m);
+        assert_eq!(kind_of(&store::read_status(&src, &b)), "corrupt", "{name}");
+        assert_eq!(Writer::open(&src, &b).err().map(|e| e.kind()), Some("corrupt"), "{name}");
+        let dest = tmp.sub(&format!("{name}-dest"));
+        assert_eq!(store::recover(&src, &dest, &b).unwrap_err().kind(), "corrupt", "{name}");
+        assert!(!dest.exists());
+        assert_eq!(journal_bytes(&src), m);
+    }
+    // Complete-record checksum corruption (all 32 bytes present) remains corruption too.
+    let mut m = good.clone();
+    m[start + ck_at + 31] ^= 0x01;
+    assert_eq!(classify(&m), "corrupt:2:checksum");
 }
 
 #[test]

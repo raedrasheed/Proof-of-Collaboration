@@ -50,8 +50,15 @@
 //! * any metadata field/checksum/marker wrong: `metadataCorrupt`;
 //! * metadata valid but profile SHA / genesis / chainId differ from the supplied profile: `profileMismatch`;
 //! * a *complete* record (all its bytes present) with any wrong field, invalid header, wrong hash,
-//!   checksum or marker, or a present partial field already inconsistent: `corrupt` (never skipped);
-//! * a final record that is a strict, so far consistent prefix of a record: torn tail. Readers
+//!   checksum or marker: `corrupt` (never skipped);
+//! * a final, incomplete record any of whose present bytes already disagree with what can be derived
+//!   at that point: `corrupt`. This includes magic, seq, prevHash and marker prefixes, and also
+//!   partial digests (LP2-I02): once the first 16 record bytes exist, every present byte of the
+//!   prefix guard is compared with the recomputed guard; once the complete header exists, every
+//!   present byte of the checksum is compared with the recomputed checksum, even when fewer than
+//!   32 checksum bytes are present. (The blockHash field cannot be checked before the header is
+//!   complete, because it is derived from the header.)
+//! * otherwise a final record that is a strict, consistent prefix of a record: torn tail. Readers
 //!   report the verified prefix and `recoveryRequired`; writers refuse to open.
 //!
 //! # Writer / reader contract
@@ -99,6 +106,8 @@ pub const REC_MAGIC: [u8; 4] = *b"LP2R";
 pub const REC_MARKER: [u8; 4] = *b"CMT!";
 /// Record bytes excluding the header.
 pub const REC_FIXED: usize = 120;
+/// Offset of the prefix guard inside a record.
+pub const REC_GUARD_AT: usize = 16;
 /// Offset of the header inside a record.
 pub const REC_HEADER_AT: usize = 84;
 pub const MAX_HEADER_BYTES: usize = header::HDR_MAX;
@@ -306,12 +315,6 @@ fn be_u64(b: &[u8]) -> u64 {
     u64::from_be_bytes(a)
 }
 
-fn h256(b: &[u8]) -> H256 {
-    let mut a = [0u8; 32];
-    a.copy_from_slice(&b[..32]);
-    a
-}
-
 /// Strictly decodes `raw` and links it to `tip` (or the genesis parent) with the scoped H-pre
 /// checks. Returns the header and its block hash, or (rule, detail).
 pub fn validate_candidate(cfg: &NetConfig, tip: Option<&Header>, raw: &[u8]) -> Result<(Header, H256), (String, String)> {
@@ -339,6 +342,14 @@ fn prefix_guard(prev_ck: &H256, first16: &[u8]) -> [u8; 4] {
     [h[0], h[1], h[2], h[3]]
 }
 
+/// SHA-256(prevChecksum || record bytes 0..84+len).
+fn record_checksum(prev_ck: &H256, through_header: &[u8]) -> H256 {
+    let mut pre = Vec::with_capacity(32 + through_header.len());
+    pre.extend_from_slice(prev_ck);
+    pre.extend_from_slice(through_header);
+    sha256(&pre)
+}
+
 /// Builds record `seq`; returns (record bytes, its checksum).
 fn build_record(seq: u64, prev_hash: &H256, block_hash: &H256, raw: &[u8], prev_ck: &H256) -> (Vec<u8>, H256) {
     let mut r = Vec::with_capacity(REC_FIXED + raw.len());
@@ -350,10 +361,7 @@ fn build_record(seq: u64, prev_hash: &H256, block_hash: &H256, raw: &[u8], prev_
     r.extend_from_slice(prev_hash);
     r.extend_from_slice(block_hash);
     r.extend_from_slice(raw);
-    let mut pre = Vec::with_capacity(32 + r.len());
-    pre.extend_from_slice(prev_ck);
-    pre.extend_from_slice(&r);
-    let ck = sha256(&pre);
+    let ck = record_checksum(prev_ck, &r);
     r.extend_from_slice(&ck);
     r.extend_from_slice(&REC_MARKER);
     (r, ck)
@@ -436,13 +444,16 @@ pub fn scan(bytes: &[u8], binding: &Binding) -> Result<Scan, StoreError> {
         if len == 0 || len > MAX_HEADER_BYTES {
             return Err(corrupt(seq, o, "declared header length out of bounds"));
         }
-        if rem < 20 {
-            // The guard is incomplete, so the length cannot be trusted yet: torn.
+        // The first 16 bytes exist, so the guard is computable: every present guard byte must match,
+        // including a partial guard (LP2-I02).
+        let guard = prefix_guard(&prev_ck, &r[..16]);
+        if !prefix_matches(&r[REC_GUARD_AT..rem.min(REC_GUARD_AT + 4)], &guard) {
+            return Err(corrupt(seq, o, "prefix guard (magic/seq/len)"));
+        }
+        if rem < REC_GUARD_AT + 4 {
+            // Consistent partial guard: the length is not yet protected, so this is a torn tail.
             tail = Tail::Torn { offset: o as u64, bytes: rem as u64 };
             break;
-        }
-        if r[16..20] != prefix_guard(&prev_ck, &r[..16]) {
-            return Err(corrupt(seq, o, "prefix guard (magic/seq/len)"));
         }
         if !prefix_matches(&r[20..rem.min(52)], &prev_hash) {
             return Err(corrupt(seq, o, "prevHash link"));
@@ -450,6 +461,7 @@ pub fn scan(bytes: &[u8], binding: &Binding) -> Result<Scan, StoreError> {
         let total = REC_FIXED + len;
         let hdr_end = REC_HEADER_AT + len;
         let mut this_hash: Option<(Header, H256)> = None;
+        let mut this_ck: Option<H256> = None;
         if rem >= hdr_end {
             let raw = &r[REC_HEADER_AT..hdr_end];
             let (hd, bh) = validate_candidate(cfg, tip.as_ref(), raw).map_err(|(rule, d)| corrupt(seq, o, &format!("header rule {rule} ({d})")))?;
@@ -460,14 +472,10 @@ pub fn scan(bytes: &[u8], binding: &Binding) -> Result<Scan, StoreError> {
                 return Err(corrupt(seq, o, "blockHash"));
             }
             this_hash = Some((hd, bh));
-        }
-        let mut this_ck: Option<H256> = None;
-        if rem >= hdr_end + 32 {
-            let mut pre = Vec::with_capacity(32 + hdr_end);
-            pre.extend_from_slice(&prev_ck);
-            pre.extend_from_slice(&r[..hdr_end]);
-            let ck = sha256(&pre);
-            if r[hdr_end..hdr_end + 32] != ck {
+            // The complete checksum preimage exists: every present checksum byte must match, even
+            // when fewer than 32 are present (LP2-I02).
+            let ck = record_checksum(&prev_ck, &r[..hdr_end]);
+            if !prefix_matches(&r[hdr_end..rem.min(hdr_end + 32)], &ck) {
                 return Err(corrupt(seq, o, "checksum"));
             }
             this_ck = Some(ck);
@@ -908,6 +916,7 @@ mod tests {
     fn layout_constants() {
         assert_eq!(META_BYTES, 8 + 4 + 4 + META_BODY_LEN as usize + 32 + 8);
         assert_eq!(REC_FIXED, 4 + 8 + 4 + 4 + 32 + 32 + 32 + 4);
+        assert_eq!(REC_GUARD_AT, 4 + 8 + 4);
         assert_eq!(REC_HEADER_AT, 4 + 8 + 4 + 4 + 32 + 32);
         assert_eq!(MAX_RECORD_BYTES, 3187);
         assert_eq!(MAX_FILE_BYTES, 128 + 1024 * 3187);
@@ -929,8 +938,17 @@ mod tests {
         let mut pre = vec![3u8; 32];
         pre.extend_from_slice(&r[..85]);
         assert_eq!(sha256(&pre), ck);
+        assert_eq!(record_checksum(&[3u8; 32], &r[..85]), ck);
         assert_eq!(&r[85..117], &ck);
         assert_eq!(&r[117..], b"CMT!");
+    }
+
+    #[test]
+    fn prefix_match_semantics() {
+        assert!(prefix_matches(&[], &[1, 2, 3]));
+        assert!(prefix_matches(&[1, 2], &[1, 2, 3]));
+        assert!(!prefix_matches(&[1, 3], &[1, 2, 3]));
+        assert!(prefix_matches(&[1, 2, 3, 9], &[1, 2, 3]));
     }
 
     #[test]
