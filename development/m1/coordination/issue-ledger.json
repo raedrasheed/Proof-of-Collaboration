@@ -1,14 +1,15 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.31-functional-profile-reviewed-C37-historyclosure-pending",
-  "latestCompletedRevision": "0.31",
+  "status": "M1-spec-accepted-0.32-coordinator-improvement-next",
+  "latestCompletedRevision": "0.32",
   "issues": [
     {
       "id": "C01",
-      "status": "open",
+      "status": "closed-M1-spec-verified",
       "evidence": "0.15 scope36partial5notstarted0complete; E6-E7,V2-V4 remain andcodecproposals/gates unapproved",
-      "decision": "Full spec gate applies; missing work must be completed, no implementation carve-out.",
-      "currentEvidence": "After0.28:34unaffected candidate rows retain independently reviewed evidence;seven owner-dependent rows remain. C32 repaired; SHA accounting and policy correction scope independently complete. No blanketM1acceptance."
+      "decision": "Final0.32rootacceptance:all41c1-c5audited/actualhistoricalclosure/independenttests. Delegatedtechnicalselections, notpersonalownerapproval. Laterimplementationgatesremain. See M1-ACCEPTANCE-0.32.json.",
+      "currentEvidence": "After0.28:34unaffected candidate rows retain independently reviewed evidence;seven owner-dependent rows remain. C32 repaired; SHA accounting and policy correction scope independently complete. No blanketM1acceptance.",
+      "finalEvidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json"
     },
     {
       "id": "C02",
@@ -36,17 +37,19 @@
     },
     {
       "id": "C06",
-      "status": "delegated-overlay-pending-final-verification",
+      "status": "closed-M1-spec-verified",
       "evidence": "Spec 4.2 U05/E03 unverified proof support and heavy budget, missing mocks",
-      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
-      "previousDecisionBeforeDelegation": "Cannot freeze snapshot guarantee without evidence and baseline reconciliation."
+      "decision": "Final0.32rootacceptance:all41c1-c5audited/actualhistoricalclosure/independenttests. Delegatedtechnicalselections, notpersonalownerapproval. Laterimplementationgatesremain. See M1-ACCEPTANCE-0.32.json.",
+      "previousDecisionBeforeDelegation": "Cannot freeze snapshot guarantee without evidence and baseline reconciliation.",
+      "finalEvidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json"
     },
     {
       "id": "C07",
-      "status": "delegated-overlay-pending-final-verification",
+      "status": "closed-M1-spec-verified",
       "evidence": "U01/U02/U10/U14/U16 owner choices",
-      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
-      "previousDecisionBeforeDelegation": "OwnerU01/U02/U10/U14/CR-M1-01/U08/RF-E6-1 unanswered; requiredCONF_DEPTH hasno default or assignedvalue; technicalreviewer choices recorded separately."
+      "decision": "Final0.32rootacceptance:all41c1-c5audited/actualhistoricalclosure/independenttests. Delegatedtechnicalselections, notpersonalownerapproval. Laterimplementationgatesremain. See M1-ACCEPTANCE-0.32.json.",
+      "previousDecisionBeforeDelegation": "OwnerU01/U02/U10/U14/CR-M1-01/U08/RF-E6-1 unanswered; requiredCONF_DEPTH hasno default or assignedvalue; technicalreviewer choices recorded separately.",
+      "finalEvidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json"
     },
     {
       "id": "C08",
@@ -63,9 +66,10 @@
     },
     {
       "id": "F01-F26",
-      "status": "open",
+      "status": "closed-M1-spec-verified",
       "evidence": "Both original reports and 0.2 dispositions",
-      "decision": "No automatic closure from agreement or saved author tests."
+      "decision": "Final0.32rootacceptance:all41c1-c5audited/actualhistoricalclosure/independenttests. Delegatedtechnicalselections, notpersonalownerapproval. Laterimplementationgatesremain. See M1-ACCEPTANCE-0.32.json.",
+      "finalEvidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json"
     },
     {
       "id": "C10",
@@ -198,10 +202,11 @@
     },
     {
       "id": "RF-E6-1",
-      "status": "delegated-overlay-pending-final-verification",
+      "status": "closed-M1-spec-verified",
       "evidence": "0.17 fulltimeline: op2 retry5001 ->total2 stale drops",
-      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
-      "previousDecisionBeforeDelegation": "Recommend supplemental global count2; no baseline change or owner approval"
+      "decision": "Final0.32rootacceptance:all41c1-c5audited/actualhistoricalclosure/independenttests. Delegatedtechnicalselections, notpersonalownerapproval. Laterimplementationgatesremain. See M1-ACCEPTANCE-0.32.json.",
+      "previousDecisionBeforeDelegation": "Recommend supplemental global count2; no baseline change or owner approval",
+      "finalEvidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json"
     },
     {
       "id": "C29",
@@ -223,16 +228,18 @@
     },
     {
       "id": "U08-CR",
-      "status": "delegated-overlay-pending-final-verification",
+      "status": "closed-M1-spec-verified",
       "evidence": "m1-draft-0.2 M1-SPEC P22 calls canonicalmanifest split a newcontract restriction; reference/storage.md does not requireit",
-      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
-      "previousDecisionBeforeDelegation": "No reviewerdefaultapproval; owner must choose canonical1-3manifestChunks restriction orbaseline-compatible alternative; clarifyproof/readbudget consequences"
+      "decision": "Final0.32rootacceptance:all41c1-c5audited/actualhistoricalclosure/independenttests. Delegatedtechnicalselections, notpersonalownerapproval. Laterimplementationgatesremain. See M1-ACCEPTANCE-0.32.json.",
+      "previousDecisionBeforeDelegation": "No reviewerdefaultapproval; owner must choose canonical1-3manifestChunks restriction orbaseline-compatible alternative; clarifyproof/readbudget consequences",
+      "finalEvidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json"
     },
     {
       "id": "V1-DEFINITIONS",
-      "status": "open-authoring",
+      "status": "closed-M1-spec-verified",
       "evidence": "m1-draft-0.25 audit: missingHeaderNetCheckwindow/messages/NX-V3e/f/g",
-      "decision": "Claude completes specs/literalfixtures/reference checks in new0.26; absentproductionM3TS notM1blocker"
+      "decision": "Final0.32rootacceptance:all41c1-c5audited/actualhistoricalclosure/independenttests. Delegatedtechnicalselections, notpersonalownerapproval. Laterimplementationgatesremain. See M1-ACCEPTANCE-0.32.json.",
+      "finalEvidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json"
     },
     {
       "id": "C32",
@@ -245,25 +252,27 @@
     },
     {
       "id": "V1-SHA-COST",
-      "status": "delegated-overlay-pending-final-verification",
+      "status": "closed-M1-spec-verified",
       "evidence": [
         "review-001/v1-share-work-probe-0.26.json: valid single header uses258SHA; h20 uses27; source claims<=13",
         "coordination/review-001/REVIEW-0.28.md"
       ],
-      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
+      "decision": "Final0.32rootacceptance:all41c1-c5audited/actualhistoricalclosure/independenttests. Delegatedtechnicalselections, notpersonalownerapproval. Laterimplementationgatesremain. See M1-ACCEPTANCE-0.32.json.",
       "evidenceFormattingCorrection": "Recovered previous evidence string that an earlier coordinator append accidentally spread into characters; content retained.",
-      "previousDecisionBeforeDelegation": "0.27/0.28:3355 distinct full-window SHA calls independently verified. Recommend explicit category bound3355 while retaining every check; owner answer pending, source<=13 untouched."
+      "previousDecisionBeforeDelegation": "0.27/0.28:3355 distinct full-window SHA calls independently verified. Recommend explicit category bound3355 while retaining every check; owner answer pending, source<=13 untouched.",
+      "finalEvidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json"
     },
     {
       "id": "P-C32-2",
-      "status": "delegated-overlay-pending-final-verification",
+      "status": "closed-M1-spec-verified",
       "revision": "0.27",
-      "decision": "User delegates reversibletechnical M1 choices; see DELEGATED-M1-DECISIONS-029.json and REVIEW-0.29. No personalowneranswer. Currentoverlay evidence verified except N05checker assertion/C33receiveboundary; finalgate closure pending.",
+      "decision": "Final0.32rootacceptance:all41c1-c5audited/actualhistoricalclosure/independenttests. Delegatedtechnicalselections, notpersonalownerapproval. Laterimplementationgatesremain. See M1-ACCEPTANCE-0.32.json.",
       "evidence": [
         "coordination/review-001/REVIEW-0.27.md",
         "coordination/review-001/REVIEW-0.28.md"
       ],
-      "previousDecisionBeforeDelegation": "0.28: rate cap explicitly routed owner, proposed0..2000ms. No universal source-range or total-load claim; recommend cap plus explicit U14 scope; unanswered."
+      "previousDecisionBeforeDelegation": "0.28: rate cap explicitly routed owner, proposed0..2000ms. No universal source-range or total-load claim; recommend cap plus explicit U14 scope; unanswered.",
+      "finalEvidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json"
     },
     {
       "id": "C33",
@@ -307,13 +316,14 @@
     },
     {
       "id": "C37",
-      "status": "open-checker-stale-status-snapshot",
+      "status": "closed-M1-spec-verified",
       "revision": "0.31",
       "evidence": [
         "coordination/review-001/m1-draft-0.31/results/run-results-0.31.json",
         "coordination/review-001/REVIEW-0.31.md"
       ],
-      "decision": "HF8isrecordedpassafterhistorysnapshot; HF12usesstalehave=>None. Freshcompletedresultclosureandmissing/failedprerequisite mutations required."
+      "decision": "Final0.32rootacceptance:all41c1-c5audited/actualhistoricalclosure/independenttests. Delegatedtechnicalselections, notpersonalownerapproval. Laterimplementationgatesremain. See M1-ACCEPTANCE-0.32.json.",
+      "finalEvidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json"
     }
   ],
   "history": [
@@ -534,6 +544,23 @@
         "failed": 0
       },
       "decision": "C35/C36verifiedclosed; effectiveC3/C4/V1reviewed conditionalonC37historicalclosure. No personalapproval."
+    },
+    {
+      "revision": "0.32",
+      "task": "030",
+      "verdict": "accept-M1-spec",
+      "prepared": {
+        "passed": 45,
+        "recorded": 68,
+        "failed": 0
+      },
+      "independent": {
+        "history": 8,
+        "rows": 41,
+        "initialPreserved": 139,
+        "recentSources": 42
+      },
+      "decision": "All41M1specrowsComplete, F01-F26closed byactualevidence. Coordinatorimprovementpending. No personalownerapproval orproduction."
     }
   ],
   "githubHandoff": {
@@ -547,7 +574,7 @@
     "commit": "23265e6",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6044378979"
   },
-  "nextAction": "New0.32freshtransitivehistoricalclosure andfinalgate evidence; then coordinatorcontinuationimprovement. Standingauthorizationactive.",
+  "nextAction": "Dispatchnewisolatedcoordinatorcontinuationbundle, independentlytestandapplylocalservicepreservingstate/capabilities/singlewriter, publish. Standingworkflowcontinues.",
   "reviewerDecisions": {
     "revision": "0.25",
     "reviewer": "Codex existing host",
@@ -1166,9 +1193,9 @@
     },
     "requiredNext": "New V1 specification/fixtures and consolidated criteria computed with these actual decisions; owner votes remain open"
   },
-  "latestReviewedRevision": "0.31",
-  "latestAcceptedRevision": "0.25",
-  "latestAcceptedReferenceRevision": "0.28",
+  "latestReviewedRevision": "0.32",
+  "latestAcceptedRevision": "0.32",
+  "latestAcceptedReferenceRevision": "0.32",
   "ownerQuestionsCurrent": {
     "status": "pending-no-answers",
     "V1_SHA_COST": "Recommend explicit3355 category bound retaining all checks",
@@ -1195,7 +1222,7 @@
   },
   "delegatedDecisions": {
     "register": "coordination/DELEGATED-M1-DECISIONS-029.json",
-    "status": "selected-pending-author-overlay-and-independent-verification",
+    "status": "verified-effective-M1-profile",
     "ids": [
       "U01",
       "U02",
@@ -1208,5 +1235,19 @@
       "P-C32-2"
     ]
   },
-  "delegatedConventions": "coordination/DELEGATED-M1-CONVENTIONS-030.json"
+  "delegatedConventions": "coordination/DELEGATED-M1-CONVENTIONS-030.json",
+  "m1Acceptance": {
+    "status": "accepted-spec-only",
+    "revision": "0.32",
+    "rowsComplete": 41,
+    "criteria": 5,
+    "evidence": "coordination/review-001/M1-ACCEPTANCE-0.32.json",
+    "review": "coordination/review-001/REVIEW-0.32.md",
+    "personalOwnerApproval": false,
+    "productionApproved": false
+  },
+  "coordinatorImprovement": {
+    "status": "pending",
+    "purpose": "Durablestanding-authoritycontinuation afteractualreview; preservecontrols/savedstate; samehostonly"
+  }
 }
