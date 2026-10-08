@@ -1,0 +1,19 @@
+{
+  "actualGithubRequest": "https://github.com/raedrasheed/Proof-of-Collaboration/issues/8#issuecomment-6063826156",
+  "receivedReply": "https://github.com/raedrasheed/Proof-of-Collaboration/issues/8#issuecomment-6064731853",
+  "completedStatusReply": "https://github.com/raedrasheed/Proof-of-Collaboration/issues/8#issuecomment-6064755350",
+  "actualLocalAcknowledgement": true,
+  "replyOwnerVerified": true,
+  "replySaysStatusOnly": true,
+  "replyPreservesLp3Block": true,
+  "duplicateRequest": "https://github.com/raedrasheed/Proof-of-Collaboration/issues/8#issuecomment-6064769793",
+  "duplicateIgnored": true,
+  "oneLocalRequest": true,
+  "oneCompletedReply": true,
+  "restartNoDelivery": true,
+  "restartNoPublication": true,
+  "runningAuthors": 0,
+  "lp3BlockerUnchanged": true,
+  "at": "2026-10-08T16:51:12.371Z",
+  "passed": true
+}

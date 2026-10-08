@@ -12,22 +12,54 @@
 // by finding the publication's hidden marker on GitHub. A repost happens only after a LATER cycle's
 // complete scan (through the last page) shows no marker AND at least RECONCILE_MIN_AGE_MS passed.
 //
-// 0.41 corrections:
-//  * I8-04 a full rescan is a persisted multi-cycle walk (cursor.fullScanPage): each cycle continues
-//    where the previous one stopped until the last page is reached; it never restarts at page 1.
-//  * I8-05 the broker client is created per cycle and DROPPED after any failure, so the next call
-//    re-reads and re-validates connection.json (new port/capability after a coordinator restart);
-//    broker idempotency keys are unchanged. A config reload is not a permission or policy change.
-//  * I8-06 requests (or linked jobs/reviews) no longer in the coordinator's 100-item view are read
-//    through GET /api/github-item, at most MAX_LOOKUPS_PER_CYCLE per cycle, round-robin with the
-//    position persisted (lookupCursor), so every open request is eventually resolved.
+// 0.41: persisted multi-cycle full rescans (I8-04); the broker client is dropped after any failure so
+// connection.json is re-read (I8-05); bounded narrow item lookups beyond the 100-item view (I8-06).
+//
+// 0.42 corrections:
+//  * I8-07 delivery outages. Each request carries a bounded outage state (record.delivery): attempts
+//    per epoch, per-request backoff, outage start, whether an earlier attempt may have reached the
+//    coordinator. After the first-epoch budget the request is 'deliveryStalled' (NOT failed). While
+//    stalled, a lightweight authenticated health read (GET /api/state) runs at most every
+//    HEALTH_INTERVAL_MS; when it succeeds, each stalled request gets ONE bounded recovery epoch that
+//    replays the SAME broker key (no new item, no new IDs). Epochs are capped; after the cap only an
+//    explicit operator retry (`--retry-delivery <requestId>`, same IDs) re-enables delivery. A
+//    definite refusal (4xx other than 401/403/429) is final and never retried. A request undelivered
+//    for OUTAGE_NOTICE_MS gets ONE temporary 'transportBlocked' reply, which says the outcome is
+//    unknown; it is never final and never ranks above later received/ack/result replies.
+//  * I8-08 backup recovery. When the journal had to fall back to its backup, the backup may predate a
+//    saved 'posting' flag, so ANY publication could be a replay. A persisted reconciliation barrier
+//    (state.reconcileBarrier) is set before anything else: the issue is walked from page 1 across
+//    bounded cycles (progress survives restarts and failures), every marker found reconciles its
+//    publication, and NO comment is posted until the walk reached the last page and the barrier is
+//    at least RECONCILE_MIN_AGE_MS old (later tail scans settle it). A new backup recovery restarts
+//    the walk at page 1.
 import { isoNow } from '../../local-coordinator/src/util.mjs';
-import { BACKOFF_MAX_S, FINAL_STATES, FULL_RESCAN_EVERY, MAX_DELIVERY_ATTEMPTS, MAX_LOOKUPS_PER_CYCLE, MAX_NEW_PER_CYCLE, MAX_PAGES_PER_CYCLE, MAX_PUBLISH_PER_CYCLE, MAX_TRACKED_COMMENTS, PINNED, RECONCILE_MIN_AGE_MS, STATES } from './constants.mjs';
+import {
+  BACKOFF_MAX_S, DELIVERY_BACKOFF_BASE_S, DELIVERY_BACKOFF_MAX_S, FINAL_STATES, FULL_RESCAN_EVERY, HEALTH_INTERVAL_MS, MAX_DELIVERY_ATTEMPTS,
+  MAX_LOOKUPS_PER_CYCLE, MAX_NEW_PER_CYCLE, MAX_PAGES_PER_CYCLE, MAX_PUBLISH_PER_CYCLE, MAX_RECOVERY_EPOCHS, MAX_TRACKED_COMMENTS, OUTAGE_NOTICE_MS,
+  PINNED, RECONCILE_MIN_AGE_MS, RECOVERY_EPOCH_ATTEMPTS, STATES, TEMPORARY_KEYS,
+} from './constants.mjs';
+import { freshState } from './journal.mjs';
 import { brokerKey, classifyComment, deriveState, guidanceText, lp3Summary, markerKeyOf, publicationKey, renderReply, textDigest } from './protocol.mjs';
 import { privateText, publicText } from './sanitize.mjs';
 
+/**
+ * Operator reset: archive (rename) the journal and start a fresh one that carries a reconciliation
+ * barrier, because an empty journal knows no markers and must not repost existing replies.
+ */
+export function resetJournal(journal, now = Date.now) {
+  const st = freshState(now());
+  st.reconcileBarrier = { reason: 'operatorReset', since: isoNow(now()), nextPage: 1, phase: 'walk', walkCompletedAt: null };
+  return journal.archiveAndReset(st);
+}
+
 const RANK = Object.fromEntries(STATES.map((s, i) => [s, i]));
 RANK.completed = RANK.blocked = 4;
+const UNDELIVERED = ['accepted', 'delivering', 'deliveryStalled', 'deliveryFailed'];
+
+function freshDelivery(attempts = 0) {
+  return { epoch: 0, epochAttempts: attempts, nextAttemptAt: null, outageSince: null, lastKind: null, maybeDelivered: false, stalledAt: null };
+}
 
 export class Adapter {
   /**
@@ -37,11 +69,28 @@ export class Adapter {
   constructor({ journal, gh, brokerFactory, readCheckpoint = () => null, now = Date.now, log = () => {} }) {
     Object.assign(this, { journal, gh, brokerFactory, readCheckpoint, now, log });
     this.state = journal.load();
-    const c = this.state.cursor;
-    if (c.fullScanPage === undefined) c.fullScanPage = null;   // states saved by 0.40
-    this.state.lookupCursor ??= 0;
-    this.state.cycleSeq ??= 0;
+    const st = this.state;
+    // Defaults for states saved by 0.40/0.41.
+    if (st.cursor.fullScanPage === undefined) st.cursor.fullScanPage = null;
+    st.lookupCursor ??= 0;
+    st.cycleSeq ??= 0;
+    st.health ??= { nextCheckAt: null, lastOkAt: null, lastFailAt: null };
+    if (st.reconcileBarrier === undefined) st.reconcileBarrier = null;
+    for (const rec of Object.values(st.records)) {
+      if (!rec.delivery) rec.delivery = freshDelivery(['accepted', 'delivering'].includes(rec.status) ? rec.attempts || 0 : 0);
+      if (rec.status === 'deliveryFailed' && rec.lastError === 'attemptsExhausted') {
+        // 0.41 made exhaustion terminal; it is a stall now, recoverable when the coordinator is healthy.
+        rec.status = 'deliveryStalled';
+        rec.delivery.stalledAt = isoNow(this.now());
+        rec.delivery.outageSince ??= rec.delivery.stalledAt;
+      }
+    }
     this.broker = null;
+    if (journal.recoveredFromBackup) {
+      // Persisted before anything else: survives the next save and the next restart.
+      st.reconcileBarrier = { reason: 'backupRecovery', since: isoNow(this.now()), nextPage: 1, phase: 'walk', walkCompletedAt: null };
+      this.save();
+    }
   }
 
   save() { this.journal.save(this.state); }
@@ -76,7 +125,8 @@ export class Adapter {
   async cycle() {
     const st = this.state;
     const sum = { at: isoNow(this.now()), skipped: null, fetchedPages: 0, comments: 0, newAccepted: 0, newIgnored: 0, backlog: false, fullScan: false,
-      delivered: 0, deliveryIssues: [], brokerState: null, lookups: 0, published: 0, reconciled: 0, publishIssues: [], scanComplete: false, error: null };
+      barrier: Boolean(st.reconcileBarrier), barrierCleared: false, delivered: 0, deliveryIssues: [], health: null, recoveryEpochs: 0,
+      brokerState: null, lookups: 0, published: 0, reconciled: 0, publishIssues: [], scanComplete: false, error: null };
     this.broker = null;                                   // connection.json is re-read every cycle
     if (st.rate.nextAllowedAt && Date.parse(st.rate.nextAllowedAt) > this.now()) {
       sum.skipped = 'rateLimitBackoff';
@@ -94,7 +144,7 @@ export class Adapter {
   }
 
   _finish(sum) {
-    this.state.lastCycle = { at: sum.at, skipped: sum.skipped, error: sum.error, backlog: sum.backlog, scanComplete: sum.scanComplete, fullScan: sum.fullScan };
+    this.state.lastCycle = { at: sum.at, skipped: sum.skipped, error: sum.error, backlog: sum.backlog, scanComplete: sum.scanComplete, fullScan: sum.fullScan, barrier: Boolean(this.state.reconcileBarrier) };
     this.save();
     this.log({ event: 'cycle', ...sum });
     return sum;
@@ -102,11 +152,11 @@ export class Adapter {
 
   // ---------------------------------------------------------------- scan (bounded pagination)
   async _scan(sum) {
-    const st = this.state, cur = st.cursor;
-    if (cur.fullScanPage === null && cur.cyclesSinceFullScan >= FULL_RESCAN_EVERY) cur.fullScanPage = 1;
-    const inFull = cur.fullScanPage !== null;
+    const st = this.state, cur = st.cursor, bar = st.reconcileBarrier;
+    if (!bar && cur.fullScanPage === null && cur.cyclesSinceFullScan >= FULL_RESCAN_EVERY) cur.fullScanPage = 1;
+    const inFull = !bar && cur.fullScanPage !== null;
     sum.fullScan = inFull;
-    const start = inFull ? cur.fullScanPage : Math.max(1, cur.page - 1);
+    const start = bar ? bar.nextPage : inFull ? cur.fullScanPage : Math.max(1, cur.page - 1);
     const comments = new Map();
     let page = start, complete = false, lastPage = start;
     for (let n = 0; n < MAX_PAGES_PER_CYCLE; n++, page++) {
@@ -115,7 +165,11 @@ export class Adapter {
         if (r.reason === 'rateLimited') this._rateFrom(r.rate || {}, 'rateLimited');
         else { st.rate.consecutiveFailures += 1; st.rate.lastReason = r.reason; }
         sum.error = `scan:${r.reason}`;
-        if (sum.fetchedPages > 0) { if (inFull) cur.fullScanPage = lastPage; }   // keep progress of a partial full scan
+        if (sum.fetchedPages > 0) {                       // keep the progress already made
+          if (bar) bar.nextPage = lastPage + 1;
+          else if (inFull) cur.fullScanPage = lastPage;
+        }
+        for (const { c } of comments.values()) this._noteMarker(c);
         return null;
       }
       sum.fetchedPages += 1;
@@ -127,7 +181,17 @@ export class Adapter {
     st.rate.consecutiveFailures = 0;
     sum.scanComplete = complete;
     if (!complete) sum.backlog = true;                    // more pages remain: reported, continued next cycle
-    if (inFull) {
+    if (bar) {
+      if (!complete) bar.nextPage = lastPage + 1;
+      else {
+        if (bar.phase === 'walk') { bar.phase = 'settle'; bar.walkCompletedAt = isoNow(this.now()); }
+        if (this.now() - Date.parse(bar.since) >= RECONCILE_MIN_AGE_MS) {
+          st.reconcileBarrier = null;                     // full coverage after recovery, settled
+          sum.barrierCleared = true;
+          cur.page = lastPage;
+        } else bar.nextPage = Math.max(1, lastPage - 1);  // settle: re-scan the tail in a later cycle
+      }
+    } else if (inFull) {
       if (complete) { cur.fullScanPage = null; cur.cyclesSinceFullScan = 0; cur.page = lastPage; }
       else cur.fullScanPage = lastPage + 1;               // persisted progress: the next cycle continues here
     } else {
@@ -136,12 +200,14 @@ export class Adapter {
     }
     const list = [...comments.values()].sort((a, b) => a.c.id - b.c.id);
     sum.comments = list.length;
-    // Own publications (marked, by the owner account the gh CLI uses) prove what was posted.
-    for (const { c } of list) {
-      const key = markerKeyOf(c.body);
-      if (key && c.user && c.user.id === PINNED.ownerId) this.state.markers[key] = c.id;
-    }
-    return { list, complete, inFull, cycle: st.cycleSeq };
+    for (const { c } of list) this._noteMarker(c);
+    return { list, complete: complete && !st.reconcileBarrier, inFull, inBarrier: Boolean(bar), cycle: st.cycleSeq };
+  }
+
+  /** Own publications (marked, by the owner account the gh CLI uses) prove what was posted. */
+  _noteMarker(c) {
+    const key = markerKeyOf(c.body);
+    if (key && c.user && c.user.id === PINNED.ownerId) this.state.markers[key] = c.id;
   }
 
   // ---------------------------------------------------------------- accept / ignore
@@ -162,8 +228,8 @@ export class Adapter {
       if (accepted >= MAX_NEW_PER_CYCLE) {
         // Not dropped: left unrecorded; the cursor moves back to this page for the next cycle.
         sum.backlog = true;
-        if (scan.inFull && st.cursor.fullScanPage !== null) st.cursor.fullScanPage = Math.min(st.cursor.fullScanPage, page);
-        else if (scan.inFull) { st.cursor.fullScanPage = page; }
+        if (st.reconcileBarrier) st.reconcileBarrier.nextPage = Math.min(st.reconcileBarrier.nextPage, page);
+        else if (scan.inFull) st.cursor.fullScanPage = st.cursor.fullScanPage === null ? page : Math.min(st.cursor.fullScanPage, page);
         else st.cursor.page = Math.min(st.cursor.page, page);
         break;
       }
@@ -177,7 +243,7 @@ export class Adapter {
         commentId: c.id, requestId: cls.requestId, mode: cls.mode, digest: textDigest(c.body),
         payload: privateText(cls.payload, 4000), brokerKey: brokerKey(c.id), status: 'accepted', attempts: 0,
         acceptedAt: sum.at, deliveredAt: null, brokerItemId: null, duplicateAtBroker: null, lastError: null,
-        derived: null, publications: {}, editedAfterSeen: false, lookup: null,
+        derived: null, publications: {}, editedAfterSeen: false, lookup: null, delivery: freshDelivery(),
       };
       st.requestIds[cls.requestId] = c.id;
       accepted += 1;
@@ -190,30 +256,103 @@ export class Adapter {
   }
 
   // ---------------------------------------------------------------- delivery (no execution)
+  _budget(d) { return d.epoch === 0 ? MAX_DELIVERY_ATTEMPTS : RECOVERY_EPOCH_ATTEMPTS; }
+
+  _stall(rec) {
+    rec.status = 'deliveryStalled';
+    rec.delivery.stalledAt = isoNow(this.now());
+    rec.delivery.nextAttemptAt = null;
+  }
+
+  /**
+   * While requests are stalled: at most one health read per HEALTH_INTERVAL_MS. A successful read is
+   * an observed healthy coordinator: each stalled request gets one bounded recovery epoch (same key).
+   */
+  async _healthRecovery(sum) {
+    const st = this.state, now = this.now();
+    const stalled = this._recordsInOrder().filter((r) => r.status === 'deliveryStalled');
+    if (!stalled.length) return;
+    if (st.health.nextCheckAt && Date.parse(st.health.nextCheckAt) > now) return;
+    st.health.nextCheckAt = isoNow(now + HEALTH_INTERVAL_MS);
+    try {
+      await this._brokerCall((b) => b.getState());
+      st.health.lastOkAt = isoNow(now);
+      sum.health = 'ok';
+    } catch (e) {
+      st.health.lastFailAt = isoNow(now);
+      sum.health = e?.kind || 'unavailable';
+      this.save();
+      return;
+    }
+    for (const rec of stalled) {
+      const d = rec.delivery;
+      if (d.epoch >= MAX_RECOVERY_EPOCHS) { rec.status = 'deliveryFailed'; rec.lastError = 'recoveryEpochsExhausted'; continue; }
+      d.epoch += 1; d.epochAttempts = 0; d.nextAttemptAt = null; d.stalledAt = null;
+      rec.status = 'delivering';                          // the outcome of earlier attempts stays unknown
+      sum.recoveryEpochs += 1;
+    }
+    this.save();
+  }
+
   async _deliver(sum) {
+    await this._healthRecovery(sum);
+    const now = this.now();
     const pending = this._recordsInOrder().filter((r) => r.status === 'accepted' || r.status === 'delivering');
     for (const rec of pending) {
-      if (rec.attempts >= MAX_DELIVERY_ATTEMPTS) { rec.status = 'deliveryFailed'; rec.lastError = 'attemptsExhausted'; this.save(); continue; }
-      let r;
+      const d = rec.delivery;
+      if (d.nextAttemptAt && Date.parse(d.nextAttemptAt) > now) continue;       // per-request backoff
+      if (d.epochAttempts >= this._budget(d)) { this._stall(rec); this.save(); continue; }
+      let attempted = false, r;
       try {
         r = await this._brokerCall(async (broker) => {
-          rec.status = 'delivering'; rec.attempts += 1;
+          attempted = true;
+          rec.status = 'delivering'; rec.attempts += 1; d.epochAttempts += 1;
           this.save();
           return broker.postGuidance({ text: guidanceText(rec), idempotencyKey: rec.brokerKey });
         });
       } catch (e) {
         const kind = e?.kind || 'uncertain';
-        if (kind === 'refused') { rec.status = 'deliveryRefused'; rec.lastError = publicText(e.message, 200); }
-        else rec.lastError = kind;                         // stays accepted/delivering: retried with the same key
         sum.deliveryIssues.push(kind);
+        if (kind === 'refused') {                         // definite refusal of this request: final, never retried
+          rec.status = 'deliveryRefused'; rec.lastError = publicText(e.message, 200);
+          this.save();
+          continue;
+        }
+        rec.lastError = kind;
+        d.lastKind = kind;
+        d.outageSince ??= isoNow(now);
+        if (attempted && kind === 'uncertain') d.maybeDelivered = true;
+        if (attempted) {
+          if (d.epochAttempts >= 2) d.nextAttemptAt = isoNow(now + Math.min(DELIVERY_BACKOFF_MAX_S, DELIVERY_BACKOFF_BASE_S * 2 ** (d.epochAttempts - 2)) * 1000);
+          if (d.epochAttempts >= this._budget(d)) this._stall(rec);
+        }
         this.save();
-        if (kind !== 'refused') return;                    // broker unavailable, stale or uncertain: stop for this cycle
-        continue;
+        return;                                           // coordinator unavailable, stale or uncertain: stop for this cycle
       }
       rec.status = 'delivered'; rec.brokerItemId = r.item.id; rec.duplicateAtBroker = r.duplicate; rec.deliveredAt = isoNow(this.now()); rec.lastError = null;
+      d.outageSince = null; d.nextAttemptAt = null; d.stalledAt = null; d.lastKind = null;
+      this.state.health.lastOkAt = isoNow(this.now());
       sum.delivered += 1;
       this.save();
     }
+  }
+
+  /**
+   * Explicit operator retry for a stalled or failed request: one more epoch with the SAME broker key,
+   * comment ID and request ID. Never creates a new item or request.
+   */
+  operatorRetry(requestId) {
+    const st = this.state;
+    const cid = Object.hasOwn(st.requestIds, requestId) ? st.requestIds[requestId] : undefined;
+    const rec = cid === undefined ? null : st.records[String(cid)];
+    if (!rec) return { ok: false, reason: 'unknownRequest' };
+    if (!['deliveryStalled', 'deliveryFailed'].includes(rec.status)) return { ok: false, reason: `notRetryable:${rec.status}` };
+    const d = rec.delivery;
+    d.epoch += 1; d.epochAttempts = 0; d.nextAttemptAt = null; d.stalledAt = null;
+    rec.status = 'delivering';
+    rec.operatorRetries = (rec.operatorRetries || 0) + 1;
+    this.save();
+    return { ok: true, requestId: rec.requestId, comment: rec.commentId, epoch: d.epoch };
   }
 
   // ---------------------------------------------------------------- actual broker state
@@ -255,17 +394,32 @@ export class Adapter {
     this.save();
   }
 
+  /** A FINAL publication exists. Temporary transport notices never count. */
   _finalPublished(rec) {
-    return Object.entries(rec.publications).some(([s, p]) => p.status === 'posted' && (FINAL_STATES.includes(s) || (rec.mode === 'status' && s === 'acknowledged')));
+    return Object.entries(rec.publications).some(([s, p]) => p.status === 'posted' && !TEMPORARY_KEYS.includes(s)
+      && (FINAL_STATES.includes(s) || (rec.mode === 'status' && s === 'acknowledged')));
   }
 
-  /** States this record should have published, in order. */
+  /**
+   * Publications this record should have, in order: { key, state, temporary, derived }. `key` names the
+   * publication (marker); `state` is the remote meaning. A temporary transport notice has
+   * state 'blocked' but key 'transportBlocked': it is never final and never ranked.
+   */
   _desired(rec) {
-    if (rec.status === 'deliveryRefused') return [{ state: 'blocked', derived: { reason: `the local broker refused the request: ${rec.lastError || 'refused'}` } }];
+    if (rec.status === 'deliveryRefused') return [{ key: 'blocked', state: 'blocked', temporary: false, derived: { reason: `the local broker refused the request: ${rec.lastError || 'refused'}` } }];
+    if (UNDELIVERED.includes(rec.status)) {
+      const d = rec.delivery || {};
+      const since = Date.parse(d.outageSince || '');
+      const longOutage = Number.isFinite(since) && this.now() - since >= OUTAGE_NOTICE_MS;
+      if (longOutage || rec.status === 'deliveryStalled' || rec.status === 'deliveryFailed') {
+        return [{ key: 'transportBlocked', state: 'blocked', temporary: true, derived: {} }];
+      }
+      return [];
+    }
     if (rec.status !== 'delivered') return [];
-    const out = [{ state: 'received', derived: {} }];
+    const out = [{ key: 'received', state: 'received', temporary: false, derived: {} }];
     const d = rec.derived;
-    if (d && d.state && d.state !== 'received') out.push({ state: d.state, derived: d });
+    if (d && d.state && d.state !== 'received') out.push({ key: d.state, state: d.state, temporary: false, derived: d });
     return out;
   }
 
@@ -276,7 +430,7 @@ export class Adapter {
     if (cycle >= scan.cycle) return 'awaitingLaterScan';
     const at = Date.parse(pub.postingAt || '');
     if (!Number.isFinite(at)) {
-      // A 0.40 record has no attempt time: start the age window now rather than reposting at once.
+      // A record without an attempt time: start the age window now rather than reposting at once.
       pub.postingAt = isoNow(this.now());
       this.save();
       return 'awaitingReconcileAge';
@@ -287,16 +441,20 @@ export class Adapter {
 
   // ---------------------------------------------------------------- publication (marked, reconciled)
   async _publish(scan, sum) {
+    if (this.state.reconcileBarrier) { sum.publishIssues.push('reconcileBarrier'); return; }   // I8-08: no POST before full coverage
     let budget = MAX_PUBLISH_PER_CYCLE;
     let lp3 = undefined;
     for (const rec of this._recordsInOrder()) {
-      for (const { state, derived } of this._desired(rec)) {
+      for (const { key, temporary, derived } of this._desired(rec)) {
         const posted = Object.entries(rec.publications).filter(([, p]) => p.status === 'posted').map(([s]) => s);
-        if (posted.includes(state)) continue;
+        if (posted.includes(key)) continue;
         if (this._finalPublished(rec)) break;
-        const maxRank = Math.max(-1, ...posted.map((s) => RANK[s]));
-        if (RANK[state] <= maxRank) continue;              // never publish an earlier state after a later one
-        const pub = rec.publications[state] ??= { status: 'pending', key: publicationKey(rec.commentId, state), commentId: null, attempts: 0 };
+        if (!temporary) {
+          const ranked = posted.filter((s) => !TEMPORARY_KEYS.includes(s) && Object.hasOwn(RANK, s));
+          const maxRank = Math.max(-1, ...ranked.map((s) => RANK[s]));
+          if (RANK[key] <= maxRank) continue;              // never publish an earlier state after a later one
+        }
+        const pub = rec.publications[key] ??= { status: 'pending', key: publicationKey(rec.commentId, key), commentId: null, attempts: 0 };
         if (Object.hasOwn(this.state.markers, pub.key)) {
           pub.status = 'posted'; pub.commentId = this.state.markers[pub.key]; pub.reconciled = true;
           sum.reconciled += 1; this.save();
@@ -307,10 +465,10 @@ export class Adapter {
           if (wait) { sum.publishIssues.push(wait); break; }
         }
         if (budget <= 0) { sum.backlog = true; return; }
-        if (rec.mode === 'status' && state !== 'received' && lp3 === undefined) {
+        if (rec.mode === 'status' && key !== 'received' && !temporary && lp3 === undefined) {
           try { lp3 = lp3Summary(this.readCheckpoint()); } catch { lp3 = null; }
         }
-        const body = renderReply({ rec, state, derived, lp3: lp3 ?? null });
+        const body = renderReply({ rec, state: key, derived, lp3: lp3 ?? null });
         pub.status = 'posting'; pub.attempts += 1; pub.postingAt = isoNow(this.now()); pub.postingCycle = this.state.cycleSeq;
         this.save();
         budget -= 1;
@@ -338,6 +496,7 @@ export function publicStatus(state, activation) {
   for (const r of recs) counts[r.status] = (counts[r.status] || 0) + 1;
   const ignored = {};
   for (const v of Object.values(state.ignored)) ignored[v.reason] = (ignored[v.reason] || 0) + 1;
+  const bar = state.reconcileBarrier;
   return {
     adapter: 'pocol-github-inbox',
     scope: { repository: `${PINNED.owner}/${PINNED.repo}`, issue: PINNED.issue, ownerLogin: PINNED.ownerLogin },
@@ -346,10 +505,13 @@ export function publicStatus(state, activation) {
     lastCycle: state.lastCycle,
     nextAllowedAt: state.rate.nextAllowedAt,
     fullScanInProgress: state.cursor.fullScanPage !== null && state.cursor.fullScanPage !== undefined,
+    reconcileBarrier: bar ? { reason: bar.reason, phase: bar.phase, nextPage: bar.nextPage, since: bar.since } : null,
+    health: state.health ? { lastOkAt: state.health.lastOkAt, lastFailAt: state.health.lastFailAt } : null,
     deliveries: counts,
     ignored,
     requests: recs.slice(-50).map((r) => ({
       requestId: r.requestId, mode: r.mode, comment: r.commentId, delivery: r.status,
+      deliveryEpoch: r.delivery?.epoch ?? 0, epochAttempts: r.delivery?.epochAttempts ?? 0, outageSince: r.delivery?.outageSince ?? null,
       remoteState: r.derived?.state ?? (r.status === 'delivered' ? 'awaitingLocalAck' : null),
       published: Object.entries(r.publications).filter(([, p]) => p.status === 'posted').map(([s]) => s),
       editedAfterSeen: r.editedAfterSeen,

@@ -1,0 +1,53 @@
+{
+  "checks": 11,
+  "passed": 11,
+  "failed": 0,
+  "realHttp": true,
+  "isolatedFixture": true,
+  "results": [
+    {
+      "check": "old acknowledgement lookup",
+      "pass": true
+    },
+    {
+      "check": "actual saved ack and allowlist",
+      "pass": true
+    },
+    {
+      "check": "existing view unchanged",
+      "pass": true
+    },
+    {
+      "check": "old ack absent from100 but lookup works",
+      "pass": true
+    },
+    {
+      "check": "bad uuid",
+      "pass": true
+    },
+    {
+      "check": "missing uuid",
+      "pass": true
+    },
+    {
+      "check": "duplicate uuid",
+      "pass": true
+    },
+    {
+      "check": "missing item",
+      "pass": true
+    },
+    {
+      "check": "wrong auth",
+      "pass": true
+    },
+    {
+      "check": "wrong origin",
+      "pass": true
+    },
+    {
+      "check": "wrong method",
+      "pass": true
+    }
+  ]
+}

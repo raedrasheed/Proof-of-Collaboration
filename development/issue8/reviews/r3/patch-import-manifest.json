@@ -1,0 +1,52 @@
+[
+  {
+    "path": "tools/github-inbox/package.json",
+    "oldSha256": "11cc70d508097c9dd5832f34320479351d01806e09f4d89b82bce056da83d3b1",
+    "newSha256": "b5b8ad34888e51a537af79be0072b65191d9eee39e695a029938810ccbc405c7"
+  },
+  {
+    "path": "tools/github-inbox/README.md",
+    "oldSha256": "b03246e1a1603f096888adc9f57bfa12eb83de8bfc5d314422793936ae121214",
+    "newSha256": "0c0b17d6f15c4036f8528e014d1091c64a8df50002b4877cfb8203cf1dcc8948"
+  },
+  {
+    "path": "tools/github-inbox/src/adapter.mjs",
+    "oldSha256": "c76a1eb9487ac506159b9cc7c13ad3cdb47504dd9f3f73afc3b6a6e54320577d",
+    "newSha256": "d4ffebf7739d032fe3a3ccd988fadfc5fb3d83a285ed8dd8ec930ee0740a1ac4"
+  },
+  {
+    "path": "tools/github-inbox/src/cli.mjs",
+    "oldSha256": "67043c8018ecd8d0b4949953f4d6ba7f87545efc9aed4a1ea4a7bff1fb70fc11",
+    "newSha256": "ec31c61d85f82a751f95e4aac7f978ea0e065d67d6d30c265fefcf352fa6dc18"
+  },
+  {
+    "path": "tools/github-inbox/src/constants.mjs",
+    "oldSha256": "486acb9d5128a735f02e1b54b7f8b4fe43d70ac0d1cae43b61b5eef1f8ec4e84",
+    "newSha256": "0320be789f2c9966a94e44a4d998a60191339d8edb61dcd3b250be844461a9cd"
+  },
+  {
+    "path": "tools/github-inbox/src/journal.mjs",
+    "oldSha256": "ae7c043113c24e0b2516626513ee521c17207a2a4b62fae15a0951d7e222b206",
+    "newSha256": "f78aff831dbba6a717022d25913e50a48f8ed9bd6fa335bf292bb45c85339183"
+  },
+  {
+    "path": "tools/github-inbox/src/protocol.mjs",
+    "oldSha256": "7ec28d7db1e1a447860998ff1607bf0ee611c76444d12a3fe103db608d869494",
+    "newSha256": "7545b16985cada82c39493a925877a217346cc0869428d8b2dc5f123d126cef5"
+  },
+  {
+    "path": "tools/github-inbox/test/backup-recovery.test.mjs",
+    "oldSha256": null,
+    "newSha256": "bc0f255728a53bb6374d708c54410a0f19c8191e2d8543ead734023218ddecc9"
+  },
+  {
+    "path": "tools/github-inbox/test/helpers.mjs",
+    "oldSha256": "2d896eb582174e776b11b3b6e949cfb3d91ec9349584e2cdbe9ba2363d374435",
+    "newSha256": "572cf98e8ef82b83fe8ba584bb76a44837a1b94e5294dc293363166973286070"
+  },
+  {
+    "path": "tools/github-inbox/test/outage.test.mjs",
+    "oldSha256": null,
+    "newSha256": "e024fab396ae97c47b5b305a35624c023963bd28938e9b048506a8ab5ab6fd43"
+  }
+]

@@ -1,0 +1,9 @@
+{
+  "stalledStatus": "deliveryStalled",
+  "recoveredStatus": "delivered",
+  "localItems": 1,
+  "allKeysSame": true,
+  "temporaryBlockPublished": true,
+  "receivedPublished": true,
+  "calls": 2
+}

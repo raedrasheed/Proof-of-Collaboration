@@ -6,8 +6,13 @@
 // carries a SHA-256 digest of its body. On load a missing or invalid main file falls back to a valid
 // backup (a crash between the two renames, or a torn/corrupt main file). If files exist but none is
 // valid the adapter refuses to start: it never silently restarts from an empty state, which would
-// re-deliver or re-publish. Every state transition is designed to be safe to replay after falling
-// back one save (broker idempotency keys and publication markers make replays idempotent).
+// re-deliver or re-publish.
+//
+// 0.42 (I8-08): a backup is one save older than the main file, so it can predate a saved 'posting'
+// flag. `recoveredFromBackup` is therefore turned by the adapter into a PERSISTED reconciliation
+// barrier (see adapter.mjs) before anything is published. And when the main file was invalid, the
+// first save after recovery keeps that file as dated evidence (inbox-journal.json.corrupt-<time>) and
+// leaves the good backup in place, instead of rotating the corrupt file into the backup slot.
 //
 // Lease: Windows uses a named pipe derived from the state directory; libuv creates it with
 // FILE_FLAG_FIRST_PIPE_INSTANCE, so a second process gets EADDRINUSE, and the OS releases it when the
@@ -32,12 +37,16 @@ export function freshState(now = Date.now()) {
   return {
     version: 1,
     createdAt: isoNow(now),
-    cursor: { page: 1, cyclesSinceFullScan: 0 },
+    cursor: { page: 1, cyclesSinceFullScan: 0, fullScanPage: null },
     records: {},        // commentId -> accepted request record
     requestIds: {},     // requestId -> commentId of the first accepted comment (deterministic owner)
     ignored: {},        // commentId -> { reason, digest, at }
     markers: {},        // publication key -> GitHub comment id (seen on GitHub)
     rate: { nextAllowedAt: null, consecutiveFailures: 0, lastReason: null },
+    health: { nextCheckAt: null, lastOkAt: null, lastFailAt: null },
+    reconcileBarrier: null,
+    lookupCursor: 0,
+    cycleSeq: 0,
     lastCycle: null,
   };
 }
@@ -69,12 +78,16 @@ export class Journal {
     this.backup = path.join(stateDir, BACKUP_FILE);
     this.now = now;
     this.recoveredFromBackup = false;
+    this.mainInvalid = false;
+    this.evidenceFile = null;
   }
 
   /** Returns the state. Throws JournalError if state files exist but none is valid. */
   load() {
     const mainRaw = readMaybe(this.main), bakRaw = readMaybe(this.backup);
-    if (mainRaw !== null) { const b = unwrap(mainRaw); if (b) return b; }
+    this.recoveredFromBackup = false;
+    this.mainInvalid = false;
+    if (mainRaw !== null) { const b = unwrap(mainRaw); if (b) return b; this.mainInvalid = true; }
     if (bakRaw !== null) {
       const b = unwrap(bakRaw);
       if (b) { this.recoveredFromBackup = true; return b; }
@@ -91,8 +104,39 @@ export class Journal {
       writeSync(fd, wrap(state, this.now()));
       fsyncSync(fd);
     } finally { closeSync(fd); }
-    if (existsSync(this.main)) renameSync(this.main, this.backup);
+    if (this.mainInvalid && existsSync(this.main)) {
+      // Keep the corrupt main file as evidence and keep the good backup where it is.
+      const stamp = isoNow(this.now()).replace(/[:.]/g, '-');
+      this.evidenceFile = path.join(this.dir, `${STATE_FILE}.corrupt-${stamp}-${randomBytes(3).toString('hex')}`);
+      renameSync(this.main, this.evidenceFile);
+      this.mainInvalid = false;
+    } else if (existsSync(this.main)) {
+      renameSync(this.main, this.backup);
+    }
+    this.mainInvalid = false;
     renameSync(tmp, this.main);
+  }
+
+  /**
+   * Operator reset (0.42): rename (never delete) the current main and backup files to dated
+   * `.reset-<time>` evidence names, then save `state` (which the caller gives a reconciliation
+   * barrier, because a fresh journal knows no markers). Returns the evidence file names.
+   */
+  archiveAndReset(state) {
+    mkdirSync(this.dir, { recursive: true });
+    const stamp = isoNow(this.now()).replace(/[:.]/g, '-');
+    const moved = [];
+    for (const f of [this.main, this.backup]) {
+      if (existsSync(f)) {
+        const to = `${f}.reset-${stamp}-${randomBytes(3).toString('hex')}`;
+        renameSync(f, to);
+        moved.push(path.basename(to));
+      }
+    }
+    this.mainInvalid = false;
+    this.recoveredFromBackup = false;
+    this.save(state);
+    return moved;
   }
 
   /**

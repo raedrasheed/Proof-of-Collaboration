@@ -25,6 +25,8 @@ export const MARKER_HEAD = '<!-- pocol-github-inbox:v1 ';
 export const MARKER_RE = /<!-- pocol-github-inbox:v1 key=([0-9a-f]{32}) -->/;
 
 export const COMMAND_RE = /^\/pocol (status|guidance) ([A-Za-z0-9][A-Za-z0-9._-]{2,63})$/;
+/** The request-ID part of COMMAND_RE, on its own (used by the operator retry). */
+export const REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/;
 export const BODY_MAX = 4000;
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -36,13 +38,29 @@ export const MAX_PAGES_PER_CYCLE = 10;
 export const FULL_RESCAN_EVERY = 30;
 export const MAX_NEW_PER_CYCLE = 20;
 export const MAX_PUBLISH_PER_CYCLE = 10;
-export const MAX_DELIVERY_ATTEMPTS = 20;
 export const MAX_TRACKED_COMMENTS = 5000;
 /** Item lookups (GET /api/github-item) per cycle, for requests or linked jobs not in the 100-item view. */
 export const MAX_LOOKUPS_PER_CYCLE = 10;
 /** An uncertain publication is reposted only after this much time AND a later complete scan without its marker. */
 export const RECONCILE_MIN_AGE_MS = 120_000;
 
-/** Remote states, in the only order they can be published. */
+// ---- delivery outage handling (0.42, I8-07)
+/** Attempts in the first delivery epoch; afterwards the request is "stalled" (not failed). */
+export const MAX_DELIVERY_ATTEMPTS = 20;
+/** Attempts in each later recovery epoch (each started only by an observed healthy coordinator). */
+export const RECOVERY_EPOCH_ATTEMPTS = 5;
+/** Recovery epochs per request; after that only an explicit operator retry re-enables delivery. */
+export const MAX_RECOVERY_EPOCHS = 5;
+/** Per-request backoff after the second consecutive failure: base * 2^(n-2), capped. */
+export const DELIVERY_BACKOFF_BASE_S = 30;
+export const DELIVERY_BACKOFF_MAX_S = 300;
+/** Minimum spacing of health reads (GET /api/state) while requests are stalled. */
+export const HEALTH_INTERVAL_MS = 300_000;
+/** A request undelivered for this long gets ONE temporary transport-blocked reply. */
+export const OUTAGE_NOTICE_MS = 600_000;
+
+/** Remote states that can end a request, in rank order. Temporary transport states are not ranked. */
 export const STATES = Object.freeze(['received', 'acknowledged', 'running', 'reviewed', 'completed', 'blocked']);
 export const FINAL_STATES = Object.freeze(['completed', 'blocked', 'reviewed']);
+/** Publication keys of TEMPORARY transport notices: never final, never ranked, never suppress later states. */
+export const TEMPORARY_KEYS = Object.freeze(['transportBlocked']);

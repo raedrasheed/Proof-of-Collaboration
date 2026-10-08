@@ -6,6 +6,10 @@
 // 0.41 identity rule: `performed_via_github_app` is attribution, not identity. A comment whose
 // user is a GitHub User with exactly the pinned id AND login stays eligible even when an app acted
 // on the owner's behalf. Bots (type Bot or a [bot] login) and every other actor stay refused.
+//
+// 0.42 (I8-07): a TEMPORARY transport notice ('transportBlocked') says only what is known: the
+// coordinator could not be reached or did not confirm the request yet. It never says "not
+// delivered", never says anything about authors or work, and is never a final state.
 import { sha256 } from '../../local-coordinator/src/util.mjs';
 import { BODY_MAX, COMMAND_RE, ISSUE_API_URL, ISSUE_HTML_URL, MARKER_HEAD, MARKER_RE, PINNED, REPO_FULL, UUID_RE } from './constants.mjs';
 import { allowedEvidenceUrl, privateText, publicText } from './sanitize.mjs';
@@ -17,7 +21,7 @@ export function brokerKey(commentId) {
   return 'gh8-' + sha256(`${REPO_FULL}#${PINNED.issue}#comment:${commentId}`).slice(0, 40);
 }
 
-/** Publication key: one per (comment, remote state). */
+/** Publication key: one per (comment, publication key name). */
 export function publicationKey(commentId, state) {
   return sha256(`${REPO_FULL}#${PINNED.issue}#comment:${commentId}#state:${state}`).slice(0, 32);
 }
@@ -192,9 +196,14 @@ const LABEL = {
   reviewed: 'Reviewed: the linked broker job has an actual review that did not accept it.',
   completed: 'Completed: the linked broker job has an actual accepted review.',
   blocked: 'Blocked: an actual saved local blocker or error.',
+  transportBlocked: 'Temporarily blocked (transport only): the local coordinator could not be reached, or has not yet confirmed this request.',
 };
 
-/** Public reply for one (request, state). Everything variable is sanitized. */
+const TRANSPORT_DETAIL = 'It is NOT known whether the request already reached the local coordinator, and nothing is concluded about delivery, '
+  + 'about any author, or about any work. Delivery is retried automatically with the same request (same key, no new item); '
+  + 'a later reply will report the actual state. This notice is temporary and not final.';
+
+/** Public reply for one (request, publication key). Everything variable is sanitized. */
 export function renderReply({ rec, state, derived = {}, lp3 = null }) {
   const lines = [`**PoCol GitHub inbox** - request \`${rec.requestId}\` (${rec.mode}), comment ${rec.commentId}`];
   if (rec.mode === 'status' && (state === 'completed' || state === 'blocked')) {
@@ -202,10 +211,11 @@ export function renderReply({ rec, state, derived = {}, lp3 = null }) {
   } else {
     lines.push(LABEL[state] || 'State update.');
   }
+  if (state === 'transportBlocked') lines.push('', TRANSPORT_DETAIL);
   if (derived.summary) lines.push('', `Summary: ${publicText(derived.summary, 600)}`);
   if (Array.isArray(derived.evidence) && derived.evidence.length) lines.push('', 'Evidence: ' + derived.evidence.filter(allowedEvidenceUrl).join(' '));
   if (derived.reason) lines.push('', `Detail: ${publicText(derived.reason, 300)}`);
-  if (rec.mode === 'status' && lp3 && state !== 'received') {
+  if (rec.mode === 'status' && lp3 && state !== 'received' && state !== 'transportBlocked') {
     lines.push('', `LP3: ${lp3.status}. Blocked step: ${lp3.blockedStep}. Error: ${lp3.exactError}.${lp3.pr ? ' PR: ' + lp3.pr : ''} (Read from the saved checkpoint; nothing was run.)`);
   }
   lines.push('', '_Transport only: not an owner approval, not a task dispatch. States are read from the actual local broker._', marker(publicationKey(rec.commentId, state)));

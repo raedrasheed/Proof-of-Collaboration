@@ -1,0 +1,27 @@
+{
+  "issue": 8,
+  "status": "verified-active-local-transport",
+  "authorRevision": "0.42",
+  "tests": {
+    "adapter": 77,
+    "coordinator": 86,
+    "independentHttp": 11
+  },
+  "realRoundtrip": true,
+  "actualHostAcknowledgement": true,
+  "duplicateDeliveryIgnored": true,
+  "freshProcessRestartNoDuplicate": true,
+  "oneTransportPollerAlive": true,
+  "secondProcessRefused": true,
+  "lp3BlockerPreserved": true,
+  "normalControlsPreserved": true,
+  "evidence": [
+    "issue8/reviews/r3/REVIEW-ISSUE8-R3.md",
+    "issue8/e2e/ROUNDTRIP-EVIDENCE.json",
+    "issue8/e2e/coordinator-preservation.json",
+    "issue8/e2e/poller-verification.json"
+  ],
+  "doesNotApproveOwnerDecisions": true,
+  "doesNotRunAuthors": true,
+  "noMergeOrDeployment": true
+}

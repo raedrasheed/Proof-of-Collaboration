@@ -62,6 +62,8 @@ export class FakeGh {
     throw new Error('unknown post step');
   }
   markerPosts(fragment) { return this.posts.filter((p) => p.body.includes(fragment)); }
+  /** Comments on GitHub (not only those posted in this run) carrying a marker fragment. */
+  markerComments(fragment) { return this.comments.filter((c) => c.body.includes(fragment)); }
 }
 
 const err = (kind, message = kind) => Object.assign(new Error(message), { kind });
@@ -69,6 +71,7 @@ const err = (kind, message = kind) => Object.assign(new Error(message), { kind }
 export class FakeBroker {
   constructor() {
     this.items = new Map(); this.keys = new Map(); this.reviews = []; this.down = false; this.uncertainOnce = false; this.refuse = false;
+    this.postFailKind = null;                             // fail deliveries (without persisting) while reads still work
     this.posts = 0; this.stateCalls = 0; this.lookups = []; this.postedKeys = [];
   }
   async postGuidance({ text, idempotencyKey }) {
@@ -76,6 +79,7 @@ export class FakeBroker {
     this.postedKeys.push(idempotencyKey);
     if (this.down) throw err('unreachable');
     if (this.refuse) throw err('refused', 'النص أطول من الحد المسموح.');
+    if (this.postFailKind) throw err(this.postFailKind);
     if (!/^[A-Za-z0-9_-]{8,100}$/.test(idempotencyKey)) throw new Error('bad key');
     if (this.keys.has(idempotencyKey)) return { item: this.items.get(this.keys.get(idempotencyKey)), duplicate: true };
     const item = { id: randomUUID(), kind: 'guidance', idempotencyKey, status: 'queued', payload: { text } };
@@ -114,6 +118,13 @@ export class FakeBroker {
 export function makeAdapter(dir, { gh, broker, clock, checkpoint = null, brokerFactory = null }) {
   const journal = new Journal(dir, { now: clock.now });
   return new Adapter({ journal, gh, brokerFactory: brokerFactory || (() => broker), readCheckpoint: () => checkpoint, now: clock.now });
+}
+
+/** Run cycles, advancing the clock before each, until `until()` is true or `max` cycles ran. */
+export async function runCycles(adapter, clock, { stepMs, max, until = () => false }) {
+  let n = 0;
+  for (; n < max && !until(); n++) { clock.advance(stepMs); await adapter.cycle(); }
+  return n;
 }
 
 export const LP3_CHECKPOINT = Object.freeze({
