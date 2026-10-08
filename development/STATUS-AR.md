@@ -125,3 +125,8 @@ Resumed the completed author task without a duplicate job. The prepared suite pa
 ## M1 review - revision 0.27
 
 C32 crashes are repaired: 26 independent malformed cases pass. Prepared suite:248 passed,72 recorded,zero failures. Independent SHA/retry observations18, hashes3677, signatures31 and ASERT1027 all pass. Full-window SHA accounting is3355 cached calls/unique inputs and6721 uncached calls. The source bound remains13 and requires owner authorization to amend. Review requests correction of the proposed rate-delay cap and the claim that6000ms retry sleep proves a10s overall load deadline. U14 and other owner decisions remain open. No merge or deployment.
+
+
+## M1 review - revision 0.28
+
+Qualified specification corrections accepted.33 prepared checks and21 independent timing branches pass;68 saved files from0.26/0.27 are unchanged. Rate-cap policy is explicitly unapproved, compatibility formulas conditional, and6000ms means retry sleep only. Source SHA bound remains13 despite verified3355 distinct full-window evaluations. Recommend owner approval of explicit3355 category bounds, rate cap0..2000ms, and a whole-load10s deadline through the verdict including computation. None is adopted; earlier owner decisions also remain pending. Current repair/review scope is complete, fullM1 is owner-blocked. No merge or deployment.

@@ -1,7 +1,7 @@
 {
   "schema": "pocol-m1-coordination/1",
-  "status": "0.27-reviewed-qualified-repair-policy-text-revision",
-  "latestCompletedRevision": "0.27",
+  "status": "0.28-independent-review-complete-owner-decisions-block-M1",
+  "latestCompletedRevision": "0.28",
   "issues": [
     {
       "id": "C01",
@@ -241,16 +241,122 @@
     {
       "id": "V1-SHA-COST",
       "status": "open-source-clarification",
-      "evidence": "review-001/v1-share-work-probe-0.26.json: valid single header uses258SHA; h20 uses27; source claims<=13",
-      "decision": "Do not relax baseline bound; include share verification in accurate worst-case accounting and seek authorized clarification"
+      "evidence": [
+        "r",
+        "e",
+        "v",
+        "i",
+        "e",
+        "w",
+        "-",
+        "0",
+        "0",
+        "1",
+        "/",
+        "v",
+        "1",
+        "-",
+        "s",
+        "h",
+        "a",
+        "r",
+        "e",
+        "-",
+        "w",
+        "o",
+        "r",
+        "k",
+        "-",
+        "p",
+        "r",
+        "o",
+        "b",
+        "e",
+        "-",
+        "0",
+        ".",
+        "2",
+        "6",
+        ".",
+        "j",
+        "s",
+        "o",
+        "n",
+        ":",
+        " ",
+        "v",
+        "a",
+        "l",
+        "i",
+        "d",
+        " ",
+        "s",
+        "i",
+        "n",
+        "g",
+        "l",
+        "e",
+        " ",
+        "h",
+        "e",
+        "a",
+        "d",
+        "e",
+        "r",
+        " ",
+        "u",
+        "s",
+        "e",
+        "s",
+        "2",
+        "5",
+        "8",
+        "S",
+        "H",
+        "A",
+        ";",
+        " ",
+        "h",
+        "2",
+        "0",
+        " ",
+        "u",
+        "s",
+        "e",
+        "s",
+        "2",
+        "7",
+        ";",
+        " ",
+        "s",
+        "o",
+        "u",
+        "r",
+        "c",
+        "e",
+        " ",
+        "c",
+        "l",
+        "a",
+        "i",
+        "m",
+        "s",
+        "<",
+        "=",
+        "1",
+        "3",
+        "coordination/review-001/REVIEW-0.28.md"
+      ],
+      "decision": "0.27/0.28:3355 distinct full-window SHA calls independently verified. Recommend explicit category bound3355 while retaining every check; owner answer pending, source<=13 untouched."
     },
     {
       "id": "P-C32-2",
       "status": "open-owner-client-policy",
       "revision": "0.27",
-      "decision": "Rate retry cap [0,2000] is proposed, not source-approved. Route owner alternatives; no total-load deadline proof from retry sleep.",
+      "decision": "0.28: rate cap explicitly routed owner, proposed0..2000ms. No universal source-range or total-load claim; recommend cap plus explicit U14 scope; unanswered.",
       "evidence": [
-        "coordination/review-001/REVIEW-0.27.md"
+        "coordination/review-001/REVIEW-0.27.md",
+        "coordination/review-001/REVIEW-0.28.md"
       ]
     }
   ],
@@ -404,6 +510,21 @@
         "asert": 1027
       },
       "decision": "C32 crash fix and SHA accounting verified; source SHA bound and rate cap await owner; deadline wording requires correction."
+    },
+    {
+      "revision": "0.28",
+      "task": "026",
+      "verdict": "accept-qualified-spec-corrections",
+      "prepared": {
+        "passed": 33,
+        "recorded": 16,
+        "failed": 0
+      },
+      "independent": {
+        "timingBranches": 21,
+        "preservedFiles": 68
+      },
+      "decision": "Policy claims corrected, conditional fixtures independently verified. No owner choice adopted; fullM1 blocked on named decisions."
     }
   ],
   "githubHandoff": {
@@ -417,7 +538,7 @@
     "commit": "23265e6",
     "cycleComment": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/2#issuecomment-6044378979"
   },
-  "nextAction": "Author new 0.28 to correct retry policy/deadline claims and explicitly route rate cap; no owner source change adopted.",
+  "nextAction": "Await actual owner answers to V1-SHA-COST, P-C32-2 and U14 plus earlier owner items. No further repair identified in current scope; do not adopt proposals or start a duplicate author job.",
   "reviewerDecisions": {
     "revision": "0.25",
     "reviewer": "Codex existing host",
@@ -1036,6 +1157,13 @@
     },
     "requiredNext": "New V1 specification/fixtures and consolidated criteria computed with these actual decisions; owner votes remain open"
   },
-  "latestReviewedRevision": "0.27",
-  "latestAcceptedRevision": "0.25"
+  "latestReviewedRevision": "0.28",
+  "latestAcceptedRevision": "0.25",
+  "latestAcceptedReferenceRevision": "0.28",
+  "ownerQuestionsCurrent": {
+    "status": "pending-no-answers",
+    "V1_SHA_COST": "Recommend explicit3355 category bound retaining all checks",
+    "P_C32_2": "Recommend explicit rate delay cap0..2000ms",
+    "U14": "Recommend whole load through verdict including computation; other branches preserved"
+  }
 }
