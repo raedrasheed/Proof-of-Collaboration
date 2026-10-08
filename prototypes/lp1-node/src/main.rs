@@ -1,11 +1,17 @@
 //! lp1-node command line. Every command reads public fixtures only; nothing signs, sends or
 //! connects outward. Exit status 0 means the command's own checks passed.
+//!
+//! LP2 `store` commands manage a local experimental candidate-header journal; they print exactly
+//! one JSON line on stdout. Exit status: 0 success, 1 append rejected or not linear (nothing
+//! written), 2 usage / I/O / busy / bound / metadata / mismatch / corrupt error, 3 recovery
+//! required. There are no fault-injection options.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
+use lp1_node::store::{self, Binding, StoreError, Writer};
 use lp1_node::{fixtures, http, rpc, verify, window};
 
 const USAGE: &str = "lp1-node <command> [options]
@@ -18,6 +24,11 @@ commands:
   asert-batch       differential ASERT rows as JSON lines [--in FILE] [--out FILE]
   serve             read-only JSON-RPC on 127.0.0.1 [--bind 127.0.0.1] [--port N] [--empty-chain]
                     [--max-requests N] [--max-runtime-ms N] [--conn-timeout-ms N]
+  store init        --store DIR                      create a NEW candidate journal (never overwrites)
+  store append      --store DIR (--range A:B | --hex HEADER_RLP_HEX)
+                                                     validate the whole batch, then write record by record
+  store status      --store DIR                      read-only validated status (exit 3: recovery required)
+  store recover     --store DIR --dest NEW_DIR       copy the verified prefix into a new store
 
 common options:
   --fixtures DIR    fixture directory (default: <crate root>/fixtures)";
@@ -29,21 +40,27 @@ struct Args {
 
 const FLAGS: [&str; 2] = ["--no-cache", "--empty-chain"];
 const VALUED: [&str; 9] = ["--fixtures", "--case", "--in", "--out", "--bind", "--port", "--max-requests", "--max-runtime-ms", "--conn-timeout-ms"];
+const STORE_VALUED: [&str; 5] = ["--fixtures", "--store", "--dest", "--range", "--hex"];
 
-fn parse_args() -> Result<Args, String> {
-    let mut it = std::env::args().skip(1);
-    let cmd = it.next().ok_or_else(|| USAGE.to_string())?;
+fn parse_opts(it: &mut dyn Iterator<Item = String>, flags: &[&str], valued: &[&str]) -> Result<Vec<(String, Option<String>)>, String> {
     let mut opts = Vec::new();
     while let Some(a) = it.next() {
-        if FLAGS.contains(&a.as_str()) {
+        if flags.contains(&a.as_str()) {
             opts.push((a, None));
-        } else if VALUED.contains(&a.as_str()) {
+        } else if valued.contains(&a.as_str()) {
             let v = it.next().ok_or_else(|| format!("{a} needs a value"))?;
             opts.push((a, Some(v)));
         } else {
             return Err(format!("unknown option {a}\n{USAGE}"));
         }
     }
+    Ok(opts)
+}
+
+fn parse_args() -> Result<Args, String> {
+    let mut it = std::env::args().skip(1);
+    let cmd = it.next().ok_or_else(|| USAGE.to_string())?;
+    let opts = parse_opts(&mut it, &FLAGS, &VALUED)?;
     Ok(Args { cmd, opts })
 }
 
@@ -177,7 +194,118 @@ fn serve(a: &Args, dir: &std::path::Path, out: &mut dyn Write) -> Result<bool, S
     Ok(true)
 }
 
+// ------------------------------------------------------------------ LP2 store commands
+
+fn store_exit(e: &StoreError) -> i32 {
+    match e {
+        StoreError::Rejected { .. } | StoreError::NotLinear { .. } => 1,
+        StoreError::RecoveryRequired { .. } => 3,
+        _ => 2,
+    }
+}
+
+fn usage_err(s: &str) -> StoreError {
+    StoreError::Io(format!("usage: {s}"))
+}
+
+/// Builds the append batch from exactly one of --range A:B (fixture chain heights) or --hex.
+fn store_batch(a: &Args, fixtures_dir: &Path) -> Result<Vec<Vec<u8>>, StoreError> {
+    match (a.get("--range"), a.get("--hex")) {
+        (Some(r), None) => {
+            let (x, y) = r.split_once(':').ok_or_else(|| usage_err("--range A:B"))?;
+            let from: usize = x.parse().map_err(|_| usage_err("--range A:B"))?;
+            let to: usize = y.parse().map_err(|_| usage_err("--range A:B"))?;
+            if from < 1 || to < from {
+                return Err(usage_err("--range needs 1 <= A <= B"));
+            }
+            if to - from + 1 > store::MAX_BATCH {
+                return Err(StoreError::Bound(format!("batch exceeds {}", store::MAX_BATCH)));
+            }
+            let chain = fixtures::read_json(fixtures_dir, "chain.json").and_then(|v| fixtures::load_chain_bytes(&v)).map_err(StoreError::Io)?;
+            if to > chain.len() {
+                return Err(usage_err("--range beyond the fixture chain"));
+            }
+            Ok(chain[from - 1..to].to_vec())
+        }
+        (None, Some(h)) => {
+            let h = h.strip_prefix("0x").unwrap_or(h);
+            if h.len() > 2 * store::MAX_HEADER_BYTES {
+                return Err(StoreError::Bound(format!("header exceeds {} bytes", store::MAX_HEADER_BYTES)));
+            }
+            let b = lp1_node::hex::decode(h).ok_or_else(|| usage_err("--hex must be even-length hex"))?;
+            Ok(vec![b])
+        }
+        _ => Err(usage_err("append needs exactly one of --range A:B or --hex HEX")),
+    }
+}
+
+fn store_cmd(sub: &str, a: &Args) -> Result<String, StoreError> {
+    let fixtures_dir = a.dir();
+    let dir = PathBuf::from(a.get("--store").ok_or_else(|| usage_err("--store DIR is required"))?);
+    let binding = Binding::from_fixtures_dir(&fixtures_dir)?;
+    match sub {
+        "init" => Ok(store::init(&dir, &binding)?.to_json()),
+        "status" => {
+            let s = store::read_status(&dir, &binding)?;
+            if s.recovery_required() {
+                // Report the verified prefix, then signal recovery with exit status 3.
+                println!("{}", s.to_json());
+                return Err(StoreError::RecoveryRequired { verified_height: s.height, verified_bytes: s.verified_end, file_bytes: s.file_len });
+            }
+            Ok(s.to_json())
+        }
+        "append" => {
+            let batch = store_batch(a, &fixtures_dir)?;
+            let mut w = Writer::open(&dir, &binding)?;
+            let rep = w.append(&batch)?;
+            Ok(rep.to_json())
+        }
+        "recover" => {
+            let dest = PathBuf::from(a.get("--dest").ok_or_else(|| usage_err("--dest NEW_DIR is required"))?);
+            Ok(store::recover(&dir, &dest, &binding)?.to_json())
+        }
+        other => Err(usage_err(&format!("unknown store command {other}"))),
+    }
+}
+
+fn store_main(args: Vec<String>) -> i32 {
+    let sub = match args.get(0) {
+        Some(s) => s.clone(),
+        None => {
+            println!("{}", usage_err("store init|append|status|recover").to_json());
+            return 2;
+        }
+    };
+    let mut it = args.into_iter().skip(1);
+    let opts = match parse_opts(&mut it, &[], &STORE_VALUED) {
+        Ok(o) => o,
+        Err(e) => {
+            println!("{}", StoreError::Io(e).to_json());
+            return 2;
+        }
+    };
+    let a = Args { cmd: "store".into(), opts };
+    match store_cmd(&sub, &a) {
+        Ok(line) => {
+            println!("{line}");
+            0
+        }
+        Err(e) => {
+            if !matches!(e, StoreError::RecoveryRequired { .. }) || sub != "status" {
+                println!("{}", e.to_json());
+            }
+            store_exit(&e)
+        }
+    }
+}
+
 fn main() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(|s| s.as_str()) == Some("store") {
+        let code = store_main(argv.into_iter().skip(1).collect());
+        let _ = io::stdout().flush();
+        process::exit(code);
+    }
     match run() {
         Ok(true) => {}
         Ok(false) => process::exit(1),
