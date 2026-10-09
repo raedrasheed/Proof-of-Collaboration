@@ -124,7 +124,7 @@ Off Windows (smoke runs only), Windows-only storage checks are also BLOCKED BY P
   - To run it, the owner adds `.github/workflows/lp3-s1-windows-verify.yml` to `main` (the script is read from the tested branch).
   - Then: Actions → **LP3 S1 Windows verification (manual)** → Run workflow, with branch `work/lp3-genesisspec-s1`, `commit` set to the SHA to verify, and `include_slow` optional.
   - Alternatively, authorize a push or pull_request trigger on the PR branch.
-- **Expected cost (estimate, not measured on Windows):** the Linux smoke run below took SMOKE_MINUTES minutes on this container. A hosted Windows run will likely take 20–40 minutes, before the Windows minute multiplier.
+- **Expected cost (estimate, not measured on Windows):** the Linux smoke run below took about 4 (248 s) minutes on this container. A hosted Windows run will likely take 20–40 minutes, before the Windows minute multiplier.
 
 ## 4. Local validation (not Windows evidence)
 
@@ -134,7 +134,7 @@ Off Windows (smoke runs only), Windows-only storage checks are also BLOCKED BY P
   - only known journal failures → BLOCKED;
   - journal failures plus another failure → FAIL;
   - a build error → FAIL.
-- `linux-smoke-not-windows-evidence/`: the CI script run end to end with PowerShell 7 on Linux, on clean commit SMOKE_COMMIT: SMOKE_COUNTS. This shows that the script, its classification and its evidence files work. It is not Windows verification.
+- `linux-smoke-not-windows-evidence/`: the CI script run end to end with PowerShell 7 on Linux, on clean commit `f2ac59960d6b64830265325c2d4a6e2d80d5be80` (`trackedFilesModified: false`): PASS 19, FAIL 0, BLOCKED BY PLATFORM 3 (`store-journal`, `cargo-test-full`, `e2e-store`: the Windows-only LP2 writer), NOT RUN 3 (`store-process-crash-recovery`: no test compiled off Windows; the two optional slow checks); the CLI harness `lineForms` check passes. This shows that the script, its classification and its evidence files work. It is not Windows verification.
 
 ## 5. Status of the Windows verification
 
@@ -143,6 +143,6 @@ Off Windows (smoke runs only), Windows-only storage checks are also BLOCKED BY P
 | Every Windows check (Rust suite, storage, crash recovery, allocation, differential, CLI) | **NOT RUN**: no authorized Windows execution; workflow prepared, not dispatched |
 | CRLF fix, simulated Windows newlines on Linux | PASS (simulation, not Windows) |
 | Workflow lint and script parse | PASS |
-| Linux smoke run of the CI script | SMOKE_STATUS (Linux only) |
+| Linux smoke run of the CI script | PASS 19 / FAIL 0 / BLOCKED BY PLATFORM 3 / NOT RUN 3 (Linux only) |
 
 No merge, no acceptance claim, no paid usage, no billing change, no self-hosted runner.
