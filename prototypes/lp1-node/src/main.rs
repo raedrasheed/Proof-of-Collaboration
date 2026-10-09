@@ -7,15 +7,17 @@
 //! required. There are no fault-injection options.
 //!
 //! LP3 `genesis-decode` runs the GenesisSpec v1 decoder over hex lines for differential checks; it
-//! reads and writes only the files it is given.
+//! streams the file it is given with fixed buffers (limits in `genesis_batch`). Exit status 0: every
+//! line decoded or rejected by the decoder and every accepted input re-encoded exactly; 1: some line
+//! refused (too large or not hex); 2: I/O or buffer reservation error.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
 use lp1_node::store::{self, Binding, StoreError, Writer};
-use lp1_node::{fixtures, genesis_spec, http, rpc, verify, window};
+use lp1_node::{fixtures, genesis_batch, http, rpc, verify, window};
 
 const USAGE: &str = "lp1-node <command> [options]
 
@@ -26,6 +28,7 @@ commands:
   hash              K1-K3, hash-oracle digests and derivations from fixture headers
   asert-batch       differential ASERT rows as JSON lines [--in FILE] [--out FILE]
   genesis-decode    GenesisSpec v1 decode of one hex input per line, JSON lines --in FILE [--out FILE]
+                    (streamed; a line above the largest valid GenesisSpec is refused, not decoded)
   serve             read-only JSON-RPC on 127.0.0.1 [--bind 127.0.0.1] [--port N] [--empty-chain]
                     [--max-requests N] [--max-runtime-ms N] [--conn-timeout-ms N]
   store init        --store DIR                      create a NEW candidate journal (never overwrites)
@@ -149,17 +152,18 @@ fn run() -> Result<bool, String> {
         }
         "genesis-decode" => {
             let p = a.get("--in").ok_or("genesis-decode needs --in FILE")?;
-            let text = std::fs::read_to_string(p).map_err(|e| format!("read {p}: {e}"))?;
-            match a.get("--out") {
+            let mut input = BufReader::new(File::open(p).map_err(|e| format!("open {p}: {e}"))?);
+            let summary = match a.get("--out") {
                 Some(o) => {
                     let f = File::create(o).map_err(|e| format!("create {o}: {e}"))?;
                     let mut w = BufWriter::new(f);
-                    let r = genesis_lines(&text, &mut w)?;
+                    let r = genesis_batch::run(&mut input, &mut w)?;
                     w.flush().map_err(|e| e.to_string())?;
-                    Ok(r)
+                    r
                 }
-                None => genesis_lines(&text, &mut out),
-            }
+                None => genesis_batch::run(&mut input, &mut out)?,
+            };
+            Ok(summary.ok())
         }
         "serve" => serve(&a, &dir, &mut out),
         "help" | "--help" | "-h" => {
@@ -210,46 +214,6 @@ fn serve(a: &Args, dir: &std::path::Path, out: &mut dyn Write) -> Result<bool, S
     writeln!(out, "{{\"event\":\"shutdown\",\"served\":{served},\"reason\":\"{why}\"}}").map_err(|e| e.to_string())?;
     out.flush().map_err(|e| e.to_string())?;
     Ok(true)
-}
-
-// ------------------------------------------------------------------ LP3 GenesisSpec decode batch
-
-/// One input per line (optional 0x; an empty line is the empty input). Each line yields either the
-/// decoded identity or the rejection code and detail, then one summary line. Rejections are results;
-/// the command fails only on bad hex, I/O, or an accepted input that does not re-encode identically.
-fn genesis_lines(text: &str, out: &mut dyn Write) -> Result<bool, String> {
-    let (mut accepted, mut rejected, mut reencode_ok) = (0usize, 0usize, true);
-    for (n, line) in text.lines().enumerate() {
-        let h = line.trim_end_matches('\r');
-        let h = h.strip_prefix("0x").unwrap_or(h);
-        let b = lp1_node::hex::decode(h).ok_or_else(|| format!("line {}: not even-length hex", n + 1))?;
-        let row = match genesis_spec::decode(&b) {
-            Ok(spec) => {
-                accepted += 1;
-                let same = genesis_spec::encode(&spec) == b;
-                reencode_ok &= same;
-                format!(
-                    "{{\"line\":{},\"ok\":true,\"genesisHash\":\"0x{}\",\"chainId\":{},\"m0\":{},\"reencodeEqual\":{same},\"bootable\":false}}",
-                    n + 1,
-                    lp1_node::hex::encode(&genesis_spec::genesis_hash(&b)),
-                    spec.chain_id,
-                    spec.m0_list.len()
-                )
-            }
-            Err(e) => {
-                rejected += 1;
-                format!("{{\"line\":{},\"ok\":false,\"code\":\"{}\",\"detail\":{}}}", n + 1, e.code, lp1_node::json::quote(&e.detail))
-            }
-        };
-        writeln!(out, "{row}").map_err(|e| e.to_string())?;
-    }
-    writeln!(
-        out,
-        "{{\"check\":\"genesis-decode\",\"inputs\":{},\"accepted\":{accepted},\"rejected\":{rejected},\"reencodeEqual\":{reencode_ok}}}",
-        accepted + rejected
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(reencode_ok)
 }
 
 // ------------------------------------------------------------------ LP2 store commands

@@ -12,15 +12,20 @@
 //! xx < 0x80) is valid framing and is judged as gsInt, not L0; this differs on purpose from the LP1
 //! scoped decoder in `genesis`, which stays unchanged for the LP1 fixture profile.
 //!
-//! Resources: the framing parser keeps an explicit stack and a flat node arena, so neither parsing
-//! nor dropping recurses at any depth. No allocation is sized from a declared length: every declared
-//! length is compared with the bytes actually present first, and each node consumes at least one
-//! input byte, so memory is linear in the input length. Callers bound the input they read.
+//! Resources: framing is validated with an explicit stack that holds only the end offset of each
+//! open list (one usize per nesting level, at most one level per input byte, grown by doubling); the
+//! later stages walk the validated bytes again instead of building a tree. Nothing recurses on input
+//! depth, and no allocation is sized from a declared length: every declared length is compared with
+//! the bytes actually present first. The other allocations are the result and the error detail. The
+//! gsVersion detail is the exact decimal value, as the reference reports it (`decimal`,
+//! O(n^1.59 log n) time and O(n) memory in the length of the specVersion item). Callers bound what
+//! they read; `MAX_SPEC_BYTES` is the largest encoding that can be valid.
 //!
 //! Not here: ParamGate relations such as M_min <= |M_0List| <= M_max (R12, DG-V3-5), recomputing
 //! allocRoot / sysCodeHash from alloc and system code (R24(a), LP4), ForkSchedule, profiles and
 //! timing. A decoded spec is an identity only and is never bootable.
 
+use crate::decimal::decimal;
 use crate::fixed::U256;
 use crate::hashes::{keccak256, H256};
 use crate::hex;
@@ -115,6 +120,56 @@ pub const CP_SCHEMA: [CpField; CP_LEN] = [
     f("P2", 32, 0, Upper::None),
 ];
 
+/// ParamGate R12 (governance.md:89): M_max >= |M_0List|, and M_max is a u16.
+pub const MAX_MEMBERS: usize = u16::MAX as usize;
+
+const fn be_len(v: u64) -> usize {
+    let mut n = 0;
+    let mut x = v;
+    while x > 0 {
+        n += 1;
+        x >>= 8;
+    }
+    n
+}
+
+/// RLP item length of an unsigned integer `v` (canonical form).
+const fn uint_item_len(v: u64) -> usize {
+    if v < 0x80 {
+        1
+    } else {
+        1 + be_len(v)
+    }
+}
+
+const fn list_len(payload: usize) -> usize {
+    if payload < 56 {
+        1 + payload
+    } else {
+        1 + be_len(payload as u64) + payload
+    }
+}
+
+const fn max_cp_payload() -> usize {
+    let mut sum = 0;
+    let mut k = 0;
+    while k < CP_LEN {
+        let f = CP_SCHEMA[k];
+        sum += match f.hi {
+            Upper::None => 1 + (f.width / 8) as usize,
+            Upper::Value(h) => uint_item_len(h),
+            Upper::Gamma => uint_item_len(10_000),
+        };
+        k += 1;
+    }
+    sum
+}
+
+/// Largest encoding that can pass decode and ParamGate R12: specVersion 1, chainId and every CP
+/// value at their widest, both roots, and MAX_MEMBERS entries of 43 bytes. Any longer input fails
+/// R12 even if it decodes. Used to bound tools that read untrusted input; not a decode rule.
+pub const MAX_SPEC_BYTES: usize = list_len(1 + 9 + list_len(max_cp_payload()) + 33 + list_len(MAX_MEMBERS * list_len(21 + 21)) + 33);
+
 pub fn cp_index(name: &str) -> Option<usize> {
     CP_SCHEMA.iter().position(|x| x.name == name)
 }
@@ -154,37 +209,6 @@ fn gs<T>(code: &'static str, detail: impl Into<String>) -> Result<T, GsError> {
 }
 
 // ------------------------------------------------------------------ framing (L0), explicit stack
-
-enum Node {
-    Bytes { start: usize, len: usize, wrapped: bool },
-    List(Vec<usize>),
-}
-
-struct Tree {
-    nodes: Vec<Node>,
-    root: usize,
-}
-
-impl Tree {
-    fn list(&self, n: usize) -> Option<&[usize]> {
-        match &self.nodes[n] {
-            Node::List(c) => Some(c),
-            Node::Bytes { .. } => None,
-        }
-    }
-
-    fn is_list(&self, n: usize) -> bool {
-        self.list(n).is_some()
-    }
-
-    /// (bytes, wrapped single byte). Only called on nodes the structure stage proved to be strings.
-    fn bytes<'a>(&self, b: &'a [u8], n: usize) -> (&'a [u8], bool) {
-        match self.nodes[n] {
-            Node::Bytes { start, len, wrapped } => (&b[start..start + len], wrapped),
-            Node::List(_) => (&[], false),
-        }
-    }
-}
 
 enum Head {
     Byte,
@@ -234,63 +258,97 @@ fn header(b: &[u8], i: usize) -> Result<Head, GsError> {
 }
 
 /// Strict RLP framing with the reference's L0 details at the same points and in the same order.
-fn parse(b: &[u8]) -> Result<Tree, GsError> {
-    let mut nodes: Vec<Node> = Vec::new();
-    let mut stack: Vec<(Vec<usize>, usize)> = Vec::new(); // open lists: (children, end)
+/// Only the end offsets of open lists are kept.
+fn check_framing(b: &[u8]) -> Result<(), GsError> {
+    let mut ends: Vec<usize> = Vec::new();
     let mut i = 0usize;
     loop {
-        let item = match header(b, i)? {
-            Head::Byte => {
-                i += 1;
-                Node::Bytes { start: i - 1, len: 1, wrapped: false }
-            }
+        match header(b, i)? {
+            Head::Byte => i += 1,
             Head::Str { n, st } => {
                 if n > b.len() - st {
                     return gs("L0", "truncated string");
                 }
                 i = st + n;
-                Node::Bytes { start: st, len: n, wrapped: n == 1 && b[st] < 0x80 }
             }
             Head::List { n, st } => {
                 if n > b.len() - st {
                     return gs("L0", "truncated list");
                 }
+                i = st;
                 if n > 0 {
-                    stack.push((Vec::new(), st + n));
-                    i = st;
+                    ends.push(st + n);
                     continue;
                 }
-                i = st;
-                Node::List(Vec::new())
             }
-        };
-        nodes.push(item);
-        let mut node = nodes.len() - 1;
-        // Attach the completed node; close every list that ends here.
+        }
+        // An item is complete at i; close every list that ends here.
         loop {
-            let closed = match stack.last_mut() {
+            match ends.last() {
                 None => {
                     if i != b.len() {
                         return gs("L0", format!("{} trailing bytes", b.len() - i));
                     }
-                    return Ok(Tree { nodes, root: node });
+                    return Ok(());
                 }
-                Some((children, end)) => {
-                    if i > *end {
-                        return gs("L0", "item crosses list end");
-                    }
-                    children.push(node);
-                    i == *end
+                Some(end) if i > *end => return gs("L0", "item crosses list end"),
+                Some(end) if i < *end => break,
+                Some(_) => {
+                    ends.pop();
                 }
-            };
-            if !closed {
-                break;
-            }
-            if let Some((children, _)) = stack.pop() {
-                nodes.push(Node::List(children));
-                node = nodes.len() - 1;
             }
         }
+    }
+}
+
+/// One item of framing-checked input: kind and payload range.
+#[derive(Clone, Copy)]
+struct Item {
+    list: bool,
+    start: usize,
+    len: usize,
+    wrapped: bool,
+}
+
+impl Item {
+    fn at(b: &[u8], i: usize) -> Result<Item, GsError> {
+        Ok(match header(b, i)? {
+            Head::Byte => Item { list: false, start: i, len: 1, wrapped: false },
+            Head::Str { n, st } => Item { list: false, start: st, len: n, wrapped: n == 1 && b[st] < 0x80 },
+            Head::List { n, st } => Item { list: true, start: st, len: n, wrapped: false },
+        })
+    }
+
+    fn end(&self) -> usize {
+        self.start + self.len
+    }
+
+    fn bytes<'a>(&self, b: &'a [u8]) -> &'a [u8] {
+        &b[self.start..self.end()]
+    }
+
+    /// Children of a list item, in order. Framing was checked, so they tile the payload exactly.
+    fn children<'a>(&self, b: &'a [u8]) -> Children<'a> {
+        Children { b, i: self.start, end: if self.list { self.end() } else { self.start } }
+    }
+}
+
+struct Children<'a> {
+    b: &'a [u8],
+    i: usize,
+    end: usize,
+}
+
+impl Iterator for Children<'_> {
+    type Item = Item;
+
+    fn next(&mut self) -> Option<Item> {
+        if self.i >= self.end {
+            return None;
+        }
+        let it = Item::at(self.b, self.i).ok()?;
+        self.i = it.end();
+        Some(it)
     }
 }
 
@@ -306,19 +364,6 @@ fn bit_len(v: &[u8]) -> u64 {
     match v.first() {
         None => 0,
         Some(x) => 8 * (v.len() as u64 - 1) + (8 - x.leading_zeros()) as u64,
-    }
-}
-
-fn version_detail(v: &[u8]) -> String {
-    let s = significant(v);
-    if s.len() <= 16 {
-        let mut x: u128 = 0;
-        for b in s {
-            x = (x << 8) | *b as u128;
-        }
-        x.to_string()
-    } else {
-        "specVersion above 2^128".to_string()
     }
 }
 
@@ -338,81 +383,92 @@ fn arr<const N: usize>(v: &[u8]) -> [u8; N] {
 
 /// GenesisSpec.decode. Rejections are values, never panics, at any input length or depth.
 pub fn decode(b: &[u8]) -> Result<GenesisSpec, GsError> {
-    let t = parse(b)?;
-    let top = match t.list(t.root) {
-        Some(c) => c,
-        None => return gs("gsStructure", "top not a list"),
-    };
+    check_framing(b)?;
+    let top = Item::at(b, 0)?;
+    if !top.list {
+        return gs("gsStructure", "top not a list");
+    }
     // structure: the positions that exist have the right kind
     let kinds = [false, false, true, false, true, false];
-    for (idx, n) in top.iter().take(6).enumerate() {
-        if t.is_list(*n) != kinds[idx] {
-            return gs("gsStructure", format!("top[{idx}]"));
+    let mut slot: [Option<Item>; 6] = [None; 6];
+    let mut top_len = 0usize;
+    for (idx, it) in top.children(b).enumerate() {
+        if idx < 6 {
+            if it.list != kinds[idx] {
+                return gs("gsStructure", format!("top[{idx}]"));
+            }
+            slot[idx] = Some(it);
         }
+        top_len += 1;
     }
-    let empty: [usize; 0] = [];
-    let cp = if top.len() > 2 { t.list(top[2]).unwrap_or(&empty) } else { &empty };
-    let m0 = if top.len() > 4 { t.list(top[4]).unwrap_or(&empty) } else { &empty };
-    if cp.iter().any(|n| t.is_list(*n)) {
+    let none = Item { list: true, start: 0, len: 0, wrapped: false };
+    let cp = slot[2].unwrap_or(none);
+    let m0 = slot[4].unwrap_or(none);
+    if cp.children(b).any(|x| x.list) {
         return gs("gsStructure", "CP item is a list");
     }
-    for e in m0 {
-        match t.list(*e) {
-            Some(c) if c.iter().all(|x| !t.is_list(*x)) => {}
-            _ => return gs("gsStructure", "M_0List entry"),
+    for e in m0.children(b) {
+        if !e.list || e.children(b).any(|x| x.list) {
+            return gs("gsStructure", "M_0List entry");
         }
     }
     // gsVersion (by value; a non-minimal 1 is judged later as gsInt)
-    if let Some(v) = top.first() {
-        let (raw, _) = t.bytes(b, *v);
+    if let Some(v) = slot[0] {
+        let raw = v.bytes(b);
         if significant(raw) != [SPEC_VERSION] {
-            return gs("gsVersion", version_detail(raw));
+            return gs("gsVersion", decimal(raw));
         }
     }
     // gsCount
-    if top.len() != 6 {
-        return gs("gsCount", format!("top {}", top.len()));
+    let (version, chain, alloc_root, sys_code_hash) = match slot {
+        [Some(v), Some(c), Some(_), Some(a), Some(_), Some(s)] if top_len == 6 => (v, c, a, s),
+        _ => return gs("gsCount", format!("top {top_len}")),
+    };
+    let cp_len = cp.children(b).count();
+    if cp_len != CP_LEN {
+        return gs("gsCount", format!("CP {cp_len}"));
     }
-    if cp.len() != CP_LEN {
-        return gs("gsCount", format!("CP {}", cp.len()));
-    }
-    if m0.is_empty() {
-        return gs("gsCount", "M_0List empty");
-    }
-    let entries: Vec<&[usize]> = m0.iter().map(|e| t.list(*e).unwrap_or(&empty)).collect();
-    for e in &entries {
-        if e.len() != 2 {
-            return gs("gsCount", format!("M_0List entry {}", e.len()));
+    let mut members = 0usize;
+    for e in m0.children(b) {
+        members += 1;
+        let n = e.children(b).count();
+        if n != 2 {
+            return gs("gsCount", format!("M_0List entry {n}"));
         }
     }
+    if members == 0 {
+        return gs("gsCount", "M_0List empty");
+    }
     // gsInt: specVersion, chainId and every CP item
-    let ints = [("specVersion", top[0]), ("chainId", top[1])];
-    for (name, n) in ints.iter().copied().chain(CP_SCHEMA.iter().map(|x| x.name).zip(cp.iter().copied())) {
-        let (v, wrapped) = t.bytes(b, n);
-        if wrapped || v.first() == Some(&0) {
+    let ints = [("specVersion", version), ("chainId", chain)];
+    for (name, it) in ints.iter().copied().chain(CP_SCHEMA.iter().map(|x| x.name).zip(cp.children(b))) {
+        if it.wrapped || it.bytes(b).first() == Some(&0) {
             return gs("gsInt", name);
         }
     }
     // gsLen
-    let (alloc_root, _) = t.bytes(b, top[3]);
-    let (sys_code_hash, _) = t.bytes(b, top[5]);
-    if alloc_root.len() != 32 || sys_code_hash.len() != 32 {
+    if alloc_root.len != 32 || sys_code_hash.len != 32 {
         return gs("gsLen", "root");
     }
-    for e in &entries {
-        if t.bytes(b, e[0]).0.len() != 20 || t.bytes(b, e[1]).0.len() != 20 {
+    let pair = |e: Item| {
+        let mut c = e.children(b);
+        (c.next().unwrap_or(none), c.next().unwrap_or(none))
+    };
+    for e in m0.children(b) {
+        let (id, reward) = pair(e);
+        if id.len != 20 || reward.len != 20 {
             return gs("gsLen", "M_0List address");
         }
     }
     // gsRange
-    let (chain, _) = t.bytes(b, top[1]);
+    let chain = chain.bytes(b);
     if chain.is_empty() || chain.len() > 8 {
         return gs("gsRange", "chainId");
     }
     let chain_id = chain.iter().fold(0u64, |a, x| (a << 8) | *x as u64);
     let mut vals = [U256::ZERO; CP_LEN];
-    for (k, field) in CP_SCHEMA.iter().enumerate() {
-        let (v, _) = t.bytes(b, cp[k]);
+    for ((k, field), it) in CP_SCHEMA.iter().enumerate().zip(cp.children(b)) {
+        let v = it.bytes(b);
         if bit_len(v) > field.width as u64 {
             return gs("gsRange", field.name);
         }
@@ -436,16 +492,28 @@ pub fn decode(b: &[u8]) -> Result<GenesisSpec, GsError> {
         }
     }
     // gsOrder: ids strictly ascending bytewise
-    let ids: Vec<Address> = entries.iter().map(|e| arr::<20>(t.bytes(b, e[0]).0)).collect();
-    if ids.windows(2).any(|w| w[0] >= w[1]) {
-        return gs("gsOrder", "ids");
+    let id_of = |e: Item| arr::<20>(pair(e).0.bytes(b));
+    let mut prev: Option<Address> = None;
+    for e in m0.children(b) {
+        let id = id_of(e);
+        if prev.map_or(false, |p| p >= id) {
+            return gs("gsOrder", "ids");
+        }
+        prev = Some(id);
     }
     // gsSys
-    if let Some(id) = ids.iter().find(|id| is_reserved(id)) {
-        return gs("gsSys", format!("0x{}", hex::encode(id)));
+    for e in m0.children(b) {
+        let id = id_of(e);
+        if is_reserved(&id) {
+            return gs("gsSys", format!("0x{}", hex::encode(&id)));
+        }
     }
-    let m0_list = entries.iter().zip(ids.iter()).map(|(e, id)| Member { id: *id, reward_addr: arr::<20>(t.bytes(b, e[1]).0) }).collect();
-    Ok(GenesisSpec { chain_id, cp: vals, alloc_root: arr::<32>(alloc_root), m0_list, sys_code_hash: arr::<32>(sys_code_hash) })
+    let mut m0_list = Vec::with_capacity(members);
+    for e in m0.children(b) {
+        let (id, reward) = pair(e);
+        m0_list.push(Member { id: arr::<20>(id.bytes(b)), reward_addr: arr::<20>(reward.bytes(b)) });
+    }
+    Ok(GenesisSpec { chain_id, cp: vals, alloc_root: arr::<32>(alloc_root.bytes(b)), m0_list, sys_code_hash: arr::<32>(sys_code_hash.bytes(b)) })
 }
 
 // ------------------------------------------------------------------ encode and identity
@@ -454,29 +522,49 @@ fn encode_uint(v: &[u8], out: &mut Vec<u8>) {
     rlp::encode_bytes(significant(v), out);
 }
 
+/// Encoded length of a canonical integer item of at most 55 significant bytes.
+fn uint_len(v: &[u8]) -> usize {
+    match significant(v) {
+        [x] if *x < 0x80 => 1,
+        m => 1 + m.len(),
+    }
+}
+
+fn push_list_header(out: &mut Vec<u8>, payload: usize) {
+    if payload < 56 {
+        out.push(0xc0 + payload as u8);
+    } else {
+        let be = (payload as u64).to_be_bytes();
+        let first = be.iter().position(|x| *x != 0).unwrap_or(7);
+        out.push(0xf7 + (8 - first) as u8);
+        out.extend_from_slice(&be[first..]);
+    }
+}
+
 /// GenesisSpec.encode: canonical RLP. It does not validate; decode(encode(s)) == Ok(s) exactly when
-/// `s` satisfies the schema.
+/// `s` satisfies the schema. Lengths are computed first and the output is allocated once.
 pub fn encode(s: &GenesisSpec) -> Vec<u8> {
-    let mut cp = Vec::new();
+    let cp_payload: usize = s.cp.iter().map(|v| uint_len(&v.to_be_bytes())).sum();
+    let entry = list_len(21 + 21);
+    let m0_payload = s.m0_list.len() * entry;
+    let payload = 1 + uint_len(&s.chain_id.to_be_bytes()) + list_len(cp_payload) + 33 + list_len(m0_payload) + 33;
+    let mut out = Vec::with_capacity(list_len(payload));
+    push_list_header(&mut out, payload);
+    encode_uint(&[SPEC_VERSION], &mut out);
+    encode_uint(&s.chain_id.to_be_bytes(), &mut out);
+    push_list_header(&mut out, cp_payload);
     for v in &s.cp {
-        encode_uint(&v.to_be_bytes(), &mut cp);
+        encode_uint(&v.to_be_bytes(), &mut out);
     }
-    let mut m0 = Vec::new();
+    rlp::encode_bytes(&s.alloc_root, &mut out);
+    push_list_header(&mut out, m0_payload);
     for e in &s.m0_list {
-        let mut entry = Vec::new();
-        rlp::encode_bytes(&e.id, &mut entry);
-        rlp::encode_bytes(&e.reward_addr, &mut entry);
-        rlp::encode_list_payload(&entry, &mut m0);
+        push_list_header(&mut out, 42);
+        rlp::encode_bytes(&e.id, &mut out);
+        rlp::encode_bytes(&e.reward_addr, &mut out);
     }
-    let mut payload = Vec::new();
-    encode_uint(&[SPEC_VERSION], &mut payload);
-    encode_uint(&s.chain_id.to_be_bytes(), &mut payload);
-    rlp::encode_list_payload(&cp, &mut payload);
-    rlp::encode_bytes(&s.alloc_root, &mut payload);
-    rlp::encode_list_payload(&m0, &mut payload);
-    rlp::encode_bytes(&s.sys_code_hash, &mut payload);
-    let mut out = Vec::new();
-    rlp::encode_list_payload(&payload, &mut out);
+    rlp::encode_bytes(&s.sys_code_hash, &mut out);
+    debug_assert_eq!(out.len(), list_len(payload));
     out
 }
 
@@ -573,7 +661,5 @@ mod tests {
         assert_eq!(bit_len(&[1]), 1);
         assert_eq!(bit_len(&[0xff]), 8);
         assert_eq!(bit_len(&[1, 0]), 9);
-        assert_eq!(version_detail(&[0; 40]), "0");
-        assert_eq!(version_detail(&[1; 17]), "specVersion above 2^128");
     }
 }

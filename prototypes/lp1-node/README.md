@@ -455,6 +455,42 @@ options.
 **`tests/e2e_store.py` (stdlib):** CLI lifecycle across processes, rejection, mismatch,
 torn/recover/existing destination, corrupt, metadata cases and the file bound.
 
+## LP3 S1 GenesisSpec decoder and `genesis-decode` (experimental, unreviewed)
+
+`src/genesis_spec.rs` decodes GenesisSpec v1 with the accepted reference order and details
+(L0, structure, gsVersion, gsCount, gsInt, gsLen, gsRange, gsOrder, gsSys). The gsVersion detail is
+the exact decimal value of the specVersion item at any length (`src/decimal.rs`). Identity only: no
+ParamGate, nothing bootable.
+
+```
+target/debug/lp1-node genesis-decode --in FILE [--out FILE]
+python tests/lp3_genesis_diff.py --bin target/debug/lp1-node --m1 ../../development/m1 [--max-version]
+python tests/lp3_genesis_cli.py  --bin target/debug/lp1-node --m1 ../../development/m1 [--max-version]
+cargo test --offline --test genesis_batch_alloc     # LP3_ALLOC_MAX_VERSION=1 adds the full-size gsVersion case
+```
+
+`genesis-decode` reads one hex input per line (optional `0x`, optional `\r`; an empty line is the
+empty input) and writes one JSON row per line plus a summary row. Exit status: 0 every line was
+decoded or rejected by the decoder and every accepted input re-encoded exactly; 1 some line was
+refused; 2 I/O or buffer reservation error.
+
+Tool limits (not GenesisSpec validity rules; a refused line gets no gs* code and no verdict):
+
+| Limit | Value | Why |
+|---|---|---|
+| One input | `MAX_SPEC_BYTES` = 2,818,474 bytes | Largest encoding that can pass decode and ParamGate R12 (65535 members, every field at its widest). Every possibly valid spec fits. |
+| One line | `MAX_LINE_BYTES` = 2·MAX_SPEC_BYTES + 4 | `0x`, the hex digits, `\r`, `\n`. A longer line is skipped in the reader's chunks and reported as `{"refused":"inputTooLarge","lineBytes":N}`; the next line is processed. |
+| Buffers | 8,455,426 bytes, reserved once | Line and byte buffers, reused for every line; reservation failure is exit 2 with a message, not an abort. |
+| Not hex | per line | `{"refused":"hex"}`, next line processed (round 1 stopped the whole command). |
+
+The file is streamed, so memory does not depend on its size or line count. Measured peak heap
+above the buffers (`tests/genesis_batch_alloc.rs`): refused 256 MiB line 15 B, 30000 lines 421 B,
+largest valid spec 5.4 MB, deepest nesting 8.4 MB, 256 KiB gsVersion 1.9 MB, full-size gsVersion
+19.1 MB. Time is linear except the gsVersion decimal conversion, O(n^1.59 log n): 23 s in a
+release build for a full-size specVersion item on the author's Linux container, peak RSS 34.7 MiB
+under a 64 MiB address-space limit (CPython 3.13 needs about 6 s for the same `str(int)`; Python
+>= 3.11 refuses it by default above 4300 digits).
+
 ## Conformance notes and recorded questions
 
 1. **JSON id semantics: resolved in revision 2, and no longer a question.** Revision 1 used exact decimal values, which departed from accepted C19 (LP1-I02). That blocked A6 conformance. Revision 2 implements the accepted binary64 value semantics described under "RPC" above. No M1 change.

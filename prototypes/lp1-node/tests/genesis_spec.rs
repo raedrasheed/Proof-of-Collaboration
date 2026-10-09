@@ -654,3 +654,104 @@ fn seeded_corpus_never_panics_and_accepts_only_canonical_bytes() {
     let parts: Vec<String> = counts.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
     println!("{{\"corpus\":\"lp3-genesis\",\"seed\":\"0x4c50330100010001\",\"trials\":{trials},\"codes\":{{{}}}}}", parts.join(","));
 }
+
+// ------------------------------------------------------------------ round 2: exact gsVersion detail, size bound
+
+/// Independent of `lp1_node::decimal`: base-10 long division, one decimal digit per pass.
+fn slow_decimal(be: &[u8]) -> String {
+    let mut v: Vec<u8> = be.iter().copied().skip_while(|x| *x == 0).collect();
+    if v.is_empty() {
+        return "0".into();
+    }
+    let mut digits = Vec::new();
+    while !v.is_empty() {
+        let mut rem = 0u32;
+        for x in v.iter_mut() {
+            let cur = (rem << 8) | *x as u32;
+            *x = (cur / 10) as u8;
+            rem = cur % 10;
+        }
+        digits.push(b'0' + rem as u8);
+        let lead = v.iter().position(|x| *x != 0).unwrap_or(v.len());
+        v.drain(..lead);
+    }
+    digits.reverse();
+    String::from_utf8(digits).unwrap()
+}
+
+fn version_item(raw: &[u8]) -> String {
+    let mut out = Vec::new();
+    lp1_node::rlp::encode_bytes(raw, &mut out);
+    hex::encode(&out)
+}
+
+#[test]
+fn gs_version_detail_is_the_exact_decimal_at_every_length() {
+    // 2^128 and above were reported as a fixed string in round 1; the reference reports the value.
+    let mut rng = Rng(0x4c50_3302_0002_0001);
+    for len in [2usize, 16, 17, 20, 32, 33, 64, 255, 256, 257, 1024, 4096] {
+        for fill in 0..3 {
+            let raw: Vec<u8> = (0..len)
+                .map(|i| match fill {
+                    0 => 0xff,
+                    1 => {
+                        if i == 0 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    _ => rng.next() as u8 | if i == 0 { 1 } else { 0 },
+                })
+                .collect();
+            let b = set_top(0, &version_item(&raw));
+            assert_eq!(outcome(&b), ("gsVersion".to_string(), slow_decimal(&raw)), "len {len} fill {fill}");
+        }
+    }
+    // Leading zero bytes do not change the value; 00..01 is version 1 and is judged as gsInt.
+    assert_eq!(outcome(&set_top(0, &version_item(&[0, 0, 2]))), ("gsVersion".into(), "2".into()));
+    assert_eq!(outcome(&set_top(0, &version_item(&[0, 0, 1]))), ("gsInt".into(), "specVersion".into()));
+    assert_eq!(slow_decimal(&[0xff; 32]), "115792089237316195423570985008687907853269984665640564039457584007913129639935");
+}
+
+/// The largest spec that can pass decode and R12: every field at its widest and 65535 members.
+fn max_spec() -> Vec<u8> {
+    let mut s = gs::decode(&gsv1()).unwrap();
+    s.chain_id = u64::MAX;
+    for (k, f) in CP_SCHEMA.iter().enumerate() {
+        s.cp[k] = match f.hi {
+            Upper::None if f.width == 256 => U256::MAX,
+            Upper::None => U256::pow2(f.width).unwrap().checked_sub(&U256::ONE).unwrap(),
+            Upper::Value(h) => U256::from_u64(h),
+            Upper::Gamma => U256::from_u64(5000),
+        };
+    }
+    s.cp[13] = U256::from_u64(5000); // alpha_bp: 3 bytes, leaves gamma_bp 5000 in range
+    s.m0_list = (1..=gs::MAX_MEMBERS as u32)
+        .map(|i| {
+            let mut id = [0x10u8; 20];
+            id[16..].copy_from_slice(&i.to_be_bytes());
+            gs::Member { id, reward_addr: [0xb1; 20] }
+        })
+        .collect();
+    gs::encode(&s)
+}
+
+#[test]
+fn max_spec_bytes_is_the_largest_valid_encoding() {
+    assert_eq!(gs::MAX_MEMBERS, 65_535);
+    assert_eq!(gs::MAX_SPEC_BYTES, 2_818_474);
+    let b = max_spec();
+    assert_eq!(b.len(), gs::MAX_SPEC_BYTES);
+    let s = gs::decode(&b).unwrap();
+    assert_eq!(s.m0_list.len(), gs::MAX_MEMBERS);
+    assert_eq!(gs::encode(&s), b);
+    // The bound is not a decode rule: one more member still decodes (R12 is ParamGate).
+    let mut more = s.clone();
+    let mut id = [0x10u8; 20];
+    id[16..].copy_from_slice(&(gs::MAX_MEMBERS as u32 + 1).to_be_bytes());
+    more.m0_list.push(gs::Member { id, reward_addr: [0xb1; 20] });
+    let b2 = gs::encode(&more);
+    assert_eq!(b2.len(), gs::MAX_SPEC_BYTES + 43);
+    assert!(gs::decode(&b2).is_ok());
+}
