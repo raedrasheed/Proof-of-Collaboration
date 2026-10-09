@@ -492,7 +492,8 @@ under a 64 MiB address-space limit (CPython 3.13 needs about 6 s for the same `s
 >= 3.11 refuses it by default above 4300 digits).
 
 The Python harnesses write their generated inputs as exact bytes (binary mode), so Windows newline
-translation cannot change them. Windows checks: `.github/workflows/lp3-s1-windows-verify.yml`
+translation cannot change them, and name `encoding='utf-8'` for every text read and write (the M1
+vector files are UTF-8; Windows run 37972422364 failed on the cp1252 default). Windows checks: `.github/workflows/lp3-s1-windows-verify.yml`
 (manual dispatch, Rust 1.58.1, GitHub-hosted `windows-2022`) runs `.github/scripts/
 lp3-s1-windows-verify.ps1` and uploads logs and `results.json` (PASS / FAIL / BLOCKED BY PLATFORM /
 NOT RUN per check, with the tested commit). It has not been run yet; see

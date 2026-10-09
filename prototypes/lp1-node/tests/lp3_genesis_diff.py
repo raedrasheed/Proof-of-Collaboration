@@ -320,8 +320,11 @@ def main():
     NP.parse = IP.make_parse(NP.GsError)
     assert getattr(NP.parse, 'c30_iterative', False)
 
-    gdoc = json.loads((m1 / 'm1-draft-0.21/vectors/v3-gsv1.json').read_text())
-    cdoc = json.loads((m1 / 'm1-draft-0.22/vectors/c30-depth.json').read_text())
+    # The M1 vector files are UTF-8 (they quote Arabic source literals). Every text read and write here
+    # names its encoding: without one, Python on Windows uses the ANSI code page (cp1252 on the
+    # windows-2022 runner) and fails on these files (Windows run 37972422364).
+    gdoc = json.loads((m1 / 'm1-draft-0.21/vectors/v3-gsv1.json').read_text(encoding='utf-8'))
+    cdoc = json.loads((m1 / 'm1-draft-0.22/vectors/c30-depth.json').read_text(encoding='utf-8'))
     gtree = gdoc['tree']
     corpus = [('gsv1', serialize(gtree))]
     corpus += [('neg.' + n['id'], apply_edits(gtree, n['edits'])) for n in gdoc['negatives']]
@@ -339,8 +342,8 @@ def main():
         inp, outp = os.path.join(tmp, 'in.txt'), os.path.join(tmp, 'out.jsonl')
         text = ''.join(b.hex() + '\n' for _, b in corpus)
         Path(inp).write_bytes(text.encode('ascii'))          # exact bytes; text mode would add \r on Windows
-        proc = subprocess.run([a.bin, 'genesis-decode', '--in', inp, '--out', outp], capture_output=True, text=True)
-        rows = [json.loads(x) for x in Path(outp).read_text().splitlines()] if os.path.exists(outp) else []
+        proc = subprocess.run([a.bin, 'genesis-decode', '--in', inp, '--out', outp], capture_output=True, encoding='utf-8')
+        rows = [json.loads(x) for x in Path(outp).read_text(encoding='utf-8').splitlines()] if os.path.exists(outp) else []
     summary_row = rows[-1] if rows else {}
     rows = rows[:-1]
     mismatches, ref_codes, label_codes = [], {}, {}
@@ -378,7 +381,7 @@ def main():
     line = json.dumps(summary, sort_keys=False)
     print(line)
     if a.out:
-        Path(a.out).write_text(json.dumps(summary, indent=1) + '\n')
+        Path(a.out).write_text(json.dumps(summary, indent=1) + '\n', encoding='utf-8')
     return 0 if ok else 1
 
 

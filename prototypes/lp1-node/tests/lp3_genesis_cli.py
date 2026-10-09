@@ -90,7 +90,7 @@ def run(binary, path, limit, args=None):
     code, sig = (status, None) if status >= 0 else (None, signal.Signals(-status).name)
     rows = []
     if os.path.exists(out):
-        with open(out) as f:
+        with open(out, encoding='utf-8') as f:
             for line in f:
                 r = json.loads(line)
                 if isinstance(r.get('detail'), str) and len(r['detail']) > 200:
@@ -112,7 +112,9 @@ def main():
     a = ap.parse_args()
     binary = str(Path(a.bin).resolve())
     m1 = Path(a.m1).resolve()
-    doc = json.loads((m1 / 'm1-draft-0.21/vectors/v3-gsv1.json').read_text())
+    # UTF-8 vector file (Arabic source literals); an explicit encoding is required on Windows, where the
+    # default is the ANSI code page (cp1252 on windows-2022; Windows run 37972422364).
+    doc = json.loads((m1 / 'm1-draft-0.21/vectors/v3-gsv1.json').read_text(encoding='utf-8'))
 
     def leaf(v):
         if isinstance(v, str):
@@ -235,7 +237,7 @@ def main():
     text = json.dumps(summary, indent=1)
     print(text)
     if a.out:
-        Path(a.out).write_text(text + '\n')
+        Path(a.out).write_text(text + '\n', encoding='utf-8')
     for f in os.listdir(tmp):
         os.remove(os.path.join(tmp, f))
     os.rmdir(tmp)
