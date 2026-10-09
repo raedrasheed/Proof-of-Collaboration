@@ -338,7 +338,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='lp3-genesis-diff-') as tmp:
         inp, outp = os.path.join(tmp, 'in.txt'), os.path.join(tmp, 'out.jsonl')
         text = ''.join(b.hex() + '\n' for _, b in corpus)
-        Path(inp).write_text(text)
+        Path(inp).write_bytes(text.encode('ascii'))          # exact bytes; text mode would add \r on Windows
         proc = subprocess.run([a.bin, 'genesis-decode', '--in', inp, '--out', outp], capture_output=True, text=True)
         rows = [json.loads(x) for x in Path(outp).read_text().splitlines()] if os.path.exists(outp) else []
     summary_row = rows[-1] if rows else {}

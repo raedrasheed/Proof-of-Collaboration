@@ -491,6 +491,13 @@ release build for a full-size specVersion item on the author's Linux container, 
 under a 64 MiB address-space limit (CPython 3.13 needs about 6 s for the same `str(int)`; Python
 >= 3.11 refuses it by default above 4300 digits).
 
+The Python harnesses write their generated inputs as exact bytes (binary mode), so Windows newline
+translation cannot change them. Windows checks: `.github/workflows/lp3-s1-windows-verify.yml`
+(manual dispatch, Rust 1.58.1, GitHub-hosted `windows-2022`) runs `.github/scripts/
+lp3-s1-windows-verify.ps1` and uploads logs and `results.json` (PASS / FAIL / BLOCKED BY PLATFORM /
+NOT RUN per check, with the tested commit). It has not been run yet; see
+`development/lp3/s1-genesisspec/author-r3-windows-ci/README.md`.
+
 ## Conformance notes and recorded questions
 
 1. **JSON id semantics: resolved in revision 2, and no longer a question.** Revision 1 used exact decimal values, which departed from accepted C19 (LP1-I02). That blocked A6 conformance. Revision 2 implements the accepted binary64 value semantics described under "RPC" above. No M1 change.
