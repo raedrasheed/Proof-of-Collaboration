@@ -8,12 +8,20 @@
 //!
 //! LP2 adds `store`: a durable, experimental journal of header *candidates* (scoped H-pre only,
 //! awaiting H-full; never executed, canonical or live consensus) with recovery into new stores.
+//!
+//! LP3 S1 (first increment) adds `genesis_spec`: the full GenesisSpec v1 decoder / encoder with the
+//! accepted error order and genesisHash binding. Identity only: not ParamGate, not bootable.
+//! `genesis_batch` is the bounded line reader behind `lp1-node genesis-decode`; `decimal` renders the
+//! exact gsVersion detail.
 
 pub mod asert;
 pub mod chain;
+pub mod decimal;
 pub mod fixed;
 pub mod fixtures;
 pub mod genesis;
+pub mod genesis_batch;
+pub mod genesis_spec;
 pub mod hashes;
 pub mod header;
 pub mod hex;
