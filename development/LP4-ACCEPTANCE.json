@@ -259,6 +259,19 @@
         "development/lp4/p2-runtime/codex-r4/PAYMENT-LIFECYCLE-DECISION.md option 1 in full"
       ],
       "requiredEvidence": "Every approved part: complete pre-transaction nonce/code facts, all PAY including zero, actual compiled Registry register/setRewardAddress precedence and RewardNotDurable rollback; GenesisRewardNotDurable semantic admission without syntax/schema change; Escrow custody and Registry-only releaseBond(id) deriving HELD record, ordinary/sweep/closing refund eligibility and atomic accounting; nonce/code lifetime and both creation/selfdestruct attacks; missing bond destination reverts/invalidates without burn/skip; preserve SV5 and all SV/CL/CF/finalization values; independent balances/storage/roots, compiled negative controls, crash/reorg; fully CP/profile/model-bound re-derived R18/SYS and R21 resources, caps64. Partial native controls are not whole-contract acceptance."
+    },
+    {
+      "id": "LP4-REGISTRY-01",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P2/P4/P5/P6/P7/P8/P9",
+      "sources": [
+        "development/LP4-REGISTRY-APPROVAL.md",
+        "development/lp4/p2-runtime/codex-r6/REGISTRY-TRANSITION-DECISION.md option1 in full",
+        "development/m1/reference/execution.md user write ceilings"
+      ],
+      "requiredEvidence": "All eight approved parts and full compiled/independent boundary/negative/mutation/resource acceptance. Original per-function ceilings and R16/LAG remain binding. Reproduced lower-bound conflict with register9, setRewardAddress1, middle claimBond9 must return to owner under part8; no silent amendment. Full actual implementation, eligibility, PAY/bridge, genesis and phase/rollback/resource proofs remain mandatory.",
+      "acceptanceBlocker": "Compiled lower-bound witness and independent SSTORE trace require at least10/2/10 changed storage keys respectively. Proposed amendment in codex-r7/REGISTRY-WRITE-BUDGET-DECISION.md is NOT APPROVED."
     }
   ],
   "increments": {

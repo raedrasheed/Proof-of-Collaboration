@@ -79,3 +79,12 @@ Registry release bridge, admission probes and semantic genesis rejection. All se
 parts of the historical proposal remain mandatory; partial native controls do not
 pass integration, genesis, closing or resource gates. Existing R18/R21 measurements
 must be re-derived for the complete implementation, not reused as accepted bounds.
+
+Owner approved LP4-REGISTRY-01 option1 in full; see
+[LP4-REGISTRY-APPROVAL.md](LP4-REGISTRY-APPROVAL.md). Slot3 successful-call accounting
+and original write ceilings are both binding. Actual compiled lower-bound witnesses
+and independent SSTORE traces expose a10/2/10 versus9/1/9 conflict for register,
+setRewardAddress and middle claimBond. Part8 requires returning this contradiction;
+no unapproved ceiling increase or budget exemption is implemented. See the explicitly
+unapproved consolidated resolution in lp4/p2-runtime/codex-r7. All25 acceptance
+obligations remain NOT PASSED; boot false, P2 draft, foundation unchanged.

@@ -32,11 +32,15 @@ jobs:
           cmp prototypes/lp4-execution/tests/data/pay-harness.json work/lp4-controls/pay-harness.json
           NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_durability.cjs work/lp4-controls/reward-durability.json
           cmp prototypes/lp4-execution/tests/data/reward-durability.json work/lp4-controls/reward-durability.json
+          NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_budget_witness.cjs work/lp4-controls/registry-write-budget.json
+          cmp prototypes/lp4-execution/tests/data/registry-write-budget.json work/lp4-controls/registry-write-budget.json
           cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example pay_vectors > work/lp4-controls/pay-vectors.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/pay_oracle.py work/lp4-controls/pay-vectors.json prototypes/lp4-execution/tests/data/pay-harness.json work/lp4-controls/pay-oracle.json
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example lifecycle_vectors > work/lp4-controls/lifecycle-vectors.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/lifecycle_oracle.py work/lp4-controls/lifecycle-vectors.json prototypes/lp4-execution/tests/data/reward-durability.json work/lp4-controls/lifecycle-oracle.json
+          cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example registry_write_budget > work/lp4-controls/registry-write-vectors.json
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/registry_budget_oracle.py work/lp4-controls/registry-write-vectors.json prototypes/lp4-execution/tests/data/registry-write-budget.json work/lp4-controls/registry-write-counts.json
       - name: Compile PAY mutation controls
         env:
           RUSTUP_TOOLCHAIN: '1.99.1'
@@ -45,6 +49,10 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: '1.99.1'
         run: python prototypes/lp4-execution/tests/create_mutations.py work/lp4-create-mutations
+      - name: Compile write-budget contradiction controls (not Registry acceptance)
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.1'
+        run: NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" python prototypes/lp4-execution/tests/registry_budget_mutations.py work/lp4-budget-mutations
       - name: Complete pinned upstream Cancun control corpus
         run: |
           set -euo pipefail
@@ -62,6 +70,8 @@ jobs:
             work/lp4-mutations/results.json
             work/lp4-create-mutations/*.log
             work/lp4-create-mutations/results.json
+            work/lp4-budget-mutations/*.log
+            work/lp4-budget-mutations/results.json
           if-no-files-found: error
           retention-days: 14
   legacy-windows-regression:
