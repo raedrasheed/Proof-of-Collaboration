@@ -270,7 +270,7 @@
     }
   },
   "pendingOwnerDefinition": {
-    "status": "PENDING",
+    "status": "APPROVED_NEW_LP4_DEFINITIONS",
     "labels": [
       "T2",
       "T2b",
@@ -279,6 +279,7 @@
       "T26"
     ],
     "proposal": "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md",
-    "answerAssumed": false
+    "answerAssumed": false,
+    "approval": "development/LP4-TEST-GATES-APPROVAL.md"
   }
 }
