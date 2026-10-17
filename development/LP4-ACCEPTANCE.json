@@ -1,0 +1,285 @@
+{
+  "base": "041061aa62d5bf772c4e45d790ce5e5a85aad151",
+  "status": "NOT PASSED",
+  "bootable": false,
+  "obligations": [
+    {
+      "id": "H-full10-17",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P9",
+      "sources": [
+        "development/m1/reference/consensus.md H-full10-17",
+        "development/LOCAL-DEVNET-PLAN.md LP4"
+      ],
+      "requiredEvidence": "All full-body/state positive/negative cases; gas/baseFee, fallback, owners, roots/caps, no invalid-state commit"
+    },
+    {
+      "id": "T2",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P2",
+      "sources": [
+        "development/m1/reference/execution.md testing",
+        "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md"
+      ],
+      "requiredEvidence": "Named definition pending; Cancun GST with individually declared exceptions and replacement tests"
+    },
+    {
+      "id": "T2b",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P2",
+      "sources": [
+        "development/m1/reference/execution.md deviations",
+        "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md"
+      ],
+      "requiredEvidence": "Named definition pending; actual PAY/transfer effects and rollback"
+    },
+    {
+      "id": "CI1-CI3",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P3",
+      "sources": [
+        "development/m1/reference/execution.md CI1-CI3"
+      ],
+      "requiredEvidence": "CHAINID777902; wrong777001 pool-32015 and included transaction block-rule17 rejection"
+    },
+    {
+      "id": "GB1",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P4",
+      "sources": [
+        "development/m1/reference/execution.md GB1"
+      ],
+      "requiredEvidence": "Real genesis with4 members, heldTotal4*B_reg and exact sorted lists/roots"
+    },
+    {
+      "id": "GB-END",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P4",
+      "sources": [
+        "development/m1/reference/execution.md GB-END"
+      ],
+      "requiredEvidence": "Real1024-member genesis and independently identical state allocation root"
+    },
+    {
+      "id": "L4s",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P4",
+      "sources": [
+        "development/m1/reference/validation.md L4s"
+      ],
+      "requiredEvidence": "sv-fix CP=GSV1; GB1; actual Rust/anvil allocRoot agreement"
+    },
+    {
+      "id": "T2c",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P7",
+      "sources": [
+        "development/m1/reference/execution.md caps",
+        "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md"
+      ],
+      "requiredEvidence": "Named definition pending; exact cap boundaries, exceptional halt vs block invalidity and rollback"
+    },
+    {
+      "id": "T24",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P5",
+      "sources": [
+        "development/m1/reference/implementation.md M4 D141-D142",
+        "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md"
+      ],
+      "requiredEvidence": "Named definition pending; real phase order, parent-only data provenance and leak controls"
+    },
+    {
+      "id": "T26",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P9",
+      "sources": [
+        "development/LOCAL-DEVNET-PLAN.md LP4",
+        "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md"
+      ],
+      "requiredEvidence": "Named definition pending; full H/state/root acceptance and atomic recovery"
+    },
+    {
+      "id": "PAY-Cancun-deviations",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P2",
+      "sources": [
+        "development/m1/reference/execution.md EVM fields and declared deviations"
+      ],
+      "requiredEvidence": "Exact customized execution fields and transfer behavior, no callbacks for PAY, no skipped failing GST without individual justification"
+    },
+    {
+      "id": "parentResult-and-phases",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P5",
+      "sources": [
+        "development/m1/reference/execution.md parentResult and phases",
+        "development/m1/reference/implementation.md M4"
+      ],
+      "requiredEvidence": "Stored parent/grandparent assignment only, h1empty, rederive mismatch halts import, no current result fields, phase call order and system caller enforcement"
+    },
+    {
+      "id": "General-R18",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P7",
+      "sources": [
+        "development/LP3-AMENDMENT-01.md tests1,4,5",
+        "development/m1/reference/governance.md R18"
+      ],
+      "requiredEvidence": "General parameter-bound SYS slots/phase keys/accounts/per-call and total gas withRET; independent derivation/counters, named default and end/full counts, bound mutations"
+    },
+    {
+      "id": "General-R21",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P8",
+      "sources": [
+        "development/LP3-AMENDMENT-01.md tests2,4,5",
+        "development/m1/reference/governance.md R21"
+      ],
+      "requiredEvidence": "Historical shared-trie/horizon general derivation and independent actual retained node/byte counts; budget boundary and simnet-only exception; measurements not proof"
+    },
+    {
+      "id": "caps64-minimum",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P7",
+      "sources": [
+        "development/LP3-AMENDMENT-01.md test3",
+        "development/m1/reference/validation.md caps64"
+      ],
+      "requiredEvidence": "Minimal SYS_SLOT_MAX passes, min-1 failsR18; real execution reaches requirement; freeze profile bytes/derivation for required VA-spec annex, no substitute default cap"
+    },
+    {
+      "id": "real-source-bound-resource-facts",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P7/P8",
+      "sources": [
+        "development/LP3-AMENDMENT-01.md tests4,5"
+      ],
+      "requiredEvidence": "Complete CP/profile/model/compiler/code/artifact binding, ordinary/closing/final+RET coverage; missing/mismatch rejects; replace synthetic facts and distinguish measured/proven"
+    },
+    {
+      "id": "GenesisBuilder-and-sysCodeHash",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P4",
+      "sources": [
+        "development/lp3/s9-acceptance/codex-r1/LP4-OBLIGATIONS.md item1",
+        "development/m1/reference/consensus.md sysCodeHash"
+      ],
+      "requiredEvidence": "Actual compiled system code and allocation/storage MPT, deterministic roots and hash(RLP(system code,empty PAY)); reject mismatch; root primitive alone insufficient"
+    },
+    {
+      "id": "real-finalization",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P6",
+      "sources": [
+        "development/LP3-CF-CORE-APPROVAL.md LP4 tests1,4",
+        "development/m1/reference/incentives.md final"
+      ],
+      "requiredEvidence": "Actual closing/final state transitions, settle remaining pots, burn final tips, no valid child and full rollback"
+    },
+    {
+      "id": "cursor-mutation",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P6",
+      "sources": [
+        "development/LP3-CF-CORE-APPROVAL.md test2"
+      ],
+      "requiredEvidence": "Actual <=RET records/block, sticky firstcloseH, exact completion and persisted state"
+    },
+    {
+      "id": "pending[F]-absence",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P6",
+      "sources": [
+        "development/LP3-CF-CORE-APPROVAL.md test3",
+        "development/m1/reference/execution.md phase2"
+      ],
+      "requiredEvidence": "No actual pending[F] creation, including adversarial pending entries and rollback"
+    },
+    {
+      "id": "zero-final-subsidy",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P6",
+      "sources": [
+        "development/LP3-CF-CORE-APPROVAL.md test4",
+        "development/m1/reference/incentives.md F"
+      ],
+      "requiredEvidence": "Zero real final subsidy through balance/supply state and finalTips burn"
+    },
+    {
+      "id": "SV6-and-real-settlement",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P6",
+      "sources": [
+        "development/m1/reference/incentives.md SV1-SV7s",
+        "development/lp3/s9-acceptance/codex-r1/LP4-OBLIGATIONS.md item5"
+      ],
+      "requiredEvidence": "Actual invalidPot5000 ->invalidBurn5000; all SV cases through real balances/storage/payment/burn/held state, no pure arithmetic substitution"
+    },
+    {
+      "id": "atomic-persistence-crash-rollback",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P9",
+      "sources": [
+        "development/LOCAL-DEVNET-PLAN.md LP4",
+        "development/m1/reference/consensus.md rollback"
+      ],
+      "requiredEvidence": "Every commit boundary crash yields one complete state; bad block no disk effects; metadata/receipts/roots/diffs atomic; corruption/mismatch rejection and inverse-diff restoration"
+    }
+  ],
+  "increments": {
+    "P0": {
+      "scope": "planning only",
+      "status": "PASS",
+      "pr": 20,
+      "merge": "9d3f99ab65c58e500ccd5b5218a5946ae335b788"
+    },
+    "P1": {
+      "scope": "canonical trie/root prerequisite only",
+      "status": "PASS",
+      "pr": 21,
+      "merge": "93ca35b97d7eeb9a11af539559e89d8e170b9a50",
+      "testedHead": "3423bbf6ba995ba1c5d77ca69084905272135211",
+      "evidence": [
+        "development/lp4/p1-trie/codex-r1",
+        "development/lp4/p1-trie/codex-r2"
+      ]
+    }
+  },
+  "pendingOwnerDefinition": {
+    "status": "APPROVED_NEW_LP4_DEFINITIONS",
+    "labels": [
+      "T2",
+      "T2b",
+      "T2c",
+      "T24",
+      "T26"
+    ],
+    "proposal": "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md",
+    "answerAssumed": false,
+    "approval": "development/LP4-TEST-GATES-APPROVAL.md"
+  }
+}
