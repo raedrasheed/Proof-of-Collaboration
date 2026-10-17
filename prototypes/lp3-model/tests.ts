@@ -88,3 +88,12 @@ test('all accepted L4n/order supplements and 1500-level malformed twins',()=>{
   if(row.dropLast)b=b.subarray(0,b.length-1);if(row.suffix)b=m.concat(b,m.unhex(row.suffix));assert.equal(b.length,row[variant].length,row.id+' length');assert.equal(code(b),row.expect.code,row.id+' '+variant);
  }}
 });
+test('SV1-SV5/SV7/SV7s pure settlement arithmetic; execution and SV6 deferred LP4',()=>{
+ const row=(n:number,count:bigint,tomb=false,accountExists=true)=>({id:id(n),count,tomb,accountExists});
+ let s=m.shareRewards(64000n,[row(1,1n)],2n,32n);assert.equal(s.amount,1000n);assert.equal(s.baseBurn,63000n);
+ s=m.shareRewards(101n,Array.from({length:65},(_,i)=>row(i+1,1n)),2n,32n);assert.equal(s.paid,65n);assert.equal(s.roundBurn,36n);
+ s=m.shareRewards(1000n,[row(1,3n),row(2,2n)],2n,32n);assert.deepEqual(s.payments.map(p=>p.amount),[46n,31n]);assert.equal(s.roundBurn,1n);assert.equal(s.baseBurn,922n);
+ for(const[tomb,exists,penalty,pay]of [[true,true,100n,0n],[false,false,0n,100n]] as const){s=m.shareRewards(6400n,[row(1,1n),row(2,1n,tomb,exists)],2n,32n);assert.equal(s.paid,100n);assert.equal(s.penaltyBurn,penalty);assert.equal(s.payBurn,pay);assert.equal(s.baseBurn,6200n);}
+ for(const[pot,expectedPaid,base]of [[80000n,13062n,66938n],[164000n,26778n,137222n]]){const p=m.splitPot(pot,1000n,500n);s=m.shareRewards(p.remainder,[row(1,1n)],2n,32n);assert.equal(p.winner+p.proposer+s.paid,expectedPaid);assert.equal(s.baseBurn,base);assert.equal(expectedPaid+base,pot);}
+ s=m.shareRewards(m.MAX256,[row(1,257n)],2n,32n);assert.equal(s.paid,m.MAX256);assert.throws(()=>m.shareRewards(1n,[row(1,258n)],2n,32n));
+});

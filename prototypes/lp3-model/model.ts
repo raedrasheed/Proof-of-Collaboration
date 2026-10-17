@@ -76,3 +76,12 @@ export function draw(w:{id:string;weight:bigint}[],seal:string,h:bigint):{id:str
 export function retryIndex(total:bigint,start:bigint,digest:(counter:bigint)=>string):{index:bigint;counter:bigint} {
  bounded(start,32,'counter');for(let k=start;k<=0xffffffffn;k++){const index=sample(digest(k),total);if(index!==null)return{index,counter:k};}throw Error('counterExhausted');
 }
+/** SV arithmetic only. Tomb/account inputs are supplied facts, not authenticated state. */
+export function shareRewards(R:bigint,counts:{id:string;count:bigint;tomb:boolean;accountExists:boolean}[],kappa:bigint,m:bigint):{payments:{id:string;amount:bigint;route:string}[];amount:bigint;baseBurn:bigint;roundBurn:bigint;paid:bigint;penaltyBurn:bigint;payBurn:bigint} {
+ bounded(R,256,'R');bounded(kappa,8,'kappa');bounded(m,16,'m');if(!kappa||!m||counts.length>257)throw Error('parameters');
+ const seen=new Set<string>();let C=0n;for(const r of counts){if(!/^[0-9a-f]{40}$/.test(r.id)||seen.has(r.id)||r.count<1n||r.count>257n)throw Error('counts');seen.add(r.id);C+=r.count;}if(C>257n)throw Error('counts');
+ const Q=C>kappa*m?C:kappa*m,amount=R*C/Q;let paid=0n,penaltyBurn=0n,payBurn=0n,sum=0n;
+ const payments=counts.map(r=>{const amount=R*r.count/Q;sum+=amount;const route=r.tomb?'penaltyBurn':!r.accountExists?'payBurn':'paid';if(route==='penaltyBurn')penaltyBurn+=amount;else if(route==='payBurn')payBurn+=amount;else paid+=amount;return{id:r.id,amount,route};});
+ return{payments,amount,baseBurn:R-amount,roundBurn:amount-sum,paid,penaltyBurn,payBurn};
+}
+export function splitPot(pot:bigint,alpha:bigint,gamma:bigint):{winner:bigint;proposer:bigint;remainder:bigint} {bounded(pot,256,'pot');bounded(alpha,16,'alpha');bounded(gamma,16,'gamma');if(alpha+gamma>10000n)throw Error('parts');const winner=pot*alpha/10000n,proposer=pot*gamma/10000n;return{winner,proposer,remainder:pot-winner-proposer};}

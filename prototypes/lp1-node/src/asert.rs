@@ -21,7 +21,18 @@ impl Early {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AsertTrace {
+    pub delta_t: i128,
+    pub e: i128,
+    pub s: i128,
+    pub f: u16,
+    /// Absent on the early saturation paths: no polynomial or multiply was run.
+    pub factor: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AsertOut {
+    pub trace: AsertTrace,
     pub target: U256,
     pub early: Early,
     /// Native oracle metric: max(bits(X), bits(Y)); 0 on the early exits.
@@ -51,17 +62,19 @@ pub fn asert(target_g: &U256, g_ts: i128, t_blk: i128, tau: i128, p_ts: i128, p_
     let e = num.div_euclid(tau); // tau > 0: Euclidean division is floor division
     let s = e.div_euclid(65536);
     let f = e - 65536 * s; // 0 <= f < 65536
+    let mut trace = AsertTrace { delta_t: dt, e, s, f: f as u16, factor: None };
     let mut max_bits = bits_i128(num).max(bits_i128(e));
     if s >= 256 {
-        return Some(AsertOut { target: U256::MAX, early: Early::High, shift_bits: 0, max_bits });
+        return Some(AsertOut { trace, target: U256::MAX, early: Early::High, shift_bits: 0, max_bits });
     }
     if s <= -257 {
-        return Some(AsertOut { target: U256::ONE, early: Early::Low, shift_bits: 0, max_bits });
+        return Some(AsertOut { trace, target: U256::ONE, early: Early::Low, shift_bits: 0, max_bits });
     }
     let fu = f as u128;
     // < 2^65 for f < 2^16: no overflow in u128.
     let poly = 195_766_423_245_049u128 * fu + 971_821_376u128 * fu * fu + 5127u128 * fu * fu * fu + (1u128 << 47);
     let big_f = 65536u64 + (poly >> 48) as u64;
+    trace.factor = Some(big_f);
     let x = U512::mul_u256_u64(target_g, big_f);
     let xb = x.bits();
     let k = (s - 16) as i32; // -273 ..= 239
@@ -83,7 +96,7 @@ pub fn asert(target_g: &U256, g_ts: i128, t_blk: i128, tau: i128, p_ts: i128, p_
         let y = if k >= 0 { x.shl(k as u32) } else { x.shr((-k) as u32) };
         y.clamp_u256()
     };
-    Some(AsertOut { target, early: Early::No, shift_bits, max_bits })
+    Some(AsertOut { trace, target, early: Early::No, shift_bits, max_bits })
 }
 
 #[cfg(test)]

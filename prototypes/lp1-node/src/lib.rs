@@ -31,6 +31,7 @@ pub mod http;
 pub mod json;
 pub mod param_gate;
 pub mod profile;
+pub mod rewards;
 pub mod rlp;
 pub mod rpc;
 pub mod store;
