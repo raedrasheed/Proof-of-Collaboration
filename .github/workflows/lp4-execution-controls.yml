@@ -9,6 +9,8 @@ permissions:
 jobs:
   cancun-pay-controls:
     runs-on: ubuntu-24.04
+    env:
+      CARGO_HOME: ${{ runner.temp }}/lp4-execution-cargo
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -24,6 +26,13 @@ jobs:
           python -m venv work/lp4-venv
           work/lp4-venv/bin/pip install -r prototypes/lp4-execution/tests/python-requirements.lock
           npm ci --prefix prototypes/lp4-execution/tools --ignore-scripts --no-audit --no-fund
+      - name: Verify locked source archives and prepare default-runtime notices
+        run: |
+          set -euo pipefail
+          cargo +1.99.1 fetch --locked --manifest-path prototypes/lp4-execution/Cargo.toml
+          cargo +1.99.1 tree --offline --locked --manifest-path prototypes/lp4-execution/Cargo.toml --target all -e normal,build --prefix none --format '{p}' > work/lp4-active-packages.txt
+          python prototypes/lp4-execution/tests/source_inventory.py "$CARGO_HOME" work/lp4-source-inventory.json
+          python prototypes/lp4-execution/tests/source_notice_audit.py "$CARGO_HOME" work/lp4-active-packages.txt development/lp4/p2-runtime/codex-r9/upstream-license-grants.json work/lp4-runtime-notices
       - name: Reproduce compiler output and run actual Rust execution tests
         run: |
           set -euo pipefail
@@ -74,6 +83,9 @@ jobs:
           name: lp4-p2-controls
           path: |
             work/lp4-controls
+            work/lp4-runtime-notices
+            work/lp4-source-inventory.json
+            work/lp4-active-packages.txt
             work/lp4-mutations/*.log
             work/lp4-mutations/results.json
             work/lp4-create-mutations/*.log
