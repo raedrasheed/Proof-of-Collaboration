@@ -16,7 +16,7 @@ jobs:
           node-version: '22.18.0'
       - name: Install exact compiler and type declarations
         working-directory: prototypes/lp3-model
-        run: npm install --ignore-scripts --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Type check and run the reference tests
         working-directory: prototypes/lp3-model
         run: |
@@ -27,5 +27,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: lp3-typescript-lock
-          path: prototypes/lp3-model/package-lock.json
+          name: lp3-typescript-tools
+          path: |
+            prototypes/lp3-model/package-lock.json
+            prototypes/lp3-model/node_modules

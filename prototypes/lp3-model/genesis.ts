@@ -20,7 +20,7 @@ export function keccak256(input:Uint8Array):Uint8Array {
 }
 export class GenesisError extends Error {readonly code:string;readonly detail:string;constructor(code:string,detail=''){super(code+':'+detail);this.code=code;this.detail=detail;}}
 type Rlp={bytes:Uint8Array;wrapped:boolean}|{list:Rlp[]};
-const fail=(code:string,detail=''):never=>{throw new GenesisError(code,detail);};
+function fail(code:string,detail=''):never {throw new GenesisError(code,detail);}
 export const MAX_SPEC_BYTES=2818474;
 function framing(b:Uint8Array):Rlp {
  if(b.length>MAX_SPEC_BYTES)fail('L0','inputLimit');
