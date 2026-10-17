@@ -36,6 +36,11 @@ closing, system-phase, caps and GenesisBuilder acceptance remains outstanding.
 fields and transaction types), not PoCol apply. `gst_control.py` checks resulting
 full-state and log hashes using Python's independent trie/RLP/Keccak against frozen
 geth-generated fixture roots. It does not validate signed wire transaction bytes.
-`--storage-collision-probe` enables an **unapproved diagnostic alternative only**;
-it is not installed in `native::execute` or any consensus/boot path. Do not mistake
-its control comparisons for an accepted fork rule or T2 PASS.
+The owner has approved the additive creation rule in
+[LP4-CREATE-01](../../development/LP4-COLLISION-APPROVAL.md). The same collision
+handler now runs in `native::execute` and the upstream control runner; the old
+optional probe has been removed. Complete InMemoryDB base storage is overlaid by
+current journal values, including unloaded keys and cleared/restored slots. This
+backend has no external storage and therefore no hidden slots; this does not claim
+persisted-state integration, a resource bound or P2/T2 acceptance. Historical probe
+receipts remain unchanged.

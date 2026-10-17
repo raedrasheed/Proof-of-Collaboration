@@ -287,5 +287,11 @@
     "authority": "development/LP4-PAY-APPROVAL.md",
     "originalContract": "development/lp4/p2-runtime/codex-r1/PAY-DECISION.md",
     "executionAcceptance": "NOT PASSED"
+  },
+  "creationCollisionDecision": {
+    "status": "APPROVED_ADDITIVE_LP4",
+    "authority": "development/LP4-COLLISION-APPROVAL.md",
+    "originalProposal": "development/lp4/p2-runtime/codex-r2/CANCUN-COLLISION-DECISION.md",
+    "executionAcceptance": "NOT PASSED"
   }
 }

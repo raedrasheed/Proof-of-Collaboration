@@ -24,7 +24,7 @@ pub fn execute(snapshot:&InMemoryDB, tx:TxEnv) -> Result<ResultAndState,EVMError
                     pay::call(context,&inputs)
                 } else { previous(context,inputs) }
             });
-        }).build();
+        }).append_handler_register(crate::collision::register).build();
     evm.transact()
 }
 

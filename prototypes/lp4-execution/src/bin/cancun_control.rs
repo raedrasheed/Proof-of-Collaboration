@@ -22,7 +22,6 @@ fn run(v:Value)->Value {
     // This unsigned control runner does not replace real wire-transaction validation.
     let chosen_value=&tx["value"][indexes["value"].as_u64().unwrap() as usize];
     if U256::from_str(chosen_value.as_str().unwrap()).is_err(){return json!({"error":"ControlInputValueOverflow"});}
-    let storage_collision_probe=v["storageCollisionProbe"].as_bool().unwrap_or(false);
     let mut evm=Evm::builder().with_db(db).with_spec_id(SpecId::CANCUN)
         .modify_cfg_env(|c|c.chain_id=1)
         .modify_block_env(|b|{
@@ -44,26 +43,7 @@ fn run(v:Value)->Value {
             }
             if let Some(blobs)=tx.get("blobVersionedHashes"){t.blob_hashes=blobs.as_array().unwrap().iter().map(|b|B256::from_str(b.as_str().unwrap()).unwrap()).collect();}
             t.max_fee_per_blob_gas=tx.get("maxFeePerBlobGas").map(number);
-        }).append_handler_register_box(Box::new(move |handler|{
-            // Diagnostic alternative ONLY: not installed in native/PoCol execution.
-            if !storage_collision_probe{return;}
-            let previous=handler.execution.create.clone();
-            handler.execution.create=std::sync::Arc::new(move |context,inputs|{
-                let result=previous(context,inputs.clone())?;
-                match result {
-                    revm::FrameOrResult::Frame(revm::Frame::Create(frame))=>{
-                        let storage_nonempty=context.evm.db.accounts.get(&frame.created_address)
-                            .map(|a|a.storage.values().any(|v|*v!=U256::ZERO)).unwrap_or(false);
-                        if storage_nonempty {
-                            context.evm.journaled_state.checkpoint_revert(frame.frame_data.checkpoint);
-                            Ok(revm::FrameOrResult::Result(revm::FrameResult::Create(revm::interpreter::CreateOutcome::new(
-                                revm::interpreter::InterpreterResult{result:revm::interpreter::InstructionResult::CreateCollision,
-                                gas:revm::interpreter::Gas::new(inputs.gas_limit),output:Bytes::new()},None))))
-                        }else{Ok(revm::FrameOrResult::Frame(revm::Frame::Create(frame)))}
-                    },other=>Ok(other)
-                }
-            });
-        })).build();
+        }).append_handler_register(pocol_lp4_execution::collision::register).build();
     let r=match evm.transact(){Ok(r)=>r,Err(e)=>return json!({"error":format!("{e:?}")})};
     let removed:Vec<_>=r.state.iter().filter(|(_,a)|a.is_selfdestructed()||(a.is_touched()&&a.is_empty())).map(|(a,_)|*a).collect();
     let gas=r.result.gas_used();let logs:Vec<_>=r.result.logs().iter().map(|l|json!({"address":hex(l.address.as_slice()),"topics":l.data.topics().iter().map(|x|hex(x.as_slice())).collect::<Vec<_>>(),"data":hex(&l.data.data)})).collect();
@@ -77,4 +57,4 @@ fn run(v:Value)->Value {
     }
     json!({"state":state,"gasUsed":gas,"logs":logs,"success":r.result.is_success()})
 }
-fn main(){for line in io::stdin().lock().lines(){let line=line.unwrap();let result=std::panic::catch_unwind(||run(serde_json::from_str(&line).unwrap()));println!("{}",result.unwrap_or_else(|_|json!({"runnerFailure":true})));}}
+fn main(){for line in io::stdin().lock().lines(){let line=line.unwrap();let result=std::panic::catch_unwind(||run(serde_json::from_str(&line).unwrap()));let mut result=result.unwrap_or_else(|_|json!({"runnerFailure":true}));result.as_object_mut().unwrap().insert("collisionRule".into(),json!("LP4-CREATE-01"));println!("{}",result);}}

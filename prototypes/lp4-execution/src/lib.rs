@@ -110,3 +110,5 @@ mod tests {
 
 pub mod pay;
 pub mod native;
+
+pub mod collision;

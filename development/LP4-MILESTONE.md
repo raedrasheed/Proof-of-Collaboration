@@ -66,3 +66,8 @@ criteria remain NOT PASSED. No silent deferral beyond LP4. Boot disabled.
 PAY native interface is now explicitly approved by [LP4-PAY-01](LP4-PAY-APPROVAL.md).
 The newly approved conditional interpretation of “never fails” is additive; M1
 and the immutable proposal remain unchanged. Approval does not pass PAY/T2b or P2.
+
+Owner approved LP4-CREATE-01 in [LP4-COLLISION-APPROVAL.md](LP4-COLLISION-APPROVAL.md).
+Nonempty-storage creation collision is an additive LP4 rule at every supported
+height; no repeat fork approval is needed. All original execution/resource gates
+remain mandatory and NOT PASSED until verified.

@@ -30,6 +30,8 @@ jobs:
           mkdir -p work/lp4-controls
           NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_contracts.cjs work/lp4-controls/pay-harness.json
           cmp prototypes/lp4-execution/tests/data/pay-harness.json work/lp4-controls/pay-harness.json
+          NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_durability.cjs work/lp4-controls/reward-durability.json
+          cmp prototypes/lp4-execution/tests/data/reward-durability.json work/lp4-controls/reward-durability.json
           cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example pay_vectors > work/lp4-controls/pay-vectors.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/pay_oracle.py work/lp4-controls/pay-vectors.json prototypes/lp4-execution/tests/data/pay-harness.json work/lp4-controls/pay-oracle.json
@@ -37,6 +39,17 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: '1.99.1'
         run: python prototypes/lp4-execution/tests/pay_mutations.py work/lp4-mutations
+      - name: Compile approved CREATE collision mutation controls
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.1'
+        run: python prototypes/lp4-execution/tests/create_mutations.py work/lp4-create-mutations
+      - name: Complete pinned upstream Cancun control corpus
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --max-time 300 https://codeload.github.com/ethereum/legacytests/tar.gz/1f581b8ccdc4c63acf5f2c5c1b155c690c32a8eb -o work/legacy.tar.gz
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/gst_extract.py work/legacy.tar.gz work/gst-corpus development/lp4/p2-runtime/codex-r2/source-receipts.json
+          cargo +1.99.1 build --locked --release --manifest-path prototypes/lp4-execution/Cargo.toml --bin cancun_control
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/gst_control.py work/gst-corpus prototypes/lp4-execution/target/release/cancun_control work/lp4-controls/gst
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
@@ -45,6 +58,8 @@ jobs:
             work/lp4-controls
             work/lp4-mutations/*.log
             work/lp4-mutations/results.json
+            work/lp4-create-mutations/*.log
+            work/lp4-create-mutations/results.json
           if-no-files-found: error
           retention-days: 14
   legacy-windows-regression:
