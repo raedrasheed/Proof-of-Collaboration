@@ -70,5 +70,9 @@ function weightTotal(w:{id:string;weight:bigint}[]):bigint {let total=0n;for(let
 export function choose(w:{id:string;weight:bigint}[],index:bigint):string {const total=weightTotal(w);if(index<0n||index>=total)throw Error('index');let sum=0n;for(const r of w){sum+=r.weight;if(sum>index)return r.id;}throw Error('index');}
 export function draw(w:{id:string;weight:bigint}[],seal:string,h:bigint):{id:string;counter:bigint} {
  if(!/^[0-9a-f]{64}$/.test(seal))throw Error('seal');const total=weightTotal(w);
- for(let k=0n;k<=0xffffffffn;k++){const digest=hex(sha256(concat(utf('PoColProposer'),unhex(seal),be(h,8),be(0n,4),be(k,4)))),idx=sample(digest,total);if(idx!==null)return {id:choose(w,idx),counter:k};}throw Error('counterExhausted');
+ const result=retryIndex(total,0n,k=>hex(sha256(concat(utf('PoColProposer'),unhex(seal),be(h,8),be(0n,4),be(k,4)))));return{id:choose(w,result.index),counter:result.counter};
+}
+/** Generic deterministic sampler retry primitive; digest injection tests error paths only. */
+export function retryIndex(total:bigint,start:bigint,digest:(counter:bigint)=>string):{index:bigint;counter:bigint} {
+ bounded(start,32,'counter');for(let k=start;k<=0xffffffffn;k++){const index=sample(digest(k),total);if(index!==null)return{index,counter:k};}throw Error('counterExhausted');
 }

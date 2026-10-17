@@ -52,6 +52,11 @@ test('weight interval, strict CDF, unbiased rejection and uniform fallback',()=>
  assert.deepEqual(m.weights([id(2),id(1)],10n,1n,[]),[{id:id(1),weight:1n},{id:id(2),weight:1n}]);
  assert.throws(()=>m.weights([id(1)],10n,1n,[history[0],history[0]]));
  assert.deepEqual(m.draw(w,'07'.repeat(32),10n).id,id(1));
+ const counters:bigint[]=[];assert.deepEqual(m.retryIndex(3n,0n,k=>{counters.push(k);return(k===0n?'ff':'00').repeat(32);}),{index:0n,counter:1n});assert.deepEqual(counters,[0n,1n]);
+ assert.throws(()=>m.retryIndex(3n,0xffffffffn,()=> 'ff'.repeat(32)),/counterExhausted/);
+ assert.deepEqual(m.retryIndex(3n,0xffffffffn,()=> '00'.repeat(32)),{index:0n,counter:0xffffffffn});
+ assert.throws(()=>m.choose([{id:id(2),weight:1n},{id:id(1),weight:1n}],0n),/weightOrder/);
+ assert.throws(()=>m.choose([{id:id(1),weight:-1n}],0n),/weight/);
 });
 test('Keccak K1-K3 and frozen literal GSV1 Rust/TS identity',()=>{
  const vectors=json('../../development/m1/m1-draft-0.21/vectors/v3-gsv1.json');
@@ -66,4 +71,19 @@ test('full schema width/order/reserved failures and deep malformed framing',()=>
  const clone=()=>({...base,cp:[...base.cp],members:base.members.map(m=>({...m}))});
  let s=clone();s.cp[4]=2n;code(()=>g.decodeGenesis(g.encodeGenesis(s)),'gsRange');s=clone();s.members.reverse();code(()=>g.decodeGenesis(g.encodeGenesis(s)),'gsOrder');s=clone();s.members[0].id=id(0);code(()=>g.decodeGenesis(g.encodeGenesis(s)),'gsSys');s=clone();s.cp[0]=1n<<64n;code(()=>g.decodeGenesis(g.encodeGenesis(s)),'gsRange');
  let b=m.unhex('80');for(let i=0;i<1500;i++)b=g.rlpList([b]);code(()=>g.decodeGenesis(b),'gsStructure');code(()=>g.decodeGenesis(b.subarray(0,b.length-1)),'L0');
+});
+test('all accepted L4n/order supplements and 1500-level malformed twins',()=>{
+ const v=json('../../development/m1/m1-draft-0.21/vectors/v3-gsv1.json');
+ const raw=(x:any):Uint8Array=>typeof x==='string'?m.unhex(x):Array.isArray(x)?g.rlpList(x.map(raw)):'repeat'in x?m.unhex(x.repeat.repeat(x.count)):m.concat(...x.concat.map(raw));
+ const at=(t:any,path:number[]):any=>path.reduce((n,i)=>n[i],t);
+ const put=(t:any,path:number[],value:any):void=>{at(t,path.slice(0,-1))[path[path.length-1]]=value;};
+ const code=(b:Uint8Array):string=>{try{g.decodeGenesis(b);return'ok';}catch(e){if(e instanceof g.GenesisError)return e.code;throw e;}};
+ for(const row of v.negatives){const t=structuredClone(v.tree);let suffix='',header='';for(const edit of row.edits){if(edit.op==='set')put(t,edit.path,edit.value);else if(edit.op==='delete')at(t,edit.path.slice(0,-1)).splice(edit.path.at(-1),1);else if(edit.op==='swap'){const a=at(t,edit.a),b=at(t,edit.b);put(t,edit.a,b);put(t,edit.b,a);}else if(edit.op==='copy')put(t,edit.to,structuredClone(at(t,edit.from)));else if(edit.op==='appendBytes')suffix+=edit.hex;else if(edit.op==='setOuterHeader')header=edit.hex;else throw Error('fixture edit');}
+  let b=raw(t);if(header)b=m.concat(m.unhex(header),b.subarray(3));b=m.concat(b,m.unhex(suffix));assert.equal(code(b),row.expect,row.id);}
+ const depth=json('../../development/m1/m1-draft-0.22/vectors/c30-depth.json');
+ for(const row of depth.cases){for(const variant of ['deep','shallow']){
+  let b=m.unhex(row.inner);for(let i=0;i<row[variant].depth;i++)b=g.rlpList([b]);
+  if(row.place==='gsv1'||row.place==='gsv1Append'){const t=structuredClone(v.tree);for(const edit of row.edits??[])put(t,edit.path,edit.value);if(row.place==='gsv1Append')t.push(m.hex(b));else put(t,row.path,m.hex(b));b=raw(t);}
+  if(row.dropLast)b=b.subarray(0,b.length-1);if(row.suffix)b=m.concat(b,m.unhex(row.suffix));assert.equal(b.length,row[variant].length,row.id+' length');assert.equal(code(b),row.expect.code,row.id+' '+variant);
+ }}
 });
