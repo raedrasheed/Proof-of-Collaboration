@@ -17,7 +17,12 @@ From this directory after installing those exact packages:
     npm run typecheck
     npm test
 
-No successful CI/type-check result is claimed before its recorded completion.
+Proper TypeScript checking and Node 22 execution have passed in GitHub Actions;
+source-bound run IDs and the initial corrected type-check failure are preserved under
+development/lp3/s6-model/codex-r1. Final-head requirements must still pass before merge.
 The first local `node --test tests.ts` invocation reported only a file-level result
 under this environment; the corrected direct invocation verifies all seven named tests.
-The authored model remains subject to separate independent comparison and review.
+Eight named tests now include every accepted L4n/order supplement and the 1500-level
+deep/shallow corpus. Separate Python review covers 12,000 arithmetic cases against
+Rust and TS, 10,000 timing cases, 1,200 Genesis cases against Rust and TS, and the
+697-scenario/7977-sampler assignment corpus. This does not complete S7 or LP3.

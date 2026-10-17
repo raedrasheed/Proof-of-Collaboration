@@ -54,6 +54,7 @@ test('weight interval, strict CDF, unbiased rejection and uniform fallback',()=>
  assert.deepEqual(m.draw(w,'07'.repeat(32),10n).id,id(1));
  const counters:bigint[]=[];assert.deepEqual(m.retryIndex(3n,0n,k=>{counters.push(k);return(k===0n?'ff':'00').repeat(32);}),{index:0n,counter:1n});assert.deepEqual(counters,[0n,1n]);
  assert.throws(()=>m.retryIndex(3n,0xffffffffn,()=> 'ff'.repeat(32)),/counterExhausted/);
+ assert.doesNotThrow(()=>m.retryIndex(3n,0xffffffffn,()=> '00'.repeat(32)));
  assert.deepEqual(m.retryIndex(3n,0xffffffffn,()=> '00'.repeat(32)),{index:0n,counter:0xffffffffn});
  assert.throws(()=>m.choose([{id:id(2),weight:1n},{id:id(1),weight:1n}],0n),/weightOrder/);
  assert.throws(()=>m.choose([{id:id(1),weight:-1n}],0n),/weight/);
