@@ -1,0 +1,73 @@
+# Diagnostic/primitive checks only: no job success implies LP4/T2/T2b acceptance.
+name: LP4 execution controls
+on:
+  pull_request:
+    branches: [work/lp3-consensus-foundation]
+    paths: ['prototypes/lp4-execution/**', '.github/workflows/lp4-execution-controls.yml']
+permissions:
+  contents: read
+jobs:
+  cancun-pay-controls:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Install pinned experimental toolchain and comparison tools
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          python -m venv work/lp4-venv
+          work/lp4-venv/bin/pip install -r prototypes/lp4-execution/tests/python-requirements.lock
+          npm ci --prefix prototypes/lp4-execution/tools --ignore-scripts --no-audit --no-fund
+      - name: Reproduce compiler output and run actual Rust execution tests
+        run: |
+          set -euo pipefail
+          mkdir -p work/lp4-controls
+          NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_contracts.cjs work/lp4-controls/pay-harness.json
+          cmp prototypes/lp4-execution/tests/data/pay-harness.json work/lp4-controls/pay-harness.json
+          cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
+          cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example pay_vectors > work/lp4-controls/pay-vectors.json
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/pay_oracle.py work/lp4-controls/pay-vectors.json prototypes/lp4-execution/tests/data/pay-harness.json work/lp4-controls/pay-oracle.json
+      - name: Compile PAY mutation controls
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.1'
+        run: python prototypes/lp4-execution/tests/pay_mutations.py work/lp4-mutations
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: lp4-p2-controls
+          path: |
+            work/lp4-controls
+            work/lp4-mutations/*.log
+            work/lp4-mutations/results.json
+          if-no-files-found: error
+          retention-days: 14
+  legacy-windows-regression:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Preserved full legacy Windows verification
+        shell: pwsh
+        env:
+          INCLUDE_SLOW: 'false'
+          EVIDENCE_DIR: ${{ runner.temp }}\lp4-legacy-evidence
+        run: ./.github/scripts/lp3-s1-windows-verify.ps1 -Evidence $env:EVIDENCE_DIR
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: lp4-legacy-windows
+          path: ${{ runner.temp }}\lp4-legacy-evidence
+          if-no-files-found: error
+          retention-days: 14

@@ -62,3 +62,7 @@ rule may be invented or acceptance requirement weakened. Continue P2 autonomousl
 
 Live ledger: [LP4-ACCEPTANCE.json](LP4-ACCEPTANCE.json). All final execution/resource
 criteria remain NOT PASSED. No silent deferral beyond LP4. Boot disabled.
+
+PAY native interface is now explicitly approved by [LP4-PAY-01](LP4-PAY-APPROVAL.md).
+The newly approved conditional interpretation of “never fails” is additive; M1
+and the immutable proposal remain unchanged. Approval does not pass PAY/T2b or P2.

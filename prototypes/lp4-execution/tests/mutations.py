@@ -7,15 +7,16 @@ cases=[('wrong-chain','cfg.chain_id = CHAIN_ID','cfg.chain_id = CHAIN_ID + 1','c
 results=[]
 for name,old,new,test in cases:
     assert source.count(old)==1
-    folder=out/name; (folder/'src').mkdir(parents=True,exist_ok=True)
-    for f in ('Cargo.toml','Cargo.lock'): shutil.copyfile(root/f,folder/f)
+    folder=out/name
+    if folder.exists():shutil.rmtree(folder)
+    shutil.copytree(root,folder,ignore=shutil.ignore_patterns('target','work','__pycache__'))
     manifest=folder/'Cargo.toml'
-    manifest.write_text(manifest.read_text().replace('name = "pocol-lp4-execution"', 'name = "pocol-lp4-execution-'+name+'"'))
+    manifest.write_text(manifest.read_text().replace('name = "pocol-lp4-execution"', 'name = "pocol-lp4-execution-'+name+'"')+'\n[lib]\nname = "pocol_lp4_execution"\n')
     lock=folder/'Cargo.lock'
     lock.write_text(lock.read_text().replace('name = "pocol-lp4-execution"', 'name = "pocol-lp4-execution-'+name+'"'))
     (folder/'src/lib.rs').write_text(source.replace(old,new))
     env=dict(os.environ,CARGO_TARGET_DIR=str(root/'target'))
-    prefix=['cargo','test','--offline','--locked','--manifest-path',str(folder/'Cargo.toml')]
+    prefix=['cargo','test','--offline','--locked','--manifest-path',str(folder/'Cargo.toml'),'--lib']
     build=subprocess.run(prefix+['--no-run'],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     (out/(name+'-build.log')).write_bytes(build.stdout)
     result=subprocess.run(prefix+['tests::'+test,'--','--exact','--nocapture'],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT) if build.returncode==0 else None

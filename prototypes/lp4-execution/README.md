@@ -24,3 +24,18 @@ three fixed initial conditions; it is not an independent full EVM. Mutants are
 compiled separately and must fail a selected assertion; compile errors do not count.
 GeneralStateTests, PoCol deviations, independent full-EVM/state-root differential,
 legacy regression and licenses/provenance audit remain acceptance obligations.
+
+Native boundary work now lives in `pay`/`native`, separately from the original
+`Sandbox` guard. Its authority is [LP4-PAY-01](../../development/LP4-PAY-APPROVAL.md)
+and the linked full approved contract. `PayBoundaryHarness.sol` is explicitly test
+code, not the completed Registry/Escrow implementation. Compiled-harness comparison
+with independently extended py-evm checks 26 boundary executions; full reward,
+closing, system-phase, caps and GenesisBuilder acceptance remains outstanding.
+
+`cancun_control` runs upstream Ethereum control fixtures (chain ID 1, upstream
+fields and transaction types), not PoCol apply. `gst_control.py` checks resulting
+full-state and log hashes using Python's independent trie/RLP/Keccak against frozen
+geth-generated fixture roots. It does not validate signed wire transaction bytes.
+`--storage-collision-probe` enables an **unapproved diagnostic alternative only**;
+it is not installed in `native::execute` or any consensus/boot path. Do not mistake
+its control comparisons for an accepted fork rule or T2 PASS.
