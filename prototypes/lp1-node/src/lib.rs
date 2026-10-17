@@ -18,6 +18,8 @@ pub mod asert;
 pub mod assignment;
 pub mod chain;
 pub mod decimal;
+pub mod envelope;
+pub mod finality_core;
 pub mod fixed;
 pub mod fixtures;
 pub mod gate;

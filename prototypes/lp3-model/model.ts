@@ -85,3 +85,24 @@ export function shareRewards(R:bigint,counts:{id:string;count:bigint;tomb:boolea
  return{payments,amount,baseBurn:R-amount,roundBurn:amount-sum,paid,penaltyBurn,payBurn};
 }
 export function splitPot(pot:bigint,alpha:bigint,gamma:bigint):{winner:bigint;proposer:bigint;remainder:bigint} {bounded(pot,256,'pot');bounded(alpha,16,'alpha');bounded(gamma,16,'gamma');if(alpha+gamma>10000n)throw Error('parts');const winner=pot*alpha/10000n,proposer=pot*gamma/10000n;return{winner,proposer,remainder:pot-winner-proposer};}
+
+/** Approved LP3 core CF mapping. Supplied parent facts are not execution certificates. */
+export interface FinalityParent {closing:boolean;closeH:bigint;cursorDone:boolean;isFinal:boolean}
+const cfU64=(v:bigint)=>{if(v<0n||v>=(1n<<64n))throw Error('width');return v;};
+const cfU32=(v:bigint)=>{if(v<0n||v>=(1n<<32n))throw Error('width');return v;};
+export function closing(first:bigint|null,h:bigint,ts:bigint,hClose:bigint,tClose:bigint):bigint|null {
+ [h,ts,hClose,tClose].forEach(cfU64);if(first!==null)return cfU64(first);return h>=hClose||ts>=tClose?h:null;
+}
+export function cursorBound(closeH:bigint,records:bigint,ret:bigint):bigint {
+ cfU64(closeH);cfU64(records);cfU32(ret);if(ret===0n)throw Error('ret');const n=(records+ret-1n)/ret;
+ const result=closeH+(n===0n?0n:n-1n);if(result>=(1n<<64n))throw Error('overflow');return result;
+}
+export function gate2(h:bigint,ts:bigint,hEnd:bigint,tEnd:bigint,p2:bigint,tBlk:bigint):boolean {
+ [h,ts,hEnd,tEnd].forEach(cfU64);[p2,tBlk].forEach(cfU32);const a=hEnd-p2,b=tEnd-p2*tBlk;
+ if(a<0n||b<0n)throw Error('threshold');return h>=a||ts>=b;
+}
+export function finalPredicate(p:FinalityParent,h:bigint,ts:bigint,d:bigint,hEnd:bigint,tEnd:bigint):boolean {
+ [p.closeH,h,ts,hEnd,tEnd].forEach(cfU64);cfU32(d);
+ return p.closing&&p.cursorDone&&h>=p.closeH+d&&(h>=hEnd||ts>=tEnd);
+}
+export function childAllowed(parentFinal:boolean,h:bigint,hEnd:bigint):boolean {cfU64(h);cfU64(hEnd);return !parentFinal&&h<=hEnd;}

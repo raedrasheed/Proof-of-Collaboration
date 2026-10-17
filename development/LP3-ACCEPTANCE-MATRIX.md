@@ -12,9 +12,9 @@ The unchanged original requirements remain in LP3-MILESTONE.md. Approved amendme
 | Original caps/64 minimum SYS_SLOT_MAX | DEFERRED LP4 — NOT PASSED | Amendment 01 test 3 |
 | Amended LP3 numeric R18/R21 fact evaluation | PASS evaluator on synthetic fixtures only | codex-r2 binding/version/coverage/provenance controls; boot disabled |
 | S6 | PASS reference scope; merged 772cb1f | PR #16: strict type check, eight tests, independent Rust/TS/Python comparisons and mutation controls |
-| S7 numerical gates | PASS scoped evidence; S7 NOT accepted | Actual AS1–AS19 traces, million full comparisons, ASQ/ASB and SV arithmetic; codex-r1 evidence |
-| CF1–CF6 canonical binding | BLOCKED BY DESIGN | Labels occur only in M3 list; CF-DECISION.md proposes explicit core mapping, not an original pass |
-| T0 final core acceptance audit | PENDING | Prior header/codec scope is not blanket V1–V26/H-full acceptance |
+| S7 numerical gates | PASS scoped evidence; PR #17 ready for checks | Actual AS1–AS19 traces, million full comparisons, ASQ/ASB and SV arithmetic; codex-r1 evidence |
+| CF1–CF6 new core mapping | PASS newly approved definitions | LP3-CF-CORE-APPROVAL.md; codex-r2 Rust/TS/independent oracle 16000 cases and mutation controls; not recovered original definitions |
+| T0 semantic core audit | PASS limited core scope | codex-r2 T0-MAPPING.md; strict M3 envelope/net/Rule3, actual PoW, maximum shape and CF6; real V20–V22 execution LP4, not full H acceptance |
 | S8 | PENDING | Integrated adversarial/mutation review |
 | S9 | Ongoing | Arabic dashboard and PR evidence each completed cycle |
 | Production boot | DISABLED | LP3 evaluator success is not execution or boot acceptance |
