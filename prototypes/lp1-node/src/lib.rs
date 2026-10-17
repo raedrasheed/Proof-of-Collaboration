@@ -15,6 +15,7 @@
 //! exact gsVersion detail.
 
 pub mod asert;
+pub mod assignment;
 pub mod chain;
 pub mod decimal;
 pub mod fixed;
