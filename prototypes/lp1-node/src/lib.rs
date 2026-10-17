@@ -28,6 +28,7 @@ pub mod header;
 pub mod hex;
 pub mod http;
 pub mod json;
+pub mod param_gate;
 pub mod profile;
 pub mod rlp;
 pub mod rpc;
