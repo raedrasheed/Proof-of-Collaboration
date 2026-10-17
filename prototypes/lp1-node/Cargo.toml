@@ -21,6 +21,12 @@ name = "asert_alloc"
 path = "tests/asert_alloc.rs"
 harness = false
 
+[[test]]
+# Counting global allocator; runs without libtest so only the measured thread allocates.
+name = "genesis_batch_alloc"
+path = "tests/genesis_batch_alloc.rs"
+harness = false
+
 [dependencies]
 # Exact versions already cached on the root machine; offline build with the lock file root generates.
 sha2 = "=0.9.9"

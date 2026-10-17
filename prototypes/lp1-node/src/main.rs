@@ -5,14 +5,19 @@
 //! one JSON line on stdout. Exit status: 0 success, 1 append rejected or not linear (nothing
 //! written), 2 usage / I/O / busy / bound / metadata / mismatch / corrupt error, 3 recovery
 //! required. There are no fault-injection options.
+//!
+//! LP3 `genesis-decode` runs the GenesisSpec v1 decoder over hex lines for differential checks; it
+//! streams the file it is given with fixed buffers (limits in `genesis_batch`). Exit status 0: every
+//! line decoded or rejected by the decoder and every accepted input re-encoded exactly; 1: some line
+//! refused (too large or not hex); 2: I/O or buffer reservation error.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
 use lp1_node::store::{self, Binding, StoreError, Writer};
-use lp1_node::{fixtures, http, rpc, verify, window};
+use lp1_node::{fixtures, genesis_batch, http, rpc, verify, window};
 
 const USAGE: &str = "lp1-node <command> [options]
 
@@ -22,6 +27,8 @@ commands:
   window            run the RP window cases [--case ID] [--no-cache]
   hash              K1-K3, hash-oracle digests and derivations from fixture headers
   asert-batch       differential ASERT rows as JSON lines [--in FILE] [--out FILE]
+  genesis-decode    GenesisSpec v1 decode of one hex input per line, JSON lines --in FILE [--out FILE]
+                    (streamed; a line above the largest valid GenesisSpec is refused, not decoded)
   serve             read-only JSON-RPC on 127.0.0.1 [--bind 127.0.0.1] [--port N] [--empty-chain]
                     [--max-requests N] [--max-runtime-ms N] [--conn-timeout-ms N]
   store init        --store DIR                      create a NEW candidate journal (never overwrites)
@@ -142,6 +149,21 @@ fn run() -> Result<bool, String> {
                 None => verify::run_asert_rows(&oracle, &mut out)?,
             };
             Ok(rows == matched)
+        }
+        "genesis-decode" => {
+            let p = a.get("--in").ok_or("genesis-decode needs --in FILE")?;
+            let mut input = BufReader::new(File::open(p).map_err(|e| format!("open {p}: {e}"))?);
+            let summary = match a.get("--out") {
+                Some(o) => {
+                    let f = File::create(o).map_err(|e| format!("create {o}: {e}"))?;
+                    let mut w = BufWriter::new(f);
+                    let r = genesis_batch::run(&mut input, &mut w)?;
+                    w.flush().map_err(|e| e.to_string())?;
+                    r
+                }
+                None => genesis_batch::run(&mut input, &mut out)?,
+            };
+            Ok(summary.ok())
         }
         "serve" => serve(&a, &dir, &mut out),
         "help" | "--help" | "-h" => {
