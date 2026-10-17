@@ -30,5 +30,23 @@ fn main(){
         assert_eq!(f::balance(&r,&db,source),U256::from(20));assert_eq!(f::balance(&r,&db,f::dest()),U256::from(87));
         rows.push(serde_json::json!({"name":"warm-second-call","source":format!("{source}"),"input":input,"output":output(&r.result),"gasUsed":r.result.gas_used(),"sourceBalance":f::balance(&r,&db,source).to_string(),"destBalance":f::balance(&r,&db,f::dest()).to_string(),"logs":r.result.logs().len()}));
     }
+    for source in [registry_address(),escrow_address()] {
+        for (name,nonce,code,balance) in [
+            ("pay02-balance-only",0,vec![],7u64),
+            ("pay02-empty",0,vec![],0),
+            ("pay02-nonce-only",1,vec![],0),
+            ("pay02-code-only",0,f::artifact("RecipientTrap"),0),
+        ] {
+            for amount in [0u64,1] {
+                let mut db=f::fixture(source,U256::from(100));
+                let bytecode=revm::primitives::Bytecode::new_raw(revm::primitives::Bytes::from(code.clone()));
+                db.insert_account_info(f::dest(),revm::primitives::AccountInfo::new(U256::from(balance),nonce,bytecode.hash_slow(),bytecode));
+                let input=f::raw(&f::transfer(f::dest(),U256::from(amount)),5000,U256::ZERO,0);
+                let r=f::run(&db,source,input.clone());
+                assert_eq!(f::accepted(&r),nonce>0 || !code.is_empty());
+                rows.push(serde_json::json!({"name":format!("{name}-{amount}"),"source":format!("{source}"),"recipientAccount":{"nonce":nonce,"balance":balance,"code":code},"input":input,"output":output(&r.result),"gasUsed":r.result.gas_used(),"sourceBalance":f::balance(&r,&db,source).to_string(),"destBalance":f::balance(&r,&db,f::dest()).to_string(),"logs":r.result.logs().len()}));
+            }
+        }
+    }
     println!("{}",serde_json::to_string_pretty(&rows).unwrap());
 }

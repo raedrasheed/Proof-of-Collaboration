@@ -12,12 +12,26 @@ cases=[
  ('value','pay.rs','|| inputs.call_value()!=U256::ZERO','', 'auth_modes_value_and_direct_reject'),
  ('static','pay.rs','|| inputs.is_static','', 'inherited_static_call_cannot_write_balances'),
  ('no-transfer','pay.rs','amount!=U256::ZERO && recipient!=inputs.caller','false && amount!=U256::ZERO && recipient!=inputs.caller','both_roles_transfer_no_callback_and_no_snapshot_commit'),
- ('account-create','pay.rs','dest.is_selfdestructed() || dest.is_empty()','dest.is_selfdestructed()','recipients_overflow_and_encoding_reject_without_effects'),
+ # PAY-02 makes absent-account rejection redundant with PAY-01's emptiness guard.
+ # Mutate the new independent eligibility predicates directly; historical R2/R4
+ # account-create control remains preserved, not asserted as re-run here.
+ ('durability-omitted','pay.rs','|| !context.external.durable(recipient)','','pay02_requires_actual_pretransaction_nonce_or_code_even_for_zero'),
+ ('durability-balance','pay.rs','account.info.nonce > 0','account.info.balance > U256::ZERO || account.info.nonce > 0','pay02_requires_actual_pretransaction_nonce_or_code_even_for_zero'),
+ ('durability-and','pay.rs','|| (account.info.code_hash','&& (account.info.code_hash','pay02_requires_actual_pretransaction_nonce_or_code_even_for_zero'),
  ('zero-address','pay.rs','if recipient==Address::ZERO','if false && recipient==Address::ZERO','recipients_overflow_and_encoding_reject_without_effects'),
  ('journal','pay.rs','let error=evm.journaled_state.transfer(&inputs.caller,&recipient,amount,&mut evm.db)?;', 'evm.journaled_state.state.get_mut(&inputs.caller).unwrap().info.balance-=amount; evm.journaled_state.state.get_mut(&recipient).unwrap().info.balance+=amount; let error:Option<InstructionResult>=None;', 'nested_revert_restores_both_balances'),
  ('callback','native.rs','pay::call(context,&inputs)', 'let _=pay::call(context,&inputs)?; let mut callback=(*inputs).clone(); callback.bytecode_address=revm::primitives::Address::from_slice(&inputs.input[12..32]); callback.target_address=callback.bytecode_address; previous(context,Box::new(callback))', 'both_roles_transfer_no_callback_and_no_snapshot_commit'),
  ('native-bypass' ,'native.rs','if inputs.bytecode_address==pay_address() || inputs.target_address==pay_address()','if false && (inputs.bytecode_address==pay_address() || inputs.target_address==pay_address())','both_roles_transfer_no_callback_and_no_snapshot_commit'),
 ]
+# A composite mutation removes both independent no-creation barriers. Removing
+# only the old emptiness guard is now semantically equivalent on valid state;
+# never call a surviving redundant mutant a passing control.
+source=(root/'src/pay.rs').read_text()
+start=source.index('    if recipient==Address::ZERO || !context.external.durable(recipient)')
+end=source.index(' || source.info.balance<amount',start)
+old=source[start:end]
+new=old.replace(' || !context.external.durable(recipient)','').replace(' || dest.is_empty()','')
+cases.append(('account-create-both-guards','pay.rs',old,new,'recipients_overflow_and_encoding_reject_without_effects'))
 results=[]
 for name,file,old,new,test in cases:
  folder=out/name

@@ -71,3 +71,11 @@ Owner approved LP4-CREATE-01 in [LP4-COLLISION-APPROVAL.md](LP4-COLLISION-APPROV
 Nonempty-storage creation collision is an additive LP4 rule at every supported
 height; no repeat fork approval is needed. All original execution/resource gates
 remain mandatory and NOT PASSED until verified.
+
+Owner approved the complete additive lifecycle contract in
+[LP4-PAY-02](LP4-PAY-LIFECYCLE-APPROVAL.md). It explicitly narrows native recipient
+eligibility to pre-transaction nonce/code and requires Escrow custody, the restricted
+Registry release bridge, admission probes and semantic genesis rejection. All seven
+parts of the historical proposal remain mandatory; partial native controls do not
+pass integration, genesis, closing or resource gates. Existing R18/R21 measurements
+must be re-derived for the complete implementation, not reused as accepted bounds.

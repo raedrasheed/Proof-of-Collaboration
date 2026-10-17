@@ -1,5 +1,5 @@
 //! Experimental native backend; full LP4 acceptance and boot remain disabled.
-//! PAY contract: development/LP4-PAY-APPROVAL.md.
+//! PAY contracts: development/LP4-PAY-APPROVAL.md and LP4-PAY-LIFECYCLE-APPROVAL.md.
 use std::sync::Arc;
 use revm::{Evm, InMemoryDB};
 use revm::primitives::{Address, EVMError, InvalidTransaction, ResultAndState, SpecId, TxEnv, U256};
@@ -7,7 +7,7 @@ use crate::{pay::{self,NativeContext},pay_address,CHAIN_ID};
 
 pub fn execute(snapshot:&InMemoryDB, tx:TxEnv) -> Result<ResultAndState,EVMError<core::convert::Infallible>> {
     validate_nonce(snapshot,tx.caller,tx.nonce)?;
-    let mut evm=Evm::builder().with_db(snapshot.clone()).with_external_context(NativeContext::default())
+    let mut evm=Evm::builder().with_db(snapshot.clone()).with_external_context(NativeContext::from_snapshot(snapshot))
         .with_spec_id(SpecId::CANCUN)
         .modify_cfg_env(|cfg|cfg.chain_id=CHAIN_ID)
         .modify_block_env(|b|{b.gas_limit=U256::from(30_000_000u64);b.basefee=U256::ZERO;b.coinbase=pay::escrow_address();})

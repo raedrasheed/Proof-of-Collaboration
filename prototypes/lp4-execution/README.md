@@ -2,12 +2,12 @@
 
 Isolated Rust 1.99.1 / revm =19.7.0 / Cancun crate. Cargo.lock pins resolved
 sources; default crypto precompiles remain enabled. Legacy LP1 dependencies are
-untouched. No PoCol apply, native PAY semantics, accepted GST, caps or boot path.
+untouched. No accepted PoCol apply, full PAY integration, GST gate, caps or boot path.
 
 `Sandbox::execute` clones its input database and returns revm's actual execution
 result/state diff; it never commits. Synthetic unfunded-network fixtures use no
 keys or signatures. CALL-family access to PAY is rejected by an experimental outer
-guard pending the owner decision; this is not a consensus rule.
+guard as a historical scaffold; use the separate native backend for approved PAY rules.
 
 With the pinned toolchain on PATH and an isolated CARGO_HOME:
 
@@ -27,9 +27,9 @@ legacy regression and licenses/provenance audit remain acceptance obligations.
 
 Native boundary work now lives in `pay`/`native`, separately from the original
 `Sandbox` guard. Its authority is [LP4-PAY-01](../../development/LP4-PAY-APPROVAL.md)
-and the linked full approved contract. `PayBoundaryHarness.sol` is explicitly test
+and [LP4-PAY-02](../../development/LP4-PAY-LIFECYCLE-APPROVAL.md), including the linked complete approved contracts. `PayBoundaryHarness.sol` is explicitly test
 code, not the completed Registry/Escrow implementation. Compiled-harness comparison
-with independently extended py-evm checks 26 boundary executions; full reward,
+with independently extended py-evm checks 44 boundary executions; full reward,
 closing, system-phase, caps and GenesisBuilder acceptance remains outstanding.
 
 `cancun_control` runs upstream Ethereum control fixtures (chain ID 1, upstream
@@ -44,3 +44,11 @@ current journal values, including unloaded keys and cleared/restored slots. This
 backend has no external storage and therefore no hidden slots; this does not claim
 persisted-state integration, a resource bound or P2/T2 acceptance. Historical probe
 receipts remain unchanged.
+
+PAY-02 reads private immutable facts from a complete pre-transaction InMemoryDB
+snapshot, never caller-supplied flags or the current creation journal. All PAY
+calls, including zero, require original nonce>0 or nonempty code. Both compiled
+same-transaction deletion attacks are independently re-executed by py-evm and
+rejected. Historical PAY-01 positive receipts remain preserved. Snapshot cloning
+and arbitrary backing databases are not proven bounded/persisted implementations;
+R18/R21, actual system admission/custody/refunds and GenesisBuilder remain NOT PASSED.

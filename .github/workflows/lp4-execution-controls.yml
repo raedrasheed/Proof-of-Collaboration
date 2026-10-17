@@ -35,6 +35,8 @@ jobs:
           cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example pay_vectors > work/lp4-controls/pay-vectors.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/pay_oracle.py work/lp4-controls/pay-vectors.json prototypes/lp4-execution/tests/data/pay-harness.json work/lp4-controls/pay-oracle.json
+          cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example lifecycle_vectors > work/lp4-controls/lifecycle-vectors.json
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/lifecycle_oracle.py work/lp4-controls/lifecycle-vectors.json prototypes/lp4-execution/tests/data/reward-durability.json work/lp4-controls/lifecycle-oracle.json
       - name: Compile PAY mutation controls
         env:
           RUSTUP_TOOLCHAIN: '1.99.1'

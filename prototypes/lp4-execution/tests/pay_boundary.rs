@@ -120,3 +120,37 @@ pub fn balance(r:&ResultAndState,db:&InMemoryDB,a:Address)->U256{
     tx.nonce=Some(u64::MAX-1);tx.transact_to=TxKind::Call(source);db.accounts.get_mut(&user()).unwrap().info.nonce=u64::MAX-1;
     assert!(native::execute(&db,tx).is_ok());
 }
+
+#[test] fn pay02_requires_actual_pretransaction_nonce_or_code_even_for_zero(){
+    let source=registry_address();
+    for (nonce,code,balance_before,eligible) in [
+        (0,vec![],0,false),(0,vec![],7,false),(1,vec![],0,true),
+        (u64::MAX,vec![],0,true),(0,artifact("RecipientTrap"),0,true),
+    ] {
+        let mut db=fixture(source,U256::from(100));
+        let code=Bytecode::new_raw(Bytes::from(code));
+        db.insert_account_info(dest(),AccountInfo::new(U256::from(balance_before),nonce,code.hash_slow(),code));
+        for amount in [0,1] {
+            let r=run(&db,source,raw(&transfer(dest(),U256::from(amount)),5000,U256::ZERO,0));
+            assert_eq!(accepted(&r),eligible,"nonce={nonce} balance={balance_before} amount={amount}");
+            assert_eq!(balance(&r,&db,source),U256::from(if eligible {100-amount}else{100}));
+            assert_eq!(db.accounts[&dest()].info.nonce,nonce);
+        }
+    }
+}
+
+#[test] fn pay02_existing_code_survives_selfdestruct_and_stays_payable_next_transaction(){
+    use revm::DatabaseCommit;
+    let source=registry_address();let mut db=fixture(source,U256::from(100));
+    let code=Bytecode::new_raw(Bytes::from(vec![0x33,0xff])); // CALLER; SELFDESTRUCT
+    db.insert_account_info(dest(),AccountInfo::new(U256::from(7),0,code.hash_slow(),code.clone()));
+    let erased=run(&db,dest(),vec![]);assert!(erased.result.is_success());
+    assert!(!erased.state[&dest()].is_selfdestructed(),"EIP-6780 preserves old account identity/code");
+    db.commit(erased.state);
+    assert_eq!(db.accounts[&dest()].info.nonce,0);
+    assert_eq!(db.accounts[&dest()].info.code_hash,code.hash_slow());
+    let tx=TxEnv{caller:user(),transact_to:TxKind::Call(source),data:Bytes::from(raw(&transfer(dest(),U256::from(40)),5000,U256::ZERO,0)),gas_limit:1_000_000,gas_price:U256::ZERO,chain_id:Some(CHAIN_ID),nonce:Some(2),..Default::default()};
+    let paid=native::execute(&db,tx).unwrap();assert!(accepted(&paid));
+    assert_eq!(balance(&paid,&db,dest()),U256::from(40));
+    assert_eq!(balance(&paid,&db,source),U256::from(60));
+}

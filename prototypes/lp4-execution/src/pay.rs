@@ -1,6 +1,7 @@
 //! Native PAY boundary, LP4-PAY-01: development/LP4-PAY-APPROVAL.md.
+//! PAY-02: development/LP4-PAY-LIFECYCLE-APPROVAL.md.
 //! Transfer primitive only. Full compiled-system policy/integration acceptance is separate.
-use revm::{Context, Database, FrameOrResult, FrameResult};
+use revm::{Context, InMemoryDB, FrameOrResult, FrameResult};
 use revm::primitives::{Address, Bytes, EVMError, U256};
 use revm::interpreter::{CallInputs, CallOutcome, CallScheme, Gas, InstructionResult, InterpreterResult};
 use crate::pay_address;
@@ -12,7 +13,25 @@ pub fn escrow_address() -> Address { Address::from_word(U256::from(0xc0c002u64).
 /// Records executing code identity independently of CALL's caller/storage identity.
 /// In particular a DELEGATECALL into foreign code cannot inherit PAY authority.
 #[derive(Default)]
-pub struct NativeContext { pub(crate) active_code: Option<Address> }
+pub struct NativeContext {
+    pub(crate) active_code: Option<Address>,
+    // Owned complete pre-transaction database, never the mutable execution journal.
+    // Private: callers cannot submit an eligibility/success flag.
+    pre_transaction: InMemoryDB,
+}
+impl NativeContext {
+    pub(crate) fn from_snapshot(snapshot: &InMemoryDB) -> Self {
+        Self { active_code: None, pre_transaction: snapshot.clone() }
+    }
+    fn durable(&self, recipient: Address) -> bool {
+        self.pre_transaction.accounts.get(&recipient).map(|account| {
+            account.account_state != revm::db::AccountState::NotExisting
+                && (account.info.nonce > 0
+                    || (account.info.code_hash != revm::primitives::KECCAK_EMPTY
+                        && account.info.code_hash != revm::primitives::B256::ZERO))
+        }).unwrap_or(false)
+    }
+}
 
 fn outcome(inputs: &CallInputs, result: InstructionResult) -> FrameOrResult {
     let mut gas=Gas::new(inputs.gas_limit);
@@ -24,8 +43,8 @@ fn outcome(inputs: &CallInputs, result: InstructionResult) -> FrameOrResult {
 
 /// Called before revm's ordinary value transfer/frame creation. No PAY recipient
 /// code is ever entered. All state changes use the enclosing revm journal.
-pub(crate) fn call<DB: Database>(context: &mut Context<NativeContext,DB>, inputs: &CallInputs)
- -> Result<FrameOrResult,EVMError<DB::Error>> {
+pub(crate) fn call(context: &mut Context<NativeContext,InMemoryDB>, inputs: &CallInputs)
+ -> Result<FrameOrResult,EVMError<core::convert::Infallible>> {
     let fail=|| outcome(inputs,InstructionResult::InvalidOperandOOG);
     if inputs.bytecode_address != pay_address() || inputs.target_address != pay_address()
         || inputs.scheme != CallScheme::Call || inputs.is_static || inputs.is_eof
@@ -37,14 +56,14 @@ pub(crate) fn call<DB: Database>(context: &mut Context<NativeContext,DB>, inputs
         || inputs.gas_limit<PAY_GAS { return Ok(fail()); }
     let recipient=Address::from_slice(&inputs.input[12..32]);
     let amount=U256::from_be_slice(&inputs.input[32..64]);
-    if recipient==Address::ZERO { return Ok(fail()); }
+    if recipient==Address::ZERO || !context.external.durable(recipient) { return Ok(fail()); }
     let evm=&mut context.evm.inner;
     evm.journaled_state.load_account(inputs.caller,&mut evm.db)?;
     evm.journaled_state.load_account(recipient,&mut evm.db)?;
     let source=&evm.journaled_state.state[&inputs.caller];
     let dest=&evm.journaled_state.state[&recipient];
-    // EIP-161 empty/deleted accounts are not durable recipients. A freshly created
-    // nonempty account in this journal is existing; PAY itself never creates one.
+    // PAY-02 additionally requires pre-transaction nonce/code above. Current-state
+    // checks remain mandatory; creation in this journal cannot confer eligibility.
     if dest.is_selfdestructed() || dest.is_empty() || source.info.balance<amount
         || (recipient!=inputs.caller && dest.info.balance.checked_add(amount).is_none()) {
         return Ok(fail());

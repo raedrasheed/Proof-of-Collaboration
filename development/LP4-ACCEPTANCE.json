@@ -248,6 +248,17 @@
         "development/m1/reference/consensus.md rollback"
       ],
       "requiredEvidence": "Every commit boundary crash yields one complete state; bad block no disk effects; metadata/receipts/roots/diffs atomic; corruption/mismatch rejection and inverse-diff restoration"
+    },
+    {
+      "id": "LP4-PAY-02-LIFECYCLE",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P2/P4/P6/P7/P8/P9",
+      "sources": [
+        "development/LP4-PAY-LIFECYCLE-APPROVAL.md",
+        "development/lp4/p2-runtime/codex-r4/PAYMENT-LIFECYCLE-DECISION.md option 1 in full"
+      ],
+      "requiredEvidence": "Every approved part: complete pre-transaction nonce/code facts, all PAY including zero, actual compiled Registry register/setRewardAddress precedence and RewardNotDurable rollback; GenesisRewardNotDurable semantic admission without syntax/schema change; Escrow custody and Registry-only releaseBond(id) deriving HELD record, ordinary/sweep/closing refund eligibility and atomic accounting; nonce/code lifetime and both creation/selfdestruct attacks; missing bond destination reverts/invalidates without burn/skip; preserve SV5 and all SV/CL/CF/finalization values; independent balances/storage/roots, compiled negative controls, crash/reorg; fully CP/profile/model-bound re-derived R18/SYS and R21 resources, caps64. Partial native controls are not whole-contract acceptance."
     }
   ],
   "increments": {
