@@ -50,14 +50,15 @@ merges only into foundation. Verify remote tree equals audited local bytes (espe
 CRLF artifacts). No credential values, private-key material, caches or dependency
 binaries in evidence. No real funded keys or production operations.
 
-## Open definition issue
+## Resolved named-test definitions; execution acceptance remains outstanding
 
-T2/T2b/T2c/T24/T26 are named in the preserved M4/gate list but no concrete vectors or
-per-label acceptance definitions were located in the accepted reference. Their
-underlying EVM/phase/cap correctness obligations remain binding, NOT PASSED. See
-lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md for a concrete new mapping requiring
-owner approval or supplied original definitions; it does not alter M1. This issue
-does not block canonical trie prerequisites or publishing this traceable plan.
+The owner explicitly approved the proposed T2/T2b/T2c/T24/T26 mapping as new LP4
+acceptance definitions. See [LP4-TEST-GATES-APPROVAL.md](LP4-TEST-GATES-APPROVAL.md).
+The historical proposal remains unchanged; it is not recovered original M1 content.
+Every mapped gate still requires real execution, independent comparisons, boundaries,
+negative tests and compiled mutations before PASS. All carried obligations remain.
+Additional missing test labels must be consolidated into one proposal. No consensus
+rule may be invented or acceptance requirement weakened. Continue P2 autonomously.
 
 Live ledger: [LP4-ACCEPTANCE.json](LP4-ACCEPTANCE.json). All final execution/resource
-criteria are NOT PASSED at plan publication. No silent deferral beyond LP4.
+criteria remain NOT PASSED. No silent deferral beyond LP4. Boot disabled.
