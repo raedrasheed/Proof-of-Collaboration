@@ -20,6 +20,7 @@ pub mod chain;
 pub mod decimal;
 pub mod fixed;
 pub mod fixtures;
+pub mod gate;
 pub mod genesis;
 pub mod genesis_batch;
 pub mod genesis_spec;

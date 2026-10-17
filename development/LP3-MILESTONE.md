@@ -1,5 +1,11 @@
 # LP3: genesis/profile and consensus foundation acceptance
 
+Approved additive scope amendment: [LP3-AMENDMENT-01.md](LP3-AMENDMENT-01.md).
+The original criteria below are retained. General R18/R21 derivations and caps/64
+minimum SYS_SLOT_MAX are deferred LP4 obligations, not original-criterion passes;
+LP3 requires profile/model-bound numeric fact evaluation with boot disabled.
+Live status: [LP3-ACCEPTANCE-MATRIX.md](LP3-ACCEPTANCE-MATRIX.md).
+
 Base: verified LP2 f5737e32e75da774a2d00529a7afe3d9eef1b952 (draft PR6), M1 0.32 immutable. LP3 is the M3 foundation; allocation-state MPT and actual system-code/GenesisBuilder execution remain LP4. Opaque GSV1/V1NET fixtures must remain explicitly non-bootable, and passing schema/identity checks must never bypass node-side R24(a). Real blocks still await H-full.
 
 Ordered contributions (single author, sequential independent review; accepting a contribution is not complete LP3 acceptance):
