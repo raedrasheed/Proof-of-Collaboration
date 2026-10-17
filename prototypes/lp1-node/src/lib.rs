@@ -27,6 +27,7 @@ pub mod header;
 pub mod hex;
 pub mod http;
 pub mod json;
+pub mod profile;
 pub mod rlp;
 pub mod rpc;
 pub mod store;
