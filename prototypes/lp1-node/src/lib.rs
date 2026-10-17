@@ -31,5 +31,6 @@ pub mod profile;
 pub mod rlp;
 pub mod rpc;
 pub mod store;
+pub mod timing;
 pub mod verify;
 pub mod window;
