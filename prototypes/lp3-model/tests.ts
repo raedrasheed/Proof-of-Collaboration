@@ -116,3 +116,16 @@ test('newly approved CF1-CF6 core mapping, boundaries and no execution certifica
  assert.equal(m.childAllowed(true,700n,700n),false);assert.equal(m.childAllowed(false,701n,700n),false);assert.equal(m.childAllowed(false,700n,700n),true);
  assert.throws(()=>m.childAllowed(false,-1n,700n));
 });
+test('S8 seeded adversarial Genesis framing and canonical acceptance',()=>{
+ const v=json('../../development/m1/m1-draft-0.21/vectors/v3-gsv1.json');
+ const base=m.unhex(v.flatSegments.map((x:any)=>typeof x==='string'?x:x.repeat.repeat(x.count)).join(''));
+ let seed=0x5338c0de;const next=()=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return seed>>>0;};
+ const counts:Record<string,number>={};
+ for(let i=0;i<12000;i++){
+  let b:Uint8Array=new Uint8Array(base);const j=next()%(b.length+1);
+  switch(next()%4){case 0:if(j<b.length)b[j]^=1<<(next()%8);break;case 1:b=b.slice(0,j);break;case 2:b=m.concat(b.slice(0,j),Uint8Array.of(next()%256),b.slice(j));break;default:if(j<b.length)b[j]=next()%256;}
+  try{const spec=g.decodeGenesis(b);assert.equal(m.hex(g.encodeGenesis(spec)),m.hex(b));counts.ok=(counts.ok??0)+1;}
+  catch(e){assert.ok(e instanceof g.GenesisError,`unexpected error ${e}`);counts[e.code]=(counts[e.code]??0)+1;}
+ }
+ assert.equal(Object.values(counts).reduce((a,b)=>a+b,0),12000);assert.ok(Object.keys(counts).length>=5);assert.ok(counts.ok>0);console.log(JSON.stringify({corpus:'S8 TS Genesis',seed:'0x5338c0de',counts}));
+});
