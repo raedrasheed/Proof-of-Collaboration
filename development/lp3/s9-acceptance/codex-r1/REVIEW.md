@@ -39,3 +39,5 @@ No remaining unresolved LP3 design decision or implementation finding was found.
 Acceptance applies exclusively to the explicitly amended LP3/core scope. M1 is
 unchanged; LP4 real execution/resource obligations and live-network acceptance are
 not passed. No boot, main merge, deploy, signing key use or billing change occurred.
+
+Final publication finding: first text upload normalized CRLF in raw Windows evidence, so the remote tree differed from the reviewed local tree. The mismatch was caught before merge. Re-upload exact UTF-8 bytes without newline conversion; acceptance requires exact full-tree equality with the locally audited snapshot. The initial remote commit remains in PR history, and no normalized evidence snapshot was accepted.
