@@ -1,0 +1,10 @@
+[package]
+name = "pocol-lp4-execution"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[dependencies]
+revm = { version = "=19.7.0", features = ["serde"] }
+serde_json = "=1.0.145"

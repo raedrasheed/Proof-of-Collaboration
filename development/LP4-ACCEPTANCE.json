@@ -23,7 +23,7 @@
         "development/m1/reference/execution.md testing",
         "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md"
       ],
-      "requiredEvidence": "Named definition pending; Cancun GST with individually declared exceptions and replacement tests"
+      "requiredEvidence": "New named definition approved in LP4-TEST-GATES-APPROVAL.md; Cancun GST with individually declared exceptions and replacement tests"
     },
     {
       "id": "T2b",
@@ -34,7 +34,7 @@
         "development/m1/reference/execution.md deviations",
         "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md"
       ],
-      "requiredEvidence": "Named definition pending; actual PAY/transfer effects and rollback"
+      "requiredEvidence": "New named definition approved in LP4-TEST-GATES-APPROVAL.md; actual PAY/transfer effects and rollback"
     },
     {
       "id": "CI1-CI3",
@@ -85,7 +85,7 @@
         "development/m1/reference/execution.md caps",
         "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md"
       ],
-      "requiredEvidence": "Named definition pending; exact cap boundaries, exceptional halt vs block invalidity and rollback"
+      "requiredEvidence": "New named definition approved in LP4-TEST-GATES-APPROVAL.md; exact cap boundaries, exceptional halt vs block invalidity and rollback"
     },
     {
       "id": "T24",
@@ -96,7 +96,7 @@
         "development/m1/reference/implementation.md M4 D141-D142",
         "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md"
       ],
-      "requiredEvidence": "Named definition pending; real phase order, parent-only data provenance and leak controls"
+      "requiredEvidence": "New named definition approved in LP4-TEST-GATES-APPROVAL.md; real phase order, parent-only data provenance and leak controls"
     },
     {
       "id": "T26",
@@ -107,7 +107,7 @@
         "development/LOCAL-DEVNET-PLAN.md LP4",
         "development/lp4/p0-plan/codex-r1/NAMED-GATES-PROPOSAL.md"
       ],
-      "requiredEvidence": "Named definition pending; full H/state/root acceptance and atomic recovery"
+      "requiredEvidence": "New named definition approved in LP4-TEST-GATES-APPROVAL.md; full H/state/root acceptance and atomic recovery"
     },
     {
       "id": "PAY-Cancun-deviations",
