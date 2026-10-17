@@ -34,6 +34,8 @@ jobs:
           cmp prototypes/lp4-execution/tests/data/reward-durability.json work/lp4-controls/reward-durability.json
           NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_budget_witness.cjs work/lp4-controls/registry-write-budget.json
           cmp prototypes/lp4-execution/tests/data/registry-write-budget.json work/lp4-controls/registry-write-budget.json
+          NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_registry.cjs work/lp4-controls/registry-payment.json
+          cmp prototypes/lp4-execution/tests/data/registry-payment.json work/lp4-controls/registry-payment.json
           cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example pay_vectors > work/lp4-controls/pay-vectors.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/pay_oracle.py work/lp4-controls/pay-vectors.json prototypes/lp4-execution/tests/data/pay-harness.json work/lp4-controls/pay-oracle.json
@@ -41,6 +43,8 @@ jobs:
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/lifecycle_oracle.py work/lp4-controls/lifecycle-vectors.json prototypes/lp4-execution/tests/data/reward-durability.json work/lp4-controls/lifecycle-oracle.json
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example registry_write_budget > work/lp4-controls/registry-write-vectors.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/registry_budget_oracle.py work/lp4-controls/registry-write-vectors.json prototypes/lp4-execution/tests/data/registry-write-budget.json work/lp4-controls/registry-write-counts.json
+          cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example registry_vectors > work/lp4-controls/registry-vectors.json
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/registry_execution_oracle.py work/lp4-controls/registry-vectors.json work/lp4-controls/registry-oracle.json
       - name: Compile PAY mutation controls
         env:
           RUSTUP_TOOLCHAIN: '1.99.1'
@@ -53,6 +57,10 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: '1.99.1'
         run: NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" python prototypes/lp4-execution/tests/registry_budget_mutations.py work/lp4-budget-mutations
+      - name: Compile actual Registry and bridge mutation controls
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.1'
+        run: NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" python prototypes/lp4-execution/tests/registry_mutations.py work/lp4-registry-mutations
       - name: Complete pinned upstream Cancun control corpus
         run: |
           set -euo pipefail
@@ -72,6 +80,8 @@ jobs:
             work/lp4-create-mutations/results.json
             work/lp4-budget-mutations/*.log
             work/lp4-budget-mutations/results.json
+            work/lp4-registry-mutations/*.log
+            work/lp4-registry-mutations/results.json
           if-no-files-found: error
           retention-days: 14
   legacy-windows-regression:
@@ -96,5 +106,29 @@ jobs:
         with:
           name: lp4-legacy-windows
           path: ${{ runner.temp }}\lp4-legacy-evidence
+          if-no-files-found: error
+          retention-days: 14
+  registry-windows-execution:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Actual pinned native execution on Windows
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force work/lp4-native-windows | Out-Null
+          cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | Tee-Object work/lp4-native-windows/rust-tests.log
+          $lp4NativeExit = $LASTEXITCODE
+          if ($lp4NativeExit -ne 0) { exit $lp4NativeExit }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: lp4-native-windows
+          path: work/lp4-native-windows
           if-no-files-found: error
           retention-days: 14

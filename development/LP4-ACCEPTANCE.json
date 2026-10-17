@@ -268,10 +268,22 @@
       "sources": [
         "development/LP4-REGISTRY-APPROVAL.md",
         "development/lp4/p2-runtime/codex-r6/REGISTRY-TRANSITION-DECISION.md option1 in full",
-        "development/m1/reference/execution.md user write ceilings"
+        "development/m1/reference/execution.md user write ceilings",
+        "development/LP4-REGISTRY-WRITE-APPROVAL.md"
       ],
-      "requiredEvidence": "All eight approved parts and full compiled/independent boundary/negative/mutation/resource acceptance. Original per-function ceilings and R16/LAG remain binding. Reproduced lower-bound conflict with register9, setRewardAddress1, middle claimBond9 must return to owner under part8; no silent amendment. Full actual implementation, eligibility, PAY/bridge, genesis and phase/rollback/resource proofs remain mandatory.",
-      "acceptanceBlocker": "Compiled lower-bound witness and independent SSTORE trace require at least10/2/10 changed storage keys respectively. Proposed amendment in codex-r7/REGISTRY-WRITE-BUDGET-DECISION.md is NOT APPROVED."
+      "requiredEvidence": "All eight approved Registry parts and full compiled/independent boundary/negative/mutation/resource acceptance. Explicit LP4-REGISTRY-02 amendment alone replaces register9/reward1/claim9 with10/2/10; the original ceilings are not retrospectively satisfied. All other limits and R16/LAG remain unchanged. Full implementation, eligibility, PAY/bridge, GenesisBuilder, system-phase/block atomicity, crash/reorg and general resource proofs remain mandatory.",
+      "priorCeilingConflictResolvedBy": "Owner explicitly approved option1 in full: development/LP4-REGISTRY-WRITE-APPROVAL.md. Approval is not acceptance."
+    },
+    {
+      "id": "LP4-REGISTRY-02-WRITE-CEILINGS",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P2/P4/P7/P8",
+      "sources": [
+        "development/LP4-REGISTRY-WRITE-APPROVAL.md",
+        "development/lp4/p2-runtime/codex-r7/REGISTRY-WRITE-BUDGET-DECISION.md option1 in full"
+      ],
+      "requiredEvidence": "Prove and execute full Registry/bridge paths for register10, reward2, claim10; preserve deactivation7 and reactivation5 and every other limit. Actual complete execution, independent balances/storage/roots and SSTORE traces, compiled limit/accounting mutations, budget/time/status/closing/zero/positive/max arithmetic boundaries. Re-derive and measure affected R18/general SYS and R21 with full CP/profile/model identity; R16/LAG and caps64 unchanged. Original9/1/9 not passed; lower-bound witnesses or synthetic profile measurements alone are not acceptance."
     }
   ],
   "increments": {

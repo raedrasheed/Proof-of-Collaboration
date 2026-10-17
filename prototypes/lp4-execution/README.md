@@ -52,3 +52,13 @@ same-transaction deletion attacks are independently re-executed by py-evm and
 rejected. Historical PAY-01 positive receipts remain preserved. Snapshot cloning
 and arbitrary backing databases are not proven bounded/persisted implementations;
 R18/R21, actual system admission/custody/refunds and GenesisBuilder remain NOT PASSED.
+
+Actual source-built Registry/Caps/bond-bridge work is in contracts/RegistryPayment.sol
+with canonical encoding in contracts/REGISTRY-LAYOUT.md. LP4-REGISTRY-WRITE-APPROVAL.md
+explicitly authorizes only10/2/10 (LP4-only), never passes the original9/1/9 or changes
+other limits. User paths, ordinary sweep and closing bond cursor are implemented;
+complete Escrow settlement, ShareLedger/GenesisBuilder, block apply/finalization and
+fully admitted resource binding remain NOT PASSED. Independent py-evm execution and
+an independently written domain model compare complete state roots and actual SSTORE
+counts. Synthetic CP52 fixtures and corrupt-state negatives are not admitted profiles,
+R18/R21 resource facts, caps64 acceptance or permission to boot/merge.

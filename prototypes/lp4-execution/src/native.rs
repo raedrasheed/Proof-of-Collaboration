@@ -11,11 +11,16 @@ pub fn execute(snapshot:&InMemoryDB, tx:TxEnv) -> Result<ResultAndState,EVMError
 
 /// Experimental explicit NUMBER for compiled controls; not a PoCol apply context.
 pub fn execute_at(snapshot:&InMemoryDB, tx:TxEnv, height:U256) -> Result<ResultAndState,EVMError<core::convert::Infallible>> {
+    execute_at_time(snapshot,tx,height,U256::ZERO)
+}
+
+/// Experimental NUMBER/TIMESTAMP context, not validated PoCol block admission.
+pub fn execute_at_time(snapshot:&InMemoryDB, tx:TxEnv, height:U256, timestamp:U256) -> Result<ResultAndState,EVMError<core::convert::Infallible>> {
     validate_nonce(snapshot,tx.caller,tx.nonce)?;
     let mut evm=Evm::builder().with_db(snapshot.clone()).with_external_context(NativeContext::from_snapshot(snapshot))
         .with_spec_id(SpecId::CANCUN)
         .modify_cfg_env(|cfg|cfg.chain_id=CHAIN_ID)
-        .modify_block_env(|b|{b.number=height;b.gas_limit=U256::from(30_000_000u64);b.basefee=U256::ZERO;b.coinbase=pay::escrow_address();})
+        .modify_block_env(|b|{b.number=height;b.timestamp=timestamp;b.gas_limit=U256::from(30_000_000u64);b.basefee=U256::ZERO;b.coinbase=pay::escrow_address();})
         .modify_tx_env(|t|*t=tx)
         .append_handler_register(|handler|{
             let previous=handler.execution.execute_frame.clone();

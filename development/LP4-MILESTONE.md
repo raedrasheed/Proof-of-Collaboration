@@ -88,3 +88,13 @@ setRewardAddress and middle claimBond. Part8 requires returning this contradicti
 no unapproved ceiling increase or budget exemption is implemented. See the explicitly
 unapproved consolidated resolution in lp4/p2-runtime/codex-r7. All25 acceptance
 obligations remain NOT PASSED; boot false, P2 draft, foundation unchanged.
+
+The owner explicitly resolved the three write-ceiling conflicts by approving
+[LP4-REGISTRY-02](LP4-REGISTRY-WRITE-APPROVAL.md) option1 in full: LP4-only10/2/10.
+The preceding blocker statements describe the historical decision state; they do not
+remain an approval stop. No other limit changes, and original9/1/9 are not passed.
+Actual source-built Registry/Caps/bond-bridge implementation and independent tests
+now proceed on PR24. Full GenesisBuilder/system settlement/finalization and complete
+CP/profile-bound R18/R21/caps64 proofs remain mandatory. All26 ledger obligations
+remain NOT PASSED until individually verified; approval and partial tests are not
+whole LP4 acceptance. Boot false; preserve M1 and prior evidence.
