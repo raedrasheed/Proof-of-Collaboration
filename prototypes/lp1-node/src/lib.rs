@@ -40,3 +40,6 @@ pub mod store;
 pub mod timing;
 pub mod verify;
 pub mod window;
+
+/// LP4 canonical trie root prerequisite; no execution or boot acceptance.
+pub mod trie;
