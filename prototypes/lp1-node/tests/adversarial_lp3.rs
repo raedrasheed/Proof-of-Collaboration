@@ -33,3 +33,18 @@ fn seeded_strict_envelope_no_panic_and_canonical_acceptance() {
     assert!(accepted > 0);
     println!("{{\"corpus\":\"S8 envelope\",\"seed\":\"0x5338c0de20261017\",\"cases\":12000,\"accepted\":{}}}", accepted);
 }
+#[test]
+fn in_range_high_s_is_still_noncanonical_in_both_signatures() {
+    use lp1_node::{hashes, header};
+    let raw = fixtures::load_chain_bytes(&common::json("chain.json")).unwrap();
+    let h = raw.iter().map(|b| header::decode(b).unwrap()).find(|h| h.is_signed()).unwrap();
+    let mut high_s = hashes::HALF_N;
+    high_s[31] += 1; // HALF_N ends in a0; this is in range and strictly above n/2.
+    for template in [false, true] {
+        let mut v = h.clone();
+        let sig = if template { v.sig.as_mut_slice() } else { v.winner_sig.as_mut_slice() };
+        sig[32..64].copy_from_slice(&high_s);
+        assert_eq!(hashes::check_sig_shape(sig), Err(hashes::SigFault::HighS));
+        assert!(envelope::decode(&v.encode()).is_err());
+    }
+}
