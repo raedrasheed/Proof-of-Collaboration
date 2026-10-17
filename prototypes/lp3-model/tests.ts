@@ -88,3 +88,31 @@ test('all accepted L4n/order supplements and 1500-level malformed twins',()=>{
   if(row.dropLast)b=b.subarray(0,b.length-1);if(row.suffix)b=m.concat(b,m.unhex(row.suffix));assert.equal(b.length,row[variant].length,row.id+' length');assert.equal(code(b),row.expect.code,row.id+' '+variant);
  }}
 });
+test('SV1-SV5/SV7/SV7s pure settlement arithmetic; execution and SV6 deferred LP4',()=>{
+ const row=(n:number,count:bigint,tomb=false,accountExists=true)=>({id:id(n),count,tomb,accountExists});
+ let s=m.shareRewards(64000n,[row(1,1n)],2n,32n);assert.equal(s.amount,1000n);assert.equal(s.baseBurn,63000n);
+ s=m.shareRewards(101n,Array.from({length:65},(_,i)=>row(i+1,1n)),2n,32n);assert.equal(s.paid,65n);assert.equal(s.roundBurn,36n);
+ s=m.shareRewards(1000n,[row(1,3n),row(2,2n)],2n,32n);assert.deepEqual(s.payments.map(p=>p.amount),[46n,31n]);assert.equal(s.roundBurn,1n);assert.equal(s.baseBurn,922n);
+ for(const[tomb,exists,penalty,pay]of [[true,true,100n,0n],[false,false,0n,100n]] as const){s=m.shareRewards(6400n,[row(1,1n),row(2,1n,tomb,exists)],2n,32n);assert.equal(s.paid,100n);assert.equal(s.penaltyBurn,penalty);assert.equal(s.payBurn,pay);assert.equal(s.baseBurn,6200n);}
+ for(const[pot,expectedPaid,base]of [[80000n,13062n,66938n],[164000n,26778n,137222n]]){const p=m.splitPot(pot,1000n,500n);s=m.shareRewards(p.remainder,[row(1,1n)],2n,32n);assert.equal(p.winner+p.proposer+s.paid,expectedPaid);assert.equal(s.baseBurn,base);assert.equal(expectedPaid+base,pot);}
+ s=m.shareRewards(m.MAX256,[row(1,257n)],2n,32n);assert.equal(s.paid,m.MAX256);assert.throws(()=>m.shareRewards(1n,[row(1,258n)],2n,32n));
+});
+test('newly approved CF1-CF6 core mapping, boundaries and no execution certificate',()=>{
+ assert.equal(m.closing(null,99n,999n,100n,1000n),null);
+ assert.equal(m.closing(null,100n,999n,100n,1000n),100n);
+ assert.equal(m.closing(null,99n,1000n,100n,1000n),99n);
+ assert.equal(m.closing(40n,99n,999n,100n,1000n),40n);
+ for(const [c,n,r,w] of [[40n,128n,128n,40n],[40n,129n,128n,41n],[553n,1024n,8n,680n],[40n,0n,128n,40n]])assert.equal(m.cursorBound(c,n,r),w);
+ assert.throws(()=>m.cursorBound(40n,128n,0n));assert.throws(()=>m.cursorBound((1n<<64n)-1n,2n,1n));
+ assert.equal(m.gate2(697n,9979n,700n,10000n,2n,10n),false);
+ assert.equal(m.gate2(698n,9979n,700n,10000n,2n,10n),true);
+ assert.equal(m.gate2(697n,9980n,700n,10000n,2n,10n),true);
+ assert.throws(()=>m.gate2(0n,0n,0n,0n,1n,1n));
+ const p={closing:true,closeH:40n,cursorDone:true,isFinal:false};
+ assert.equal(m.finalPredicate(p,42n,1000n,2n,700n,1000n),true);
+ for(const q of [{...p,closing:false},{...p,cursorDone:false}])assert.equal(m.finalPredicate(q,42n,1000n,2n,700n,1000n),false);
+ assert.equal(m.finalPredicate(p,41n,1000n,2n,700n,1000n),false);assert.equal(m.finalPredicate(p,42n,999n,2n,700n,1000n),false);
+ const u=(1n<<64n)-1n;assert.equal(m.finalPredicate({...p,closeH:u},u,u,0n,u,u),true);assert.equal(m.finalPredicate({...p,closeH:u},u,u,1n,u,u),false);
+ assert.equal(m.childAllowed(true,700n,700n),false);assert.equal(m.childAllowed(false,701n,700n),false);assert.equal(m.childAllowed(false,700n,700n),true);
+ assert.throws(()=>m.childAllowed(false,-1n,700n));
+});
