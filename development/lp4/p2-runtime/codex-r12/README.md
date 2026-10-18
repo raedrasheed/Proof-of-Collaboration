@@ -53,3 +53,9 @@ in a verified local backup and immutable local Git commit; see PUBLICATION-STATU
 for exact hashes, sizes, actual publication status and required specific review action.
 This is a missing published-evidence obligation, not an acceptance waiver. No splitting
 or alternate external route is used. New independent CI exports summaries only.
+
+Publication resolution: specific owner authorization and decompressed inspection
+accepted the exact two original blobs; both are restored in the current publication
+commit. Historical rejection statements above describe the preceding checkpoint.
+See ../codex-r13/OWNER-PUBLICATION-APPROVAL.md and current PUBLICATION-STATUS.json.
+No acceptance requirement or execution result changes.

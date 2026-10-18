@@ -47,3 +47,9 @@ Git commit fddca02cf7afa75b229240795c0c96fb577db970 also preserves both. The sub
 publication commit intentionally excludes their bytes and states the gap; do not claim
 complete remote evidence. User asked to explain this restriction and save a handoff if
 it persists. No new LP4 design approval is requested or needed.
+
+Publication resolution: specific owner authorization and decompressed inspection
+accepted the exact two original blobs; both are restored in the current publication
+commit. Historical rejection statements above describe the preceding checkpoint.
+See ../codex-r13/OWNER-PUBLICATION-APPROVAL.md and current PUBLICATION-STATUS.json.
+No acceptance requirement or execution result changes.
