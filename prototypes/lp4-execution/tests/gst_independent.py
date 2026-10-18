@@ -23,8 +23,8 @@ def raw(v):
 
 
 def execute(test, post, profile="unmodified"):
-    from gst_independent_vm import ComparisonVM
-    vm = CancunVM if profile=="unmodified" else ComparisonVM
+    from gst_independent_vm import ComparisonVM, AdmissionComparisonVM
+    vm = {"unmodified":CancunVM,"lp4-create01-modexp":ComparisonVM,"lp4-create01-modexp-admission":AdmissionComparisonVM}[profile]
     env = test['env']; tx = test['transaction']; ix = post['indexes']
     header = CancunBlockHeader(
         difficulty=0, block_number=num(env['currentNumber']),
@@ -107,7 +107,7 @@ def items(corpus, sources, timeout, limit, profile, selected):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('corpus'); p.add_argument('output'); p.add_argument('--limit',type=int,default=0)
-    p.add_argument('--profile',choices=['unmodified','lp4-create01-modexp'],default='unmodified'); p.add_argument('--selected-receipts')
+    p.add_argument('--profile',choices=['unmodified','lp4-create01-modexp','lp4-create01-modexp-admission'],default='unmodified'); p.add_argument('--selected-receipts')
     p.add_argument('--workers',type=int,default=4); p.add_argument('--timeout',type=int,default=30); a=p.parse_args()
     assert 1<=a.workers<=4 and a.timeout>0 and a.limit>=0
     selected=None

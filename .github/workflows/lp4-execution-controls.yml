@@ -165,13 +165,17 @@ jobs:
           set -euo pipefail
           python -m venv work/independent-venv
           work/independent-venv/bin/pip install -r prototypes/lp4-execution/tests/python-requirements.lock
+          work/independent-venv/bin/pip install --only-binary=:all: --no-deps --require-hashes -r prototypes/lp4-execution/tests/python-comparison-extra.lock
           curl --fail --location --silent --show-error --max-time 300 https://codeload.github.com/ethereum/legacytests/tar.gz/1f581b8ccdc4c63acf5f2c5c1b155c690c32a8eb -o work/legacy.tar.gz
           work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_extract.py work/legacy.tar.gz work/independent-corpus development/lp4/p2-runtime/codex-r2/source-receipts.json
       - name: Complete independent comparison (disagreement or timeout fails)
         run: |
           set -euo pipefail
           work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_comparison_checks.py
-          work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_independent.py work/independent-corpus work/independent-results --profile lp4-create01-modexp --timeout 60
+          work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_admission_checks.py
+          work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_admission_mutations.py work/independent-admission-mutations
+          work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_blake2_checks.py
+          work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_independent.py work/independent-corpus work/independent-results --profile lp4-create01-modexp-admission --timeout 300
           python -c "import json; s=json.load(open('work/independent-results/summary.json')); c=s['counts']; assert c['total']==20661 and not s['limited'] and s['selectedCases'] is None; assert all(c.get(k,0)==0 for k in ['MISMATCH','ENGINE_ERROR','BLOCKED_TIMEOUT']), s"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
@@ -180,5 +184,62 @@ jobs:
           path: |
             work/independent-results/summary.json
             work/independent-results/sources.json
+            work/independent-admission-mutations/results.json
+            work/independent-admission-mutations/*.log
+          if-no-files-found: error
+          retention-days: 14
+  native-cancun-reference:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GOPATH: ${{ github.workspace }}/work/geth-path
+      GOCACHE: ${{ github.workspace }}/work/geth-cache
+      GOBIN: ${{ github.workspace }}/work/geth-bin
+      GOMAXPROCS: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version: '1.23.2'
+          cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Build pinned independent native reference
+        run: |
+          set -euo pipefail
+          mkdir -p work/geth-results
+          go version > work/geth-results/compiler.txt
+          go install -buildvcs=false -p 2 github.com/ethereum/go-ethereum/cmd/evm@v1.14.12
+          go mod download -json github.com/ethereum/go-ethereum@v1.14.12 > work/geth-results/source-module.json
+          go version -m "$GOBIN/evm" > work/geth-results/binary-build-info.txt
+          sha256sum "$GOBIN/evm" > work/geth-results/binary-sha256.txt
+          curl --fail --location --silent --show-error --max-time 300 https://codeload.github.com/ethereum/legacytests/tar.gz/1f581b8ccdc4c63acf5f2c5c1b155c690c32a8eb -o work/legacy.tar.gz
+          python prototypes/lp4-execution/tests/gst_extract.py work/legacy.tar.gz work/geth-corpus development/lp4/p2-runtime/codex-r2/source-receipts.json
+      - name: Complete independent native Cancun state and log assertions
+        run: |
+          set -euo pipefail
+          python prototypes/lp4-execution/tests/gst_geth_control.py work/geth-corpus "$GOBIN/evm" work/geth-results
+          python -c "import json; s=json.load(open('work/geth-results/summary.json')); assert s['complete'] and not s['limited'] and s['expected']==s['counts']['total']==20661 and s['counts'].get('FAILURE',0)==0, s"
+      - name: Compile independent engine arithmetic and collision controls
+        run: |
+          python prototypes/lp4-execution/tests/gst_geth_mutations.py work/geth-mutations "$GOPATH/pkg/mod/github.com/ethereum/go-ethereum@v1.14.12" go work/geth-corpus "$GOBIN/evm"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: lp4-native-cancun-reference
+          path: |
+            work/geth-results/summary.json
+            work/geth-results/process-receipt.json
+            work/geth-results/sources.json
+            work/geth-results/compiler.txt
+            work/geth-results/source-module.json
+            work/geth-results/binary-build-info.txt
+            work/geth-results/binary-sha256.txt
+            work/geth-mutations/results.json
+            work/geth-mutations/*-build.log
           if-no-files-found: error
           retention-days: 14
