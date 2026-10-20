@@ -112,3 +112,14 @@ pub mod pay;
 pub mod native;
 
 pub mod collision;
+pub mod wire;
+pub mod receipts;
+pub mod fees;
+#[path="wire_rlp.rs"] #[allow(dead_code)] pub(crate) mod rlp;
+#[path="p1_fixed.rs"] #[allow(dead_code)] pub(crate) mod fixed;
+#[path="p1_trie.rs"] #[allow(dead_code)] pub(crate) mod trie;
+#[path="p1_hex.rs"] #[allow(dead_code)] pub(crate) mod hex;
+pub(crate) mod hashes {
+    pub type H256=[u8;32];
+    pub fn keccak256(bytes:&[u8])->H256{revm::primitives::keccak256(bytes).0}
+}

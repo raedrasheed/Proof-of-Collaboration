@@ -2,8 +2,8 @@
 name: LP4 execution controls
 on:
   pull_request:
-    branches: [work/lp3-consensus-foundation]
-    paths: ['prototypes/lp4-execution/**', '.github/workflows/lp4-execution-controls.yml']
+    branches: [work/lp3-consensus-foundation, codex-lp4-p2-runtime]
+    paths: ['prototypes/lp4-execution/**', 'prototypes/lp1-node/src/**', '.github/workflows/lp4-execution-controls.yml']
 permissions:
   contents: read
 jobs:
@@ -84,12 +84,30 @@ jobs:
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/gst_control.py work/gst-corpus prototypes/lp4-execution/target/release/cancun_control work/lp4-controls/gst
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/gst_exception_audit.py work/gst-corpus work/lp4-controls/gst/cases.jsonl work/lp4-controls/gst/exception-category-audit.json
           python prototypes/lp4-execution/tests/gst_exception_mutations.py work/lp4-exception-mutations work/gst-corpus work/lp4-controls/gst/cases.jsonl
+      - name: P3 signed-wire fee receipt primitives (not full P3 admission)
+        run: |
+          set -euo pipefail
+          cmp prototypes/lp1-node/src/rlp.rs prototypes/lp4-execution/src/wire_rlp.rs
+          cmp prototypes/lp1-node/src/fixed.rs prototypes/lp4-execution/src/p1_fixed.rs
+          cmp prototypes/lp1-node/src/trie.rs prototypes/lp4-execution/src/p1_trie.rs
+          cmp prototypes/lp1-node/src/hex.rs prototypes/lp4-execution/src/p1_hex.rs
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/wire_fixtures.py work/lp4-controls/wire-envelopes.json
+          cmp prototypes/lp4-execution/tests/data/wire-envelopes.json work/lp4-controls/wire-envelopes.json
+          python prototypes/lp4-execution/tests/fee_fixtures.py work/lp4-controls/london-fees.json
+          cmp prototypes/lp4-execution/tests/data/london-fees.json work/lp4-controls/london-fees.json
+          cargo +1.99.1 run --offline --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example wire_vectors > work/lp4-controls/wire-execution.json
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/wire_oracle.py work/lp4-controls/wire-execution.json work/lp4-controls/wire-oracle.json
+          cargo +1.99.1 run --offline --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example receipt_roots -- work/lp4-controls/wire-execution.json > work/lp4-controls/receipt-roots.json
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/receipt_oracle.py work/lp4-controls/wire-execution.json work/lp4-controls/receipt-roots.json | tee work/lp4-controls/receipt-oracle.log
+          RUSTUP_TOOLCHAIN=1.99.1 work/lp4-venv/bin/python prototypes/lp4-execution/tests/wire_mutations.py work/lp4-wire-mutations | tee work/lp4-controls/wire-mutations.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: lp4-p2-controls
           path: |
             work/lp4-controls
+            work/lp4-wire-mutations/*.log
+            work/lp4-wire-mutations/results.json
             work/lp4-context-mutations/*.log
             work/lp4-context-mutations/results.json
             work/lp4-exception-mutations/*.log
