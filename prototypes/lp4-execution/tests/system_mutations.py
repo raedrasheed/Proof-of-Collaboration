@@ -19,6 +19,11 @@ controls=[
  ('pending-offset','origin.as_slice())<<8','origin.as_slice())<<16','independent_pending_encoder_and_invalid_context'),
  ('pending-kind','U256::from(matches!(self,Self::Fallback) as u64)','U256::ZERO','independent_pending_encoder_and_invalid_context'),
 ]
+if len(sys.argv)>2 and sys.argv[2]=='boundary':
+ controls=[
+  ('nested-gas-overallocation','CallInputs::new_boxed(&evm.context.evm.env.tx,allocation)','CallInputs::new_boxed(&evm.context.evm.env.tx,allocation+allocation/63)','compiled_nested_matches_independent_complete_roots_and_exact_gas'),
+  ('nested-revert-committed','// No transact(), caller deduction, intrinsic gas or transaction post-handler.','let previous=evm.handler.execution.call_return.clone(); evm.handler.execution.call_return=std::sync::Arc::new(move |context,frame,mut result|{if result.result==revm::interpreter::InstructionResult::Revert{result.result=revm::interpreter::InstructionResult::Return;}previous(context,frame,result)});','compiled_nested_matches_independent_complete_roots_and_exact_gas'),
+ ]
 results=[]
 for name,old,new,test in controls:
  folder=out/name
@@ -38,5 +43,5 @@ for name,old,new,test in controls:
  results.append(dict(name=name,old=old,new=new,test=prefix_test+test,buildExit=build.returncode,testExit=None if run is None else run.returncode,assertionKilled=killed))
  (out/'results.json').write_text(json.dumps(results,indent=2)+'\n')
  print(name,build.returncode,None if run is None else run.returncode,killed,flush=True)
-assert len(results)==15 and all(r['assertionKilled'] for r in results),results
-print('15 compiled SYS-01 primitive assertion controls verified; complete integration NOT PASSED')
+assert len(results)==len(controls) and all(r['assertionKilled'] for r in results),results
+print(f'{len(results)} compiled SYS-01 primitive assertion controls verified; complete integration NOT PASSED')

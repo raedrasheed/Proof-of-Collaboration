@@ -112,3 +112,5 @@ remain NOT PASSED until individually verified; approval and partial tests are no
 whole LP4 acceptance. Boot false; preserve M1 and prior evidence.
 
 LP4-SYS-01 option 1 is now owner-approved separately in [LP4-SYS-APPROVAL.md](LP4-SYS-APPROVAL.md). The immutable proposal remains historical. Approval passes no execution/resource gate; every unverified obligation and boot=false remains unchanged.
+
+R3 verifies compiled nested SYS EIP150/rollback boundaries independently. A separate new funding-point/host-interface question is consolidated in `lp4/p4-genesis/codex-r3/ISSUANCE-DECISION.md` (NOT APPROVED); no issuance rule is installed and all prior approvals remain closed. All27 complete obligations remain NOT PASSED.

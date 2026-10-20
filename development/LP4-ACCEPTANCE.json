@@ -349,5 +349,13 @@
     "implementationAcceptance": "NOT PASSED",
     "requiredEvidence": "All seven approved clauses and every immutable proposal acceptance requirement; internal primitives and synthetic measurements do not satisfy full integration/resources",
     "currentPacket": "development/lp4/p4-genesis/codex-r2/ACCEPTANCE.json"
+  },
+  "issuanceFundingDecision": {
+    "id": "LP4-ISSUANCE-01",
+    "status": "NOT APPROVED",
+    "proposal": "development/lp4/p4-genesis/codex-r3/ISSUANCE-DECISION.md",
+    "scope": "New observable protocol subsidy funding point/host interface; SYS-01 and all previous approvals stay closed",
+    "diagnostics": "Two independently executed unapproved timing countermodels, different complete roots; no mint implementation",
+    "executionAcceptance": "NOT PASSED"
   }
 }

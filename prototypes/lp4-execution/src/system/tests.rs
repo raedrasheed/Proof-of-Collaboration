@@ -12,7 +12,7 @@ fn profile(budget:u64)->ProfileIdentity{
 fn block(p:&ProfileIdentity)->NativeBlockContext{NativeBlockContext{height:U256::from(1),timestamp:U256::ZERO,gas_limit:U256::from(p.cp().GAS_LIMIT),base_fee:U256::from(100),prevrandao:B256::ZERO}}
 fn insert(db:&mut InMemoryDB,a:Address,code:Bytecode,balance:u64){db.insert_account_info(a,AccountInfo::new(U256::from(balance),1,code.hash_slow(),code));}
 fn artifact(file:&str,name:&str)->Bytecode{
- let v:serde_json::Value=serde_json::from_str(match file{"SystemEpochWitness.sol"=>include_str!("../../tests/data/system-epoch-witness.json"),_=>include_str!("../../tests/data/registry-payment.json")}).unwrap();
+ let v:serde_json::Value=serde_json::from_str(match file{"SystemBoundaryWitness.sol"=>include_str!("../../tests/data/system-boundary-witness.json"),"SystemEpochWitness.sol"=>include_str!("../../tests/data/system-epoch-witness.json"),_=>include_str!("../../tests/data/registry-payment.json")}).unwrap();
  Bytecode::new_raw(Bytes::from(raw(v["output"]["contracts"][file][name]["evm"]["deployedBytecode"]["object"].as_str().unwrap())))
 }
 fn target()->Address{Address::from([0x22;20])}
@@ -151,4 +151,45 @@ fn registry_pre(p:&ProfileIdentity)->InMemoryDB{
   let r=r.unwrap();assert_eq!(U256::from_be_slice(&r.output[..32]),U256::from(budget.min(30_000_000)-2));assert_eq!(U256::from_be_slice(&r.output[32..64]),b.gas_limit);assert_eq!(U256::from_be_slice(&r.output[64..96]),b.base_fee);assert_eq!(U256::from_be_slice(&r.output[96..]),U256::ZERO);
   let remaining=budget-r.raw_gas;let second=c.call(probe,Bytes::new()).unwrap();assert_eq!(U256::from_be_slice(&second.output[..32]),U256::from(remaining.min(30_000_000)-2));
  }
+}
+fn boundary_target()->Address{Address::from([0x66;20])}
+fn boundary_db()->InMemoryDB{let mut db=fixture();insert(&mut db,boundary_target(),artifact("SystemBoundaryWitness.sol","SystemBoundaryWitness"),0);db}
+fn forward(requested:u64,required:u64,abort_child:bool,abort_outer:bool)->Bytes{
+ let mut input=data("forward(uint256,uint256,bool,bool)").to_vec();for n in [requested,required,abort_child as u64,abort_outer as u64]{input.extend(U256::from(n).to_be_bytes::<32>());}Bytes::from(input)
+}
+fn word(bytes:&[u8],n:usize)->U256{U256::from_be_slice(&bytes[n*32..(n+1)*32])}
+#[test]fn compiled_nested_eip150_and_nested_revert_boundaries(){
+ let db=boundary_db();let original=root(&db);let input=forward(30_000_000,100_000,false,false);
+ let succeeds=|gas|{let p=profile(gas);let b=block(&p);Candidate::new(&db,&p,&b,Proposer::Fallback).unwrap().call(boundary_target(),input.clone()).map(|r|word(&r.output,0)==U256::from(1)).unwrap_or(false)};
+ let(mut lo,mut hi)=(30_000u64,200_000u64);assert!(!succeeds(lo));assert!(succeeds(hi));
+ while lo<hi{let mid=lo+(hi-lo)/2;if succeeds(mid){hi=mid}else{lo=mid+1}}
+ let minimum=lo;let expected:serde_json::Value=serde_json::from_str(include_str!("../../tests/data/system-boundary-independent.json")).unwrap();assert_eq!(minimum,expected["minimumGas"].as_u64().unwrap());assert!(succeeds(minimum));assert!(!succeeds(minimum-1));
+ let p=profile(30_000_000);let b=block(&p);let mut c=Candidate::new(&db,&p,&b,Proposer::Fallback).unwrap();
+ let r=c.call(boundary_target(),forward(30_000_000,0,true,false)).unwrap();assert_eq!(word(&r.output,0),U256::ZERO);assert_eq!(word(&r.output,3),U256::ZERO);assert_eq!(word(&r.output,4),U256::ZERO);
+ let r=c.call(boundary_target(),forward(30_000_000,100_000,false,false)).unwrap();assert_eq!(word(&r.output,0),U256::from(1));assert!(word(&r.output,2)>=U256::from(100_000));assert!(word(&r.output,2)<word(&r.output,1));assert_eq!(word(&r.output,3),U256::from(9));assert_eq!(word(&r.output,4),U256::from(7));
+ let r=c.call(boundary_target(),forward(30_000_000,0,true,false)).unwrap();assert_eq!(word(&r.output,3),U256::from(9));assert_eq!(word(&r.output,4),U256::ZERO);
+ assert!(c.call(boundary_target(),forward(30_000_000,0,false,true)).is_err());assert!(matches!(c.snapshot(),Err(SystemError::Poisoned)));assert_eq!(root(&db),original);
+}
+#[test]fn issuance_timing_is_observable_without_selecting_a_rule(){
+ // Two countermodels only: no host mint operation is installed. Both credit the
+ // same subsidy once. The USER instruction BALANCE sees different phase timing.
+ let p=profile(30_000_000);let mut b=block(&p);b.base_fee=U256::ZERO;let mut base=boundary_db();let sender=Address::from([0x11;20]);insert(&mut base,sender,Bytecode::default(),1_000_000);
+ insert(&mut base,crate::pay::escrow_address(),artifact("RegistryPayment.sol","RewardEscrow"),1000);
+ let subsidy=U256::from_be_bytes(p.spec().cp[15].to_be_bytes());let mut rows=Vec::new();
+ for early in [true,false]{let mut pre=base.clone();if early{let a=pre.accounts.get_mut(&crate::pay::escrow_address()).unwrap();a.info.balance=a.info.balance.checked_add(subsidy).unwrap();}
+  let tx=TxEnv{caller:sender,transact_to:TxKind::Call(boundary_target()),gas_limit:100_000,gas_price:U256::ZERO,nonce:Some(1),chain_id:Some(777902),data:data("captureCoinbaseBalance()"),..Default::default()};
+  let result=native::execute_for_profile(&pre,tx,&b,&p).unwrap();assert!(result.result.is_success());let mut post=pre.clone();commit_epoch(&mut post,result.state);
+  let observed=storage(&post,boundary_target(),1);assert_eq!(observed,U256::from(1000)+if early{subsidy}else{U256::ZERO});
+  if !early{let a=post.accounts.get_mut(&crate::pay::escrow_address()).unwrap();a.info.balance=a.info.balance.checked_add(subsidy).unwrap();}
+  rows.push(serde_json::json!({"model":if early{"credit-before-USER"}else{"credit-after-USER-before-closeBlock"},"pre":state(&pre),"caller":format!("{sender:#x}"),"to":format!("{:#x}",boundary_target()),"input":format!("0x{}",crate::hex::encode(&data("captureCoinbaseBalance()"))),"gas":100000,"gasUsed":result.result.gas_used(),"subsidy":subsidy.to_string(),"observed":observed.to_string(),"post":state(&post),"stateRoot":format!("{:#x}",root(&post)),"approved":false}));
+ }
+ assert_ne!(rows[0]["stateRoot"],rows[1]["stateRoot"]);assert_eq!(rows[0]["gasUsed"],rows[1]["gasUsed"]);
+ if let Some(path)=std::env::var_os("LP4_ISSUANCE_DIAGNOSTIC_PATH"){std::fs::write(path,serde_json::to_string_pretty(&serde_json::json!({"scope":"Unapproved issuance timing countermodels only; ordinary unsigned EVM transaction control, not verified PoCol block admission","semanticBase":"LP4-SYS-01","bootable":false,"genesisSpec":crate::hex::encode(&gs::encode(p.spec())),"genesisHash":format!("0x{}",crate::hex::encode(&p.genesis_hash())),"rows":rows})).unwrap()+"\n").unwrap();}
+}
+#[test]fn compiled_nested_matches_independent_complete_roots_and_exact_gas(){
+ let expected:serde_json::Value=serde_json::from_str(include_str!("../../tests/data/system-boundary-independent.json")).unwrap();let db=boundary_db();assert_eq!(format!("{:#x}",root(&db)),expected["preRoot"].as_str().unwrap());
+ for row in expected["cases"].as_array().unwrap(){let p=profile(row["gas"].as_u64().unwrap());let b=block(&p);let mut c=Candidate::new(&db,&p,&b,Proposer::Fallback).unwrap();let result=c.call(boundary_target(),forward(30_000_000,row["required"].as_u64().unwrap(),row["abortChild"].as_bool().unwrap(),row["abortOuter"].as_bool().unwrap()));
+  if !row["frameSuccess"].as_bool().unwrap(){assert!(result.is_err());assert!(matches!(c.snapshot(),Err(SystemError::Poisoned)));continue}
+  let result=result.unwrap();assert_eq!(result.raw_gas,row["rawGas"].as_u64().unwrap());assert_eq!(result.refund_counter,row["refundCounter"].as_i64().unwrap());assert_eq!(result.output.as_ref(),raw(row["output"].as_str().unwrap().trim_start_matches("0x")));assert_eq!(format!("{:#x}",root(c.snapshot().unwrap())),row["stateRoot"].as_str().unwrap());
+ }assert_eq!(expected["cases"].as_array().unwrap().len(),5);
 }
