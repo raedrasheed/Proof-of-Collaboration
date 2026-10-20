@@ -99,6 +99,9 @@ jobs:
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/wire_oracle.py work/lp4-controls/wire-execution.json work/lp4-controls/wire-oracle.json
           cargo +1.99.1 run --offline --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example receipt_roots -- work/lp4-controls/wire-execution.json > work/lp4-controls/receipt-roots.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/receipt_oracle.py work/lp4-controls/wire-execution.json work/lp4-controls/receipt-roots.json | tee work/lp4-controls/receipt-oracle.log
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/user_phase_fixtures.py work/lp4-controls/user-phase.json
+          cmp prototypes/lp4-execution/tests/data/user-phase.json work/lp4-controls/user-phase.json
+          RUSTUP_TOOLCHAIN=1.99.1 work/lp4-venv/bin/python prototypes/lp4-execution/tests/user_phase_mutations.py work/lp4-user-mutations | tee work/lp4-controls/user-mutations.log
           RUSTUP_TOOLCHAIN=1.99.1 work/lp4-venv/bin/python prototypes/lp4-execution/tests/wire_mutations.py work/lp4-wire-mutations | tee work/lp4-controls/wire-mutations.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
@@ -106,6 +109,8 @@ jobs:
           name: lp4-p2-controls
           path: |
             work/lp4-controls
+            work/lp4-user-mutations/*.log
+            work/lp4-user-mutations/results.json
             work/lp4-wire-mutations/*.log
             work/lp4-wire-mutations/results.json
             work/lp4-context-mutations/*.log
