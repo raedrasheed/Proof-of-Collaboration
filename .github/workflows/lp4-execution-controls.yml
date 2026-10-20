@@ -25,6 +25,7 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal
           python -m venv work/lp4-venv
           work/lp4-venv/bin/pip install -r prototypes/lp4-execution/tests/python-requirements.lock
+          work/lp4-venv/bin/pip install --only-binary=:all: --no-deps --require-hashes -r prototypes/lp4-execution/tests/python-comparison-extra.lock
           npm ci --prefix prototypes/lp4-execution/tools --ignore-scripts --no-audit --no-fund
       - name: Verify locked source archives and prepare default-runtime notices
         run: |
