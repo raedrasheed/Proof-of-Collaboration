@@ -2,7 +2,7 @@
 //! PAY contracts: development/LP4-PAY-APPROVAL.md and LP4-PAY-LIFECYCLE-APPROVAL.md.
 use std::sync::Arc;
 use revm::{Evm, InMemoryDB};
-use revm::primitives::{Address, EVMError, InvalidTransaction, ResultAndState, SpecId, TxEnv, U256};
+use revm::primitives::{Address, B256, EVMError, InvalidTransaction, ResultAndState, SpecId, TxEnv, U256};
 use crate::{pay::{self,NativeContext},pay_address,CHAIN_ID};
 
 pub fn execute(snapshot:&InMemoryDB, tx:TxEnv) -> Result<ResultAndState,EVMError<core::convert::Infallible>> {
@@ -16,11 +16,29 @@ pub fn execute_at(snapshot:&InMemoryDB, tx:TxEnv, height:U256) -> Result<ResultA
 
 /// Experimental NUMBER/TIMESTAMP context, not validated PoCol block admission.
 pub fn execute_at_time(snapshot:&InMemoryDB, tx:TxEnv, height:U256, timestamp:U256) -> Result<ResultAndState,EVMError<core::convert::Infallible>> {
+    execute_in_context(snapshot,tx,&NativeBlockContext{height,timestamp,gas_limit:U256::from(30_000_000u64),base_fee:U256::ZERO,prevrandao:B256::ZERO})
+}
+
+/// Host-supplied fields for execution controls. This is NOT validated block apply:
+/// P5 must derive these fields and the complete ancestor cache from stored headers.
+/// In particular prevrandao must eventually be SHA256('PoColRandao' || seal_p).
+pub struct NativeBlockContext {
+    pub height:U256,
+    pub timestamp:U256,
+    pub gas_limit:U256,
+    pub base_fee:U256,
+    pub prevrandao:B256,
+}
+
+/// Execute against an immutable snapshot, including its BLOCKHASH ancestor cache.
+/// No EIP-4788 system call is inserted here. Transaction/block validation and all
+/// resource ceilings remain separate acceptance obligations, never caller flags.
+pub fn execute_in_context(snapshot:&InMemoryDB, tx:TxEnv, block:&NativeBlockContext) -> Result<ResultAndState,EVMError<core::convert::Infallible>> {
     validate_nonce(snapshot,tx.caller,tx.nonce)?;
     let mut evm=Evm::builder().with_db(snapshot.clone()).with_external_context(NativeContext::from_snapshot(snapshot))
         .with_spec_id(SpecId::CANCUN)
         .modify_cfg_env(|cfg|cfg.chain_id=CHAIN_ID)
-        .modify_block_env(|b|{b.number=height;b.timestamp=timestamp;b.gas_limit=U256::from(30_000_000u64);b.basefee=U256::ZERO;b.coinbase=pay::escrow_address();})
+        .modify_block_env(|b|{b.number=block.height;b.timestamp=block.timestamp;b.gas_limit=block.gas_limit;b.basefee=block.base_fee;b.prevrandao=Some(block.prevrandao);b.coinbase=pay::escrow_address();b.blob_excess_gas_and_price=Some(revm::primitives::BlobExcessGasAndPrice::new(0,false));})
         .modify_tx_env(|t|*t=tx)
         .append_handler_register(|handler|{
             let previous=handler.execution.execute_frame.clone();

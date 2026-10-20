@@ -62,3 +62,13 @@ fully admitted resource binding remain NOT PASSED. Independent py-evm execution 
 an independently written domain model compare complete state roots and actual SSTORE
 counts. Synthetic CP52 fixtures and corrupt-state negatives are not admitted profiles,
 R18/R21 resource facts, caps64 acceptance or permission to boot/merge.
+
+`native::execute_in_context` additionally executes explicit NUMBER, TIMESTAMP,
+GASLIMIT, BASEFEE and PREVRANDAO, with fixed Escrow COINBASE and Cancun blob base
+fee1. BLOCKHASH reads the immutable snapshot's ancestor cache with the EVM256-block
+window. Nine independently re-executed context/full-state-root controls and seven
+compiled field/cache mutation controls are recorded in R15. This low-level control
+API does not validate headers, derive parent-seal randomness, prove complete stored
+ancestry or admit signed transactions. The historical30M/zero-basefee wrappers are
+synthetic fixtures. All remaining adaptations and replacement obligations are mapped
+in development/lp4/p2-runtime/codex-r15/DEVIATIONS.md; no GST case is excluded.

@@ -115,7 +115,7 @@ def main():
         selected={(r['file'],r['name'],r['variant']) for r in map(json.loads,open(a.selected_receipts))}
     out=pathlib.Path(a.output); out.mkdir(parents=True,exist_ok=True); start=time.time(); counts=collections.Counter(); sources=[]
     # At most two queued cases per worker, preserving deterministic source order.
-    with ProcessPoolExecutor(max_workers=a.workers) as pool, (out/'cases.jsonl').open('w') as log:
+    with ProcessPoolExecutor(max_workers=a.workers) as pool, (out/'cases.jsonl').open('w') as log, (out/'incomplete.jsonl').open('w') as incomplete:
         iterator=iter(items(a.corpus,sources,a.timeout,a.limit,a.profile,selected)); pending=deque(); exhausted=False
         while pending or not exhausted:
             while not exhausted and len(pending)<2*a.workers:
@@ -125,6 +125,10 @@ def main():
             if not pending: break
             row=pending.popleft().result()
             counts[row['comparison']]+=1; counts['total']+=1; log.write(json.dumps(row)+'\n'); log.flush()
+            # Public metadata only: retain the exact failed identities even when the
+            # full per-case receipt is kept local. Never convert timeout to success.
+            if row['comparison'] in ('BLOCKED_TIMEOUT', 'ENGINE_ERROR', 'MISMATCH'):
+                incomplete.write(json.dumps(row)+'\n'); incomplete.flush()
             if counts['total']%250==0: print(dict(counts),flush=True)
     if selected is not None: assert counts['total']==len(selected), 'selected case missing from frozen corpus'
     summary=dict(scope='Independent py-evm fixture state/log comparison only; no PoCol wire/PAY acceptance',profile=a.profile,selectedCases=len(selected) if selected is not None else None,counts=dict(counts),limited=bool(a.limit),workers=a.workers,timeoutSeconds=a.timeout,seconds=round(time.time()-start,3),status='REQUIRES REVIEW; NOT PASSED',bootable=False)

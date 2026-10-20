@@ -37,6 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p work/lp4-controls
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/tool_inventory.py "$PWD/prototypes/lp4-execution/tools/node_modules" "$(rustc +1.99.1 --print sysroot)" work/lp4-controls/tool-inventory.json
           NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_contracts.cjs work/lp4-controls/pay-harness.json
           cmp prototypes/lp4-execution/tests/data/pay-harness.json work/lp4-controls/pay-harness.json
           NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_durability.cjs work/lp4-controls/reward-durability.json
@@ -46,6 +47,9 @@ jobs:
           NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_registry.cjs work/lp4-controls/registry-payment.json
           cmp prototypes/lp4-execution/tests/data/registry-payment.json work/lp4-controls/registry-payment.json
           cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
+          cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example context_vectors > work/lp4-controls/context-vectors.json
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/context_oracle.py work/lp4-controls/context-vectors.json work/lp4-controls/context-oracle.json
+          RUSTUP_TOOLCHAIN=1.99.1 work/lp4-venv/bin/python prototypes/lp4-execution/tests/context_mutations.py work/lp4-context-mutations 2>&1 | tee work/lp4-controls/context-mutations.log
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example pay_vectors > work/lp4-controls/pay-vectors.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/pay_oracle.py work/lp4-controls/pay-vectors.json prototypes/lp4-execution/tests/data/pay-harness.json work/lp4-controls/pay-oracle.json
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example lifecycle_vectors > work/lp4-controls/lifecycle-vectors.json
@@ -85,6 +89,8 @@ jobs:
           name: lp4-p2-controls
           path: |
             work/lp4-controls
+            work/lp4-context-mutations/*.log
+            work/lp4-context-mutations/results.json
             work/lp4-exception-mutations/*.log
             work/lp4-exception-mutations/exception-compiled-controls.json
             work/lp4-runtime-notices
@@ -151,7 +157,7 @@ jobs:
 
   independent-cancun-comparison:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -175,7 +181,7 @@ jobs:
           work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_admission_checks.py
           work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_admission_mutations.py work/independent-admission-mutations
           work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_blake2_checks.py
-          work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_independent.py work/independent-corpus work/independent-results --profile lp4-create01-modexp-admission --timeout 300
+          work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_independent.py work/independent-corpus work/independent-results --profile lp4-create01-modexp-admission --timeout 7200 --workers 2
           python -c "import json; s=json.load(open('work/independent-results/summary.json')); c=s['counts']; assert c['total']==20661 and not s['limited'] and s['selectedCases'] is None; assert all(c.get(k,0)==0 for k in ['MISMATCH','ENGINE_ERROR','BLOCKED_TIMEOUT']), s"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
@@ -184,6 +190,7 @@ jobs:
           path: |
             work/independent-results/summary.json
             work/independent-results/sources.json
+            work/independent-results/incomplete.jsonl
             work/independent-admission-mutations/results.json
             work/independent-admission-mutations/*.log
           if-no-files-found: error
