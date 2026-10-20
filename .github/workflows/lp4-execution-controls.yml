@@ -236,6 +236,7 @@ jobs:
           work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_blake2_checks.py
           work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_independent.py work/independent-corpus work/independent-results --profile lp4-create01-modexp-admission --timeout 7200 --workers 2
           python -c "import json; s=json.load(open('work/independent-results/summary.json')); c=s['counts']; assert c['total']==20661 and not s['limited'] and s['selectedCases'] is None; assert all(c.get(k,0)==0 for k in ['MISMATCH','ENGINE_ERROR','BLOCKED_TIMEOUT']), s"
+          work/independent-venv/bin/python prototypes/lp4-execution/tests/gst_archive_independent.py work/independent-results work/independent-corpus
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
@@ -244,6 +245,8 @@ jobs:
             work/independent-results/summary.json
             work/independent-results/sources.json
             work/independent-results/incomplete.jsonl
+            work/independent-results/cases.jsonl.gz
+            work/independent-results/cases-receipt.json
             work/independent-admission-mutations/results.json
             work/independent-admission-mutations/*.log
           if-no-files-found: error
