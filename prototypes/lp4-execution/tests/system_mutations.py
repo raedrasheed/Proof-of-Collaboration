@@ -14,7 +14,7 @@ controls=[
  ('fee-deduction','commit_epoch(&mut self.state,state);','commit_epoch(&mut self.state,state); let a=self.state.accounts.entry(system_address()).or_default(); a.info.balance=a.info.balance.saturating_sub(U256::from(raw));','fresh_epochs_match_independent_compiled_witness_gas_and_root'),
  ('warm-slot','let mut input=CallInputs::new_boxed','evm.context.evm.load_account(to).unwrap(); evm.context.evm.sload(to,U256::ZERO).unwrap(); let mut input=CallInputs::new_boxed','fresh_epochs_match_independent_compiled_witness_gas_and_root'),
  ('transient-carry','let mut input=CallInputs::new_boxed','if self.used>0 {evm.context.evm.tstore(to,U256::ZERO,U256::from(7));} let mut input=CallInputs::new_boxed','fresh_epochs_match_independent_compiled_witness_gas_and_root'),
- ('failed-candidate-reusable','if result.is_err(){self.failed=true;','if false && result.is_err(){self.failed=true;','later_revert_or_log_invalidates_all_candidate_effects'),
+ ('failed-candidate-reusable','fn poison(&mut self){self.failed=true;','fn poison(&mut self){self.failed=false;','later_revert_or_log_invalidates_all_candidate_effects'),
  ('logs-discarded','if !logs.is_empty()','if false && !logs.is_empty()','later_revert_or_log_invalidates_all_candidate_effects'),
  ('pending-offset','origin.as_slice())<<8','origin.as_slice())<<16','independent_pending_encoder_and_invalid_context'),
  ('pending-kind','U256::from(matches!(self,Self::Fallback) as u64)','U256::ZERO','independent_pending_encoder_and_invalid_context'),

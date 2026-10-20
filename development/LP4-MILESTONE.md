@@ -20,9 +20,10 @@ replacement proofs remain required, as do actual GenesisBuilder and persistence.
 
 ## Ordered increments (one branch/PR each)
 
-Proposed only: P4/P5 SystemCall execution and tips-only metadata transport need the
-owner decision in [SYS-EXECUTION-DECISION.md](lp4/p4-genesis/codex-r1/SYS-EXECUTION-DECISION.md).
-Diagnostics are verified but neither candidate contract is installed or accepted.
+P4/P5 SystemCall and phase-2 issuance are explicitly approved through
+[LP4-SYS-APPROVAL.md](LP4-SYS-APPROVAL.md) and
+[LP4-ISSUANCE-APPROVAL.md](LP4-ISSUANCE-APPROVAL.md).
+The immutable proposals remain historical; approval does not accept implementation.
 The accepted CODE/PAY/CREATE/Registry decisions stay closed. Every existing gate
 and resource obligation remains mandatory and NOT PASSED; boot stays disabled.
 
@@ -114,3 +115,5 @@ whole LP4 acceptance. Boot false; preserve M1 and prior evidence.
 LP4-SYS-01 option 1 is now owner-approved separately in [LP4-SYS-APPROVAL.md](LP4-SYS-APPROVAL.md). The immutable proposal remains historical. Approval passes no execution/resource gate; every unverified obligation and boot=false remains unchanged.
 
 R3 verifies compiled nested SYS EIP150/rollback boundaries independently. A separate new funding-point/host-interface question is consolidated in `lp4/p4-genesis/codex-r3/ISSUANCE-DECISION.md` (NOT APPROVED); no issuance rule is installed and all prior approvals remain closed. All27 complete obligations remain NOT PASSED.
+
+LP4-ISSUANCE-01 option1 is now owner-approved separately in LP4-ISSUANCE-APPROVAL.md. All eight clauses/acceptance cases bind implementation; no full gate passes and historical proposals remain unchanged.

@@ -2,24 +2,24 @@
 use super::*;
 use crate::{profile::{ProfileKind,NodeKind},genesis_spec as gs};
 use revm::primitives::{AccountInfo,Bytecode,B256,keccak256};
-fn raw(s:&str)->Vec<u8>{s.as_bytes().chunks(2).map(|p|u8::from_str_radix(std::str::from_utf8(p).unwrap(),16).unwrap()).collect()}
-fn profile(budget:u64)->ProfileIdentity{
+pub(super) fn raw(s:&str)->Vec<u8>{s.as_bytes().chunks(2).map(|p|u8::from_str_radix(std::str::from_utf8(p).unwrap(),16).unwrap()).collect()}
+pub(super) fn profile(budget:u64)->ProfileIdentity{
  let v:serde_json::Value=serde_json::from_str(include_str!("../../tests/data/code-caps-native-views.json")).unwrap();
  let mut spec=gs::decode(&raw(v["cases"][0]["genesisSpec"].as_str().unwrap())).unwrap();
  spec.cp[44]=crate::fixed::U256::from_u64(budget);
  let bytes=gs::encode(&spec);ProfileIdentity::validate(&bytes,&gs::genesis_hash(&bytes),777902,ProfileKind::Synthetic,NodeKind::Simnet,&[(1,0)]).unwrap()
 }
-fn block(p:&ProfileIdentity)->NativeBlockContext{NativeBlockContext{height:U256::from(1),timestamp:U256::ZERO,gas_limit:U256::from(p.cp().GAS_LIMIT),base_fee:U256::from(100),prevrandao:B256::ZERO}}
-fn insert(db:&mut InMemoryDB,a:Address,code:Bytecode,balance:u64){db.insert_account_info(a,AccountInfo::new(U256::from(balance),1,code.hash_slow(),code));}
-fn artifact(file:&str,name:&str)->Bytecode{
- let v:serde_json::Value=serde_json::from_str(match file{"SystemBoundaryWitness.sol"=>include_str!("../../tests/data/system-boundary-witness.json"),"SystemEpochWitness.sol"=>include_str!("../../tests/data/system-epoch-witness.json"),_=>include_str!("../../tests/data/registry-payment.json")}).unwrap();
+pub(super) fn block(p:&ProfileIdentity)->NativeBlockContext{NativeBlockContext{height:U256::from(1),timestamp:U256::ZERO,gas_limit:U256::from(p.cp().GAS_LIMIT),base_fee:U256::from(100),prevrandao:B256::ZERO}}
+pub(super) fn insert(db:&mut InMemoryDB,a:Address,code:Bytecode,balance:u64){db.insert_account_info(a,AccountInfo::new(U256::from(balance),1,code.hash_slow(),code));}
+pub(super) fn artifact(file:&str,name:&str)->Bytecode{
+ let v:serde_json::Value=serde_json::from_str(match file{"FinalFundingWitness.sol"=>include_str!("../../tests/data/pending-escrow.json"),"PendingEscrow.sol"=>include_str!("../../tests/data/pending-escrow.json"),"SystemBoundaryWitness.sol"=>include_str!("../../tests/data/system-boundary-witness.json"),"SystemEpochWitness.sol"=>include_str!("../../tests/data/system-epoch-witness.json"),_=>include_str!("../../tests/data/registry-payment.json")}).unwrap();
  Bytecode::new_raw(Bytes::from(raw(v["output"]["contracts"][file][name]["evm"]["deployedBytecode"]["object"].as_str().unwrap())))
 }
 fn target()->Address{Address::from([0x22;20])}
 fn fixture()->InMemoryDB{let mut db=InMemoryDB::default();insert(&mut db,target(),artifact("SystemEpochWitness.sol","SystemEpochWitness"),0);db.insert_account_storage(target(),U256::ZERO,U256::from(11)).unwrap();db}
-fn data(s:&str)->Bytes{Bytes::from(keccak256(s.as_bytes())[..4].to_vec())}
-fn storage(db:&InMemoryDB,to:Address,slot:u64)->U256{db.accounts[&to].storage.get(&U256::from(slot)).copied().unwrap_or_default()}
-fn root(db:&InMemoryDB)->B256{
+pub(super) fn data(s:&str)->Bytes{Bytes::from(keccak256(s.as_bytes())[..4].to_vec())}
+pub(super) fn storage(db:&InMemoryDB,to:Address,slot:u64)->U256{db.accounts[&to].storage.get(&U256::from(slot)).copied().unwrap_or_default()}
+pub(super) fn root(db:&InMemoryDB)->B256{
  let n=|v:U256|crate::fixed::U256::from_be_slice(&v.to_be_bytes::<32>()).unwrap();let mut accounts=Vec::new();
  for (addr,a) in &db.accounts{if a.account_state==revm::db::AccountState::NotExisting{continue}
   let slots:Vec<_>=a.storage.iter().filter(|(_,v)|**v!=U256::ZERO).map(|(k,v)|(n(*k),n(*v))).collect();
@@ -75,7 +75,7 @@ fn load_state(v:&serde_json::Value)->InMemoryDB{
  for (key,value) in a["storage"].as_object().unwrap(){db.insert_account_storage(to,U256::from_str_radix(key.trim_start_matches("0x"),16).unwrap(),number(value)).unwrap();}
  }db
 }
-fn state(db:&InMemoryDB)->serde_json::Value{
+pub(super) fn state(db:&InMemoryDB)->serde_json::Value{
  let mut out=serde_json::Map::new();for (address,a) in &db.accounts{if a.account_state==revm::db::AccountState::NotExisting{continue}
  let code=a.info.code.as_ref().or_else(||db.contracts.get(&a.info.code_hash)).unwrap().original_bytes();
  let slots:serde_json::Map<String,serde_json::Value>=a.storage.iter().filter(|(_,v)|**v!=U256::ZERO).map(|(k,v)|(format!("{k:#x}"),serde_json::json!(format!("{v:#x}")))).collect();

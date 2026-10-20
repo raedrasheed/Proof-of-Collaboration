@@ -22,7 +22,7 @@ impl Proposer {
     }
 }
 #[derive(Debug,PartialEq,Eq)]
-pub(crate) enum SystemError { Metadata, Context, Budget, Execution(String), UnexpectedLogs, Poisoned }
+pub(crate) enum SystemError { Metadata, Context, Budget, Execution(String), UnexpectedLogs, Poisoned, Genesis, Phase, Supply }
 #[derive(Debug)]
 pub(crate) struct Observation {pub raw_gas:u64,pub refund_counter:i64,pub output:Bytes}
 
@@ -36,21 +36,88 @@ pub(crate) struct Candidate<'a> {
     proposer:Proposer,
     used:u64,
     failed:bool,
+    image:Option<&'a crate::genesis_builder::GenesisImage>,
+    stage:Stage,
+    tips:U256,
+    user:Option<crate::user_phase::UserCandidate>,
+    final_block:bool,
+    issued:U256,
 }
+#[derive(Clone,Copy,PartialEq,Eq)] enum Stage{System,Ready,Running,Complete}
 impl<'a> Candidate<'a> {
     pub(crate) fn new(snapshot:&InMemoryDB,profile:&'a ProfileIdentity,block:&'a NativeBlockContext,proposer:Proposer)->Result<Self,SystemError>{
         proposer.origin()?;
         if block.height==U256::ZERO || block.gas_limit!=U256::from(profile.cp().GAS_LIMIT){return Err(SystemError::Context)}
         let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
         crate::code_caps::validate_snapshot(snapshot,limits).map_err(SystemError::Execution)?;
-        Ok(Self{state:snapshot.clone(),profile,block,proposer,used:0,failed:false})
+        Ok(Self{state:snapshot.clone(),profile,block,proposer,used:0,failed:false,image:None,stage:Stage::System,tips:U256::ZERO,user:None,final_block:false,issued:U256::ZERO})
     }
     pub(crate) fn call(&mut self,to:Address,data:Bytes)->Result<Observation,SystemError>{
         if self.failed{return Err(SystemError::Poisoned)}
+        if !matches!(self.stage,Stage::System|Stage::Running){self.poison();return Err(SystemError::Phase)}
         let result=self.call_inner(to,data);
-        if result.is_err(){self.failed=true;self.state=InMemoryDB::default();}
+        if result.is_err(){self.poison();}
         result
     }
+    fn poison(&mut self){self.failed=true;self.state=InMemoryDB::default();self.user=None;self.tips=U256::ZERO;self.issued=U256::ZERO;}
+    /// Actual genesis/root/code/CP proof required. Still crate-private: complete
+    /// current UT/stored-header phase validation remains mandatory in P5.
+    pub(crate) fn from_genesis(snapshot:&InMemoryDB,image:&'a crate::genesis_builder::GenesisImage,profile:&'a ProfileIdentity,block:&'a NativeBlockContext,proposer:Proposer)->Result<Self,SystemError>{
+        image.verify_candidate(snapshot,profile).map_err(|_|SystemError::Genesis)?;
+        let height:u64=block.height.try_into().map_err(|_|SystemError::Context)?;
+        let time:u64=block.timestamp.try_into().map_err(|_|SystemError::Context)?;
+        if height==0||height>profile.cp().H_END{return Err(SystemError::Context)}
+        if height==1&&crate::genesis_builder::world_root(snapshot).map_err(|_|SystemError::Genesis)?!=image.root(){return Err(SystemError::Genesis)}
+        let reg=&snapshot.accounts[&crate::pay::registry_address()];let counters=reg.storage.get(&U256::from(3)).copied().unwrap_or_default();
+        let close_h:u64=((counters>>187u32)&U256::from(u64::MAX)).try_into().map_err(|_|SystemError::Context)?;
+        let cursor=(counters>>90u32)&U256::from(u32::MAX);let len=reg.storage.get(&U256::ZERO).copied().unwrap_or_default();
+        let parent=crate::finality_core::ParentFacts{closing:((counters>>89u32)&U256::from(1))!=U256::ZERO,close_h,cursor_done:cursor>=len,is_final:false};
+        let mut candidate=Self::new(snapshot,profile,block,proposer)?;candidate.image=Some(image);
+        candidate.final_block=crate::finality_core::final_predicate(parent,height,time,u32::from(profile.cp().D),profile.cp().H_END,profile.cp().T_END);Ok(candidate)
+    }
+    pub(crate) fn execute_users(&mut self,raw:&[Vec<u8>])->Result<(),SystemError>{
+        if self.failed{return Err(SystemError::Poisoned)}
+        let result=(||{
+            if self.stage!=Stage::System||self.image.is_none(){return Err(SystemError::Phase)}
+            let reg=&self.state.accounts[&crate::pay::registry_address()];let c=reg.storage.get(&U256::from(3)).copied().unwrap_or_default();
+            if (c>>123u32)&U256::from(u64::MAX)!=self.block.height||(c>>24u32)&U256::from(u64::MAX)!=self.block.height||(c>>88u32)&U256::from(1)==U256::ZERO{return Err(SystemError::Phase)}
+            if raw.iter().any(|r|r.len()>self.profile.cp().TX_MAX as usize){return Err(SystemError::Budget)}
+            let budget=self.profile.cp().BODY_MAX as usize;
+            let users=crate::user_phase::execute_for_profile(&self.state,raw,self.block,budget,budget,self.profile).map_err(|e|SystemError::Execution(format!("{e:?}")))?;
+            self.state=users.state().clone();self.tips=users.tips();self.user=Some(users);self.stage=Stage::Ready;Ok(())
+        })();if result.is_err(){self.poison();}result
+    }
+    /// No externally supplied amount/recipient/finality/tips/authorization flag.
+    /// Every error poisons all USER/SYS/issuance effects of this private candidate.
+    pub(crate) fn phase2(&mut self)->Result<Observation,SystemError>{
+        if self.failed{return Err(SystemError::Poisoned)}
+        let result=(||{
+            if self.stage!=Stage::Ready{return Err(SystemError::Phase)}
+            let image=self.image.ok_or(SystemError::Genesis)?;
+            image.verify_candidate(&self.state,self.profile).map_err(|_|SystemError::Genesis)?;
+            if !self.final_block{
+                let amount=U256::from_be_bytes(self.profile.spec().cp[15].to_be_bytes());
+                self.tips.checked_add(amount).ok_or(SystemError::Supply)?;
+                let escrow=self.state.accounts.get_mut(&crate::pay::escrow_address()).ok_or(SystemError::Genesis)?;
+                escrow.info.balance=escrow.info.balance.checked_add(amount).ok_or(SystemError::Supply)?;
+                self.issued=amount;
+            }
+            image.verify_candidate(&self.state,self.profile).map_err(|_|SystemError::Genesis)?;
+            self.stage=Stage::Running;
+            let selector=if self.final_block{"finalize(uint256)"}else{"closeBlock(uint256)"};
+            let mut input=revm::primitives::keccak256(selector.as_bytes())[..4].to_vec();input.extend(self.tips.to_be_bytes::<32>());
+            let observation=self.call(crate::pay::escrow_address(),Bytes::from(input))?;
+            image.verify_candidate(&self.state,self.profile).map_err(|_|SystemError::Genesis)?;
+            self.stage=Stage::Complete;Ok(observation)
+        })();if result.is_err(){self.poison();}result
+    }
+    /// Final state commitment only; transaction/receipt/body/header validation
+    /// and real disk commit still belong to the complete P5/P9 acceptance path.
+    pub(crate) fn check_state_root(&mut self,expected:revm::primitives::B256)->Result<(),SystemError>{
+        if self.failed{return Err(SystemError::Poisoned)}
+        let valid=self.stage==Stage::Complete&&crate::genesis_builder::world_root(&self.state).map(|r|r==expected).unwrap_or(false);if !valid{self.poison();return Err(SystemError::Context)}Ok(())
+    }
+    pub(crate) fn issued(&self)->Result<U256,SystemError>{if self.failed{Err(SystemError::Poisoned)}else{Ok(self.issued)}}
     fn call_inner(&mut self,to:Address,data:Bytes)->Result<Observation,SystemError>{
         let remaining=self.profile.cp().G_SYS.checked_sub(self.used).ok_or(SystemError::Budget)?;
         let allocation=remaining.min(PER_CALL_GAS);
@@ -96,3 +163,5 @@ fn commit_epoch(db:&mut InMemoryDB,state:EvmState){
 }
 
 #[cfg(test)] mod tests;
+
+#[cfg(test)] mod issuance_tests;
