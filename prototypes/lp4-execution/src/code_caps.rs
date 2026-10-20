@@ -1,0 +1,82 @@
+//! LP4-CODE-01: development/LP4-CODE-APPROVAL.md.
+//! Complete EmptyDB-backed inventory only; not a partial/persisted state proof.
+use std::sync::Arc;
+use revm::{Context, InMemoryDB, handler::register::EvmHandler};
+use revm::primitives::{AccountInfo, EVMError, KECCAK_EMPTY};
+use revm::interpreter::InstructionResult;
+
+#[derive(Clone, Copy, Debug)]
+pub struct CodeLimits { pub runtime: u32, pub logical: u64 }
+
+/// Resolve actual runtime bytes and verify their content address. An unknown
+/// nonempty hash must never silently resolve to EmptyDB's empty-code fallback.
+fn code_len(db:&InMemoryDB, info:&AccountInfo)->Result<u64,String> {
+    let code=info.code.as_ref().or_else(||db.contracts.get(&info.code_hash));
+    match code {
+        Some(code) if code.hash_slow()==info.code_hash =>
+            u64::try_from(code.original_bytes().len()).map_err(|_|"code length overflow".into()),
+        None if info.code_hash==KECCAK_EMPTY => Ok(0),
+        None => Err("missing runtime bytes".into()),
+        Some(_) => Err("runtime code hash mismatch".into()),
+    }
+}
+
+/// Logical bytes per existing address, not unique code hashes. EmptyDB has no
+/// hidden accounts: callers with a different backing store cannot use this API.
+pub fn inventory(db:&InMemoryDB)->Result<u64,String> {
+    db.accounts.values().filter_map(|a|a.info()).try_fold(0u64,|sum,info| {
+        sum.checked_add(code_len(db,&info)?).ok_or_else(||"logical code overflow".into())
+    })
+}
+
+pub fn validate_snapshot(db:&InMemoryDB,limits:CodeLimits)->Result<(),String> {
+    if limits.runtime<24577 {return Err("R9: B_code_max below 24577".into());}
+    for a in db.accounts.values().filter_map(|a|a.info()) {
+        if code_len(db,&a)?>u64::from(limits.runtime) {return Err("snapshot exceeds B_code_max".into());}
+    }
+    if inventory(db)?>limits.logical {return Err("snapshot exceeds CODE_CAP".into());}
+    Ok(())
+}
+
+fn current_total<EXT>(context:&Context<EXT,InMemoryDB>)->Result<u64,String> {
+    let db=&context.evm.db;
+    let state=&context.evm.journaled_state.state;
+    let base=db.accounts.iter().filter(|(address,_)|!state.contains_key(*address))
+        .filter_map(|(_,a)|a.info());
+    // SELFDESTRUCT schedules end-of-transaction deletion. Its code remains
+    // observable until that deletion, so no early credit is granted here.
+    // After actual commit/removal the next complete inventory releases charge.
+    base.chain(state.values().map(|a|a.info.clone())).try_fold(0u64,|sum,info| {
+        sum.checked_add(code_len(db,&info)?).ok_or_else(||"logical code overflow".into())
+    })
+}
+
+/// Keep ordinary Cancun configuration during validation AND opcode execution.
+/// Only the existing deposit handler sees the amended runtime limit. This leaves
+/// EIP3860's 49152 limit, word gas, and exact error ordering untouched, without
+/// copying or modifying the interpreter or its transaction validator.
+pub fn register<EXT:'static>(handler:&mut EvmHandler<'_,EXT,InMemoryDB>,limits:CodeLimits) {
+    assert_eq!(handler.cfg.spec_id,revm::primitives::SpecId::CANCUN);
+    let previous=handler.execution.create_return.clone();
+    handler.execution.create_return=Arc::new(move |context,frame,mut result| {
+        if result.result.is_ok() && result.output.first()!=Some(&0xef)
+            && result.output.len()<=limits.runtime as usize {
+            let total=current_total(context).map_err(EVMError::Custom)?;
+            let old=context.evm.journaled_state.state.get(&frame.created_address)
+                .map(|a|code_len(&context.evm.db,&a.info)).transpose()
+                .map_err(EVMError::Custom)?.unwrap_or(0);
+            let proposed=total.checked_sub(old).and_then(|n|n.checked_add(result.output.len() as u64))
+                .ok_or_else(||EVMError::Custom("logical code overflow".into()))?;
+            if proposed>limits.logical {
+                // The upstream failure path reverts the create checkpoint;
+                // enclosing frames retain Cancun create-failure/nonce/gas rules.
+                result.result=InstructionResult::CreateContractSizeLimit;
+            }
+        }
+        let saved=context.evm.env.cfg.limit_contract_code_size;
+        context.evm.env.cfg.limit_contract_code_size=Some(limits.runtime as usize);
+        let outcome=previous(context,frame,result);
+        context.evm.env.cfg.limit_contract_code_size=saved;
+        outcome
+    });
+}

@@ -12,6 +12,12 @@ LP3-AMENDMENT-01.md and LP3-CF-CORE-APPROVAL.md are additive carried obligations
 LP3 acceptance is not real execution/resource acceptance. Every execution obligation
 starts NOT PASSED. Increment completion never implies full LP4 acceptance or boot.
 
+LP4-CODE-01 is explicitly approved in [LP4-CODE-APPROVAL.md](LP4-CODE-APPROVAL.md).
+Its complete runtime/initcode/logical-accounting contract and acceptance evidence
+are mandatory across P2/P3/P4/P7/P8/P9/P10. Approval does not pass results or change
+CP values, R9, M1 or any other limit. Original Cancun controls and individual
+replacement proofs remain required, as do actual GenesisBuilder and persistence.
+
 ## Ordered increments (one branch/PR each)
 
 | ID | Implementation | Acceptance before foundation merge |
