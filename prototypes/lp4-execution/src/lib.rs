@@ -131,3 +131,15 @@ pub(crate) mod hashes {
 
 pub mod code_caps;
 #[cfg(test)] mod code_caps_engine_tests;
+
+// No public SystemCall/block-admission API until validated phase integration.
+#[allow(dead_code)] pub(crate) mod system;
+
+// Byte-identical P3 primitives reused for internal atomic USER/SYS integration.
+#[allow(dead_code)] pub(crate) mod wire;
+#[allow(dead_code)] pub(crate) mod fees;
+#[allow(dead_code)] pub(crate) mod receipts;
+#[allow(dead_code)] pub(crate) mod user_phase;
+#[allow(dead_code)] pub(crate) mod genesis_builder;
+
+#[allow(dead_code)] pub(crate) mod finality_core;

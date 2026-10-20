@@ -20,6 +20,13 @@ replacement proofs remain required, as do actual GenesisBuilder and persistence.
 
 ## Ordered increments (one branch/PR each)
 
+P4/P5 SystemCall and phase-2 issuance are explicitly approved through
+[LP4-SYS-APPROVAL.md](LP4-SYS-APPROVAL.md) and
+[LP4-ISSUANCE-APPROVAL.md](LP4-ISSUANCE-APPROVAL.md).
+The immutable proposals remain historical; approval does not accept implementation.
+The accepted CODE/PAY/CREATE/Registry decisions stay closed. Every existing gate
+and resource obligation remains mandatory and NOT PASSED; boot stays disabled.
+
 | ID | Implementation | Acceptance before foundation merge |
 |---|---|---|
 | P0 | Source/decision inventory, traceable scope and acceptance ledger | Reproduce hashes and immutable baseline; separate review; identify missing named gate definitions rather than invent recovered originals. Documentation acceptance only. |
@@ -104,3 +111,13 @@ now proceed on PR24. Full GenesisBuilder/system settlement/finalization and comp
 CP/profile-bound R18/R21/caps64 proofs remain mandatory. All26 ledger obligations
 remain NOT PASSED until individually verified; approval and partial tests are not
 whole LP4 acceptance. Boot false; preserve M1 and prior evidence.
+
+LP4-SYS-01 option 1 is now owner-approved separately in [LP4-SYS-APPROVAL.md](LP4-SYS-APPROVAL.md). The immutable proposal remains historical. Approval passes no execution/resource gate; every unverified obligation and boot=false remains unchanged.
+
+R3 verifies compiled nested SYS EIP150/rollback boundaries independently. A separate new funding-point/host-interface question is consolidated in `lp4/p4-genesis/codex-r3/ISSUANCE-DECISION.md` (NOT APPROVED); no issuance rule is installed and all prior approvals remain closed. All27 complete obligations remain NOT PASSED.
+
+LP4-ISSUANCE-01 option1 is now owner-approved separately in LP4-ISSUANCE-APPROVAL.md. All eight clauses/acceptance cases bind implementation; no full gate passes and historical proposals remain unchanged.
+
+R7 integrates actual source-built D27 factory into the sealed synthetic genesis image and authenticated USER/phase-2 comparisons. One Ledger witness and incomplete Escrow settlement remain explicit. All27 complete gates, general R18/R21/caps64, full validated phases/finalization/SV6 and durable atomicity remain NOT PASSED; boot=false. See lp4/p4-genesis/codex-r7.
+
+LP4-LEDGER-01 is a NEW consolidated pending owner decision in lp4/p4-genesis/codex-r8/LEDGER-STATE-DECISION.md. The sources do not fix physical Ledger retention/layout and recording interface; compiled equal-code/equal-parent-state countermodels preserve needed logical counts but change state roots. Neither policy is installed or accepted. All prior decisions remain closed; independent checks/evidence work may continue.
