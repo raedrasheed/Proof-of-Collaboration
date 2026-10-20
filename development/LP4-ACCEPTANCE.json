@@ -360,5 +360,12 @@
     "authority": "development/LP4-ISSUANCE-APPROVAL.md",
     "originalProposalCommit": "a67eb9d7ce39e7fdb7c0a53e3dee85de73de61e8",
     "currentPacket": "development/lp4/p4-genesis/codex-r7/ACCEPTANCE.json"
+  },
+  "ledgerStateDecision": {
+    "id": "LP4-LEDGER-01",
+    "status": "NOT APPROVED",
+    "proposal": "development/lp4/p4-genesis/codex-r8/LEDGER-STATE-DECISION.md",
+    "scope": "New explicit Ledger storage/prune/Registry recording interface; earlier approvals closed",
+    "executionAcceptance": "NOT PASSED"
   }
 }

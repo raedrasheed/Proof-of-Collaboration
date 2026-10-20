@@ -119,3 +119,5 @@ R3 verifies compiled nested SYS EIP150/rollback boundaries independently. A sepa
 LP4-ISSUANCE-01 option1 is now owner-approved separately in LP4-ISSUANCE-APPROVAL.md. All eight clauses/acceptance cases bind implementation; no full gate passes and historical proposals remain unchanged.
 
 R7 integrates actual source-built D27 factory into the sealed synthetic genesis image and authenticated USER/phase-2 comparisons. One Ledger witness and incomplete Escrow settlement remain explicit. All27 complete gates, general R18/R21/caps64, full validated phases/finalization/SV6 and durable atomicity remain NOT PASSED; boot=false. See lp4/p4-genesis/codex-r7.
+
+LP4-LEDGER-01 is a NEW consolidated pending owner decision in lp4/p4-genesis/codex-r8/LEDGER-STATE-DECISION.md. The sources do not fix physical Ledger retention/layout and recording interface; compiled equal-code/equal-parent-state countermodels preserve needed logical counts but change state roots. Neither policy is installed or accepted. All prior decisions remain closed; independent checks/evidence work may continue.
