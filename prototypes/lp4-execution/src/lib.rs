@@ -116,7 +116,7 @@ pub mod wire;
 pub mod receipts;
 pub mod fees;
 #[path="wire_rlp.rs"] #[allow(dead_code)] pub(crate) mod rlp;
-#[path="p1_fixed.rs"] #[allow(dead_code)] pub(crate) mod fixed;
+#[path="p1_fixed.rs"] #[allow(dead_code)] pub mod fixed;
 #[path="p1_trie.rs"] #[allow(dead_code)] pub(crate) mod trie;
 #[path="p1_hex.rs"] #[allow(dead_code)] pub(crate) mod hex;
 pub(crate) mod hashes {
@@ -125,3 +125,14 @@ pub(crate) mod hashes {
 }
 
 pub mod user_phase;
+
+// Byte-identical accepted LP3 identity and JSON primitives; no boot authorization.
+#[path="p1_profile.rs"] #[allow(dead_code)] pub mod profile;
+#[path="p1_genesis_spec.rs"] #[allow(dead_code)] pub mod genesis_spec;
+#[path="p1_genesis.rs"] #[allow(dead_code)] pub mod genesis;
+#[path="p1_decimal.rs"] #[allow(dead_code)] pub mod decimal;
+#[path="p1_json.rs"] #[allow(dead_code)] pub mod json;
+
+pub mod pool;
+pub mod rpc_pool;
+pub mod rpc_http;

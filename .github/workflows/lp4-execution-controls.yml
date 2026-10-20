@@ -91,6 +91,12 @@ jobs:
           cmp prototypes/lp1-node/src/fixed.rs prototypes/lp4-execution/src/p1_fixed.rs
           cmp prototypes/lp1-node/src/trie.rs prototypes/lp4-execution/src/p1_trie.rs
           cmp prototypes/lp1-node/src/hex.rs prototypes/lp4-execution/src/p1_hex.rs
+          for module in profile genesis_spec genesis decimal json; do
+            cmp "prototypes/lp1-node/src/$module.rs" "prototypes/lp4-execution/src/p1_$module.rs"
+          done
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/profile_execution_fixtures.py work/lp4-controls/profile-execution.json
+          cmp prototypes/lp4-execution/tests/data/profile-execution.json work/lp4-controls/profile-execution.json
+          RUSTUP_TOOLCHAIN=1.99.1 work/lp4-venv/bin/python prototypes/lp4-execution/tests/pool_mutations.py work/lp4-pool-mutations | tee work/lp4-controls/pool-mutations.log
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/wire_fixtures.py work/lp4-controls/wire-envelopes.json
           cmp prototypes/lp4-execution/tests/data/wire-envelopes.json work/lp4-controls/wire-envelopes.json
           python prototypes/lp4-execution/tests/fee_fixtures.py work/lp4-controls/london-fees.json
@@ -103,12 +109,20 @@ jobs:
           cmp prototypes/lp4-execution/tests/data/user-phase.json work/lp4-controls/user-phase.json
           RUSTUP_TOOLCHAIN=1.99.1 work/lp4-venv/bin/python prototypes/lp4-execution/tests/user_phase_mutations.py work/lp4-user-mutations | tee work/lp4-controls/user-mutations.log
           RUSTUP_TOOLCHAIN=1.99.1 work/lp4-venv/bin/python prototypes/lp4-execution/tests/wire_mutations.py work/lp4-wire-mutations | tee work/lp4-controls/wire-mutations.log
+      - name: Signed negative controls and unmodified second-engine diagnostic
+        run: |
+          set -euo pipefail
+          cargo +1.99.1 build --offline --locked --manifest-path prototypes/lp4-execution/Cargo.toml --bin signed_rejection_control
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/gst_signed_rejections.py work/gst-corpus work/lp4-controls/gst/cases.jsonl prototypes/lp4-execution/target/debug/signed_rejection_control work/lp4-controls/signed-admission | tee work/lp4-controls/signed-admission.log
+          python -c "import json; s=json.load(open('work/lp4-controls/signed-admission/summary.json')); assert s['total']==1173 and sum(s['counts'][k] for k in ['SIGNED_NATIVE_CATEGORY_AND_INPUT_PREDICATE','SIGNED_OVER_U256_WIRE_INTEGER','SIGNED_PRIORITY_WIRE_PRECEDENCE','POCOL_TYPE3_REJECTION_NOT_ORIGINAL_CATEGORY'])==1173"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: lp4-p2-controls
           path: |
             work/lp4-controls
+            work/lp4-pool-mutations/*.log
+            work/lp4-pool-mutations/results.json
             work/lp4-user-mutations/*.log
             work/lp4-user-mutations/results.json
             work/lp4-wire-mutations/*.log
@@ -220,6 +234,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   native-cancun-reference:
+    needs: cancun-pay-controls
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -255,6 +270,16 @@ jobs:
           set -euo pipefail
           python prototypes/lp4-execution/tests/gst_geth_control.py work/geth-corpus "$GOBIN/evm" work/geth-results
           python -c "import json; s=json.load(open('work/geth-results/summary.json')); assert s['complete'] and not s['limited'] and s['expected']==s['counts']['total']==20661 and s['counts'].get('FAILURE',0)==0, s"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: lp4-p2-controls
+          path: work/signed-input-artifact
+      - name: Actual signed independent Geth admission and compiled controls
+        run: |
+          set -euo pipefail
+          python prototypes/lp4-execution/tests/build_signed_geth.py go "$GOPATH/pkg/mod/github.com/ethereum/go-ethereum@v1.14.12" work/signed-geth
+          python prototypes/lp4-execution/tests/gst_signed_geth_verify.py work/signed-geth/signed-geth-control work/signed-input-artifact/lp4-controls/signed-admission work/signed-geth-results
+          python prototypes/lp4-execution/tests/signed_geth_mutations.py go work/signed-geth work/signed-input-artifact/lp4-controls/signed-admission work/signed-geth-mutations
       - name: Compile independent engine arithmetic and collision controls
         run: |
           python prototypes/lp4-execution/tests/gst_geth_mutations.py work/geth-mutations "$GOPATH/pkg/mod/github.com/ethereum/go-ethereum@v1.14.12" go work/geth-corpus "$GOBIN/evm"
@@ -263,6 +288,12 @@ jobs:
         with:
           name: lp4-native-cancun-reference
           path: |
+            work/signed-geth/source-proof.json
+            work/signed-geth/build.log
+            work/signed-geth/build-info.txt
+            work/signed-geth-results
+            work/signed-geth-mutations/results.json
+            work/signed-geth-mutations/*.log
             work/geth-results/summary.json
             work/geth-results/process-receipt.json
             work/geth-results/sources.json

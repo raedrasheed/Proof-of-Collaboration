@@ -4,7 +4,7 @@ root=pathlib.Path(__file__).resolve().parents[1];out=pathlib.Path(sys.argv[1]).r
 fields=[
  ('wire-budget','wire.rs','if raw.len()>byte_budget','if false && raw.len()>byte_budget','wire','byte_budget_equality_and_minus_one'),
  ('high-s','wire.rs','if s>n/U256::from(2)','if false && s>n/U256::from(2)','wire','signed_envelopes_match_independent_oracle'),
- ('typed-chain','wire.rs','if uint(&f[0])?!=U256::from(CHAIN_ID)','if false && uint(&f[0])?!=U256::from(CHAIN_ID)','wire','signed_envelopes_match_independent_oracle'),
+ ('typed-chain','wire.rs','if uint(&f[0])?!=U256::from(chain_id)','if false && uint(&f[0])?!=U256::from(chain_id)','wire','signed_envelopes_match_independent_oracle'),
  ('signing-domain','wire.rs','if kind!=0{preimage.push(kind)}','if false && kind!=0{preimage.push(kind)}','wire','signed_envelopes_match_independent_oracle'),
  ('canonical-integer','wire.rs','b.len()>32 || b.first()==Some(&0)','b.len()>32','wire','signed_envelopes_match_independent_oracle'),
  ('priority-cap','wire.rs','if priority.map(|p|p>max).unwrap_or(false)','if false && priority.map(|p|p>max).unwrap_or(false)','wire','signed_envelopes_match_independent_oracle'),

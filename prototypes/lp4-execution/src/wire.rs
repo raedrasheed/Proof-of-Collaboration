@@ -18,7 +18,7 @@ impl WireError {
 
 #[derive(Debug,Clone)]
 pub struct SignedEnvelope {
-    kind:u8, raw:Bytes, signing_hash:B256, sender:Address, nonce:u64, gas_limit:u64,
+    chain_id:u64, kind:u8, raw:Bytes, signing_hash:B256, sender:Address, nonce:u64, gas_limit:u64,
     max_fee:U256, priority:Option<U256>, to:TxKind, value:U256, input:Bytes,
     access_list:Vec<AccessListItem>,
 }
@@ -30,7 +30,7 @@ impl SignedEnvelope {
     pub fn tx_env(&self)->TxEnv{TxEnv{caller:self.sender,gas_limit:self.gas_limit,
         gas_price:self.max_fee,gas_priority_fee:self.priority,transact_to:self.to,
         value:self.value,data:self.input.clone(),nonce:Some(self.nonce),
-        chain_id:Some(CHAIN_ID),access_list:self.access_list.clone(),..Default::default()}}
+        chain_id:Some(self.chain_id),access_list:self.access_list.clone(),..Default::default()}}
     pub fn view(&self)->serde_json::Value{serde_json::json!({"kind":self.kind,
         "sender":format!("{:#x}",self.sender),"hash":format!("{}",self.hash()),
         "signingHash":format!("{}",self.signing_hash),"nonce":self.nonce,
@@ -61,7 +61,12 @@ fn order()->U256{U256::from_be_slice(&[
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xfe,
     0xba,0xae,0xdc,0xe6,0xaf,0x48,0xa0,0x3b,0xbf,0xd2,0x5e,0x8c,0xd0,0x36,0x41,0x41])}
 
-pub fn decode_signed(raw:&[u8],byte_budget:usize)->Result<SignedEnvelope,WireError>{
+pub fn decode_signed(raw:&[u8],byte_budget:usize)->Result<SignedEnvelope,WireError>{decode_on_chain(raw,byte_budget,CHAIN_ID)}
+/// LP3 schema/identity binding only, never complete ParamGate or boot authorization.
+pub fn decode_for_profile(raw:&[u8],profile:&crate::profile::ProfileIdentity)->Result<SignedEnvelope,WireError>{
+ decode_on_chain(raw,profile.cp().TX_MAX as usize,profile.spec().chain_id)
+}
+fn decode_on_chain(raw:&[u8],byte_budget:usize,chain_id:u64)->Result<SignedEnvelope,WireError>{
     if raw.len()>byte_budget{return Err(WireError::Budget)}
     let first=*raw.first().ok_or(WireError::Rlp)?;
     let (kind,encoded)=match first{0x01|0x02=>(first,&raw[1..]),0xc0..=0xff=>(0,raw),0x00..=0x7f=>return Err(WireError::UnsupportedType),_=>return Err(WireError::Rlp)};
@@ -71,11 +76,11 @@ pub fn decode_signed(raw:&[u8],byte_budget:usize)->Result<SignedEnvelope,WireErr
     let (nonce,gas_limit,max_fee,priority,to,value,input,access_list,parity,unsigned)=if kind==0{
         let v=uint(&f[6])?;if v==U256::from(27)||v==U256::from(28){return Err(WireError::UnprotectedLegacy)}
         if v<U256::from(35){return Err(WireError::Parity)}
-        let expected=U256::from(CHAIN_ID)*U256::from(2)+U256::from(35);
+        let expected=U256::from(chain_id)*U256::from(2)+U256::from(35);
         if v!=expected && v!=expected+U256::from(1){return Err(WireError::ChainId)}
         (uint64(&f[0])?,uint64(&f[2])?,uint(&f[1])?,None,destination(&f[3])?,uint(&f[4])?,Bytes::copy_from_slice(bytes(&f[5])?),Vec::new(),(v-expected).to::<u8>(),6)
     }else{
-        if uint(&f[0])?!=U256::from(CHAIN_ID){return Err(WireError::ChainId)}
+        if uint(&f[0])?!=U256::from(chain_id){return Err(WireError::ChainId)}
         let shift=usize::from(kind==2);let p=uint(&f[8+shift])?;if p>U256::from(1){return Err(WireError::Parity)}
         let max=uint(&f[2+shift])?;let priority=if kind==2{Some(uint(&f[2])?)}else{None};
         if priority.map(|p|p>max).unwrap_or(false){return Err(WireError::FeeCap)}
@@ -85,10 +90,10 @@ pub fn decode_signed(raw:&[u8],byte_budget:usize)->Result<SignedEnvelope,WireErr
     if r==U256::ZERO || r>=n || s==U256::ZERO || s>=n{return Err(WireError::Signature)}
     if s>n/U256::from(2){return Err(WireError::HighS)}
     let mut payload=Vec::new();for field in &f[..unsigned]{payload.extend_from_slice(field.raw)}
-    if kind==0{let chain=U256::from(CHAIN_ID).to_be_bytes::<32>();let start=chain.iter().position(|x|*x!=0).unwrap();rlp::encode_bytes(&chain[start..],&mut payload);payload.extend([0x80,0x80]);}
+    if kind==0{let chain=U256::from(chain_id).to_be_bytes::<32>();let start=chain.iter().position(|x|*x!=0).unwrap();rlp::encode_bytes(&chain[start..],&mut payload);payload.extend([0x80,0x80]);}
     let mut preimage=Vec::new();if kind!=0{preimage.push(kind)}rlp::encode_list_payload(&payload,&mut preimage);
     let signing_hash=keccak256(preimage);let mut recovery=vec![0u8;128];recovery[..32].copy_from_slice(signing_hash.as_slice());recovery[63]=27+parity;recovery[64..96].copy_from_slice(&r.to_be_bytes::<32>());recovery[96..].copy_from_slice(&s.to_be_bytes::<32>());
     let recovered=revm::precompile::secp256k1::ec_recover_run(&Bytes::from(recovery),3000).map_err(|_|WireError::Signature)?;
     if recovered.bytes.len()!=32{return Err(WireError::Signature)}let sender=Address::from_word(B256::from_slice(&recovered.bytes));
-    Ok(SignedEnvelope{kind,raw:Bytes::copy_from_slice(raw),signing_hash,sender,nonce,gas_limit,max_fee,priority,to,value,input,access_list})
+    Ok(SignedEnvelope{chain_id,kind,raw:Bytes::copy_from_slice(raw),signing_hash,sender,nonce,gas_limit,max_fee,priority,to,value,input,access_list})
 }
