@@ -64,15 +64,18 @@ jobs:
           cmp prototypes/lp4-execution/tests/data/system-boundary-witness.json work/lp4-controls/system-boundary-witness.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/system_boundary_oracle.py work/lp4-controls/system-boundary-independent.json
           cmp prototypes/lp4-execution/tests/data/system-boundary-independent.json work/lp4-controls/system-boundary-independent.json
+          NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_chunk.cjs work/lp4-controls/chunk-factory.json
+          cmp prototypes/lp4-execution/tests/data/chunk-factory.json work/lp4-controls/chunk-factory.json
           NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_pending.cjs work/lp4-controls/pending-escrow.json
           cmp prototypes/lp4-execution/tests/data/pending-escrow.json work/lp4-controls/pending-escrow.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/issuance_signed_fixtures.py work/lp4-controls/issuance-signed.json
           cmp prototypes/lp4-execution/tests/data/issuance-signed.json work/lp4-controls/issuance-signed.json
-          LP4_ISSUANCE_REPORT_PATH="$PWD/work/lp4-controls/issuance-vectors.json" LP4_ISSUANCE_DIAGNOSTIC_PATH="$PWD/work/lp4-controls/issuance-diagnostic.json" LP4_SYS_REPORT_PATH="$PWD/work/lp4-controls/system-vectors.json" cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
+          LP4_CHUNK_REPORT_PATH="$PWD/work/lp4-controls/chunk-vectors.json" LP4_ISSUANCE_REPORT_PATH="$PWD/work/lp4-controls/issuance-vectors.json" LP4_ISSUANCE_DIAGNOSTIC_PATH="$PWD/work/lp4-controls/issuance-diagnostic.json" LP4_SYS_REPORT_PATH="$PWD/work/lp4-controls/system-vectors.json" cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/system_boundary_oracle.py work/lp4-controls/system-boundary-repeat.json work/lp4-controls/issuance-diagnostic.json work/lp4-controls/issuance-independent.json
           cmp prototypes/lp4-execution/tests/data/system-boundary-independent.json work/lp4-controls/system-boundary-repeat.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/system_oracle.py work/lp4-controls/system-vectors.json work/lp4-controls/system-independent.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/issuance_oracle.py work/lp4-controls/issuance-vectors.json work/lp4-controls/issuance-independent.json
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/chunk_oracle.py work/lp4-controls/chunk-vectors.json work/lp4-controls/chunk-independent.json
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example context_vectors > work/lp4-controls/context-vectors.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/context_oracle.py work/lp4-controls/context-vectors.json work/lp4-controls/context-oracle.json
           RUSTUP_TOOLCHAIN=1.99.1 work/lp4-venv/bin/python prototypes/lp4-execution/tests/context_mutations.py work/lp4-context-mutations 2>&1 | tee work/lp4-controls/context-mutations.log
@@ -110,6 +113,10 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: '1.99.1'
         run: NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" python prototypes/lp4-execution/tests/issuance_mutations.py work/lp4-issuance-mutations
+      - name: Compiled source-built D27 ChunkFactory controls
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.1'
+        run: NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" python prototypes/lp4-execution/tests/chunk_mutations.py work/lp4-chunk-mutations
       - name: Complete pinned upstream Cancun control corpus
         run: |
           set -euo pipefail
@@ -140,6 +147,8 @@ jobs:
             work/lp4-system-mutations/results.json
             work/lp4-issuance-mutations/*.log
             work/lp4-issuance-mutations/results.json
+            work/lp4-chunk-mutations/*.log
+            work/lp4-chunk-mutations/results.json
             work/lp4-code-mutations/*.log
             work/lp4-code-mutations/results.json
             work/lp4-context-mutations/*.log

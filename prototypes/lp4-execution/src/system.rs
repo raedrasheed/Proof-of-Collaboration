@@ -165,3 +165,5 @@ fn commit_epoch(db:&mut InMemoryDB,state:EvmState){
 #[cfg(test)] mod tests;
 
 #[cfg(test)] mod issuance_tests;
+
+#[cfg(test)] mod chunk_tests;
