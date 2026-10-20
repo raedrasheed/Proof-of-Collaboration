@@ -1,5 +1,5 @@
 """Independent actual genesis MPT and signed USER/native issuance/SYS execution.
-Synthetic manifest has two witness roles; not real five-program/UT/P5/P6 acceptance.
+Synthetic manifest has one witness role; Escrow settlement/finalization incomplete; not real five-program/UT/P5/P6 acceptance.
 """
 import sys,json,copy,hashlib,rlp
 from pathlib import Path
@@ -81,6 +81,6 @@ for row in v['cases']:
   for k,value in a['storage'].items():assert s.get_storage(addr,number(k))==number(value)
  trace={f'0x{addr.hex()}:{op:02x}':[hex(k) for k in keys] for (addr,op),keys in s.slots.items()}
  results.append(dict(phase2OpcodeCounts={hex(k):n for k,n in s.opcodes.items()},phase2StorageTrace=trace,kind=row['kind'],origin=row['origin'],stateRoot=actual,userGas=gas,authenticatedTips=tip,sysRawGas=used,phase2RawGas=c.get_gas_used(),issued=cp[15],comparison='MATCH'))
-assert len(genesis)==2 and len(results)==6
-out=dict(scope=__doc__,inputSHA256=hashlib.sha256(source.read_bytes()).hexdigest(),genesis=genesis,cases=results,semanticVersion=v['semanticVersion'],fullGenesisBuilderAcceptance='NOT PASSED: two synthetic manifest roles',fullValidatedPhases='NOT PASSED',realFinalizationSV6='NOT PASSED',generalR18R21caps64='NOT PASSED',bootable=False)
-Path(sys.argv[2]).write_text(json.dumps(out,indent=2)+'\n');print('MATCH actual genesis roots4/1024 and6 signed USER/issuance/compiled-SYS full-state/gas cases; full LP4 NOT PASSED')
+assert len(genesis)==2 and len(results)==8
+out=dict(scope=__doc__,inputSHA256=hashlib.sha256(source.read_bytes()).hexdigest(),genesis=genesis,cases=results,semanticVersion=v['semanticVersion'],fullGenesisBuilderAcceptance='NOT PASSED: one synthetic manifest role; Escrow settlement/finalization incomplete',fullValidatedPhases='NOT PASSED',realFinalizationSV6='NOT PASSED',generalR18R21caps64='NOT PASSED',bootable=False)
+Path(sys.argv[2]).write_text(json.dumps(out,indent=2)+'\n');print('MATCH actual genesis roots4/1024 and8 signed USER/issuance/compiled-SYS full-state/gas cases; full LP4 NOT PASSED')

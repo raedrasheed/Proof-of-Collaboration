@@ -109,6 +109,7 @@ jobs:
         run: |
           python prototypes/lp4-execution/tests/system_mutations.py work/lp4-system-mutations
           python prototypes/lp4-execution/tests/system_mutations.py work/lp4-system-nested-mutations boundary
+          python prototypes/lp4-execution/tests/genesis_factory_mutations.py work/lp4-genesis-factory-mutations
       - name: Compiled approved issuance and pending mutation controls
         env:
           RUSTUP_TOOLCHAIN: '1.99.1'
@@ -149,6 +150,8 @@ jobs:
             work/lp4-issuance-mutations/results.json
             work/lp4-chunk-mutations/*.log
             work/lp4-chunk-mutations/results.json
+            work/lp4-genesis-factory-mutations/*.log
+            work/lp4-genesis-factory-mutations/results.json
             work/lp4-code-mutations/*.log
             work/lp4-code-mutations/results.json
             work/lp4-context-mutations/*.log

@@ -12,7 +12,7 @@ pub(super) fn profile(budget:u64)->ProfileIdentity{
 pub(super) fn block(p:&ProfileIdentity)->NativeBlockContext{NativeBlockContext{height:U256::from(1),timestamp:U256::ZERO,gas_limit:U256::from(p.cp().GAS_LIMIT),base_fee:U256::from(100),prevrandao:B256::ZERO}}
 pub(super) fn insert(db:&mut InMemoryDB,a:Address,code:Bytecode,balance:u64){db.insert_account_info(a,AccountInfo::new(U256::from(balance),1,code.hash_slow(),code));}
 pub(super) fn artifact(file:&str,name:&str)->Bytecode{
- let v:serde_json::Value=serde_json::from_str(match file{"FinalFundingWitness.sol"=>include_str!("../../tests/data/pending-escrow.json"),"PendingEscrow.sol"=>include_str!("../../tests/data/pending-escrow.json"),"SystemBoundaryWitness.sol"=>include_str!("../../tests/data/system-boundary-witness.json"),"SystemEpochWitness.sol"=>include_str!("../../tests/data/system-epoch-witness.json"),_=>include_str!("../../tests/data/registry-payment.json")}).unwrap();
+ let v:serde_json::Value=serde_json::from_str(match file{"ChunkFactory.sol"=>include_str!("../../tests/data/chunk-factory.json"),"FinalFundingWitness.sol"=>include_str!("../../tests/data/pending-escrow.json"),"PendingEscrow.sol"=>include_str!("../../tests/data/pending-escrow.json"),"SystemBoundaryWitness.sol"=>include_str!("../../tests/data/system-boundary-witness.json"),"SystemEpochWitness.sol"=>include_str!("../../tests/data/system-epoch-witness.json"),_=>include_str!("../../tests/data/registry-payment.json")}).unwrap();
  Bytecode::new_raw(Bytes::from(raw(v["output"]["contracts"][file][name]["evm"]["deployedBytecode"]["object"].as_str().unwrap())))
 }
 fn target()->Address{Address::from([0x22;20])}

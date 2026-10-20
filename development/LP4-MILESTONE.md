@@ -117,3 +117,5 @@ LP4-SYS-01 option 1 is now owner-approved separately in [LP4-SYS-APPROVAL.md](LP
 R3 verifies compiled nested SYS EIP150/rollback boundaries independently. A separate new funding-point/host-interface question is consolidated in `lp4/p4-genesis/codex-r3/ISSUANCE-DECISION.md` (NOT APPROVED); no issuance rule is installed and all prior approvals remain closed. All27 complete obligations remain NOT PASSED.
 
 LP4-ISSUANCE-01 option1 is now owner-approved separately in LP4-ISSUANCE-APPROVAL.md. All eight clauses/acceptance cases bind implementation; no full gate passes and historical proposals remain unchanged.
+
+R7 integrates actual source-built D27 factory into the sealed synthetic genesis image and authenticated USER/phase-2 comparisons. One Ledger witness and incomplete Escrow settlement remain explicit. All27 complete gates, general R18/R21/caps64, full validated phases/finalization/SV6 and durable atomicity remain NOT PASSED; boot=false. See lp4/p4-genesis/codex-r7.

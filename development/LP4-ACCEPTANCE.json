@@ -348,17 +348,17 @@
     "originalProposalCommit": "b1f25e0613fbeb3832dfb20252f76b92ef72b90d",
     "implementationAcceptance": "NOT PASSED",
     "requiredEvidence": "All seven approved clauses and every immutable proposal acceptance requirement; internal primitives and synthetic measurements do not satisfy full integration/resources",
-    "currentPacket": "development/lp4/p4-genesis/codex-r4/ACCEPTANCE.json"
+    "currentPacket": "development/lp4/p4-genesis/codex-r7/ACCEPTANCE.json"
   },
   "issuanceFundingDecision": {
     "id": "LP4-ISSUANCE-01",
     "status": "APPROVED_ADDITIVE_LP4",
     "proposal": "development/lp4/p4-genesis/codex-r3/ISSUANCE-DECISION.md",
     "scope": "New observable protocol subsidy funding point/host interface; SYS-01 and all previous approvals stay closed",
-    "diagnostics": "Historical R3 timing countermodels preserved unchanged; approved R4 internal phase-2 credit, actual genesis/signed-USER/SYS partial comparisons; complete five-program/validated-phase/finality/resource/durable acceptance remains NOT PASSED",
+    "diagnostics": "Historical timing diagnostics remain unchanged. R7 partial sealed genesis/actual factory/signed USER/phase-2 credit comparisons, with witness Ledger and incomplete Escrow settlement; complete validated phases/finality/resources/durable acceptance still NOT PASSED",
     "executionAcceptance": "NOT PASSED",
     "authority": "development/LP4-ISSUANCE-APPROVAL.md",
     "originalProposalCommit": "a67eb9d7ce39e7fdb7c0a53e3dee85de73de61e8",
-    "currentPacket": "development/lp4/p4-genesis/codex-r4/ACCEPTANCE.json"
+    "currentPacket": "development/lp4/p4-genesis/codex-r7/ACCEPTANCE.json"
   }
 }
