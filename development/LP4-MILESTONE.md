@@ -20,6 +20,12 @@ replacement proofs remain required, as do actual GenesisBuilder and persistence.
 
 ## Ordered increments (one branch/PR each)
 
+Proposed only: P4/P5 SystemCall execution and tips-only metadata transport need the
+owner decision in [SYS-EXECUTION-DECISION.md](lp4/p4-genesis/codex-r1/SYS-EXECUTION-DECISION.md).
+Diagnostics are verified but neither candidate contract is installed or accepted.
+The accepted CODE/PAY/CREATE/Registry decisions stay closed. Every existing gate
+and resource obligation remains mandatory and NOT PASSED; boot stays disabled.
+
 | ID | Implementation | Acceptance before foundation merge |
 |---|---|---|
 | P0 | Source/decision inventory, traceable scope and acceptance ledger | Reproduce hashes and immutable baseline; separate review; identify missing named gate definitions rather than invent recovered originals. Documentation acceptance only. |
