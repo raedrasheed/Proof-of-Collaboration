@@ -110,3 +110,5 @@ now proceed on PR24. Full GenesisBuilder/system settlement/finalization and comp
 CP/profile-bound R18/R21/caps64 proofs remain mandatory. All26 ledger obligations
 remain NOT PASSED until individually verified; approval and partial tests are not
 whole LP4 acceptance. Boot false; preserve M1 and prior evidence.
+
+LP4-SYS-01 option 1 is now owner-approved separately in [LP4-SYS-APPROVAL.md](LP4-SYS-APPROVAL.md). The immutable proposal remains historical. Approval passes no execution/resource gate; every unverified obligation and boot=false remains unchanged.

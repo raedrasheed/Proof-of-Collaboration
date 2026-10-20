@@ -2,7 +2,7 @@
 name: LP4 execution controls
 on:
   pull_request:
-    branches: [work/lp3-consensus-foundation]
+    branches: [work/lp3-consensus-foundation, codex-lp4-p2-runtime]
     paths: ['prototypes/lp4-execution/**', '.github/workflows/lp4-execution-controls.yml']
 permissions:
   contents: read
@@ -58,7 +58,10 @@ jobs:
           cmp prototypes/lp4-execution/tests/data/code-caps-execution.json work/lp4-controls/code-caps-execution.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/code_caps_native_views.py work/lp4-controls/code-caps-execution.json work/lp4-controls/code-caps-native-views.json
           cmp prototypes/lp4-execution/tests/data/code-caps-native-views.json work/lp4-controls/code-caps-native-views.json
-          cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
+          NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_system_epoch.cjs work/lp4-controls/system-epoch-witness.json
+          cmp prototypes/lp4-execution/tests/data/system-epoch-witness.json work/lp4-controls/system-epoch-witness.json
+          LP4_SYS_REPORT_PATH="$PWD/work/lp4-controls/system-vectors.json" cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/system_oracle.py work/lp4-controls/system-vectors.json work/lp4-controls/system-independent.json
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example context_vectors > work/lp4-controls/context-vectors.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/context_oracle.py work/lp4-controls/context-vectors.json work/lp4-controls/context-oracle.json
           RUSTUP_TOOLCHAIN=1.99.1 work/lp4-venv/bin/python prototypes/lp4-execution/tests/context_mutations.py work/lp4-context-mutations 2>&1 | tee work/lp4-controls/context-mutations.log
@@ -86,6 +89,10 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: '1.99.1'
         run: NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" python prototypes/lp4-execution/tests/registry_mutations.py work/lp4-registry-mutations
+      - name: Compiled approved SystemCall primitive mutation controls
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.1'
+        run: python prototypes/lp4-execution/tests/system_mutations.py work/lp4-system-mutations
       - name: Complete pinned upstream Cancun control corpus
         run: |
           set -euo pipefail
@@ -110,6 +117,8 @@ jobs:
           name: lp4-p2-controls
           path: |
             work/lp4-controls
+            work/lp4-system-mutations/*.log
+            work/lp4-system-mutations/results.json
             work/lp4-code-mutations/*.log
             work/lp4-code-mutations/results.json
             work/lp4-context-mutations/*.log

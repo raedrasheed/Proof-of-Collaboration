@@ -340,5 +340,14 @@
     "authority": "development/LP4-COLLISION-APPROVAL.md",
     "originalProposal": "development/lp4/p2-runtime/codex-r2/CANCUN-COLLISION-DECISION.md",
     "executionAcceptance": "NOT PASSED"
+  },
+  "systemExecutionDecision": {
+    "id": "LP4-SYS-01",
+    "status": "APPROVED_ADDITIVE_LP4",
+    "authority": "development/LP4-SYS-APPROVAL.md",
+    "originalProposalCommit": "b1f25e0613fbeb3832dfb20252f76b92ef72b90d",
+    "implementationAcceptance": "NOT PASSED",
+    "requiredEvidence": "All seven approved clauses and every immutable proposal acceptance requirement; internal primitives and synthetic measurements do not satisfy full integration/resources",
+    "currentPacket": "development/lp4/p4-genesis/codex-r2/ACCEPTANCE.json"
   }
 }

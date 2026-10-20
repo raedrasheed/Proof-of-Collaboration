@@ -48,7 +48,12 @@ pub fn execute_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockConte
 }
 fn execute_on_chain(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     validate_nonce(snapshot,tx.caller,tx.nonce)?;
-    let mut evm=Evm::builder().with_db(snapshot.clone()).with_external_context(NativeContext::from_snapshot(snapshot))
+    build_engine(snapshot,tx,block,chain_id,limits).transact()
+}
+
+/// Shared hooks only. SYSTEM uses direct frames; USER retains transact().
+pub(crate) fn build_engine(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>)->Evm<'static,NativeContext,InMemoryDB>{
+    Evm::builder().with_db(snapshot.clone()).with_external_context(NativeContext::from_snapshot(snapshot))
         .with_spec_id(SpecId::CANCUN)
         .modify_cfg_env(|cfg|cfg.chain_id=chain_id)
         .modify_block_env(|b|{b.number=block.height;b.timestamp=block.timestamp;b.gas_limit=block.gas_limit;b.basefee=block.base_fee;b.prevrandao=Some(block.prevrandao);b.coinbase=pay::escrow_address();b.blob_excess_gas_and_price=Some(revm::primitives::BlobExcessGasAndPrice::new(0,false));})
@@ -68,8 +73,7 @@ fn execute_on_chain(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chai
         }).append_handler_register(crate::collision::register)
         .append_handler_register_box(Box::new(move |handler| {
             if let Some(limits)=limits {crate::code_caps::register(handler,limits);}
-        })).build();
-    evm.transact()
+        })).build()
 }
 
 /// EIP-2681: maximum u64 transaction/account nonce cannot be incremented.

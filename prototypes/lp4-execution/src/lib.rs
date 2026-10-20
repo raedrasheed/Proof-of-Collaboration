@@ -131,3 +131,6 @@ pub(crate) mod hashes {
 
 pub mod code_caps;
 #[cfg(test)] mod code_caps_engine_tests;
+
+// No public SystemCall/block-admission API until validated phase integration.
+#[allow(dead_code)] pub(crate) mod system;
