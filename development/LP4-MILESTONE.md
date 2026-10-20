@@ -12,6 +12,12 @@ LP3-AMENDMENT-01.md and LP3-CF-CORE-APPROVAL.md are additive carried obligations
 LP3 acceptance is not real execution/resource acceptance. Every execution obligation
 starts NOT PASSED. Increment completion never implies full LP4 acceptance or boot.
 
+LP4-CODE-01 is explicitly approved in [LP4-CODE-APPROVAL.md](LP4-CODE-APPROVAL.md).
+Its complete runtime/initcode/logical-accounting contract and acceptance evidence
+are mandatory across P2/P3/P4/P7/P8/P9/P10. Approval does not pass results or change
+CP values, R9, M1 or any other limit. Original Cancun controls and individual
+replacement proofs remain required, as do actual GenesisBuilder and persistence.
+
 ## Ordered increments (one branch/PR each)
 
 | ID | Implementation | Acceptance before foundation merge |
@@ -62,3 +68,39 @@ rule may be invented or acceptance requirement weakened. Continue P2 autonomousl
 
 Live ledger: [LP4-ACCEPTANCE.json](LP4-ACCEPTANCE.json). All final execution/resource
 criteria remain NOT PASSED. No silent deferral beyond LP4. Boot disabled.
+
+PAY native interface is now explicitly approved by [LP4-PAY-01](LP4-PAY-APPROVAL.md).
+The newly approved conditional interpretation of “never fails” is additive; M1
+and the immutable proposal remain unchanged. Approval does not pass PAY/T2b or P2.
+
+Owner approved LP4-CREATE-01 in [LP4-COLLISION-APPROVAL.md](LP4-COLLISION-APPROVAL.md).
+Nonempty-storage creation collision is an additive LP4 rule at every supported
+height; no repeat fork approval is needed. All original execution/resource gates
+remain mandatory and NOT PASSED until verified.
+
+Owner approved the complete additive lifecycle contract in
+[LP4-PAY-02](LP4-PAY-LIFECYCLE-APPROVAL.md). It explicitly narrows native recipient
+eligibility to pre-transaction nonce/code and requires Escrow custody, the restricted
+Registry release bridge, admission probes and semantic genesis rejection. All seven
+parts of the historical proposal remain mandatory; partial native controls do not
+pass integration, genesis, closing or resource gates. Existing R18/R21 measurements
+must be re-derived for the complete implementation, not reused as accepted bounds.
+
+Owner approved LP4-REGISTRY-01 option1 in full; see
+[LP4-REGISTRY-APPROVAL.md](LP4-REGISTRY-APPROVAL.md). Slot3 successful-call accounting
+and original write ceilings are both binding. Actual compiled lower-bound witnesses
+and independent SSTORE traces expose a10/2/10 versus9/1/9 conflict for register,
+setRewardAddress and middle claimBond. Part8 requires returning this contradiction;
+no unapproved ceiling increase or budget exemption is implemented. See the explicitly
+unapproved consolidated resolution in lp4/p2-runtime/codex-r7. All25 acceptance
+obligations remain NOT PASSED; boot false, P2 draft, foundation unchanged.
+
+The owner explicitly resolved the three write-ceiling conflicts by approving
+[LP4-REGISTRY-02](LP4-REGISTRY-WRITE-APPROVAL.md) option1 in full: LP4-only10/2/10.
+The preceding blocker statements describe the historical decision state; they do not
+remain an approval stop. No other limit changes, and original9/1/9 are not passed.
+Actual source-built Registry/Caps/bond-bridge implementation and independent tests
+now proceed on PR24. Full GenesisBuilder/system settlement/finalization and complete
+CP/profile-bound R18/R21/caps64 proofs remain mandatory. All26 ledger obligations
+remain NOT PASSED until individually verified; approval and partial tests are not
+whole LP4 acceptance. Boot false; preserve M1 and prior evidence.
