@@ -136,3 +136,4 @@ pub mod user_phase;
 pub mod pool;
 pub mod rpc_pool;
 pub mod rpc_http;
+pub mod code_caps;

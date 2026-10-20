@@ -284,6 +284,17 @@
         "development/lp4/p2-runtime/codex-r7/REGISTRY-WRITE-BUDGET-DECISION.md option1 in full"
       ],
       "requiredEvidence": "Prove and execute full Registry/bridge paths for register10, reward2, claim10; preserve deactivation7 and reactivation5 and every other limit. Actual complete execution, independent balances/storage/roots and SSTORE traces, compiled limit/accounting mutations, budget/time/status/closing/zero/positive/max arithmetic boundaries. Re-derive and measure affected R18/general SYS and R21 with full CP/profile/model identity; R16/LAG and caps64 unchanged. Original9/1/9 not passed; lower-bound witnesses or synthetic profile measurements alone are not acceptance."
+    },
+    {
+      "id": "LP4-CODE-01",
+      "status": "NOT PASSED",
+      "evidence": [],
+      "increment": "P2/P3/P4/P7/P8/P9/P10",
+      "sources": [
+        "development/LP4-CODE-APPROVAL.md",
+        "development/lp4/p3-wire/codex-r3/CODE-CAP-DECISION.md at 3bdbd149ccabfe21ef6cdd7fbaaa2afdabb1f59b"
+      ],
+      "requiredEvidence": "All approved option1 clauses and acceptance cases: CP runtime limit; independent EIP3860 49152; logical per-existing-account CODE_CAP; actual GenesisBuilder, signed/nested CREATE/CREATE2, gas/order/EIP3541, independent inventory and execution roots, all20661 original Cancun controls plus individual replacements, compiled mutations, deletion/rollback/import/crash/reorg, complete profile/semantic/model-bound general R18/R21/caps64; no boot authorization"
     }
   ],
   "increments": {

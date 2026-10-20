@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CARGO_HOME: ${{ github.workspace }}/work/lp4-execution-cargo
+      CARGO_INCREMENTAL: '0'
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -47,6 +48,10 @@ jobs:
           cmp prototypes/lp4-execution/tests/data/registry-write-budget.json work/lp4-controls/registry-write-budget.json
           NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_registry.cjs work/lp4-controls/registry-payment.json
           cmp prototypes/lp4-execution/tests/data/registry-payment.json work/lp4-controls/registry-payment.json
+          NODE_PATH="$PWD/prototypes/lp4-execution/tools/node_modules" node prototypes/lp4-execution/tests/compile_code_caps.cjs work/lp4-controls/code-caps-witness.json
+          cmp prototypes/lp4-execution/tests/data/code-caps-witness.json work/lp4-controls/code-caps-witness.json
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/code_caps_fixtures.py work/lp4-controls/code-caps-execution.json work/lp4-controls/code-caps-expanded.json
+          cmp prototypes/lp4-execution/tests/data/code-caps-execution.json work/lp4-controls/code-caps-execution.json
           cargo +1.99.1 test --locked --manifest-path prototypes/lp4-execution/Cargo.toml 2>&1 | tee work/lp4-controls/rust-tests.log
           cargo +1.99.1 run --locked --manifest-path prototypes/lp4-execution/Cargo.toml --example context_vectors > work/lp4-controls/context-vectors.json
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/context_oracle.py work/lp4-controls/context-vectors.json work/lp4-controls/context-oracle.json
@@ -115,12 +120,24 @@ jobs:
           cargo +1.99.1 build --offline --locked --manifest-path prototypes/lp4-execution/Cargo.toml --bin signed_rejection_control
           work/lp4-venv/bin/python prototypes/lp4-execution/tests/gst_signed_rejections.py work/gst-corpus work/lp4-controls/gst/cases.jsonl prototypes/lp4-execution/target/debug/signed_rejection_control work/lp4-controls/signed-admission | tee work/lp4-controls/signed-admission.log
           python -c "import json; s=json.load(open('work/lp4-controls/signed-admission/summary.json')); assert s['total']==1173 and sum(s['counts'][k] for k in ['SIGNED_NATIVE_CATEGORY_AND_INPUT_PREDICATE','SIGNED_OVER_U256_WIRE_INTEGER','SIGNED_PRIORITY_WIRE_PRECEDENCE','POCOL_TYPE3_REJECTION_NOT_ORIGINAL_CATEGORY'])==1173"
+      - name: Approved CODE-01 compiled controls and complete individual delta inventory
+        env:
+          RUSTUP_TOOLCHAIN: '1.99.1'
+          CARGO_INCREMENTAL: '0'
+        run: |
+          set -euo pipefail
+          python prototypes/lp4-execution/tests/code_caps_mutations.py work/lp4-code-mutations | tee work/lp4-controls/code-mutations.log
+          cargo +1.99.1 build --offline --locked --release --manifest-path prototypes/lp4-execution/Cargo.toml --bin code_caps_control
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/gst_code_replacements.py work/gst-corpus prototypes/lp4-execution/target/release/code_caps_control prototypes/lp4-execution/tests/data/execution-profile.hex work/lp4-controls/gst/cases.jsonl work/lp4-controls/code-deltas | tee work/lp4-controls/code-deltas.log
+          work/lp4-venv/bin/python prototypes/lp4-execution/tests/gst_code_independent.py work/gst-corpus work/lp4-controls/code-deltas prototypes/lp4-execution/tests/data/execution-profile.hex work/lp4-controls/code-deltas-independent | tee work/lp4-controls/code-deltas-independent.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: lp4-p2-controls
           path: |
             work/lp4-controls
+            work/lp4-code-mutations/*.log
+            work/lp4-code-mutations/results.json
             work/lp4-pool-mutations/*.log
             work/lp4-pool-mutations/results.json
             work/lp4-user-mutations/*.log

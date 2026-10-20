@@ -22,9 +22,10 @@ def raw(v):
     return bytes.fromhex(v.removeprefix('0x'))
 
 
-def execute(test, post, profile="unmodified"):
+def execute(test, post, profile="unmodified", vm_override=None, include_gas=False):
     from gst_independent_vm import ComparisonVM, AdmissionComparisonVM
     vm = {"unmodified":CancunVM,"lp4-create01-modexp":ComparisonVM,"lp4-create01-modexp-admission":AdmissionComparisonVM}[profile]
+    if vm_override is not None:vm=vm_override
     env = test['env']; tx = test['transaction']; ix = post['indexes']
     header = CancunBlockHeader(
         difficulty=0, block_number=num(env['currentNumber']),
@@ -62,8 +63,10 @@ def execute(test, post, profile="unmodified"):
         unsigned = builder.create_unsigned_transaction(gas_price=num(tx['gasPrice']), **args)
     computation = state.apply_transaction(SpoofTransaction(unsigned, from_=raw(tx['sender'])))
     logs = [[a, [t.to_bytes(32, 'big') for t in topics], data] for a, topics, data in computation.get_log_entries()]
-    return dict(actualRoot='0x'+state.make_state_root().hex(), actualLogs='0x'+keccak(rlp.encode(logs)).hex(),
+    result=dict(actualRoot='0x'+state.make_state_root().hex(), actualLogs='0x'+keccak(rlp.encode(logs)).hex(),
                 executionSuccess=not computation.is_error)
+    if include_gas:result['gasUsed']=vm.finalize_gas_used(unsigned,computation)
+    return result
 
 
 class ComparisonTimeout(Exception):
