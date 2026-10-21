@@ -57,6 +57,10 @@ pub struct Node{
     pub rejects:VecDeque<(String,String)>,
     pub stats:Stats,
     pub stopped:bool,
+    /// Equivocation observations and evidence awaiting inclusion (incentives.md الأدلة).
+    seen_templates:HashMap<([u8;32],u64),(Vec<u8>,Vec<u8>,Vec<u8>)>,
+    seen_wins:HashMap<([u8;32],u64),([u8;32],[u8;65])>,
+    pub evidence_pool:Vec<Vec<u8>>,
 }
 #[derive(Default,Clone,Debug)]
 pub struct Stats{pub imported:u64,pub mined:u64,pub signed_templates:u64,pub fallback_templates:u64,pub shares_seen:u64,pub hashes:u64,pub reorgs:u64}
@@ -82,13 +86,15 @@ impl Node{
             let (entry,_)=chain.validate(&block,None,0).map_err(|e|format!("replay {i}: {e:?}"))?;
             if result_bytes(&entry.result)!=rb{return Err(format!("parentResultMismatch at record {i}"))}
             chain.insert(entry);
+            if i%64==63{chain.retain();}
         }
+        chain.retain();
         let (tx,rx)=mpsc::channel();let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
         let fwd=tx.clone();std::thread::spawn(move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}});
         let head_state=chain.head().state.clone();
         let mut node=Self{cfg,chain,journal:rec.journal,peers:HashMap::new(),outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),templates:HashMap::new(),received:HashMap::new(),
-            pool:Pool{txs:vec![],pending_state:head_state,bytes:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false};
+            pool:Pool{txs:vec![],pending_state:head_state,bytes:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;
         if rec.torn_tail{node.log("recovered torn journal tail into a new journal");}
         Ok(node)
@@ -146,6 +152,7 @@ impl Node{
             Err(Reject::Block(why))=>{self.chain.mark_invalid(hash,why.clone());self.reject(hash,&why);return Err(Reject::Block(why))}
             Err(e)=>{if let Reject::Envelope(w)=&e{self.reject(hash,w);}return Err(e)}
         };
+        self.observe_template(&b.header);self.observe_win(&b.header);
         let record=store::encode_record(&b.header.encoded,&b.body.encode(),&result_bytes(&entry.result));
         if let Err(e)=self.journal.append(&record){self.log(&format!("FATAL journal append: {e:?}"));std::process::exit(70);}
         self.received.insert(hash,now_ms());
@@ -238,10 +245,14 @@ impl Node{
         }
     }
     fn build_signed_template(&mut self,p:&Entry,mut txs:Vec<Vec<u8>>)->Option<(Header,Body)>{
+        self.cfg.miner.as_ref()?;
+        let evidence=self.includable_evidence(p);
         let key=self.cfg.miner.as_ref()?;
         for _ in 0..8{
-            let body=Body{txs:txs.clone(),evidence:vec![]};
-            match self.chain.build_signed(p,key,now_s(),body.clone(),vec![]){
+            let body=Body{txs:txs.clone(),evidence:evidence.clone()};
+            let effects=match self.chain.evidence_effects(p,&body,p.height+1){Ok(e)=>e,Err(_)=>vec![]};
+            let body=if effects.len()==body.evidence.len(){body}else{Body{txs:txs.clone(),evidence:vec![]}};
+            match self.chain.build_signed(p,key,now_s(),body.clone(),effects){
                 Ok((h,_,_))=>return Some((h,body)),
                 Err(Reject::Block(why))=>{
                     self.log(&format!("signed template failed: {why}"));
@@ -257,7 +268,7 @@ impl Node{
     fn lock_fallback(&mut self,p:&Entry,a:u32){
         match self.chain.build_fallback(p,a){
             Ok((h,_,_))=>{self.stats.fallback_templates+=1;self.lock(h,Body::default(),true)}
-            Err(e)=>self.log(&format!("fallback build failed a={a}: {e:?}")),
+            Err(e)=>{self.log(&format!("fallback build failed a={a}: {e:?}"));if let Some(pr)=&mut self.prod{pr.mode=Mode::Idle;}}
         }
     }
     fn lock(&mut self,header:Header,body:Body,fallback:bool){
@@ -292,7 +303,7 @@ impl Node{
         let Some(pr)=&self.prod else{return};
         let parent=pr.parent;let a=pr.attempt;
         match &pr.mode{
-            Mode::Wait{deadline_ms} if now>=*deadline_ms=>{
+            Mode::Wait{deadline_ms} if now>*deadline_ms=>{
                 // FB is sticky for (parent, h, 0).
                 let p=self.chain.get(&parent).unwrap().clone_light();self.lock_fallback(&p,0);
             }
@@ -345,8 +356,13 @@ impl Node{
             Msg::Template{shell,body}=>{
                 let Ok(h)=decode_header(&shell) else{return};
                 let Ok(b)=Body::decode(&body,self.chain.spec.cp().BODY_MAX as usize) else{return};
-                let waiting=matches!(&self.prod,Some(p) if p.parent==h.parent_hash&&p.attempt==0&&matches!(p.mode,Mode::Wait{..}));
-                if waiting{self.try_lock_signed(h,b);}
+                let arrival=now_ms();
+                let equivocated=self.observe_template(&h);
+                let waiting=matches!(&self.prod,Some(p) if p.parent==h.parent_hash&&p.attempt==0&&matches!(p.mode,Mode::Wait{deadline_ms} if arrival<=deadline_ms));
+                if equivocated{
+                    // Second template from the same proposer: evidence type 1, then sticky FB.
+                    if matches!(&self.prod,Some(p) if p.parent==h.parent_hash&&p.attempt==0){let p=self.chain.get(&h.parent_hash).unwrap().clone();self.lock_fallback(&p,0);}
+                }else if waiting{self.try_lock_signed(h,b);}
                 else if !self.chain.blocks.contains_key(&h.parent_hash)||self.prod.as_ref().map(|p|p.parent!=h.parent_hash).unwrap_or(true){
                     if self.templates.len()>64{self.templates.clear();}self.templates.insert(h.parent_hash,(h,b,now_ms()));
                 }
@@ -382,6 +398,50 @@ impl Node{
         match &self.prod{Some(Production{mode:Mode::Locked(l),..})=>serde_json::json!({"templateId":hex(&l.tid),"header":hex(&l.header.encoded),"fallback":l.fallback,"nonceMax":l.ctx.assignment.nonce_max().to_string()}),_=>serde_json::Value::Null}
     }
     pub fn journal_records(&self)->u64{self.journal.records}
+}
+impl Node{
+    fn st_bytes(h:&Header)->Vec<u8>{let mut p=h.ut_raw.clone();crate::rlp::encode_bytes(&h.sig,&mut p);let mut o=Vec::new();crate::rlp::encode_list_payload(&p,&mut o);o}
+    /// Records a signed template; returns true when it equivocates (evidence type 1 created).
+    fn observe_template(&mut self,h:&Header)->bool{
+        if h.proposer.len()!=20||h.sig.len()!=65||h.a!=0{return false}
+        let tid=template_id(&h.ut_raw);
+        if !matches!(hashes::recover_address(&hashes::sig_msg(&tid),&h.sig),Ok(a) if a[..]==h.proposer[..]){return false}
+        let key=(h.parent_hash,h.h);let st=Self::st_bytes(h);
+        match self.seen_templates.get(&key){
+            None=>{if self.seen_templates.len()>4096{self.seen_templates.clear();}self.seen_templates.insert(key,(h.ut_raw.clone(),st,h.proposer.clone()));false}
+            Some((ut,first,prop)) if *ut!=h.ut_raw&&*prop==h.proposer=>{
+                let mut p=Vec::new();crate::rlp::encode_bytes(&[1],&mut p);p.extend(first.clone());p.extend(st);let mut ev=Vec::new();crate::rlp::encode_list_payload(&p,&mut ev);
+                if !self.evidence_pool.contains(&ev){self.log(&format!("equivocation (type 1) by proposer of h={}",h.h));self.evidence_pool.push(ev);}true}
+            _=>false,
+        }
+    }
+    /// Records winner signatures per (TemplateID, nonce); a second share root creates evidence type 2.
+    fn observe_win(&mut self,h:&Header){
+        let tid=template_id(&h.ut_raw);let root=share_root(h);
+        match self.seen_wins.get(&(tid,h.nonce)){
+            None=>{if self.seen_wins.len()>4096{self.seen_wins.clear();}self.seen_wins.insert((tid,h.nonce),(root,h.winner_sig));}
+            Some((r,sig)) if *r!=root=>{
+                let mut p=Vec::new();crate::rlp::encode_bytes(&[2],&mut p);crate::rlp::encode_bytes(&tid,&mut p);crate::rlp::encode_bytes(&h.nonce.to_be_bytes(),&mut p);
+                crate::rlp::encode_bytes(r,&mut p);crate::rlp::encode_bytes(sig,&mut p);crate::rlp::encode_bytes(&root,&mut p);crate::rlp::encode_bytes(&h.winner_sig,&mut p);
+                let mut ev=Vec::new();crate::rlp::encode_list_payload(&p,&mut ev);
+                if !self.evidence_pool.contains(&ev){self.log(&format!("equivocation (type 2) on h={}",h.h));self.evidence_pool.push(ev);}
+            }
+            _=>{}
+        }
+    }
+    /// Evidence still valid on top of `p`, at most E_max, one per accused.
+    fn includable_evidence(&mut self,p:&Entry)->Vec<Vec<u8>>{
+        let e_max=usize::from(self.chain.spec.cp().E_max);let mut out:Vec<Vec<u8>>=Vec::new();let mut keep=Vec::new();
+        for ev in std::mem::take(&mut self.evidence_pool){
+            let one=Body{txs:vec![],evidence:vec![ev.clone()]};
+            match self.chain.evidence_effects(p,&one,p.height+1){
+                Ok(_)=>{let mut trial=out.clone();trial.push(ev.clone());
+                    if out.len()<e_max&&self.chain.evidence_effects(p,&Body{txs:vec![],evidence:trial},p.height+1).is_ok(){out.push(ev.clone());}keep.push(ev);}
+                Err(_)=>{} // already applied on this branch (accused tomb) or no longer provable: drop
+            }
+        }
+        self.evidence_pool=keep;out
+    }
 }
 trait Light{fn clone_light(&self)->Entry;}
 impl Light for Entry{fn clone_light(&self)->Entry{self.clone()}}

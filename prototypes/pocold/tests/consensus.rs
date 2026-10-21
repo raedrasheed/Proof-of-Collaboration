@@ -215,3 +215,36 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let (e,_)=n.chain.validate(&child,None,0).unwrap();n.chain.insert(e);
     assert_eq!(apply::state_root(&n.chain.blocks[&fork_parent].state).unwrap().0,n.chain.blocks[&fork_parent].header.state_root);
 }
+
+#[test] fn template_form_classes_follow_d129(){
+    let mut n=net();for _ in 0..2{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);}
+    let head=n.chain.head;let good=signed(&n,head,Body::default(),0);
+    // proposer present but sig removed: envelope (sig bytes are not committed).
+    let mut h=good.header.clone();h.sig=vec![];reseal(&mut h);assert!(matches!(reject(&n,&Block{header:h,body:Body::default()}),Reject::Envelope(_)));
+    // fallback-shaped header carrying a sig: envelope.
+    let fb=fallback(&n,head,0);let mut h=fb.header.clone();h.sig=good.header.sig.clone();reseal(&mut h);assert!(matches!(reject(&n,&Block{header:h,body:Body::default()}),Reject::Envelope(_)));
+    // proposer present with a != 0 is committed content: block reject.
+    let mut h=good.header.clone();h.a=1;reseal(&mut h);assert!(matches!(reject(&n,&Block{header:h,body:Body::default()}),Reject::Block(s) if s.contains("a=0")));
+}
+
+#[test] fn node_detects_template_equivocation_and_produces_valid_evidence(){
+    use pocold::{node::{Config,Event,Node},net::{Msg,NetEvent}};
+    let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
+    let keys:HashMap<Address,Key>=d.miners.iter().map(|m|(m.id,Key::from_secret(&m.key.secret()).unwrap())).collect();
+    let spec=Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes.clone(),profile:d.profile.clone(),genesis:devnet::build(&c).unwrap().genesis};
+    let dir=std::env::temp_dir().join(format!("pocold-ev-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let mut node=Node::open(Config{dir,name:"t".into(),miner:None,listen:None,peers:vec![],rpc:None,delta_rel:600,phi:100_000_000,gamma:1,stop_at:None,log:false},spec).unwrap();
+    node.handle(Event::Tick);
+    let net2=Net{chain:Chain::new(Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes.clone(),profile:d.profile.clone(),genesis:d.genesis}),keys};
+    let g=net2.chain.head;let p=net2.chain.get(&g).unwrap().clone();let ctx=net2.chain.child_ctx(&p,0).unwrap();
+    let mk=|off:u64|{let (h,_,_)=net2.chain.build_signed(&p,&net2.keys[&ctx.proposer],ctx.window.lower()+off,Body::default(),vec![]).unwrap();h};
+    let (t1,t2)=(mk(0),mk(1));
+    // Simulate the node's production loop at h=1 (it starts producing on run(); use the handler directly).
+    for t in [&t1,&t2]{node.handle(Event::Net(NetEvent::Message(1,Msg::Template{shell:t.encoded.clone(),body:Body::default().encode()})));}
+    assert_eq!(node.evidence_pool.len(),1,"one type-1 evidence");
+    // The evidence is valid in a block at h=2 on a branch whose h=1 drew the same proposer.
+    let mut n2=net2;let b1=fallback(&n2,g,0);import(&mut n2,&b1);
+    let head=n2.chain.head;let ph=n2.chain.get(&head).unwrap().clone();
+    let eff=n2.chain.evidence_effects(&ph,&Body{txs:vec![],evidence:node.evidence_pool.clone()},2).unwrap();
+    assert_eq!(eff,vec![apply::EvidenceEffect::Punish{accused:ctx.proposer}]);
+}

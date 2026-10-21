@@ -48,3 +48,10 @@ const B:[u8;32]=[9;32];
     drop(first);
     assert!(matches!(store::open(&dir,&[1;32]),Err(StoreError::Binding)),"journal bound to another genesisHash");
 }
+
+#[test] fn missing_journal_with_recovery_artifacts_refuses_to_start(){
+    let dir=tmp("missing");
+    {let mut r=store::open(&dir,&B).unwrap();r.journal.append(&[1;10]).unwrap();}
+    fs::rename(dir.join("blocks.journal"),dir.join("blocks.journal.torn-0")).unwrap();
+    assert!(matches!(store::open(&dir,&B),Err(StoreError::MissingJournal)));
+}

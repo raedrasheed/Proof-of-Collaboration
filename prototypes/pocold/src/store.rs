@@ -14,7 +14,7 @@ const MAGIC:&[u8;8]=b"POCOLJ1\n";
 pub const MAX_RECORD:usize=4*1024*1024;
 
 #[derive(Debug,PartialEq,Eq)]
-pub enum StoreError{Io(String),Locked,Binding,Corrupt(u64),TooLarge}
+pub enum StoreError{Io(String),Locked,Binding,Corrupt(u64),TooLarge,MissingJournal}
 impl From<std::io::Error> for StoreError{fn from(e:std::io::Error)->Self{Self::Io(e.to_string())}}
 
 pub struct Journal{file:File,path:PathBuf,_lock:File,pub records:u64}
@@ -29,7 +29,11 @@ pub fn open(dir:&Path,binding:&[u8;32])->Result<Recovered,StoreError>{
     let lock=OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("LOCK"))?;
     match lock.try_lock(){Ok(())=>{},Err(std::fs::TryLockError::WouldBlock)=>return Err(StoreError::Locked),Err(std::fs::TryLockError::Error(e))=>return Err(e.into())}
     let path=dir.join("blocks.journal");
+    let _=fs::remove_file(dir.join("blocks.journal.tmp"));
     if !path.exists(){
+        // Never silently restart from genesis when recovery artifacts exist.
+        let artifacts=fs::read_dir(dir)?.filter_map(|e|e.ok()).any(|e|e.file_name().to_string_lossy().starts_with("blocks.journal.torn-"));
+        if artifacts{return Err(StoreError::MissingJournal)}
         let tmp=dir.join("blocks.journal.tmp");
         {let mut f=File::create(&tmp)?;f.write_all(MAGIC)?;f.write_all(binding)?;f.sync_all()?;}
         fs::rename(&tmp,&path)?;sync_dir(dir);
@@ -47,13 +51,17 @@ pub fn open(dir:&Path,binding:&[u8;32])->Result<Recovered,StoreError>{
         if marker!=1||sha(payload)[..]!=digest[..]{return Err(StoreError::Corrupt(payloads.len() as u64))}
         payloads.push(payload.to_vec());pos=end;
     }
-    let path=if torn{
-        // Recovery: write the verified prefix to a new journal; keep the torn original.
+    if torn{
+        // Recovery: (1) preserve the original torn bytes as torn-n (fsynced copy),
+        // (2) write the verified prefix to tmp (fsynced), (3) atomically replace the
+        // journal with tmp, (4) fsync the directory. A crash at any point leaves a
+        // complete journal (original or recovered) in place.
         let n=(0..).find(|i|!dir.join(format!("blocks.journal.torn-{i}")).exists()).unwrap();
+        {let mut f=File::create(dir.join(format!("blocks.journal.torn-{n}")))?;f.write_all(&bytes)?;f.sync_all()?;}
         let tmp=dir.join("blocks.journal.tmp");
         {let mut f=File::create(&tmp)?;f.write_all(&bytes[..pos])?;f.sync_all()?;}
-        fs::rename(&path,dir.join(format!("blocks.journal.torn-{n}")))?;fs::rename(&tmp,&path)?;sync_dir(dir);path
-    }else{path};
+        fs::rename(&tmp,&path)?;sync_dir(dir);
+    }
     let file=OpenOptions::new().append(true).open(&path)?;
     Ok(Recovered{journal:Journal{file,path,_lock:lock,records:payloads.len() as u64},payloads,torn_tail:torn})
 }

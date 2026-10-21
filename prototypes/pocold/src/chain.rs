@@ -42,6 +42,8 @@ pub struct Entry{
     pub pruned:bool,
     /// Draw(h,0) for this block's height on its branch (evidence type 1 DrawIndex).
     pub drawn:Address,
+    /// This block's nonce ranges (owner lookup for evidence without old state).
+    pub ranges:Vec<(Address,u128,u128)>,
 }
 
 /// Everything a child of `p` at attempt `a` needs, derived only from p and its state.
@@ -98,7 +100,7 @@ impl Chain{
         let mut h=blank_header();h.chain_id=spec.chain_id();h.genesis_hash=gh;h.ts=cp.g_ts;h.target=spec.target_g();
         let genesis=Entry{hash:gh,header:h,body:Body::default(),height:0,parent:None,total_work:U256::ZERO,import_seq:0,signed:false,ts:cp.g_ts,
             target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis.state().clone(),is_final:false,result:None,
-            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,pruned:false,drawn:Address::ZERO};
+            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![]};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
         Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist:32,rebuilds:0,invalid:HashMap::new(),seen_templates:BTreeMap::new()}
     }
@@ -197,14 +199,15 @@ impl Chain{
         if x.h!=p.height+1{return blk("2 height")}
         if x.h>cp.H_END{return blk("10a H_END")}
         if let Some(c)=clock{ if crate::timing::is_future(x.ts,c,phi){return Err(Reject::Future)} }
-        // 3. template form.
+        // 3. template form. proposer and a are committed (blockReject); sig is not (envReject).
         let tid=template_id(&x.ut_raw);
-        let signed=!x.proposer.is_empty()||!x.sig.is_empty();
+        let signed=!x.proposer.is_empty();
         if signed{
-            if x.proposer.len()!=20||x.sig.len()!=65{return Err(Reject::Envelope("3 signed shape".into()))}
+            if x.proposer.len()!=20{return blk("1 proposer width")}
             if x.a!=0{return blk("3 signed requires a=0")}
+            if x.sig.len()!=65{return Err(Reject::Envelope("3 signed template without signature".into()))}
             match hashes::recover_address(&hashes::sig_msg(&tid),&x.sig){Ok(a) if a[..]==x.proposer[..]=>{},_=>return Err(Reject::Envelope("3 template signature".into()))}
-        }
+        }else if !x.sig.is_empty(){return Err(Reject::Envelope("3 signature without proposer".into()))}
         // 4. timing window and fallback timestamp.
         let ctx=self.child_ctx(p,x.a)?;
         if !ctx.window.contains(x.ts){return blk("4 window")}
@@ -227,29 +230,39 @@ impl Chain{
         if p.is_final{return blk("10 final parent")}
         if x.gas_limit!=cp.GAS_LIMIT{return blk("11 gasLimit")}
         if from_fixed(&x.base_fee)!=ctx.base_fee{return blk("11 baseFee")}
-        // 12. exclusive form.
+        // 1 (body): sizes and evidence bounds before any evidence evaluation.
+        let body_bytes:usize=b.body.txs.iter().chain(b.body.evidence.iter()).map(|t|t.len()).sum();
+        if body_bytes>cp.BODY_MAX as usize{return blk("1 BODY_MAX")}
+        if b.body.evidence.len()>usize::from(cp.E_max)||b.body.evidence.iter().any(|e|e.len()>cp.EVID_BYTES_MAX as usize){return blk("1 evidence bounds")}
+        // 12. exclusive form. Fallback: body 0xc2c0c0 and UT byte-equal to Build_fb (needs apply).
+        let mut fb_out=None;
         if signed{ if x.proposer[..]!=ctx.proposer[..]{return blk("12 proposer is not Draw(h,0)")} }
-        // 13/14. ownership.
+        else{
+            if b.body.encode()!=EMPTY_BODY{return blk("12 fallback body")}
+            let out=self.execute(p,&ctx,x.ts,Proposer::Fallback,&b.body,vec![])?;
+            if self.fill_ut(p,&ctx,x.ts,&out,&[]).ut_raw!=x.ut_raw{return blk("12 fallback UT differs from Build_fb")}
+            fb_out=Some(out);
+        }
+        // 13/14. ownership (winnerSig signer part is envReject).
         let owner=ctx.assignment.owner(x.nonce).ok_or_else(||Reject::Block("13 owner".into()))?;
         if owner!=winner{return Err(Reject::Envelope("13 winnerSig signer is not owner(nonce)".into()))}
         let mut shares=Vec::new();for n in &x.shares{shares.push((*n,addr(&ctx.assignment.owner(*n).ok_or_else(||Reject::Block("14 share owner".into()))?)));}
-        // 15/16 body roots and caps; evidence validity.
-        let effects=self.evidence_effects(p,&b.body,x.h)?;
-        if !signed&&b.body.encode()!=EMPTY_BODY{return blk("12 fallback body")}
+        // 15. body roots, then evidence validity. 16. cumulative caps.
+        let tx_root=crate::types::ordered_root(&b.body.txs)?;let ev_root=crate::types::ordered_root(&b.body.evidence)?;
+        if tx_root!=x.tx_root||ev_root!=x.evidence_root{return blk("15 body roots")}
+        let effects=if signed{self.evidence_effects(p,&b.body,x.h)?}else{vec![]};
         let tx_bytes:u64=b.body.txs.iter().map(|t|t.len() as u64).sum();
         if p.cum_txs+b.body.txs.len() as u64>cp.TX_CAP||p.cum_tx_bytes+tx_bytes>cp.TXBYTES_CAP{return blk("16 caps")}
         // 17. apply.
-        let proposer=if signed{Proposer::Signed(Address::from_slice(&x.proposer))}else{Proposer::Fallback};
-        let out=self.execute(p,&ctx,x.ts,proposer,&b.body,effects)?;
-        if !signed&&self.fill_ut(p,&ctx,x.ts,&out,&[]).ut_raw!=x.ut_raw{return blk("12 fallback UT differs from Build_fb")}
-        if out.transactions_root.0!=x.tx_root||out.evidence_root.0!=x.evidence_root{return blk("15 body roots")}
+        let out=match fb_out{Some(o)=>o,None=>self.execute(p,&ctx,x.ts,Proposer::Signed(Address::from_slice(&x.proposer)),&b.body,effects)?};
         if out.state_root.0!=x.state_root{return blk("17 stateRoot")}
         if out.receipts_root.0!=x.receipts_root||out.logs_bloom[..]!=x.logs_bloom[..]||out.gas_used!=x.gas_used{return blk("17 receipts/bloom/gasUsed")}
         let tx_hashes=b.body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();
         let entry=Entry{hash,header:x.clone(),body:b.body.clone(),height:x.h,parent:Some(p.hash),total_work:p.total_work.saturating_add(work(&x.target)),
             import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,
             result:Some(ParentResult{block_hash:B256::from(hash),winner:addr(&owner),shares}),receipts:out.receipts,tx_hashes,
-            cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,pruned:false,drawn:ctx.proposer};
+            cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,pruned:false,drawn:ctx.proposer,
+            ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect()};
         Ok((entry,ctx))
     }
 
@@ -290,9 +303,12 @@ impl Chain{
         let r1=hashes::recover_address(&hashes::sig_msg(&template_id(&u1.ut_raw)),&s1).map_err(|_|Reject::Block("ev1 sig1".into()))?;
         let r2=hashes::recover_address(&hashes::sig_msg(&template_id(&u2.ut_raw)),&s2).map_err(|_|Reject::Block("ev1 sig2".into()))?;
         if r1!=r2{return blk("ev1 signers differ")}
-        // DrawIndex: the signer must be Draw(h,0) for that parent on this branch.
-        let drawn=if u1.h==p.height+1{ if u1.parent_hash!=p.hash{return blk("ev1 parent not on branch")} let m=self.membership(p,u1.h)?;self.draw(p,&m,u1.h)? }
-            else{ let at=self.ancestor_at(p,u1.h).filter(|e|e.parent==Some(u1.parent_hash)).ok_or_else(||Reject::Block("ev1 height not on branch".into()))?;at.drawn };
+        // Both are signed templates (§3 form): proposer present and equal to the signer.
+        if u1.proposer[..]!=r1[..]||u2.proposer[..]!=r1[..]{return blk("ev1 proposer is not the signer")}
+        if u1.h>h_incl{return blk("ev1 future height")}
+        // DrawIndex[h mod E_win]: the proposer drawn for height u1.h on the carrying branch.
+        let drawn=if u1.h==p.height+1{let m=self.membership(p,u1.h)?;self.draw(p,&m,u1.h)?}
+            else{self.ancestor_at(p,u1.h).ok_or_else(||Reject::Block("ev1 height not on branch".into()))?.drawn};
         if drawn[..]!=r1[..]{return blk("ev1 signer not drawn")}
         Ok((addr(&r1),None))
     }
@@ -310,9 +326,8 @@ impl Chain{
         while let Some(e)=cur{
             if e.height==0||e.height+u64::from(self.spec.cp().E_win)<h_incl{break}
             if template_id(&e.header.ut_raw)==tid{
-                // owner(nonce) of the committed block is its recorded winner (D142).
-                if e.header.nonce!=nonce{return blk("ev2 nonce is not the block nonce")}
-                let owner=e.result.as_ref().map(|r|r.winner).ok_or_else(||Reject::Block("ev2 owner".into()))?;
+                // owner(nonce) under that block's assignment (stored ranges, D142).
+                let owner=e.ranges.iter().find(|(_,s0,e0)|*s0<=nonce as u128&&(nonce as u128)<*e0).map(|r|r.0).ok_or_else(||Reject::Block("ev2 nonce outside nMax".into()))?;
                 if owner.0.0!=a1{return blk("ev2 signer not owner(nonce)")}
                 return Ok((addr(&a1),Some(e.height)));
             }
@@ -345,6 +360,11 @@ impl Chain{
             let proposer=if e.signed{Proposer::Signed(Address::from_slice(&e.header.proposer))}else{Proposer::Fallback};
             let out=self.execute(&p,&ctx,e.ts,proposer,&e.body,effects)?;
             if out.state_root.0!=e.header.state_root{return blk("rebuild stateRoot mismatch")}
+            // Re-derive ParentResult from the header and the rebuilt assignment (parentResultMismatch).
+            let owner=|n:u64|ctx.assignment.owner(n).map(|a|addr(&a));
+            let derived=ParentResult{block_hash:B256::from(e.hash),winner:owner(e.header.nonce).ok_or_else(||Reject::Block("rebuild owner".into()))?,
+                shares:e.header.shares.iter().map(|n|owner(*n).map(|o|(*n,o))).collect::<Option<Vec<_>>>().ok_or_else(||Reject::Block("rebuild share owner".into()))?};
+            if Some(&derived)!=e.result.as_ref(){return blk("parentResultMismatch")}
             let x=self.blocks.get_mut(&h).unwrap();x.state=out.state;x.pruned=false;self.rebuilds+=1;
         }
         Ok(())
