@@ -187,7 +187,6 @@ impl Chain{
         if let Some(r)=self.invalid.get(&hash){return blk(format!("known invalid: {r}"))}
         // 1. sizes, 1b NetID.
         if x.encoded.len()>crate::header::HDR_MAX{return blk("1 header size")}
-        if b.body.txs.iter().any(|t|t.len()>cp.TX_MAX as usize){return blk("1 TX_MAX")}
         if x.chain_id!=self.spec.chain_id(){return blk("netChain")}
         if x.genesis_hash!=self.spec.genesis_hash{return blk("netGenesis")}
         if x.protocol_version!=self.spec.active_version(x.h){return blk("netVersion")}
@@ -230,7 +229,13 @@ impl Chain{
         if p.is_final{return blk("10 final parent")}
         if x.gas_limit!=cp.GAS_LIMIT{return blk("11 gasLimit")}
         if from_fixed(&x.base_fee)!=ctx.base_fee{return blk("11 baseFee")}
+        // Body binding first (D129): the block hash commits the header only and the body through
+        // tx_root/evidence_root. A body that does not match is another copy, not an invalid block:
+        // envReject, never marked invalid. Body-content checks below run on the bound body only.
+        let tx_root=crate::types::ordered_root(&b.body.txs)?;let ev_root=crate::types::ordered_root(&b.body.evidence)?;
+        if tx_root!=x.tx_root||ev_root!=x.evidence_root{return Err(Reject::Envelope("15 body does not match the header roots".into()))}
         // 1 (body): sizes and evidence bounds before any evidence evaluation.
+        if b.body.txs.iter().any(|t|t.len()>cp.TX_MAX as usize){return blk("1 TX_MAX")}
         let body_bytes:usize=b.body.txs.iter().chain(b.body.evidence.iter()).map(|t|t.len()).sum();
         if body_bytes>cp.BODY_MAX as usize{return blk("1 BODY_MAX")}
         if b.body.evidence.len()>usize::from(cp.E_max)||b.body.evidence.iter().any(|e|e.len()>cp.EVID_BYTES_MAX as usize){return blk("1 evidence bounds")}
@@ -247,9 +252,7 @@ impl Chain{
         let owner=ctx.assignment.owner(x.nonce).ok_or_else(||Reject::Block("13 owner".into()))?;
         if owner!=winner{return Err(Reject::Envelope("13 winnerSig signer is not owner(nonce)".into()))}
         let mut shares=Vec::new();for n in &x.shares{shares.push((*n,addr(&ctx.assignment.owner(*n).ok_or_else(||Reject::Block("14 share owner".into()))?)));}
-        // 15. body roots, then evidence validity. 16. cumulative caps.
-        let tx_root=crate::types::ordered_root(&b.body.txs)?;let ev_root=crate::types::ordered_root(&b.body.evidence)?;
-        if tx_root!=x.tx_root||ev_root!=x.evidence_root{return blk("15 body roots")}
+        // 15. evidence validity (roots were bound above). 16. cumulative caps.
         let effects=if signed{self.evidence_effects(p,&b.body,x.h)?}else{vec![]};
         let tx_bytes:u64=b.body.txs.iter().map(|t|t.len() as u64).sum();
         if p.cum_txs+b.body.txs.len() as u64>cp.TX_CAP||p.cum_tx_bytes+tx_bytes>cp.TXBYTES_CAP{return blk("16 caps")}

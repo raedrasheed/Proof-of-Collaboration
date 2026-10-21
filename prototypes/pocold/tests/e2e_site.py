@@ -87,10 +87,41 @@ def main():
         r3 = send("alice", alice_nonce + 1, "0x" + SEL["createVersion"] + "00" * 32 + "%064x" % 70000 + "%064x" % 96 + "%064x" % 0)
         ok("unauthorized publish / revoke(current) / oversize manifest all revert", (r1["status"], r2["status"], r3["status"]) == ("0x0", "0x0", "0x0"), f"{r1['status']} {r2['status']} {r3['status']}")
         ok("reverted operations leave Website storage unchanged", storage(0) == before)
+        # Review fixes: (1) an oversize site is rejected before any transaction; (2) an empty file is
+        # valid (pos-empty-file); (3) concurrent publishers each publish exactly their own version.
+        big = os.path.join(work, "big"); os.makedirs(big)
+        open(os.path.join(big, "index.html"), "w").write("<!doctype html><p>big")
+        for k in range(5): open(os.path.join(big, f"f{k}.txt"), "wb").write(os.urandom(1 << 20))
+        n0 = int(dn.rpc(8540, "eth_getTransactionCount", [next(a["address"] for a in info["accounts"] if a["label"] == "alice"), "pending"]), 16)
+        r = subprocess.run([SITE_BIN, "publish", "--rpc", "127.0.0.1:8540", "--chain-id", cid, "--account", "alice", "--dir", big, "--site", site], capture_output=True, text=True)
+        n1 = int(dn.rpc(8540, "eth_getTransactionCount", [next(a["address"] for a in info["accounts"] if a["label"] == "alice"), "pending"]), 16)
+        ok("oversize site (5 MiB) rejected before any transaction (nonce unchanged)", r.returncode != 0 and "4 MiB" in r.stderr and n0 == n1, r.stderr.strip()[-80:])
+        bob = next(a["address"] for a in info["accounts"] if a["label"] == "bob")
+        ra = send("alice", n1, "0x" + SEL["addPublisher"] + "%064x" % int(bob, 16))
+        ok("owner adds bob as a publisher", ra["status"] == "0x1")
+        da, db = os.path.join(work, "pa"), os.path.join(work, "pb"); site_files(da, "A"); site_files(db, "B")
+        open(os.path.join(da, "empty.txt"), "wb").write(b"")
+        procs = [subprocess.Popen([SITE_BIN, "publish", "--rpc", "127.0.0.1:8540", "--chain-id", cid, "--account", acct, "--dir", d, "--site", site], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for acct, d in (("alice", da), ("bob", db))]
+        outs = [p.communicate() for p in procs]
+        ok("two concurrent publishers both succeed", all(p.returncode == 0 for p in procs), " | ".join(o[1][-120:] for o in outs if o[1]))
+        res = [json.loads(o[0]) for o in outs]
+        def version_hash(v): return "0x" + dn.rpc(8540, "eth_call", [{"to": site, "data": "0x" + SEL["version"] + "%064x" % v}, "latest"])[2:66]
+        ok("each publisher's reported version holds exactly its own manifest", res[0]["version"] != res[1]["version"] and all(version_hash(x["version"]) == x["manifestHash"] for x in res), json.dumps([(x["version"], x["manifestHash"][:12]) for x in res]))
+        cur = dn.rpc(8540, "eth_call", [{"to": site, "data": "0x" + SEL["current"]}, "latest"])
+        cv = int(cur[2:66], 16); last = next(x for x in res if x["version"] == cv) if any(x["version"] == cv for x in res) else None
+        meta, got = fetch(0, site)
+        ok("current version is one of them and fetches fully verified", last is not None and meta["version"] == cv)
+        if last is res[0]: ok("empty file round-trips (size 0, no chunks)", got.get("/empty.txt") == b"")
+        else:
+            # make A current to check the empty file
+            an = int(dn.rpc(8540, "eth_getTransactionCount", [next(a["address"] for a in info["accounts"] if a["label"] == "alice"), "pending"]), 16)
+            send("alice", an, "0x" + SEL["setCurrent"] + "%064x" % res[0]["version"]); meta, got = fetch(0, site)
+            ok("empty file round-trips (size 0, no chunks)", got.get("/empty.txt") == b"" and meta["version"] == res[0]["version"])
+        want2 = fetch(0, site)[1]
         # Restart every node; fetch again from each.
         dn.stop(work); time.sleep(2); dn.start(work, log=True)
         wait(lambda: all(dn.rpc(8540 + i, "pocol_status") for i in range(3)), 60, "restart")
-        for i in range(3): ok(f"after restart node {'abc'[i]} serves v2", fetch(i, site)[1] == want2)
+        for i in range(3): ok(f"after restart node {'abc'[i]} serves the current version unchanged", fetch(i, site)[1] == want2)
         print(json.dumps({"result": "PASS", "checks": n, "site": site, "work": work}))
         return 0
     except Exception as e:

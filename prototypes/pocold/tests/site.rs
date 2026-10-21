@@ -1,5 +1,5 @@
 //! LP8 T16 rejection vectors for the manifest and chunk verification.
-use pocold::{site::{self,FileEntry,Manifest},rlp};
+use pocold::{site::{self,FileEntry,Manifest,decode_current},rlp,types::unhex};
 use revm::primitives::{keccak256,Address,B256};
 
 fn good()->Manifest{
@@ -36,4 +36,24 @@ fn rejects(m:&Manifest,why:&str){let e=Manifest::decode(&m.encode()).unwrap_err(
     assert_eq!(site::normalize(""),Some(None));assert_eq!(site::normalize("/"),Some(None));assert_eq!(site::normalize("/?q=1#x"),Some(None));
     assert_eq!(site::normalize("/docs/"),Some(Some("/docs/index.html".into())));assert_eq!(site::normalize("/a.css?v=2"),Some(Some("/a.css".into())));
     for bad in ["/%2e/x","//x","/./x","/../x","/a/../b"]{assert_eq!(site::normalize(bad),None,"{bad}");}
+}
+
+fn vectors(name:&str)->Vec<serde_json::Value>{
+    let p=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../development/m1/m1-draft-0.2/vectors").join(name);
+    let v:serde_json::Value=serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();v["fixtures"].as_array().unwrap().clone()
+}
+#[test] fn manifest_vectors_positive_and_negative(){
+    // M1 manifest vectors: every positive accepted (including pos-empty-file); every decode,
+    // structure and semantic negative rejected (fetch/hash stages need chunk content).
+    let mut acc=0;for f in vectors("manifest-positive.json"){let b=unhex(f["manifest"].as_str().unwrap()).unwrap();
+        Manifest::decode(&b).unwrap_or_else(|e|panic!("{}: {e}",f["id"]));acc+=1;}
+    let mut rej=0;for f in vectors("manifest-negative.json"){if !["decode","structure","semantic"].contains(&f["stage"].as_str().unwrap()){continue}
+        let b=unhex(f["manifest"].as_str().unwrap()).unwrap();assert!(Manifest::decode(&b).is_err(),"{} must be rejected",f["id"]);rej+=1;}
+    assert_eq!((acc,rej),(11,56));
+}
+#[test] fn hostile_current_output_never_panics(){
+    let mut out=vec![0u8;32*7];out[4*32+31]=0xff;assert!(decode_current(&out).is_err());     // offset beyond the output
+    let mut out=vec![0u8;32*7];for b in &mut out[4*32..5*32]{*b=0xff}assert!(decode_current(&out).is_err()); // huge offset
+    let mut out=vec![0u8;32*7];out[4*32+31]=0xa0;out[5*32+31]=9;assert!(decode_current(&out).is_err());  // 9 chunks
+    for n in 0..300{assert!(decode_current(&vec![0x41u8;n]).is_err()||n>=32*6);}
 }

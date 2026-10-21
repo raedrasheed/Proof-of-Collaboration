@@ -162,6 +162,15 @@ ok('T16 size mismatch rejected', throws(() => { const f = file('/index.html', 1,
   ok('D27 chunk with code[0]!=0 rejected', throws(() => SITE.chunkPayload(a, HEX.concat(Uint8Array.of(1), d1), d1.length)));
   ok('D27 chunk at a foreign address rejected', throws(() => SITE.chunkPayload(SITE.chunkAddress(d2), code, d1.length))); }
 
+// ---------------- M1 manifest vectors (draft 0.2): positives accepted, decode/structure/semantic negatives rejected ----------------
+{
+  const { readFileSync } = await import('node:fs'); const V = (n) => JSON.parse(readFileSync(new URL('../../../development/m1/m1-draft-0.2/vectors/' + n, import.meta.url), 'utf8')).fixtures;
+  const pos = V('manifest-positive.json'); const bad = pos.filter((f) => throws(() => SITE.decodeManifest(HEX.fromHex(f.manifest)))).map((f) => f.id);
+  ok('manifest vectors: all 11 positives accepted (incl. pos-empty-file)', pos.length === 11 && bad.length === 0, bad.join(','));
+  const neg = V('manifest-negative.json').filter((f) => ['decode', 'structure', 'semantic'].includes(f.stage)); const miss = neg.filter((f) => !throws(() => SITE.decodeManifest(HEX.fromHex(f.manifest)))).map((f) => f.id);
+  ok('manifest vectors: all 56 decode/structure/semantic negatives rejected', neg.length === 56 && miss.length === 0, miss.join(','));
+}
+
 // ---------------- wallet ----------------
 {
   const seed = new Uint8Array(32).fill(7); const box = await WAL.encryptSeed(seed, 'pw');

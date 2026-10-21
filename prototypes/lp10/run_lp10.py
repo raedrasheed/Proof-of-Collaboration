@@ -29,9 +29,12 @@ def summarize(name, out):
     if name.endswith("tests"):
         rs = re.findall(r"test result: (\w+)\. (\d+) passed; (\d+) failed", out)
         return {"passed": sum(int(r[1]) for r in rs), "failed": sum(int(r[2]) for r in rs)}
-    last = [l for l in out.strip().splitlines() if l.startswith("{")]
-    try: return json.loads(last[-1])
-    except Exception: return {"lines": out.strip().splitlines()[-3:]}
+    lines = out.strip().splitlines()
+    for i in range(len(lines) - 1, -1, -1):  # last JSON object, one line or pretty-printed
+        if lines[i].startswith("{"):
+            try: v = json.loads("\n".join(lines[i:])); return {k: v[k] for k in ("result", "checks", "passed", "failed") if k in v}
+            except Exception: continue
+    return {"lines": lines[-3:]}
 
 def main():
     args = sys.argv[1:]

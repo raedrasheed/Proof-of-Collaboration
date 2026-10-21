@@ -143,7 +143,11 @@ fn reference_best(n:&Net)->[u8;32]{
     let fb=fallback(&n,head,0);
     let mut h=fb.header.clone();h.ts+=1;reseal(&mut h);let b=remine(&n,h,Body::default());block("4 fallback timestamp",reject(&n,&b));
     let tx=Tx{chain_id:777910,nonce:0,max_priority:U256::from(1u64),max_fee:U256::from(10_000_000_000u64),gas:21000,to:Some(Address::ZERO),value:U256::ZERO,data:Default::default()}.sign_1559(&devnet::account_key("alice"));
-    let b=Block{header:fb.header.clone(),body:Body{txs:vec![tx],evidence:vec![]}};block("12 fallback body",reject(&n,&b));
+    // A fallback header committing to the empty body plus a non-empty body is another copy (envelope);
+    // a fallback header that commits to a non-empty body is invalid (12).
+    let b=Block{header:fb.header.clone(),body:Body{txs:vec![tx.clone()],evidence:vec![]}};assert!(matches!(reject(&n,&b),Reject::Envelope(s) if s.contains("body does not match")));
+    let body=Body{txs:vec![tx],evidence:vec![]};let mut h=fb.header.clone();h.tx_root=pocold::types::ordered_root(&body.txs).unwrap();reseal(&mut h);
+    let b=remine(&n,h,body);block("12 fallback body",reject(&n,&b));
     // Envelope rejection: winnerSig from a non-owner rejects only this copy.
     let mut h=good.header.clone();h.winner_sig=n.keys[&other].sign_hash(&B256::from(hashes::win_msg(&tid,h.nonce,&share_root(&h))));reseal(&mut h);
     let copy=Block{header:h,body:Body::default()};
@@ -269,5 +273,21 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let head=node.chain.head;drop(node);
     let again=Node::open(conf(),spec()).expect("replay of a journal that contains a deep fork");
     assert_eq!(again.chain.head,head);assert!(again.chain.get(&child_hash).is_some());
+    let _=std::fs::remove_dir_all(&dir);
+}
+
+#[test] fn a_valid_header_with_a_foreign_body_rejects_only_that_copy(){
+    // Review finding (HIGH): a peer relaying a real header with a mismatched body must not get the
+    // block marked invalid; the correct body is accepted afterwards.
+    use pocold::node::{Config,Node};
+    let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
+    let spec=Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes.clone(),profile:d.profile.clone(),genesis:d.genesis};
+    let dir=std::env::temp_dir().join(format!("pocold-copy-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let mut node=Node::open(Config{dir:dir.clone(),name:"c".into(),miner:None,listen:None,peers:vec![],rpc:None,delta_rel:600,phi:100_000_000,gamma:1,stop_at:None,log:false},spec).unwrap();
+    let n=net();let g=n.chain.head;let good=fallback(&n,g,0);
+    let junk=Block{header:good.header.clone(),body:Body{txs:vec![vec![0xc0;40]],evidence:vec![]}};
+    assert!(matches!(node.import(junk,None),Err(Reject::Envelope(_))),"mismatched body is an envelope rejection");
+    assert!(node.import(good.clone(),None).expect("the real block is still accepted"),"becomes head");
+    assert_eq!(node.chain.head,good.hash());
     let _=std::fs::remove_dir_all(&dir);
 }

@@ -75,7 +75,7 @@ impl Manifest{
             for c in x[4].list().ok_or("chunks")?{let y=c.list().ok_or("chunk")?;if y.len()!=2{return Err("chunk arity".into())}
                 let a=y[0].bytes().ok_or("chunk addr")?;if a.len()!=20{return Err("chunk addr len".into())}
                 let l=int(&y[1],4)?;if l==0||l as usize>CHUNK_MAX{return Err("chunk len".into())}sum+=l;chunks.push((Address::from_slice(a),l as u32));}
-            if sum!=size as u64||size as usize>SITE_FILE_MAX||chunks.is_empty(){return Err(format!("size mismatch for {path}"))}
+            if sum!=size as u64||size as usize>SITE_FILE_MAX{return Err(format!("size mismatch for {path}"))}
             total+=size as usize;files.push(FileEntry{path,mime,size,content_hash:B256::from_slice(h),chunks});
         }
         if files.is_empty()||files.len()>FILES_MAX||total>SITE_MAX{return Err("file count/site size".into())}
@@ -109,12 +109,26 @@ pub fn abi_create_version(hash:B256,len:u32,chunks:&[Address])->Vec<u8>{
     for c in chunks{o.extend(c.into_word().0)}o
 }
 pub struct Current{pub version:u64,pub manifest_hash:B256,pub manifest_len:u32,pub published_block:u64,pub chunks:Vec<Address>}
+/// ABI word i as an integer no wider than `max` (hostile contracts cannot make this panic).
+fn abi_word(out:&[u8],i:usize,max:u64)->Result<u64,String>{
+    let w=out.get(i*32..i*32+32).ok_or("abi: short output")?;let v=U256::from_be_slice(w);
+    if v>U256::from(max){return Err("abi: word out of range".into())}Ok(v.to::<u64>())
+}
+/// Dynamic address[] (<= 3 entries) at the offset stored in head word `head`.
+fn abi_addresses(out:&[u8],head:usize)->Result<Vec<Address>,String>{
+    let off=abi_word(out,head,out.len() as u64)? as usize;if off%32!=0{return Err("abi: offset".into())}
+    let n=abi_word(out,off/32,3)? as usize;
+    (0..n).map(|i|{let w=out.get(off+32+32*i..off+64+32*i).ok_or("abi: short array")?;if w[..12].iter().any(|b|*b!=0){return Err("abi: address".into())}Ok(Address::from_slice(&w[12..]))}).collect()
+}
 pub fn decode_current(out:&[u8])->Result<Current,String>{
-    if out.len()<32*7{return Err("current() output".into())}
-    let w=|i:usize|U256::from_be_slice(&out[i*32..i*32+32]);
-    let off=w(4).to::<usize>();let n=U256::from_be_slice(&out[off..off+32]).to::<usize>();if n>3||out.len()<off+32+32*n{return Err("chunks".into())}
-    let chunks=(0..n).map(|i|Address::from_slice(&out[off+32+32*i+12..off+64+32*i])).collect();
-    Ok(Current{version:w(0).to::<u64>(),manifest_hash:B256::from_slice(&out[32..64]),manifest_len:w(2).to::<u32>(),published_block:w(3).to::<u64>(),chunks})
+    if out.len()<32*6{return Err("current() output".into())}
+    Ok(Current{version:abi_word(out,0,u64::MAX)?,manifest_hash:B256::from_slice(&out[32..64]),manifest_len:abi_word(out,2,u32::MAX as u64)? as u32,
+        published_block:abi_word(out,3,u64::MAX)?,chunks:abi_addresses(out,4)?})
+}
+/// version(v) -> (manifestHash, manifestLen, status, publishedBlock, chunks).
+pub fn decode_version(out:&[u8])->Result<(B256,u32,u8,Vec<Address>),String>{
+    if out.len()<32*6{return Err("version() output".into())}
+    Ok((B256::from_slice(&out[0..32]),abi_word(out,1,u32::MAX as u64)? as u32,abi_word(out,2,255)? as u8,abi_addresses(out,4)?))
 }
 
 // ---------------- RPC client ----------------
@@ -152,30 +166,46 @@ impl Publisher<'_>{
         let gas=200_000+data.len() as u64*260;self.tx(Some(factory()),abi_bytes_call("store(bytes)",data),gas.min(7_900_000))?;
         if self.rpc.code(a)?.is_empty(){return Err("chunk not deployed".into())}Ok(a)
     }
-    fn store_bytes(&self,data:&[u8])->Result<Vec<(Address,u32)>,String>{data.chunks(CHUNK_MAX).map(|c|self.store_chunk(c).map(|a|(a,c.len() as u32))).collect()}
     pub fn deploy_website(&self)->Result<Address,String>{
         let init=website_initcode();let r=self.tx(None,init,1_500_000)?;r["contractAddress"].as_str().ok_or("no contractAddress".to_string())?.parse().map_err(|_|"addr".to_string())
     }
-    /// Publishes `files` (path -> bytes) as a new version and makes it current.
+    /// Publishes `files` (path -> bytes) as a new version and makes it current. Every rule (paths,
+    /// MIME, sizes, entry, manifest T16 and limits) is checked on the predicted manifest before the
+    /// first transaction, so a rejected site has no state effect.
     pub fn publish(&self,site:Option<Address>,files:&BTreeMap<String,Vec<u8>>,entry:&str)->Result<(Address,u64,Manifest),String>{
         if files.is_empty()||files.len()>FILES_MAX{return Err("1..256 files".into())}
+        let predicted=|data:&[u8]|->Vec<(Address,u32)>{data.chunks(CHUNK_MAX).map(|c|(chunk_address(c),c.len() as u32)).collect()};
         let mut entries=Vec::new();let mut total=0usize;
         for (p,data) in files{
             if !valid_path(p){return Err(format!("invalid path {p}"))}let mime=mime_for_path(p).ok_or(format!("unknown MIME for {p}"))?;
-            if data.is_empty()||data.len()>SITE_FILE_MAX{return Err(format!("{p}: size 1..1 MiB"))}total+=data.len();
-            if self.log{eprintln!("storing {p} ({} bytes)",data.len());}
-            entries.push(FileEntry{path:p.clone(),mime,size:data.len() as u32,content_hash:keccak256(data),chunks:self.store_bytes(data)?});
+            if data.len()>SITE_FILE_MAX{return Err(format!("{p}: size 0..1 MiB"))}total+=data.len();
+            entries.push(FileEntry{path:p.clone(),mime,size:data.len() as u32,content_hash:keccak256(data),chunks:predicted(data)});
         }
         if total>SITE_MAX{return Err("site > 4 MiB".into())}
         let entry=entries.iter().position(|f|f.path==entry).ok_or("entry path not found")? as u32;
         let m=Manifest{entry,files:entries};let mb=m.encode();Manifest::decode(&mb)?;
-        let mchunks=self.store_bytes(&mb)?;
+        let mpred=predicted(&mb);if mpred.is_empty()||mpred.len()>3{return Err("manifest needs 1..3 chunks".into())}
+        // Validated: now store chunks (idempotent CREATE2) and check each lands at its predicted address.
+        for (p,data) in files{
+            if self.log{eprintln!("storing {p} ({} bytes)",data.len());}
+            for c in data.chunks(CHUNK_MAX){self.store_chunk(c)?;}
+        }
+        for c in mb.chunks(CHUNK_MAX){self.store_chunk(c)?;}
         let site=match site{Some(s)=>s,None=>self.deploy_website()?};
         let count_before=U256::from_be_slice(&self.rpc.eth_call(site,&sel("versionCount()"))?).to::<u64>();
-        self.tx(Some(site),abi_create_version(keccak256(&mb),mb.len() as u32,&mchunks.iter().map(|c|c.0).collect::<Vec<_>>()),600_000)?;
-        self.tx(Some(site),abi_u256_call("publish(uint256)",count_before),200_000)?;
-        self.tx(Some(site),abi_u256_call("setCurrent(uint256)",count_before),200_000)?;
-        Ok((site,count_before,m))
+        let mhash=keccak256(&mb);
+        self.tx(Some(site),abi_create_version(mhash,mb.len() as u32,&mpred.iter().map(|c|c.0).collect::<Vec<_>>()),600_000)?;
+        // Another publisher may have created a version concurrently: find the draft with this exact manifest.
+        let count_after=U256::from_be_slice(&self.rpc.eth_call(site,&sel("versionCount()"))?).to::<u64>();
+        let mut mine=None;
+        for v in count_before..count_after{
+            let (h,l,status,_)=decode_version(&self.rpc.eth_call(site,&abi_u256_call("version(uint256)",v))?)?;
+            if h==mhash&&l==mb.len() as u32&&status==0{mine=Some(v);break}
+        }
+        let v=mine.ok_or("created version not found (concurrent publisher?)")?;
+        self.tx(Some(site),abi_u256_call("publish(uint256)",v),200_000)?;
+        self.tx(Some(site),abi_u256_call("setCurrent(uint256)",v),200_000)?;
+        Ok((site,v,m))
     }
 }
 pub fn website_initcode()->Vec<u8>{

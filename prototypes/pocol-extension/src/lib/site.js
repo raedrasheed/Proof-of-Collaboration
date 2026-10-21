@@ -43,7 +43,7 @@ export function decodeManifest(b) {
     const mime = Number(rlp.uint(f[1], 1, 'mime')); if (!MIME.has(mime)) throw new Error('unknown mime ' + mime);
     const size = Number(rlp.uint(f[2], 4, 'size'));
     const hash = rlp.bytes(f[3], 'hash'); if (hash.length !== 32) throw new Error('hash len');
-    if (!rlp.isList(f[4]) || f[4].length === 0) throw new Error('chunks');
+    if (!rlp.isList(f[4])) throw new Error('chunks'); // an empty file has size 0 and no chunks (pos-empty-file)
     let sum = 0; const chunks = [];
     for (const c of f[4]) { if (!rlp.isList(c) || c.length !== 2) throw new Error('chunk arity'); const a = rlp.bytes(c[0]); if (a.length !== 20) throw new Error('chunk addr'); const l = Number(rlp.uint(c[1], 4, 'len')); if (l < 1 || l > CHUNK_MAX) throw new Error('chunk len'); sum += l; chunks.push([a, l]); }
     if (sum !== size || size > FILE_MAX) throw new Error('size mismatch for ' + path);
