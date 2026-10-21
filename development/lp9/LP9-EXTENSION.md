@@ -70,7 +70,7 @@ Evidence: `node tests/unit.mjs` (Node, release and fault builds) and `node tests
 | BR20 | partial | second `load` teardown, nav bucket (4th rapid navigation → −32005 {nav}), replies of torn-down frames dropped; the BR20a table is not reproduced |
 | BR21 (StoreQueue) | partial | admission 8 / 256 KiB / 64 / 4 MiB, per-key FIFO, quota decided before any write (zero `set` on 4300), STORE_ACTIVE_GLOBAL = 2, STORE_QUEUE_WAIT (−32005 {store}), STORE_WRITE_DEADLINE (−32603 {storeTimeout}, key blocked until Chrome settles); the explicit replyState/ownState trace (BridgeTrace) is not reproduced |
 | BR22 (D103) | claimed (core) | `src/lib/records.js`: EpochFence (names gate 8 with sweep after T_LATE, generation window 4, confirmed epoch item, 3 retries), non-replaceable `(epoch, seq)` records `{fmt:2, epoch, seq, tomb, b64}`, RecoveryGate (newest valid, ≤ 4 gets, 5 s, checkpoint with one retry, prune below). Unit: I57 late write never wins, late write applied first becomes the base, corrupt newest skipped, all-corrupt → failed, gate/window/epoch-write failures. Chrome: service worker stopped over CDP → frames torn down with the loss notice → reload recovers the committed dictionary under epoch 2. RecoverySlots/ReadSlots FIFOs and gateId bookkeeping are simplified |
-| BR23 (D104 disk) | partial | names admission `names + 1 + LATE_NAMES + EPOCH_NAMES_MAX ≤ STORE_RECORDS_MAX` and byte admission with LATE_RESERVE and META_RESERVE (4300 {sites|disk}, zero `set`); DiskLedger reservations are not tracked separately |
+| BR23 (D104 disk) | partial | names admission `names + 1 + LATE_NAMES + EPOCH_NAMES_MAX ≤ STORE_RECORDS_MAX` and byte admission with LATE_RESERVE and META_RESERVE (4300 {sites|disk}, zero `set`); DiskLedger (D105) reserves synchronously with `unres/unresN`, released after the settle is re-measured |
 | BR24 (D106 admin delete, tombs) | not claimed | no administrative delete UI; `tomb` is always false |
 | D98 RecvGuard | claimed | unit: Content-Length, streamed over-limit abort, fatal UTF-8, depth 16/17, duplicate keys, error clipping, unlisted method never sent, deadline, pools |
 | Network isolation | claimed | release: HTTP canary 0, UDP canary 0. noDnr: 0 (CSP alone). cspOpen: 0 (DNR alone). cspOpen+noDnr: hits > 0 (the probes work) |
@@ -80,3 +80,5 @@ Evidence: `node tests/unit.mjs` (Node, release and fault builds) and `node tests
 | T12 site matrix | partial | one site with relative CSS + @import, folders, classic and inline scripts, localStorage, fetch/XHR JSON, PNG in img and in CSS url(), internal links, contract read/write. No woff2, form or importmap-module site |
 | ProfileMutex / eligibilityEpoch | not claimed | single-user local prototype; eligibility is checked as profile + unlocked wallet + approved grant |
 | Remote endpoints | not enabled | profiles accept http://127.0.0.1:<port> only |
+
+Independent review: [REVIEW-RESOLUTION.md](REVIEW-RESOLUTION.md) (4 findings, all fixed).

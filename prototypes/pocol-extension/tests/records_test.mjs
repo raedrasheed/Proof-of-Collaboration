@@ -86,9 +86,20 @@ export async function recordChecks(dist) {
     for (let i = 0; i < 16; i++) await set(g, 'f' + i, 'a'.repeat(61440)); const sets = area.sets; const q = await set(g, 'over', 'a'.repeat(61440));
     ok('4300 quota: zero set calls', q.error && q.error.code === 4300 && area.sets === sets); }
   { const area = new FakeArea(); const g = new R.RecordStore(area, { limits: { ...fast, STORE_RECORDS_MAX: 72 } }); await g.boot(); await set(g, 'k', 'v');
-    for (let i = 0; i < 40; i++) area.data.set('other:' + i, 1); const sets = area.sets; const r = await set(g, 'k', 'w');
+    for (let i = 0; i < 40; i++) area.data.set('other:' + i, 1); await g.measure(); const sets = area.sets; const r = await set(g, 'k', 'w');
     ok('D104 names admission: 4300 {sites} when names + 1 + 24 + 8 > STORE_RECORDS_MAX, no set', r.error && r.error.code === 4300 && r.error.data.reason === 'sites' && area.sets === sets, JSON.stringify(r)); }
   { const area = new FakeArea(); for (let i = 0; i < 40; i++) area.data.set('other:' + i, 1); const g = new R.RecordStore(area, { limits: { ...fast, STORE_RECORDS_MAX: 72 } }); await g.boot();
     const r = await set(g, 'k', 'v'); ok('checkpoint refused by the disk twice -> key failed, -32603 {storeRecovery}', r.error && r.error.code === -32603 && r.error.data.detail === 'sites', JSON.stringify(r)); }
+  // D105: two writes in flight see each other's reservation (synchronous check-and-add).
+  { const area = new FakeArea(); const g = new R.RecordStore(area, { limits: { ...fast, STORE_RECORDS_MAX: 36, STORE_WRITE_DEADLINE_MS: 2000 } }); await g.boot(); await g.load(NK, SITE);
+    const SITE2 = '0x' + '34'.repeat(20); await g.load(NK, SITE2); await g.measure();
+    area.holdNext = 2; const w1 = g.write(NK, SITE, 'site_storageSet', ['a', '1']); const w2 = g.write(NK, SITE2, 'site_storageSet', ['b', '2']);
+    await tick(30); const inflight = g.disk.unresN; area.release(); area.release(); const r = [await w1, await w2];
+    ok('D105 DiskLedger: concurrent writes reserve names synchronously; the one over the cap is refused', inflight === 1 && r.filter((x) => x.result === null).length === 1 && r.some((x) => x.error && x.error.data.reason === 'sites'), JSON.stringify({ inflight, r }));
+    ok('D105 reservations released after settle', g.disk.unres === 0 && g.disk.unresN === 0); }
+  // '__proto__' is an ordinary storage key (null-prototype dictionaries).
+  { const area = new FakeArea(); const g = new R.RecordStore(area, { limits: fast }); await g.boot(); const r = await set(g, '__proto__', 'p');
+    const g2 = new R.RecordStore(area, { limits: fast }); await g2.boot(); const d = (await g2.load(NK, SITE)).dict;
+    ok("'__proto__' key stored, counted and recovered; no prototype pollution", r.result === null && Object.prototype.hasOwnProperty.call(d, '__proto__') && d['__proto__'] === 'p' && ({}).p === undefined); }
   return checks;
 }

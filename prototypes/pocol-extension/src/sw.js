@@ -180,10 +180,13 @@ async function route(sess, m, ctl) {
   }
   return E(-32600, 'kind');
 }
+// The 15-minute lock is refreshed only by user actions (unlock, an approved grant or signature),
+// never by site-driven calls (review finding: eth_accounts kept the seed decrypted).
 async function walletKey(sess) {
   if (!unlocked || Date.now() > unlocked.until) { unlocked = null; return null; }
-  unlocked.until = Date.now() + LOCK_MS; return networkKey(unlocked.seed, sess.netKey);
+  return networkKey(unlocked.seed, sess.netKey);
 }
+const touchWallet = () => { if (unlocked) unlocked.until = Date.now() + LOCK_MS; };
 async function wallet(sess, m, ask) {
   if (m.method === 'eth_chainId') return { result: '0x' + sess.profile.chainId.toString(16) };
   const key = await walletKey(sess);
@@ -191,7 +194,7 @@ async function wallet(sess, m, ask) {
   const address = addressOf(key);
   if (m.method === 'eth_accounts') return { result: sess.approved ? [address] : [] };
   if (m.method === 'eth_requestAccounts') {
-    if (!sess.approved) { const ok = await ask({ type: 'confirmAccounts', site: sess.site, address, network: sess.profile.name }); if (!ok) return E(4001, 'user rejected'); sess.approved = true; }
+    if (!sess.approved) { const ok = await ask({ type: 'confirmAccounts', site: sess.site, address, network: sess.profile.name }); if (!ok) return E(4001, 'user rejected'); sess.approved = true; touchWallet(); }
     return { result: [address] };
   }
   // eth_sendTransaction: build, show the exact bytes and hash bound to the network, sign only after approval, submit (WalletSubmit).
@@ -205,8 +208,11 @@ async function wallet(sess, m, ask) {
     const maxPriority = o.maxPriorityFeePerGas ? BigInt(o.maxPriorityFeePerGas) : 1000000000n;
     const tx = { chainId: sess.profile.chainId, nonce, maxPriority, maxFee: o.maxFeePerGas ? BigInt(o.maxFeePerGas) : base * 2n + maxPriority, gas, to: o.to, value, data };
     const signed = signTx(key, tx);
-    const ok = await ask({ type: 'confirmTx', site: sess.site, network: sess.profile.name, chainId: tx.chainId, from: address, txHash: signed.hash, raw: signed.raw, to: o.to, value: value.toString(), data, gas: gas.toString(), nonce: nonce.toString() });
+    // Every committed field is shown, with the worst-case cost gas·maxFee + value (review finding: fees were hidden).
+    const ok = await ask({ type: 'confirmTx', site: sess.site, network: sess.profile.name, chainId: tx.chainId, from: address, txHash: signed.hash, raw: signed.raw, to: o.to, value: value.toString(), data, gas: gas.toString(), nonce: nonce.toString(),
+      maxFeePerGas: tx.maxFee.toString(), maxPriorityFeePerGas: tx.maxPriority.toString(), maxCost: (gas * tx.maxFee + value).toString() });
     if (!ok) return E(4001, 'user rejected');
+    touchWallet();
     return { result: await sess.rpc('eth_sendRawTransaction', [signed.raw]) };
   } catch (e) { return transportError(e); }
 }

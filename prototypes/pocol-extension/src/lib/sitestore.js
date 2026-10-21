@@ -7,8 +7,9 @@ export const entry = (k, v) => u8(k) + u8(v);
 export const total = (d) => Object.entries(d).reduce((a, [k, v]) => a + entry(k, v), 0);
 /** Pure decision: returns {next} or {error:{code,message,data}}. */
 export function apply(dict, method, params) {
-  if (method === 'site_storageClear') return { next: {} };
-  const [k, v] = params; const next = { ...dict }; const t = total(dict);
+  // Null-prototype dictionaries: '__proto__' is an ordinary key (review finding: it was silently dropped).
+  if (method === 'site_storageClear') return { next: Object.create(null) };
+  const [k, v] = params; const next = Object.assign(Object.create(null), dict); const t = total(dict);
   if (v === null) { delete next[k]; return { next }; }
   const has = Object.prototype.hasOwnProperty.call(dict, k);
   /*@fault quotaNoSubtract*/const newTotal = t - (has ? entry(k, dict[k]) : 0) + entry(k, v);/*@else*/const newTotal = t + entry(k, v);/*@end*/

@@ -57,6 +57,11 @@ export class RecordStore {
     this.area = area; this.L = { ...LIMITS, ...(opts.limits || {}) }; this.now = opts.now || (() => Date.now()); this.timers = opts.timers || globalThis;
     this.keys = new Map(); this.active = 0; this.activeQ = []; this.stats = { epochGateBlocks: 0, recoveryCorrupt: 0, lateRecordsSeen: 0 };
     this.epoch = null; this.bootFailed = null; this.bootMs = this.now();
+    // DiskLedger (D105): measured {inUse, names} plus live reservations, checked and reserved synchronously.
+    this.disk = { inUse: 0, names: 0, unres: 0, unresN: 0 };
+  }
+  async measure() {
+    try { this.disk.names = (await this.area.getKeys()).length; this.disk.inUse = this.area.getBytesInUse ? await this.area.getBytesInUse(null) : 0; } catch { /* keep the last measurement */ }
   }
   sleep(ms) { return new Promise((r) => this.timers.setTimeout(r, ms)); }
   async listEpochs() { return (await this.area.getKeys()).filter((k) => k.startsWith(EPOCH_PREFIX)).map((k) => ({ name: k, e: BigInt('0x' + k.slice(EPOCH_PREFIX.length)) })); }
@@ -79,6 +84,7 @@ export class RecordStore {
       await this.sleep(this.L.T_LATE_MS); ep = await this.listEpochs();
     }
     const E = ep.reduce((a, x) => (x.e > a ? x.e : a), 0n) + 1n; const name = EPOCH_PREFIX + hex(E, 16);
+    await this.measure();
     for (let i = 0; i <= this.L.STORE_EPOCH_RETRY; i++) {
       try { await this.area.set({ [name]: { bootMs: this.bootMs } }); this.epoch = E; break; } catch { /* retry with the same name */ }
     }
@@ -87,25 +93,27 @@ export class RecordStore {
     return E;
   }
   keyOf(netKey, site) { return 'site:' + netKey + ':' + site.toLowerCase(); }
-  st(k) { let s = this.keys.get(k); if (!s) { s = { k, prefix: k + ':r:', state: 'unrecovered', dict: {}, seq: 0, names: new Set(), chain: Promise.resolve(), gate: null }; this.keys.set(k, s); } return s; }
+  st(k) { let s = this.keys.get(k); if (!s) { s = { k, prefix: k + ':r:', state: 'unrecovered', dict: Object.create(null), seq: 0, names: new Set(), chain: Promise.resolve(), gate: null }; this.keys.set(k, s); } return s; }
   alloc(s) { if (s.seq > 0xffffffff) return null; return s.seq++; }
   recordName(s, seq) { return s.prefix + hex(this.epoch, 16) + ':' + hex(seq, 8); }
   async slot() { if (this.active < this.L.STORE_ACTIVE_GLOBAL) { this.active++; return; } await new Promise((r) => this.activeQ.push(r)); }
   unslot() { const n = this.activeQ.shift(); if (n) n(); else this.active--; }
-  /** D104 admission for one record of encoded size enc. */
-  async admitDisk(enc) {
-    const names = (await this.area.getKeys()).length; const inUse = this.area.getBytesInUse ? await this.area.getBytesInUse(null) : 0;
-    if (names + 1 + this.L.LATE_NAMES + this.L.EPOCH_NAMES_MAX > this.L.STORE_RECORDS_MAX) return { code: 4300, message: 'sites', data: { reason: 'sites', limit: this.L.STORE_RECORDS_MAX } };
-    if (inUse + enc + 4 * 4 * this.L.RECORD_BYTES_MAX + this.L.META_RESERVE > this.L.STORE_DISK_HARD) return { code: 4300, message: 'disk', data: { reason: 'disk', limit: this.L.STORE_DISK_HARD } };
-    return null;
+  /** D104 admission for one record of encoded size enc; on success the reservation is taken in the same
+   * synchronous step (no await between check and add), and released after the settle is re-measured. */
+  admitDisk(enc) {
+    const d = this.disk;
+    if (d.names + d.unresN + 1 + this.L.LATE_NAMES + this.L.EPOCH_NAMES_MAX > this.L.STORE_RECORDS_MAX) return { refuse: { code: 4300, message: 'sites', data: { reason: 'sites', limit: this.L.STORE_RECORDS_MAX } } };
+    if (d.inUse + d.unres + enc + 4 * 4 * this.L.RECORD_BYTES_MAX + this.L.META_RESERVE > this.L.STORE_DISK_HARD) return { refuse: { code: 4300, message: 'disk', data: { reason: 'disk', limit: this.L.STORE_DISK_HARD } } };
+    d.unres += enc; d.unresN += 1;
+    return { release: async () => { await this.measure(); d.unres -= enc; d.unresN -= 1; } };
   }
   /** Writes one record; resolves {ok}, {timeout, settled: Promise}, or {err}. */
   async putRecord(s, dict) {
     const seq = this.alloc(s); if (seq === null) return { err: 'seq' };
     const name = this.recordName(s, seq); const value = { fmt: 2, epoch: hex(this.epoch, 16), seq, tomb: false, b64: encodeDict(dict) };
-    const enc = JSON.stringify(value).length; const disk = await this.admitDisk(enc); if (disk) return { disk };
+    const enc = name.length + JSON.stringify(value).length; const adm = this.admitDisk(enc); if (adm.refuse) return { disk: adm.refuse };
     s.names.add(name); await this.slot();
-    const p = Promise.resolve().then(() => this.area.set({ [name]: value })); const settled = p.finally(() => this.unslot());
+    const p = Promise.resolve().then(() => this.area.set({ [name]: value })); const settled = p.finally(async () => { this.unslot(); await adm.release(); });
     const r = await deadline(p, this.L.STORE_WRITE_DEADLINE_MS, this.timers);
     if (r.ok) { await settled.catch(() => {}); return { ok: true, name, seq }; }
     if (r.timeout) return { timeout: true, name, seq, settled: settled.then(() => true, () => false) };
@@ -113,7 +121,7 @@ export class RecordStore {
   }
   async pruneBelow(s, keepName) {
     const keep = parseName(s.prefix, keepName); const drop = [...s.names].filter((n) => { const v = parseName(s.prefix, n); return v && verCmp(v, keep) < 0; });
-    if (drop.length) { try { await this.area.remove(drop); for (const n of drop) s.names.delete(n); } catch { /* best effort; still counted on disk */ } }
+    if (drop.length) { try { await this.area.remove(drop); for (const n of drop) s.names.delete(n); } catch { /* best effort; still counted on disk */ } await this.measure(); }
   }
   /** RecoveryGate (D104 section 3). */
   recover(s) {
@@ -133,7 +141,7 @@ export class RecordStore {
             return { dict: decodeDict(v.b64) };
           } catch { corrupt++; this.stats.recoveryCorrupt++; }
         }
-        return corrupt ? { corrupt: true } : { dict: {} };
+        return corrupt ? { corrupt: true } : { dict: Object.create(null) };
       })();
       const r = await deadline(read, this.L.RECOVERY_READ_DEADLINE_MS, this.timers);
       if (r.timeout || r.err) { s.state = 'unrecovered'; s.gate = null; throw fail(r.timeout ? 'readTimeout' : 'read'); }
@@ -157,7 +165,7 @@ export class RecordStore {
     return null;
   }
   /** Snapshot for a new frame: the confirmed dictionary after recovery. */
-  async load(netKey, site) { const s = this.st(this.keyOf(netKey, site)); const e = await this.ready(s); return e ? { error: e.error, dict: {} } : { dict: { ...s.dict } }; }
+  async load(netKey, site) { const s = this.st(this.keyOf(netKey, site)); const e = await this.ready(s); return e ? { error: e.error, dict: Object.create(null) } : { dict: Object.assign(Object.create(null), s.dict) }; }
   /** storage_set after BridgeAuth and StoreQueue admission; FIFO per key. The reply can be sent
    * (storeTimeout) while the key's chain still waits for Chrome to settle the write. */
   write(netKey, site, method, params) {

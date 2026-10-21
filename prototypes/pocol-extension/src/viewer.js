@@ -21,7 +21,7 @@ function pump() {
   $('mtitle').textContent = titles[q.type] || q.type;
   $('mtext').textContent = q.type === 'confirmExternal' ? q.url
     : q.type === 'confirmAccounts' ? `site: ${q.site}\nnetwork: ${q.network}\naccount: ${q.address}`
-    : `network: ${q.network} (chainId ${q.chainId})\nsite: ${q.site}\nfrom: ${q.from}\nto: ${q.to}\nvalue (wei): ${q.value}\ngas: ${q.gas}\nnonce: ${q.nonce}\ndata: ${q.data}\ntxHash: ${q.txHash}\nraw: ${q.raw}`;
+    : `network: ${q.network} (chainId ${q.chainId})\nsite: ${q.site}\nfrom: ${q.from}\nto: ${q.to}\nvalue (wei): ${q.value}\nmax cost (wei, gas·maxFee + value): ${q.maxCost}\ngas: ${q.gas}\nmaxFeePerGas (wei): ${q.maxFeePerGas}\nmaxPriorityFeePerGas (wei): ${q.maxPriorityFeePerGas}\nnonce: ${q.nonce}\ndata: ${q.data}\ntxHash: ${q.txHash}\nraw: ${q.raw}`;
   $('modal').hidden = false; $('modal').dataset.kind = q.type;
   const done = (ok) => { $('approve').onclick = $('reject').onclick = null; $('modal').hidden = true; showing = false; resolve(ok); pump(); };
   $('approve').onclick = () => done(true); $('reject').onclick = () => done(false);

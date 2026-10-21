@@ -2,7 +2,7 @@
  "result": "PASS",
  "checks": 66,
  "failed": 0,
- "work": "/tmp/pocol-browser-CNY0la",
+ "work": "/tmp/pocol-browser-RhuyPk",
  "results": [
   {
    "name": "LP8 sites published into PoCol state through nodes a and b",
@@ -92,7 +92,7 @@
   {
    "name": "profile accepted (genesisPre hashes to genesisHash, chainId matches)",
    "pass": true,
-   "detail": "0xb430189a6e3e101b5647fd70f4ae0ceef75f30f5771259dca83d2eec42afa1a1"
+   "detail": "0x6c0b9ec3e6da2ce7f4ac73361eb06e0673c5bc6437d437e63e6588425bacaba4"
   },
   {
    "name": "profile with a genesisHash that genesisPre does not hash to is rejected",
@@ -172,7 +172,7 @@
   {
    "name": "BR19c burst of 60: rate rejections occur, later read succeeds",
    "pass": true,
-   "detail": "ok=4 rate=10 pending=46"
+   "detail": "ok=7 rate=10 pending=43"
   },
   {
    "name": "BR17a localStorage write persisted through BridgeAuth as a versioned record (D103)",
@@ -257,7 +257,7 @@
   {
    "name": "BR14 eth_requestAccounts after click returns the per-network wallet address",
    "pass": true,
-   "detail": "0x88961f1924f3148615d387bd14bf00e66c7d91cb"
+   "detail": "0x629fd2200a655fce2d740d3ae2f90139ff4e0d9f"
   },
   {
    "name": "BR14 no eth_sendRawTransaction before the click",
@@ -267,12 +267,12 @@
   {
    "name": "BR14 exactly one eth_sendRawTransaction, raw = displayed bytes, keccak(raw) = displayed txHash = result",
    "pass": true,
-   "detail": "1 0xe7f75f70b4f180682a32d6d86bd401f3b61ef35afe0aa390a33ef39620dff1d5"
+   "detail": "1 0xed2924793d1efca885da154f29ba0d582bca19684d9bbe8161e65a2dd85d2df3"
   },
   {
    "name": "BR14 transaction included by the devnet (status 1) and identical receipt on all nodes",
    "pass": true,
-   "detail": "0x7c"
+   "detail": "0x96"
   },
   {
    "name": "BR14 rejected signature -> 4001 and no further eth_sendRawTransaction",
@@ -292,7 +292,7 @@
   {
    "name": "v2 update read in Chrome through each of the 3 nodes (LN profiles), identical content",
    "pass": true,
-   "detail": "[[\"PoCol on-chain site v2\",\"version 1 · block 145\",\"LN\"],[\"PoCol on-chain site v2\",\"version 1 · block 145\",\"LN\"],[\"PoCol on-chain site v2\",\"version 1 · block 145\",\"LN\"]]"
+   "detail": "[[\"PoCol on-chain site v2\",\"version 1 · block 174\",\"LN\"],[\"PoCol on-chain site v2\",\"version 1 · block 174\",\"LN\"],[\"PoCol on-chain site v2\",\"version 1 · block 174\",\"LN\"]]"
   },
   {
    "name": "viewer pages raised no uncaught errors",
@@ -317,7 +317,7 @@
   {
    "name": "positive control (cspOpen+noDnr): the probes do reach the HTTP canary",
    "pass": true,
-   "detail": "3: GET /css | GET /link.css | POST /form"
+   "detail": "4: GET /img2 | GET /css | GET /link.css | POST /form"
   },
   {
    "name": "positive control (fault noRtc): RTCPeerConnection is available without RtcLockdown",
