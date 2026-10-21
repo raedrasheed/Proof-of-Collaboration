@@ -1,0 +1,32 @@
+//! Range miner: scans ONLY this identity's assigned nonce range [start,end] for
+//! the locked TemplateID. Every hash <= T_share is reported as a share; the first
+//! hash <= target is a solution. After the range is exhausted the miner stops
+//! hashing (the thesis energy-saving post-range policy) until a new template.
+use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
+use std::sync::mpsc::Sender;
+use crate::types::{Fixed,pow_hash,le_target};
+
+#[derive(Debug,Clone)]
+pub enum MinerEvent{Share{tid:[u8;32],nonce:u64},Solution{tid:[u8;32],nonce:u64},Exhausted{tid:[u8;32],hashes:u64}}
+
+pub struct MinerHandle{stop:Arc<AtomicBool>,pub tid:[u8;32]}
+impl MinerHandle{pub fn stop(&self){self.stop.store(true,Ordering::SeqCst);}}
+impl Drop for MinerHandle{fn drop(&mut self){self.stop();}}
+
+pub fn start(tid:[u8;32],start:u64,end:u64,target:Fixed,t_share:Fixed,max_shares:usize,events:Sender<MinerEvent>)->MinerHandle{
+    let stop=Arc::new(AtomicBool::new(false));let flag=stop.clone();
+    std::thread::Builder::new().name("miner".into()).spawn(move||{
+        let mut n=start;let mut hashes=0u64;let mut shares=0usize;
+        loop{
+            if hashes%4096==0&&flag.load(Ordering::Relaxed){return}
+            let h=pow_hash(&tid,n);hashes+=1;
+            if le_target(&h,&t_share){
+                if le_target(&h,&target){let _=events.send(MinerEvent::Solution{tid,nonce:n});return}
+                if shares<max_shares{shares+=1;let _=events.send(MinerEvent::Share{tid,nonce:n});}
+            }
+            if n==end{let _=events.send(MinerEvent::Exhausted{tid,hashes});return}
+            n+=1;
+        }
+    }).expect("spawn miner");
+    MinerHandle{stop,tid}
+}

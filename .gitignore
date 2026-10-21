@@ -14,3 +14,4 @@
 *.whl
 **/keys-txa*.json
 **/txa-node-check.json
+prototypes/pocold/target/

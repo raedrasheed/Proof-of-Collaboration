@@ -1,0 +1,83 @@
+//! pocold — PoCol local development node (simnet devnets only).
+// Accepted LP1 consensus sources, shared byte-for-byte (not copied).
+#[path="../../lp1-node/src/fixed.rs"] #[allow(dead_code)] pub mod fixed;
+#[path="../../lp1-node/src/rlp.rs"] #[allow(dead_code)] pub mod rlp;
+#[path="../../lp1-node/src/hex.rs"] #[allow(dead_code)] pub mod hex;
+#[path="../../lp1-node/src/hashes.rs"] #[allow(dead_code)] pub mod hashes;
+#[path="../../lp1-node/src/decimal.rs"] #[allow(dead_code)] pub mod decimal;
+#[path="../../lp1-node/src/genesis.rs"] #[allow(dead_code)] pub mod genesis;
+#[path="../../lp1-node/src/genesis_spec.rs"] #[allow(dead_code)] pub mod genesis_spec;
+#[path="../../lp1-node/src/header.rs"] #[allow(dead_code)] pub mod header;
+#[path="../../lp1-node/src/asert.rs"] #[allow(dead_code)] pub mod asert;
+#[path="../../lp1-node/src/assignment.rs"] #[allow(dead_code)] pub mod assignment;
+#[path="../../lp1-node/src/timing.rs"] #[allow(dead_code)] pub mod timing;
+mod types;mod chain;mod store;mod miner;mod net;mod node;mod rpc;
+use std::path::PathBuf;
+use pocol_lp4_execution::devnet;
+
+fn arg(args:&[String],k:&str)->Option<String>{args.iter().position(|a|a==k).and_then(|i|args.get(i+1)).cloned()}
+fn args_all(args:&[String],k:&str)->Vec<String>{args.windows(2).filter(|w|w[0]==k).map(|w|w[1].clone()).collect()}
+fn num<T:std::str::FromStr>(args:&[String],k:&str,d:T)->T{arg(args,k).and_then(|v|v.parse().ok()).unwrap_or(d)}
+
+pub fn load_spec(dir:&std::path::Path)->Result<chain::Spec,String>{
+    let hexs=std::fs::read_to_string(dir.join("genesis.spec.hex")).map_err(|e|format!("genesis.spec.hex: {e}"))?;
+    let spec_bytes=types::unhex(hexs.trim())?;
+    let alloc:serde_json::Value=serde_json::from_str(&std::fs::read_to_string(dir.join("alloc.json")).map_err(|e|format!("alloc.json: {e}"))?).map_err(|e|e.to_string())?;
+    let alloc=devnet::alloc_from_json(&alloc)?;
+    let (profile,genesis)=devnet::load(&spec_bytes,&alloc,&[(1,0)])?;
+    let genesis_hash=profile.genesis_hash();
+    Ok(chain::Spec{profile,genesis,genesis_hash,spec_bytes})
+}
+
+fn main(){
+    let args:Vec<String>=std::env::args().collect();
+    let cmd=args.get(1).map(|s|s.as_str()).unwrap_or("help");
+    let r=match cmd{
+        "init-devnet"=>init(&args),
+        "run"=>run(&args),
+        "status"=>status(&args),
+        _=>{eprintln!("usage:\n  pocold init-devnet --out DIR --miners a,b,c [--chain-id N] [--genesis-time S] [--t-blk S] [--tau S] [--d-att S] [--work-bits N] [--h-end N] [--h-close N] [--accounts x,y]\n  pocold run --network DIR --data DIR --name N [--miner LABEL] [--listen ADDR] [--peer ADDR]... [--rpc ADDR] [--stop-at H] [--log]\n  pocold status --network DIR --data DIR");Ok(())}
+    };
+    if let Err(e)=r{eprintln!("error: {e}");std::process::exit(1);}
+}
+fn init(args:&[String])->Result<(),String>{
+    let out=PathBuf::from(arg(args,"--out").ok_or("--out")?);
+    let miners:Vec<String>=arg(args,"--miners").ok_or("--miners")?.split(',').map(|s|s.to_string()).collect();
+    let refs:Vec<&str>=miners.iter().map(|s|s.as_str()).collect();
+    let g_ts=num(args,"--genesis-time",node::now_s());
+    let mut cfg=devnet::DevnetConfig::new(num(args,"--chain-id",777900u64),g_ts,&refs);
+    cfg.t_blk=num(args,"--t-blk",cfg.t_blk);cfg.tau=num(args,"--tau",cfg.tau);cfg.d_att=num(args,"--d-att",cfg.d_att);cfg.d_fb_wait=num(args,"--fb-wait",cfg.d_fb_wait);
+    cfg.h_end=num(args,"--h-end",cfg.h_end);cfg.h_close=num(args,"--h-close",cfg.h_close);cfg.d=num(args,"--d",cfg.d);cfg.w_w=num(args,"--w-w",cfg.w_w);
+    let bits:u32=num(args,"--work-bits",18);cfg.target_g=devnet::to_fixed((revm::primitives::U256::from(1)<<(256-bits as usize))-revm::primitives::U256::from(1));
+    if let Some(a)=arg(args,"--accounts"){cfg.accounts=a.split(',').map(|l|(l.to_string(),revm::primitives::U256::from(10u128.pow(24)))).collect();}
+    let net=devnet::build(&cfg)?;
+    std::fs::create_dir_all(&out).map_err(|e|e.to_string())?;
+    std::fs::write(out.join("genesis.spec.hex"),types::hex(&net.spec_bytes)).map_err(|e|e.to_string())?;
+    std::fs::write(out.join("alloc.json"),serde_json::to_string_pretty(&devnet::alloc_to_json(&net.alloc)).unwrap()).map_err(|e|e.to_string())?;
+    let info=serde_json::json!({"chainId":cfg.chain_id,"genesisHash":types::hex(&net.genesis_hash.0),"genesisTime":g_ts,"forks":[[1,0]],"profileKind":"simnet",
+        "note":"Local devnet only. Keys are deterministic disposable devnet keys derived from labels (pocol_lp4_execution::txsign::Key::devnet).",
+        "miners":net.miners.iter().map(|m|serde_json::json!({"label":m.label,"id":format!("{:#x}",m.id),"reward":format!("{:#x}",m.reward)})).collect::<Vec<_>>(),
+        "accounts":cfg.accounts.iter().map(|(l,w)|serde_json::json!({"label":l,"address":format!("{:#x}",devnet::account_key(l).address()),"wei":w.to_string()})).collect::<Vec<_>>()});
+    std::fs::write(out.join("devnet.json"),serde_json::to_string_pretty(&info).unwrap()).map_err(|e|e.to_string())?;
+    println!("{}",serde_json::to_string_pretty(&info).unwrap());Ok(())
+}
+fn run(args:&[String])->Result<(),String>{
+    let net=PathBuf::from(arg(args,"--network").ok_or("--network")?);
+    let spec=load_spec(&net)?;
+    let name=arg(args,"--name").unwrap_or_else(||"node".into());
+    let miner=arg(args,"--miner").map(|l|devnet::miner_identity(&l).key);
+    let parse=|s:&str|s.parse::<std::net::SocketAddr>().map_err(|e|format!("{s}: {e}"));
+    let cfg=node::Config{dir:PathBuf::from(arg(args,"--data").ok_or("--data")?),name,miner,
+        listen:arg(args,"--listen").map(|s|parse(&s)).transpose()?,peers:args_all(args,"--peer").iter().map(|s|parse(s)).collect::<Result<_,_>>()?,
+        rpc:arg(args,"--rpc").map(|s|parse(&s)).transpose()?,delta_rel:num(args,"--delta-rel",2),phi:num(args,"--phi",10),gamma:num(args,"--gamma",1),
+        stop_at:arg(args,"--stop-at").and_then(|s|s.parse().ok()),log:args.iter().any(|a|a=="--log")};
+    let mut n=node::Node::open(cfg,spec)?;
+    n.log(&format!("opened: head h={} records={}",n.chain.head().height,n.journal_records()));
+    n.start_network()?;n.run();
+    println!("{}",n.status_json());Ok(())
+}
+fn status(args:&[String])->Result<(),String>{
+    let net=PathBuf::from(arg(args,"--network").ok_or("--network")?);let spec=load_spec(&net)?;
+    let cfg=node::Config{dir:PathBuf::from(arg(args,"--data").ok_or("--data")?),name:"status".into(),miner:None,listen:None,peers:vec![],rpc:None,delta_rel:2,phi:10,gamma:1,stop_at:None,log:false};
+    let n=node::Node::open(cfg,spec)?;println!("{}",n.status_json());Ok(())
+}
