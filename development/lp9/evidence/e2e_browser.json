@@ -1,8 +1,8 @@
 {
  "result": "PASS",
- "checks": 65,
+ "checks": 66,
  "failed": 0,
- "work": "/tmp/pocol-browser-JYFQds",
+ "work": "/tmp/pocol-browser-CNY0la",
  "results": [
   {
    "name": "LP8 sites published into PoCol state through nodes a and b",
@@ -92,7 +92,7 @@
   {
    "name": "profile accepted (genesisPre hashes to genesisHash, chainId matches)",
    "pass": true,
-   "detail": "0x775c758a9a5564f3c21001640efaad03b7a2efce44f80c2f0bbeb272cb784f83"
+   "detail": "0xb430189a6e3e101b5647fd70f4ae0ceef75f30f5771259dca83d2eec42afa1a1"
   },
   {
    "name": "profile with a genesisHash that genesisPre does not hash to is rejected",
@@ -172,12 +172,12 @@
   {
    "name": "BR19c burst of 60: rate rejections occur, later read succeeds",
    "pass": true,
-   "detail": "ok=9 rate=9 pending=42"
+   "detail": "ok=4 rate=10 pending=46"
   },
   {
-   "name": "BR17a localStorage write persisted through BridgeAuth -> SiteStorage",
+   "name": "BR17a localStorage write persisted through BridgeAuth as a versioned record (D103)",
    "pass": true,
-   "detail": "{\"k\":\"v\"}"
+   "detail": "{\"d\":{\"k\":\"v\"},\"n\":[\":0000000000000001:00000002\"]}"
   },
   {
    "name": "BR17a after reload localStorage.getItem(k) = v (new session, same netKey/site)",
@@ -198,6 +198,11 @@
    "name": "BR17f S_B sees none of S_A keys; its quota is independent",
    "pass": true,
    "detail": "{\"k00\":null,\"w\":\"null\"}"
+  },
+  {
+   "name": "D103 worker restart: frame torn down with the loss notice; reload recovers the committed dictionary under epoch 2",
+   "pass": true,
+   "detail": "{\"rec\":{\"k00\":\"b\",\"k17\":4042,\"k01\":null},\"epochs\":[\"0001\",\"0002\"],\"names\":[\":0000000000000002:00000000\"]}"
   },
   {
    "name": "BR18a site_navigate(/about.html): old frame torn down, new frame shows about.html, no new tab",
@@ -252,7 +257,7 @@
   {
    "name": "BR14 eth_requestAccounts after click returns the per-network wallet address",
    "pass": true,
-   "detail": "0xa3f75c577184680f184f2acc53fb959dd6fb9058"
+   "detail": "0x88961f1924f3148615d387bd14bf00e66c7d91cb"
   },
   {
    "name": "BR14 no eth_sendRawTransaction before the click",
@@ -262,12 +267,12 @@
   {
    "name": "BR14 exactly one eth_sendRawTransaction, raw = displayed bytes, keccak(raw) = displayed txHash = result",
    "pass": true,
-   "detail": "1 0x400cd1aeb8e5ede4d42127e3747c0c6aad112319256215f58657c6fb594021da"
+   "detail": "1 0xe7f75f70b4f180682a32d6d86bd401f3b61ef35afe0aa390a33ef39620dff1d5"
   },
   {
    "name": "BR14 transaction included by the devnet (status 1) and identical receipt on all nodes",
    "pass": true,
-   "detail": "0x78"
+   "detail": "0x7c"
   },
   {
    "name": "BR14 rejected signature -> 4001 and no further eth_sendRawTransaction",
@@ -287,7 +292,7 @@
   {
    "name": "v2 update read in Chrome through each of the 3 nodes (LN profiles), identical content",
    "pass": true,
-   "detail": "[[\"PoCol on-chain site v2\",\"version 1 · block 134\",\"LN\"],[\"PoCol on-chain site v2\",\"version 1 · block 134\",\"LN\"],[\"PoCol on-chain site v2\",\"version 1 · block 134\",\"LN\"]]"
+   "detail": "[[\"PoCol on-chain site v2\",\"version 1 · block 145\",\"LN\"],[\"PoCol on-chain site v2\",\"version 1 · block 145\",\"LN\"],[\"PoCol on-chain site v2\",\"version 1 · block 145\",\"LN\"]]"
   },
   {
    "name": "viewer pages raised no uncaught errors",
@@ -312,7 +317,7 @@
   {
    "name": "positive control (cspOpen+noDnr): the probes do reach the HTTP canary",
    "pass": true,
-   "detail": "4: GET /img2 | GET /css | GET /link.css | POST /form"
+   "detail": "3: GET /css | GET /link.css | POST /form"
   },
   {
    "name": "positive control (fault noRtc): RTCPeerConnection is available without RtcLockdown",

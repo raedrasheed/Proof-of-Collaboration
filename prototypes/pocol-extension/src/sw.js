@@ -3,7 +3,8 @@
 import { decodeSpec, verifyWindow } from './lib/rp.js';
 import { fetchSite, normalize } from './lib/site.js';
 import * as bridge from './lib/bridge.js';
-import { SiteStorage, StoreAdmission, qbytes } from './lib/sitestore.js';
+import { StoreAdmission, qbytes } from './lib/sitestore.js';
+import { RecordStore } from './lib/records.js';
 import * as http from './lib/transport.js';
 import { encryptSeed, decryptSeed, networkKey, addressOf, signTx, LOCK_MS } from './lib/wallet.js';
 import { keccak } from './lib/crypto.js';
@@ -11,7 +12,10 @@ import * as rlp from './lib/rlp.js';
 import { toHex, fromHex, eq } from './lib/hex.js';
 
 const store = chrome.storage.local;
-const siteStorage = new SiteStorage(store);
+// Site storage records with a worker-generation fence (D103); no data write before the fence confirms.
+const records = new RecordStore(store);
+const booted = records.boot().catch(() => null);
+const genId = crypto.randomUUID();
 const admission = new StoreAdmission();
 const sessions = new Map(); // sessionId -> SiteSession (D99)
 let globalPending = 0;
@@ -112,9 +116,9 @@ async function openVerified(profile, site, path, tabId) {
   const recv = { recv: 0 };
   sessions.set(sessionId, { profile, site: site.toLowerCase(), netKey: profile.netKey, bucket: bridge.newSession(now), approved: false, rpc: rpcFor(profile, pools.site, recv), tabId,
     confirmPending: false, walletPending: false, walletTimes: [], storeQ: admission.session() });
-  const storage = await siteStorage.load(profile.netKey, site);
+  await booted; const snap = await records.load(profile.netKey, site); const storage = snap.dict;
   const norm = normalize(path || '/'); const target = norm === '' ? s.entry : norm;
-  return { ok: true, sessionId, version: s.version, publishedBlock: s.publishedBlock, entry: s.entry, path: target, notFound: norm === null || !s.files.has(target), files, storage, trust, netKey: profile.netKey };
+  return { ok: true, sessionId, version: s.version, publishedBlock: s.publishedBlock, entry: s.entry, path: target, notFound: norm === null || !s.files.has(target), files, storage, storageError: snap.error || null, trust, netKey: profile.netKey };
 }
 
 // ---------------- B4 routing (state limits of the target component, D97) ----------------
@@ -150,7 +154,7 @@ async function route(sess, m, ctl) {
   if (m.kind === 'storage_set') {
     const q = qbytes(m.method, m.params);
     if (!admission.admit(sess.storeQ, q)) return E(-32005, 'store', { reason: 'store' });
-    try { return await siteStorage.write(sess.netKey, sess.site, m.method, m.params); } finally { admission.release(sess.storeQ, q); }
+    try { await booted; return await records.write(sess.netKey, sess.site, m.method, m.params); } finally { admission.release(sess.storeQ, q); }
   }
   if (m.kind === 'nav') {
     if (m.method === 'site_navigate') {
@@ -214,6 +218,7 @@ chrome.runtime.onConnect.addListener((port) => {
   if (!sess || !port.sender || !port.sender.tab || port.sender.tab.id !== sess.tabId) { port.disconnect(); return; }
   let asks = 0; const waiting = new Map(); let alive = true;
   const post = (m) => { if (alive) port.postMessage(m); };
+  post({ hello: genId }); // D103 section 5: the viewer tears frames down if the worker generation changes
   const ask = (q) => new Promise((resolve) => { const id = ++asks; waiting.set(id, resolve); post({ ask: id, q }); });
   port.onMessage.addListener((msg) => {
     if (msg && msg.answer !== undefined) { const r = waiting.get(msg.answer); if (r) { waiting.delete(msg.answer); r(msg.ok === true); } return; }
@@ -240,7 +245,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         list.push(p); await store.set({ profiles: list }); return { ok: true, profile: p }; }
       case 'profiles.remove': await store.set({ profiles: (await profiles()).filter((x) => x.name !== msg.name) }); return { ok: true };
       case 'open': return await openSite({ ...msg, tabId: sender.tab ? sender.tab.id : undefined });
-      case 'session.storage': { const s = sessions.get(msg.sessionId); if (!s || !sender.tab || sender.tab.id !== s.tabId) return { ok: false }; return { ok: true, storage: await siteStorage.load(s.netKey, s.site) }; }
+      case 'session.storage': { const s = sessions.get(msg.sessionId); if (!s || !sender.tab || sender.tab.id !== s.tabId) return { ok: false }; await booted; const snap = await records.load(s.netKey, s.site); return { ok: true, storage: snap.dict, storageError: snap.error || null }; }
       case 'wallet.create': { const seed = msg.seedHex ? fromHex(msg.seedHex) : crypto.getRandomValues(new Uint8Array(32)); if (seed.length !== 32) throw new Error('seed');
         await store.set({ wallet: await encryptSeed(seed, msg.password) }); unlocked = { seed, until: Date.now() + LOCK_MS }; return { ok: true }; }
       case 'wallet.unlock': { const w = (await store.get('wallet')).wallet; if (!w) return { ok: false, error: 'no wallet' }; unlocked = { seed: await decryptSeed(w, msg.password), until: Date.now() + LOCK_MS }; return { ok: true }; }

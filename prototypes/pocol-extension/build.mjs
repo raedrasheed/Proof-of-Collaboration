@@ -42,7 +42,7 @@ export function build({ fault = null, out } = {}) {
     name: 'PoCol Local Viewer' + (fault ? ` [TEST FAULT ${fault}]` : ''),
     version: JSON.parse(readFileSync(join(HERE, 'package.json'), 'utf8')).version,
     description: 'Verified PoCol on-chain websites from a local devnet node: sandboxed rendering, DNR isolation, BridgeAuth, local wallet.',
-    minimum_chrome_version: '120',
+    minimum_chrome_version: '130', // chrome.storage.local.getKeys (D103 recovery)
     background: { service_worker: 'sw.js', type: 'module' },
     permissions: ['storage', 'unlimitedStorage', 'declarativeNetRequest'],
     host_permissions: ['http://127.0.0.1/*'],

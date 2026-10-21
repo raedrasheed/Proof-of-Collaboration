@@ -141,6 +141,14 @@ const probeNetwork = async (fr) => fr.evaluate(async ({ CANARY, UDP, HOST_IP }) 
 const raw = (fr, text) => fr.evaluate((t) => pocol.raw(t), text);
 const req = (fr, kind, method, params) => fr.evaluate(async ([k, m, p]) => { try { return { result: await pocol.request(k, m, p) }; } catch (e) { return { error: { code: e.code, message: e.message, data: e.data } }; } }, [kind, method, params]);
 const msg = (id, kind, method, params) => JSON.stringify({ id, kind, payload: { method, params } });
+/** Confirmed site dictionary as stored (D103): the largest (epoch, seq) record under the key. */
+async function storedDict(b, dist, stKey) {
+  const all = await b.opt.evaluate(() => chrome.storage.local.get(null));
+  const names = Object.keys(all).filter((k) => k.startsWith(stKey + ':r:')).sort();
+  if (!names.length) return { dict: null, names, epochs: Object.keys(all).filter((k) => k.startsWith('pocol:epoch:')) };
+  const R = await import(pathToFileURL(join(dist, 'lib', 'records.js')).href);
+  return { dict: R.decodeDict(all[names[names.length - 1]].b64), names, epochs: Object.keys(all).filter((k) => k.startsWith('pocol:epoch:')).sort() };
+}
 
 async function main() {
   for (const p of [30300, 30301, 30302, 8540, 8541, 8542, TAP, CANARY]) if (!(await portFree(p))) throw new Error('port busy ' + p);
@@ -231,8 +239,8 @@ async function main() {
     await sleep(1100);
     await fr.evaluate(async () => { localStorage.setItem('k', 'v'); localStorage.setItem('z', 'zz'); localStorage.removeItem('z'); await pocol.flushStorage(); });
     const stKey = 'site:' + added.profile.netKey + ':' + S_A.toLowerCase();
-    const stored = await b.opt.evaluate((k) => chrome.storage.local.get(k), stKey);
-    ok('BR17a localStorage write persisted through BridgeAuth -> SiteStorage', stored[stKey] && stored[stKey].k === 'v' && !('z' in stored[stKey]), JSON.stringify(stored[stKey]));
+    const stored = await storedDict(b, dist, stKey);
+    ok('BR17a localStorage write persisted through BridgeAuth as a versioned record (D103)', stored.dict && stored.dict.k === 'v' && !('z' in stored.dict) && stored.names.length === 1 && /:r:[0-9a-f]{16}:[0-9a-f]{8}$/.test(stored.names[0]), JSON.stringify({ d: stored.dict, n: stored.names.map((x) => x.slice(-26)) }));
     await page.reload(); ({ fr, n } = await siteFrame(page));
     ok('BR17a after reload localStorage.getItem(k) = v (new session, same netKey/site)', (await fr.evaluate(() => localStorage.getItem('k'))) === 'v');
     // BR17e quota table over the real bridge (24 messages, each awaited).
@@ -245,7 +253,7 @@ async function main() {
     });
     const wantTable = [...Array(17).fill('null'), '4300', '4300', 'null', '4300', '4300', 'null', 'null'];
     ok('BR17e quota table (e1-e8) through Chrome', JSON.stringify(tableCodes) === JSON.stringify(wantTable), tableCodes.join(','));
-    const dict = (await b.opt.evaluate((k) => chrome.storage.local.get(k), stKey))[stKey];
+    const dict = (await storedDict(b, dist, stKey)).dict;
     const tot = Object.entries(dict).reduce((a, [k, v]) => a + Buffer.byteLength(k) + Buffer.byteLength(v), 0);
     ok('BR17e(e9) stored dictionary total = 925694, k00=b, k01/k18 absent, k17 = 4042 bytes', tot === 925694 && dict.k00 === 'b' && !('k01' in dict) && !('k18' in dict) && dict.k17.length === 4042, tot);
     // BR17f isolation: S_B on the same network does not see S_A's keys and has its own quota.
@@ -253,6 +261,15 @@ async function main() {
     const iso = await fB.evaluate(async () => ({ k00: localStorage.getItem('k00'), w: await pocol.request('storage_set', 'site_storageSet', ['k', 'v']).then(() => 'null', (e) => e.code) }));
     ok('BR17f S_B sees none of S_A keys; its quota is independent', iso.k00 === null && iso.w === 'null', JSON.stringify(iso));
     await pB.page.close();
+    // D103: the worker generation ends; frames are torn down with the loss notice; a user reload recovers in a new generation.
+    const cdpS = await b.ctx.newCDPSession(b.opt); await cdpS.send('ServiceWorker.enable').catch(() => {}); await cdpS.send('ServiceWorker.stopAllWorkers');
+    await page.waitForSelector('#reload', { timeout: 20000 }); const lost = await page.textContent('#stage');
+    await page.click('#reload'); ({ fr, n } = await siteFrame(page));
+    const rec = await fr.evaluate(() => ({ k00: localStorage.getItem('k00'), k17: (localStorage.getItem('k17') || '').length, k01: localStorage.getItem('k01') }));
+    const st2 = await storedDict(b, dist, stKey);
+    ok('D103 worker restart: frame torn down with the loss notice; reload recovers the committed dictionary under epoch 2',
+      /انقطع عامل الإضافة/.test(lost) && rec.k00 === 'b' && rec.k17 === 4042 && rec.k01 === null && st2.epochs.some((e) => e.endsWith('0000000000000002')) && st2.names.every((x) => x.includes(':r:0000000000000002:')),
+      JSON.stringify({ rec, epochs: st2.epochs.map((e) => e.slice(-4)), names: st2.names.map((x) => x.slice(-26)) }));
 
     // --- navigation (BR18, D26/D99) ---
     const pagesBefore = b.ctx.pages().length;

@@ -6,6 +6,7 @@ import { build } from '../build.mjs';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { recvGuardChecks } from './recv_guard.mjs';
+import { recordChecks } from './records_test.mjs';
 
 const load = async (dist, m) => import(pathToFileURL(join(dist, 'lib', m)).href + '?' + dist);
 const rel = build().dist;
@@ -188,6 +189,7 @@ ok('T16 size mismatch rejected', throws(() => { const f = file('/index.html', 1,
 }
 
 for (const c of await recvGuardChecks(rel)) ok('D98 ' + c.name, c.pass, c.detail);
+for (const c of await recordChecks(rel)) ok('D103 ' + c.name, c.pass, c.detail);
 
 console.log(JSON.stringify({ result: failed.length ? 'FAIL' : 'PASS', passed, failed }, null, 1));
 process.exit(failed.length ? 1 : 0);

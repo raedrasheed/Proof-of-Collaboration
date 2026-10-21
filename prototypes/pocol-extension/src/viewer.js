@@ -60,6 +60,13 @@ async function mount(path, opts = {}) {
   status(opts.notFound ? '404' : path);
 }
 
+// D103 section 5: worker gone or replaced -> tear frames down, announce possible loss, reload only by the user.
+function workerLost() {
+  if (!ctx) return; teardown(); ctx.current = null; ctx.frame = Number.MAX_SAFE_INTEGER;
+  const p = Object.assign(document.createElement('p'), { className: 'err', textContent: 'انقطع عامل الإضافة؛ قد تكون آخر الكتابات غير محفوظة ' });
+  const b = Object.assign(document.createElement('button'), { type: 'button', id: 'reload', textContent: 'إعادة التحميل' }); b.onclick = () => location.reload();
+  p.append(b); $('stage').replaceChildren(p); status('');
+}
 async function start() {
   const t = TARGET.exec(decodeURI(location.hash.slice(1)));
   if (!t) { fail('العنوان: #<profile>/<0x…address>[/path]'); return; }
@@ -73,6 +80,7 @@ async function start() {
   const port = chrome.runtime.connect({ name: 'bridge:' + r.sessionId });
   ctx = { name, site, sessionId: r.sessionId, port, files, frame: 0, current: null, entry: r.entry, version: r.version };
   port.onMessage.addListener(async (m) => {
+    if (m.hello !== undefined) { if (ctx.genId && ctx.genId !== m.hello) workerLost(); ctx.genId = m.hello; return; }
     if (m.ask !== undefined) { const ok = await confirmUI(m.q); port.postMessage({ answer: m.ask, ok }); return; }
     if (!ctx.current || m.frame !== ctx.current.frame) return; // replies to a torn-down frame are dropped (D99)
     if (m.navigate) {
@@ -83,7 +91,7 @@ async function start() {
     }
     ctx.current.channel.port1.postMessage({ seq: m.seq, reply: m.reply });
   });
-  port.onDisconnect.addListener(() => { teardown('انتهت الجلسة'); });
+  port.onDisconnect.addListener(workerLost);
   await mount(r.path, { storage: r.storage, notFound: r.notFound, requested: r.notFound ? path : undefined });
 }
 start().catch((e) => fail(String(e && e.message ? e.message : e)));

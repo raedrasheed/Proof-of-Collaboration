@@ -1,6 +1,6 @@
 // SiteStorage (browser.md D34/D96/D104): per (netKey, site) dictionary, literal
 // quota entry(k,v)=utf8len(k)+utf8len(v), SITE_STORE_MAX = 1048576 (equality ok),
-// SITE_ENTRIES_MAX = 4096, one atomic chrome.storage.local.set per accepted write.
+// SITE_ENTRIES_MAX = 4096, the records themselves live in records.js (D103).
 export const SITE_STORE_MAX = 1048576, SITE_ENTRIES_MAX = 4096;
 const u8 = (s) => new TextEncoder().encode(s).length;
 export const entry = (k, v) => u8(k) + u8(v);
@@ -15,22 +15,6 @@ export function apply(dict, method, params) {
   if (newTotal > SITE_STORE_MAX) return { error: { code: 4300, message: 'quota', data: { reason: 'quota', limit: SITE_STORE_MAX } } };
   if (!has && Object.keys(dict).length + 1 > SITE_ENTRIES_MAX) return { error: { code: 4300, message: 'entries', data: { reason: 'entries', limit: SITE_ENTRIES_MAX } } };
   next[k] = v; return { next };
-}
-export class SiteStorage {
-  constructor(area) { this.area = area; this.queues = new Map(); }
-  key(netKey, site) { return 'site:' + netKey + ':' + site.toLowerCase(); }
-  async load(netKey, site) { const k = this.key(netKey, site); const r = await this.area.get(k); return r[k] || {}; }
-  /** Serialized per storage key (StoreQueue); returns result or error object. */
-  write(netKey, site, method, params) {
-    const k = this.key(netKey, site); const prev = this.queues.get(k) || Promise.resolve();
-    const job = prev.then(async () => {
-      const dict = await this.load(netKey, site); const d = apply(dict, method, params);
-      if (d.error) return { error: d.error };
-      try { await this.area.set({ [k]: d.next }); } catch { return { error: { code: -32603, message: 'transport', data: { reason: 'transport' } } }; }
-      return { result: true };
-    });
-    this.queues.set(k, job.catch(() => {})); return job;
-  }
 }
 // StoreQueue admission (D101): qbytes = 64 + utf8len(k) + utf8len(v) (null -> 0), clear = 64.
 // Accepted iff session n+1 <= 8, session bytes <= 262144, global n+1 <= 64, global bytes <= 4194304
