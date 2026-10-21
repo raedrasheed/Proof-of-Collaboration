@@ -83,7 +83,12 @@ impl Node{
             let header=decode_header(&hb).map_err(|e|format!("record {i}: {e}"))?;
             let body=Body::decode(&bb,chain.spec.cp().BODY_MAX as usize).map_err(|e|format!("record {i}: {e}"))?;
             let block=Block{header,body};
-            let (entry,_)=chain.validate(&block,None,0).map_err(|e|format!("replay {i}: {e:?}"))?;
+            // Same rules as live import: a journaled fork child of a block below the K_hist window
+            // needs the TrieRebuild that import performed before journaling it.
+            let (entry,_)=match chain.validate(&block,None,0){
+                Err(Reject::NeedsRebuild(p))=>{chain.ensure_state(&p).map_err(|e|format!("replay {i}: rebuild {e:?}"))?;chain.validate(&block,None,0).map_err(|e|format!("replay {i}: {e:?}"))?}
+                r=>r.map_err(|e|format!("replay {i}: {e:?}"))?,
+            };
             if result_bytes(&entry.result)!=rb{return Err(format!("parentResultMismatch at record {i}"))}
             chain.insert(entry);
             if i%64==63{chain.retain();}

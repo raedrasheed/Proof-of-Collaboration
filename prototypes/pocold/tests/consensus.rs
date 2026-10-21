@@ -248,3 +248,26 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let eff=n2.chain.evidence_effects(&ph,&Body{txs:vec![],evidence:node.evidence_pool.clone()},2).unwrap();
     assert_eq!(eff,vec![apply::EvidenceEffect::Punish{accused:ctx.proposer}]);
 }
+
+#[test] fn journal_replay_rebuilds_pruned_state_for_a_journaled_fork(){
+    // LP10 finding: a node that imported a fork child of a block below the K_hist window
+    // (live TrieRebuild) must replay that journal; replay applies the same TrieRebuild.
+    use pocold::node::{Config,Node};
+    let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
+    let spec=|| Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes.clone(),profile:d.profile.clone(),genesis:devnet::build(&c).unwrap().genesis};
+    let dir=std::env::temp_dir().join(format!("pocold-replay-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let conf=||Config{dir:dir.clone(),name:"r".into(),miner:None,listen:None,peers:vec![],rpc:None,delta_rel:600,phi:100_000_000,gamma:1,stop_at:None,log:false};
+    let mut n=net();let mut hashes=vec![n.chain.head];
+    let mut node=Node::open(conf(),spec()).unwrap();
+    for _ in 0..70{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);node.import(b,None).unwrap();hashes.push(n.chain.head);}
+    node.chain.retain();
+    let fork_parent=hashes[3];
+    let mut m=net();for h in &hashes[1..=3]{let e=n.chain.blocks[h].clone();import(&mut m,&Block{header:e.header,body:e.body});}
+    let child=fallback(&m,fork_parent,1);let child_hash=child.hash();
+    assert!(node.chain.blocks[&fork_parent].pruned,"fork parent below the K_hist window");
+    node.import(child,None).expect("live import rebuilds the pruned parent");
+    let head=node.chain.head;drop(node);
+    let again=Node::open(conf(),spec()).expect("replay of a journal that contains a deep fork");
+    assert_eq!(again.chain.head,head);assert!(again.chain.get(&child_hash).is_some());
+    let _=std::fs::remove_dir_all(&dir);
+}
