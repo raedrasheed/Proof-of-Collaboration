@@ -2,8 +2,8 @@
 """Local PoCol devnet launcher (LP10). Starts N pocold processes on loopback.
 
 usage: devnet.py init  WORK --miners a,b,c [init-devnet flags...]
-       devnet.py start WORK [--stop-at H] [--log]
-       devnet.py stop  WORK
+       devnet.py start WORK [--stop-at H] [--log] [--only a,b]
+       devnet.py stop  WORK [--only a,b]
        devnet.py status WORK
        devnet.py rpc   WORK NODE METHOD [JSON_PARAMS]
 Ports: p2p 30300+i, rpc 8540+i (i = node index). Data in WORK/data/<label>.
@@ -28,6 +28,11 @@ def init(work, miners, extra):
     info = json.load(open(os.path.join(work, "net", "devnet.json")))
     info["miners_order"] = [{"label": l} for l in miners.split(",")]
     json.dump(info, open(os.path.join(work, "net", "devnet.json"), "w"), indent=1)
+    # Browser profile (browser.md D58/D77): the extension recomputes genesisHash from genesisPre.
+    spec_hex = open(os.path.join(work, "net", "genesis.spec.hex")).read().strip()
+    profile = {"name": "devnet", "chainId": info["chainId"], "genesisPre": spec_hex if spec_hex.startswith("0x") else "0x" + spec_hex,
+               "genesisHash": info["genesisHash"], "endpoint": "http://127.0.0.1:8540", "trustLevel": "RP"}
+    json.dump(profile, open(os.path.join(work, "net", "profile.json"), "w"), indent=1)
     print(out)
 
 def start(work, stop_at=None, log=False, only=None):
@@ -68,8 +73,8 @@ def status(work):
 if __name__ == "__main__":
     a = sys.argv
     if a[1] == "init": init(a[2], a[a.index("--miners")+1], [x for x in a[3:] if x not in ("--miners", a[a.index("--miners")+1])])
-    elif a[1] == "start": print(start(a[2], int(a[a.index("--stop-at")+1]) if "--stop-at" in a else None, "--log" in a))
-    elif a[1] == "stop": stop(a[2])
+    elif a[1] == "start": print(start(a[2], int(a[a.index("--stop-at")+1]) if "--stop-at" in a else None, "--log" in a, a[a.index("--only")+1].split(",") if "--only" in a else None))
+    elif a[1] == "stop": stop(a[2], a[a.index("--only")+1].split(",") if "--only" in a else None)
     elif a[1] == "status": print(json.dumps(status(a[2]), indent=1))
     elif a[1] == "rpc":
         i = labels(a[2]).index(a[3]); print(json.dumps(rpc(8540+i, a[4], json.loads(a[5]) if len(a) > 5 else []), indent=1))
