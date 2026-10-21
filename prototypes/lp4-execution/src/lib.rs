@@ -112,7 +112,9 @@ pub mod pay;
 pub mod native;
 
 pub mod collision;
-
+pub mod wire;
+pub mod receipts;
+pub mod fees;
 #[path="wire_rlp.rs"] #[allow(dead_code)] pub(crate) mod rlp;
 #[path="p1_fixed.rs"] #[allow(dead_code)] pub mod fixed;
 #[path="p1_trie.rs"] #[allow(dead_code)] pub(crate) mod trie;
@@ -121,6 +123,8 @@ pub(crate) mod hashes {
     pub type H256=[u8;32];
     pub fn keccak256(bytes:&[u8])->H256{revm::primitives::keccak256(bytes).0}
 }
+
+pub mod user_phase;
 
 // Byte-identical accepted LP3 identity and JSON primitives; no boot authorization.
 #[path="p1_profile.rs"] #[allow(dead_code)] pub mod profile;
@@ -135,11 +139,11 @@ pub mod code_caps;
 // No public SystemCall/block-admission API until validated phase integration.
 #[allow(dead_code)] pub(crate) mod system;
 
-// Byte-identical P3 primitives reused for internal atomic USER/SYS integration.
-#[allow(dead_code)] pub(crate) mod wire;
-#[allow(dead_code)] pub(crate) mod fees;
-#[allow(dead_code)] pub(crate) mod receipts;
-#[allow(dead_code)] pub(crate) mod user_phase;
+// P3 local pool and loopback RPC (merged from codex-lp4-p3-wire).
+pub mod pool;
+pub mod rpc_pool;
+pub mod rpc_http;
+
 #[allow(dead_code)] pub(crate) mod genesis_builder;
 
 #[allow(dead_code)] pub(crate) mod finality_core;
