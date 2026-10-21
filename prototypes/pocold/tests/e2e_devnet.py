@@ -111,9 +111,16 @@ def main():
         ok("SIGKILL crash: b restarts from its journal and rejoins", True, f"b={h(1,work)}")
         # Reach >= 100 blocks.
         wait(lambda: min(h(i, work) for i in range(3)) >= 100, 400, "100 blocks on all nodes")
-        time.sleep(3)
-        # Convergence on every height.
-        top = min(h(i, work) for i in range(3)) - 1
+        # Convergence on every height of the confirmed common prefix (>= 100). Equal-work tip forks
+        # (simultaneous seals while ASERT is easy after the partition/crash) resolve by D133 as soon
+        # as one branch is extended first, so the very tip is compared only once it is CONFIRM deep.
+        CONFIRM = 6
+        def common_top():
+            top = min(h(i, work) for i in range(3)) - CONFIRM
+            if top < 100: return None
+            return top if len({dn.rpc(8540 + i, "eth_getBlockByNumber", [hex(top), False])["hash"] for i in range(3)}) == 1 else None
+        wait(lambda: common_top() is not None, 300, "confirmed common prefix >= 100")
+        top = common_top() or min(h(i, work) for i in range(3)) - CONFIRM
         mism = []
         for n in range(1, top + 1):
             bs = [dn.rpc(8540 + i, "eth_getBlockByNumber", [hex(n), False]) for i in range(3)]
@@ -123,12 +130,29 @@ def main():
         ok("every miner produced blocks", all(s["mined"] > 0 for s in stats.values()), json.dumps({k: v["mined"] for k, v in stats.items()}))
         signed = sum(1 for n in range(1, top + 1) if dn.rpc(8540, "eth_getBlockByNumber", [hex(n), False])["pocol"]["signed"])
         ok("signed and fallback templates both occur", 0 < signed < top, f"signed={signed}/{top}")
-        # Full restart: deterministic replay to the same head.
-        heads = {l: dn.rpc(8540 + i, "pocol_status")["head"]["hash"] for i, l in enumerate("abc")}
+        # Full restart: deterministic replay. Each journal is replayed by a fresh process with no
+        # peers and no miner; the replayed canonical chain must contain the live head observed
+        # before the stop (a block imported between that read and SIGTERM may extend it), with the
+        # same stateRoot/receiptsRoot, and two independent replays must agree byte-for-byte.
+        live = {}
+        for i, l in enumerate("abc"):
+            hd = dn.rpc(8540 + i, "pocol_status")["head"]; b = dn.rpc(8540 + i, "eth_getBlockByNumber", [hex(hd["height"]), False])
+            live[l] = (hd["height"], b["hash"], b["stateRoot"], b["receiptsRoot"])
         dn.stop(work); time.sleep(2)
-        for l in "abc":
-            st = json.loads(subprocess.run([dn.BIN, "status", "--network", os.path.join(work, "net"), "--data", os.path.join(work, "data", l)], capture_output=True, text=True, check=True).stdout)
-            ok(f"replay of {l} reproduces its head", st["head"]["hash"] == heads[l], st["head"]["hash"][:14])
+        for i, l in enumerate("abc"):
+            port = 8540 + i
+            rp = subprocess.Popen([dn.BIN, "run", "--network", os.path.join(work, "net"), "--data", os.path.join(work, "data", l), "--name", l + "-replay", "--rpc", f"127.0.0.1:{port}"],
+                                  stdout=open(os.path.join(work, f"{l}-replay.log"), "ab"), stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                wait(lambda: dn.rpc(port, "pocol_status") is not None, 60, f"replay {l}")
+                hgt, hsh, sr, rr = live[l]; b = dn.rpc(port, "eth_getBlockByNumber", [hex(hgt), False])
+                rhead = dn.rpc(port, "pocol_status")["head"]
+                ok(f"replay of {l} reproduces its live head h={hgt} (hash/stateRoot/receiptsRoot)", (b["hash"], b["stateRoot"], b["receiptsRoot"]) == (hsh, sr, rr), f"replayed head h={rhead['height']}")
+            finally:
+                os.killpg(rp.pid, signal.SIGTERM); rp.wait()
+            st1 = subprocess.run([dn.BIN, "status", "--network", os.path.join(work, "net"), "--data", os.path.join(work, "data", l)], capture_output=True, text=True, check=True).stdout
+            st2 = subprocess.run([dn.BIN, "status", "--network", os.path.join(work, "net"), "--data", os.path.join(work, "data", l)], capture_output=True, text=True, check=True).stdout
+            ok(f"two independent replays of {l} agree", json.loads(st1)["head"] == json.loads(st2)["head"] and json.loads(st1)["head"]["hash"] == rhead["hash"], json.loads(st1)["head"]["hash"][:14])
         print(json.dumps({"result": "PASS", "checks": len(checks), "work": work}))
         return 0
     except Exception as e:

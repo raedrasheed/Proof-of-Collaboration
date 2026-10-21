@@ -1,5 +1,5 @@
 //! pocold — PoCol local development node (simnet devnets only).
-use pocold::{chain,node,types,load_spec};
+use pocold::{node,types,load_spec};
 use std::path::PathBuf;
 use pocol_lp4_execution::devnet;
 
