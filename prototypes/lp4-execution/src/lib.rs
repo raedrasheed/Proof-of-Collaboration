@@ -147,3 +147,8 @@ pub mod rpc_http;
 #[allow(dead_code)] pub(crate) mod genesis_builder;
 
 #[allow(dead_code)] pub(crate) mod finality_core;
+
+// Full block apply, devnet profiles and transaction signing (local devnet only).
+pub mod apply;
+pub mod devnet;
+pub mod txsign;

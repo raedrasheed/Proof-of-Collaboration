@@ -1275,6 +1275,7 @@ dependencies = [
  "elliptic-curve",
  "once_cell",
  "sha2",
+ "signature",
 ]
 
 [[package]]
@@ -1512,8 +1513,10 @@ dependencies = [
 name = "pocol-lp4-execution"
 version = "0.1.0"
 dependencies = [
+ "k256",
  "revm",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

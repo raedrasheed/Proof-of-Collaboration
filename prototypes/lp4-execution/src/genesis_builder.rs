@@ -74,4 +74,5 @@ pub(crate) fn world_root(db:&InMemoryDB)->Result<B256,GenesisError>{
   accounts.push(crate::trie::Account{address:address.0.0,nonce:info.nonce,balance:num(info.balance),storage_root:crate::trie::storage_root(&slots,slots.len()).map_err(|_|GenesisError::Root)?,code_hash:info.code_hash.0});
  }crate::trie::state_root(&accounts,accounts.len()).map(B256::from).map_err(|_|GenesisError::Root)
 }
+pub(crate) fn construct_root(alloc:&InMemoryDB,p:&ProfileIdentity,programs:&[Bytes;5])->Result<B256,GenesisError>{Ok(construct(alloc,p,programs)?.root)}
 #[cfg(test)]pub(crate) fn derive_fixture_root(alloc:&InMemoryDB,p:&ProfileIdentity,programs:&[Bytes;5])->Result<B256,GenesisError>{Ok(construct(alloc,p,programs)?.root)}
