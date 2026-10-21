@@ -103,6 +103,7 @@ pub struct BlockOutput{
     pub system_gas:u64,
     pub is_final:bool,
     pub facts:ChainFacts,
+    pub meter:Meter,
 }
 
 /// Parent-state facts used by consensus (finality, closing, membership).
@@ -176,7 +177,11 @@ impl Genesis{
     pub fn initial_supply(&self)->U256{self.image.initial_supply()}
 }
 
-struct Exec<'a>{state:InMemoryDB,profile:&'a ProfileIdentity,block:NativeBlockContext,origin:Address,used:u64,limits:CodeLimits}
+struct Exec<'a>{state:InMemoryDB,profile:&'a ProfileIdentity,block:NativeBlockContext,origin:Address,used:u64,limits:CodeLimits,meter:Meter}
+/// CapsTracker (P7): distinct storage keys changed and accounts touched by SYSTEM
+/// calls in one block, plus the largest single-call gas.
+#[derive(Clone,Debug,Default)]
+pub struct Meter{pub keys:std::collections::HashSet<(Address,U256)>,pub accounts:std::collections::HashSet<Address>,pub max_call_gas:u64,pub calls:u32}
 impl<'a> Exec<'a>{
     fn call(&mut self,name:&'static str,to:Address,data:Vec<u8>)->Result<Bytes,ApplyError>{
         let err=|d:String|ApplyError::System{call:name,detail:d};
@@ -198,6 +203,8 @@ impl<'a> Exec<'a>{
         if self.used>self.profile.cp().G_SYS{return Err(ApplyError::Budget("G_SYS"))}
         let (state,logs)=evm.context.evm.journaled_state.finalize();
         if !logs.is_empty(){return Err(ApplyError::Logs)}
+        for (a,acct) in state.iter(){ if acct.is_touched(){self.meter.accounts.insert(*a);} for (k,v) in acct.storage.iter(){ if v.is_changed(){self.meter.keys.insert((*a,*k));} } }
+        self.meter.max_call_gas=self.meter.max_call_gas.max(result.gas.spent());self.meter.calls+=1;
         commit_epoch(&mut self.state,state);
         code_caps::validate_snapshot(&self.state,self.limits).map_err(ApplyError::Caps)?;
         Ok(result.output)
@@ -241,7 +248,7 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
         state.block_hashes.insert(U256::from(*n),*hash);
     }
     let block=NativeBlockContext{height:U256::from(h),timestamp:U256::from(input.timestamp),gas_limit:U256::from(input.gas_limit),base_fee:input.base_fee,prevrandao:input.prevrandao};
-    let mut ex=Exec{state,profile,block,origin,used:0,limits};
+    let mut ex=Exec{state,profile,block,origin,used:0,limits,meter:Meter::default()};
 
     // Phase 0.
     for e in &input.evidence{
@@ -280,8 +287,15 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
         let mut d=selector("closeBlock(uint256)");enc_u256(&mut d,tips);ex.call("closeBlock",escrow(),d)?;
     }else{
         let mut d=selector("finalize(uint256)");enc_u256(&mut d,tips);ex.call("finalize",escrow(),d)?;
+        // LP4-FINAL-01: one SYSTEM call per remaining pot j in [F-D+1, F-1].
+        let start=if h>u64::from(cp.D){h-u64::from(cp.D)+1}else{1};
+        for j in start..h{ if pending(&ex.state,j).1!=U256::ZERO{let mut d=selector("settleFinal(uint256)");enc_u256(&mut d,U256::from(j));ex.call("settleFinal",escrow(),d)?;} }
     }
     let system_gas=ex.used;
+    // R18 per-block SYS caps (CapsTracker): distinct keys and accounts.
+    if ex.meter.keys.len() as u64>u64::from(cp.SYS_KEYS_BLOCK_MAX){return Err(ApplyError::Budget("SYS_KEYS_BLOCK_MAX"))}
+    if ex.meter.accounts.len() as u64>u64::from(cp.SYS_ACCT_BLOCK_MAX){return Err(ApplyError::Budget("SYS_ACCT_BLOCK_MAX"))}
+    let meter=ex.meter.clone();
     let state=ex.state;
     genesis.image.verify_candidate(&state,profile).map_err(|e|ApplyError::Genesis(format!("candidate {e:?}")))?;
     check_escrow_invariant(&state,profile,h,is_final)?;
@@ -292,7 +306,7 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
     let state_root=state_root(&state)?;
     let facts=chain_facts(&state);
     Ok(BlockOutput{state,state_root,transactions_root:c.transactions_root,receipts_root:c.receipts_root,evidence_root,logs_bloom:c.logs_bloom,gas_used:c.gas_used,
-        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts})
+        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter})
 }
 
 /// T17: Escrow surplus = balance-(Σpending+heldTotal+burnedTotal) >= 0, and

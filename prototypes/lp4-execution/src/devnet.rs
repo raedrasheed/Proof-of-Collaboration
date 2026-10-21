@@ -18,6 +18,8 @@ pub struct DevnetConfig{
     pub h_end:u64,pub h_close:u64,pub t_end_offset:u64,pub t_close_offset:u64,pub ret:u32,pub p2:u32,
     pub m_max:u16,
     pub alpha_bp:u16,pub gamma_bp:u16,
+    /// nonceMode=0 bound multiplier: nMax=min(2^64, c·work(target)).
+    pub c:u8,
     pub miners:Vec<String>,
     /// Extra funded devnet accounts (label, wei).
     pub accounts:Vec<(String,U256)>,
@@ -26,14 +28,14 @@ impl DevnetConfig{
     pub fn new(chain_id:u64,g_ts:u64,miners:&[&str])->Self{
         Self{chain_id,g_ts,target_g:to_fixed((U256::from(1)<<(256-18))-U256::from(1)),
             t_blk:2,tau:40,d_att:10,d_fb_wait:1,d:4,w_w:8,m:32,kappa:2,s_max:256,
-            w_act:32,theta_inact:64,e_win:16,u:40,h_end:100_000,h_close:99_000,t_end_offset:10_000_000,t_close_offset:9_990_000,ret:128,p2:2,m_max:64,alpha_bp:1000,gamma_bp:500,
+            w_act:32,theta_inact:64,e_win:16,u:40,h_end:100_000,h_close:99_000,t_end_offset:10_000_000,t_close_offset:9_990_000,ret:128,p2:2,m_max:64,alpha_bp:1000,gamma_bp:500,c:2,
             miners:miners.iter().map(|s|s.to_string()).collect(),
             accounts:vec![("alice".into(),U256::from(10u128.pow(24))),("bob".into(),U256::from(10u128.pow(24)))]}
     }
     pub fn cp(&self)->[fixed::U256;52]{
         let n=|v:u64|fixed::U256::from_u64(v);
         let big=|v:u128|fixed::U256::from_be_slice(&v.to_be_bytes()).unwrap();
-        [n(self.g_ts),self.target_g,n(self.t_blk.into()),n(self.tau.into()),n(0),n(2),n(self.d_att.into()),n(self.d_fb_wait.into()),
+        [n(self.g_ts),self.target_g,n(self.t_blk.into()),n(self.tau.into()),n(0),n(self.c.into()),n(self.d_att.into()),n(self.d_fb_wait.into()),
          n(self.m.into()),n(self.kappa.into()),n(self.s_max.into()),n(self.d.into()),n(self.w_w.into()),n(self.alpha_bp.into()),n(self.gamma_bp.into()),
          big(2_000_000_000_000_000_000),big(100_000_000_000_000_000_000),n(2),n(self.m_max.into()),n(1),n(8192),n(16),n(64),n(16),
          n(self.w_act.into()),n(self.theta_inact.into()),n(self.e_win.into()),n(self.u.into()),n(4),n(8192),

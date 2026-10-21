@@ -10,13 +10,17 @@ pragma solidity 0.8.28;
 // None of these programs emits a LOG.
 
 interface ICaps { function get(uint256 n) external view returns(uint256); }
-interface IRegistryV1 { function bondRecord(address id) external view returns(uint256,address,uint256); }
+interface IRegistryV1 {
+    function bondRecord(address id) external view returns(uint256,address,uint256);
+    function payInfos(address[] calldata ids) external view returns(address[] memory rewards);
+}
 interface IEscrowV1 { function releaseBond(address id) external; function burnBond(uint256 amount) external; }
 interface ILedgerV1 {
     function record(uint64 j,address[] calldata seq) external;
     function totalOf(uint64 j) external view returns(uint256);
     function countOf(uint64 j,address a) external view returns(uint256);
     function ownersOf(uint64 j) external view returns(address[] memory);
+    function entriesOf(uint64 j) external view returns(address[] memory,uint256[] memory,uint256);
 }
 
 library Sys {
@@ -52,6 +56,11 @@ contract ShareLedger {
     function totalOf(uint64 j) external view returns(uint256){return total[j];}
     function countOf(uint64 j,address a) external view returns(uint256){return count[j][a];}
     function ownersOf(uint64 j) external view returns(address[] memory){return owners[j];}
+    /// One call for settlement: distinct owners, their counts and the total.
+    function entriesOf(uint64 j) external view returns(address[] memory list,uint256[] memory counts,uint256 t){
+        list=owners[j];counts=new uint256[](list.length);t=total[j];
+        for(uint256 i;i<list.length;i++) counts[i]=count[j][list[i]];
+    }
 
     /// CALLER=Registry only. Exactly selector||j||0x40||N||N addresses (100+32N bytes).
     function record(uint64 j,address[] calldata) external {
@@ -97,7 +106,7 @@ contract ShareLedger {
 }
 
 /// Pending pots, bond bridge, settlement and finalization (M1 incentives.md).
-/// Layout: slot0 burnedTotal; pending[j] at keccak(be256(j)||be256(3))+k,
+/// Layout: slot0 burnedTotal; slot1 final height F (set only by finalize); pending[j] at keccak(be256(j)||be256(3))+k,
 /// k=0 amount, k=1 meta = proposer<<8 | kind (0 signed, 1 fallback) | INVALID<<168,
 /// k=2 winner (zero until recordResult).
 contract RewardEscrow {
@@ -156,15 +165,21 @@ contract RewardEscrow {
         if(block.number<=d || j!=block.number-d) revert BadSystemCall();
         settleOne(j);
     }
-    /// Phase 2 of the final block F: no pending[F]; tips burned; all remaining pots settled.
+    /// Phase 2 of the final block F: no pending[F]; tips burned (finalBurn). Marks
+    /// F in slot1 so that each remaining pot is settled by its own SYSTEM call
+    /// settleFinal(j) (LP4-FINAL-01: keeps every call within the 30M per-call cap).
     function finalize(uint256 tips) external {
         sys(36);
         uint256 h=block.number; uint256 b=base(h);
-        if(get(b)!=0||get(b+1)!=0||get(b+2)!=0) revert BadPending();
-        put(0,get(0)+tips);
-        uint256 d=Sys.cfg(11);
-        uint256 start=h>d?h-d+1:1;
-        for(uint256 j=start;j<h;j++) settleOne(j);
+        if(get(b)!=0||get(b+1)!=0||get(b+2)!=0||get(1)!=0) revert BadPending();
+        put(0,get(0)+tips); put(1,h);
+    }
+    function settleFinal(uint256 j) external {
+        sys(36);
+        uint256 h=block.number; if(get(1)!=h) revert BadSystemCall();
+        uint256 d=Sys.cfg(11); uint256 start=h>d?h-d+1:1;
+        if(j<start||j>=h) revert BadSystemCall();
+        settleOne(j);
     }
     function settleOne(uint256 j) internal {
         uint256 b=base(j); uint256 amount=get(b); uint256 meta=get(b+1);
@@ -186,14 +201,15 @@ contract RewardEscrow {
     /// R split: p_i=floor(R*c_i/Q), A=floor(R*C/Q), Q=max(C,kappa*m);
     /// baseBurn=R-A, roundBurn=A-sum(p_i). Returns all burned value of R.
     function distribute(uint256 j,uint256 r) internal returns(uint256 burned) {
-        uint256 c=ILedgerV1(Sys.LEDGER).totalOf(uint64(j));
+        (address[] memory list,uint256[] memory counts,uint256 c)=ILedgerV1(Sys.LEDGER).entriesOf(uint64(j));
         if(c==0) revert BadPending();
         uint256 q=Sys.cfg(9)*Sys.cfg(8); if(c>q) q=c;
-        address[] memory list=ILedgerV1(Sys.LEDGER).ownersOf(uint64(j));
+        address[] memory rewards=IRegistryV1(Sys.REGISTRY).payInfos(list);
         uint256 sum;
         for(uint256 i;i<list.length;i++){
-            uint256 p=r*ILedgerV1(Sys.LEDGER).countOf(uint64(j),list[i])/q;
-            sum+=p; burned+=payTo(list[i],p);
+            uint256 p=r*counts[i]/q; sum+=p;
+            if(p==0) continue;
+            if(rewards[i]==address(0) || !Sys.pay(rewards[i],p)) burned+=p;
         }
         uint256 a=r*c/q;
         burned+=(r-a)+(a-sum);
@@ -238,6 +254,12 @@ contract MinerRegistry {
     function held(uint256 w) internal pure returns(bool){return (w&255)!=0 && ((w>>8)&255)==0 && ((w>>16)&255)==1;}
     function system() internal view {if(msg.sender!=Sys.SYSTEM)revert Unauthorized();if(msg.data.length!=4)revert BadCalldata();}
     function bondRecord(address id) external view returns(uint256,address,uint256){uint256 r=rec(id);return(get(r),address(uint160(get(r+1))),get(r+2));}
+    /// Settlement payees: reward address of each live record; zero for an absent
+    /// record (payBurn) or a tomb (penaltyBurn). Two SLOADs per id.
+    function payInfos(address[] calldata ids) external view returns(address[] memory rewards){
+        rewards=new address[](ids.length);
+        for(uint256 i;i<ids.length;i++){uint256 r=rec(ids[i]);uint256 w=get(r);if(w!=0&&((w>>8)&255)==0)rewards[i]=address(uint160(get(r+1)));}
+    }
     function recordWords(address id) external view returns(uint256,uint256,uint256,uint256){uint256 r=rec(id);return(get(r),get(r+1),get(r+2),get(r+3));}
     function lengths() external view returns(uint256,uint256,uint256,uint256){return(get(0),get(1),get(2),get(4));}
     function counters() external view returns(uint256){return get(3);}

@@ -152,3 +152,4 @@ pub mod rpc_http;
 pub mod apply;
 pub mod devnet;
 pub mod txsign;
+pub mod resources;

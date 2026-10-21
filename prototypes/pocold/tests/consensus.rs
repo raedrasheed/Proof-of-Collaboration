@@ -7,7 +7,7 @@ use pocol_lp4_execution::{apply,devnet::{self,DevnetConfig},txsign::{Key,Tx}};
 use revm::primitives::{Address,B256,U256};
 
 struct Net{chain:Chain,keys:HashMap<Address,Key>}
-fn cfg(miners:&[&str])->DevnetConfig{let mut c=DevnetConfig::new(777910,1_800_000_000,miners);c.target_g=devnet::to_fixed((U256::from(1)<<244)-U256::from(1));c.d_att=10;c.tau=40;c}
+fn cfg(miners:&[&str])->DevnetConfig{let mut c=DevnetConfig::new(777910,1_800_000_000,miners);c.target_g=devnet::to_fixed((U256::from(1)<<244)-U256::from(1));c.d_att=10;c.tau=40;c.c=8;c}
 fn net_with(c:&DevnetConfig)->Net{
     let d=devnet::build(c).unwrap();let mut keys=HashMap::new();
     for m in &d.miners{keys.insert(m.id,Key::from_secret(&m.key.secret()).unwrap());}
@@ -89,7 +89,7 @@ fn reference_best(n:&Net)->[u8;32]{
     import(&mut n,&fb);assert_eq!(n.chain.head,fb.hash());
     assert!(import(&mut n,&sg),"signed sibling wins the tie");assert_eq!(n.chain.head,sg.hash());assert_eq!(n.chain.head,reference_best(&n));
     // Two fallback siblings at h=6 (different attempts): earlier import wins the tie
-    let fb1=fallback(&n,base,1);
+    let fb1=fallback(&n,base,fb.header.a+1);
     if n.chain.blocks[&base].total_work+pocold::chain::work(&fb1.header.target)==n.chain.blocks[&sg.hash()].total_work{import(&mut n,&fb1);assert_eq!(n.chain.head,sg.hash());}
     else{import(&mut n,&fb1);}
     assert_eq!(n.chain.head,reference_best(&n));
@@ -199,4 +199,19 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let s=&n.chain.head().state;for j in 1..=9{assert_eq!(apply::pending(s,j).1,U256::ZERO);}
     let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();
     assert!(n.chain.build_fallback(&p,0).is_err(),"no valid child above H_END/final");
+}
+
+#[test] fn k_hist_retention_and_trie_rebuild_for_deep_fork(){
+    let mut n=net();n.chain.k_hist=4;let mut hashes=vec![n.chain.head];
+    for _ in 0..12{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);n.chain.retain();hashes.push(n.chain.head);}
+    let pruned:Vec<u64>=n.chain.blocks.values().filter(|e|e.pruned).map(|e|e.height).collect();
+    assert!(pruned.iter().all(|h|*h>=1&&*h<=8)&&pruned.len()==8,"{pruned:?}");
+    // A fork child of pruned height 3 needs TrieRebuild; the rebuilt state matches the committed root.
+    let fork_parent=hashes[3];
+    let mut m=net();for h in &hashes[1..=3]{let e=n.chain.blocks[h].clone();import(&mut m,&Block{header:e.header,body:e.body});}
+    let child=fallback(&m,fork_parent,1);
+    assert_eq!(n.chain.validate(&child,None,0).err(),Some(Reject::NeedsRebuild(fork_parent)));
+    n.chain.ensure_state(&fork_parent).unwrap();assert!(n.chain.rebuilds>=3);
+    let (e,_)=n.chain.validate(&child,None,0).unwrap();n.chain.insert(e);
+    assert_eq!(apply::state_root(&n.chain.blocks[&fork_parent].state).unwrap().0,n.chain.blocks[&fork_parent].header.state_root);
 }

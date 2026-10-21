@@ -38,6 +38,10 @@ pub struct Entry{
     pub tx_hashes:Vec<B256>,
     pub cum_txs:u64,
     pub cum_tx_bytes:u64,
+    /// R21: state dropped outside the K_hist window; rebuilt by re-execution on demand.
+    pub pruned:bool,
+    /// Draw(h,0) for this block's height on its branch (evidence type 1 DrawIndex).
+    pub drawn:Address,
 }
 
 /// Everything a child of `p` at attempt `a` needs, derived only from p and its state.
@@ -63,6 +67,8 @@ pub enum Reject{
     /// Committed-content violation (blockReject): the blockHash and descendants are invalid.
     Block(String),
     UnknownParent,
+    /// Parent state outside the K_hist window: TrieRebuild, then retry.
+    NeedsRebuild([u8;32]),
     Future,
     Duplicate,
 }
@@ -74,6 +80,9 @@ pub struct Chain{
     pub head:[u8;32],
     pub canonical:Vec<[u8;32]>,
     next_seq:u64,
+    /// R21 window: full states kept for heights > head-K_hist (and genesis).
+    pub k_hist:u64,
+    pub rebuilds:u64,
     /// Invalid committed contents (blockReject) never re-validated.
     pub invalid:HashMap<[u8;32],String>,
     /// tid -> (proposer, parent, h) for equivocation detection (evidence type 1).
@@ -89,9 +98,9 @@ impl Chain{
         let mut h=blank_header();h.chain_id=spec.chain_id();h.genesis_hash=gh;h.ts=cp.g_ts;h.target=spec.target_g();
         let genesis=Entry{hash:gh,header:h,body:Body::default(),height:0,parent:None,total_work:U256::ZERO,import_seq:0,signed:false,ts:cp.g_ts,
             target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis.state().clone(),is_final:false,result:None,
-            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0};
+            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,pruned:false,drawn:Address::ZERO};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
-        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,invalid:HashMap::new(),seen_templates:BTreeMap::new()}
+        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist:32,rebuilds:0,invalid:HashMap::new(),seen_templates:BTreeMap::new()}
     }
     pub fn head(&self)->&Entry{&self.blocks[&self.head]}
     pub fn get(&self,h:&[u8;32])->Option<&Entry>{self.blocks.get(h)}
@@ -180,8 +189,10 @@ impl Chain{
         if x.chain_id!=self.spec.chain_id(){return blk("netChain")}
         if x.genesis_hash!=self.spec.genesis_hash{return blk("netGenesis")}
         if x.protocol_version!=self.spec.active_version(x.h){return blk("netVersion")}
-        let p=self.blocks.get(&x.parent_hash).ok_or(Reject::UnknownParent)?;
+        if !self.blocks.contains_key(&x.parent_hash){return Err(Reject::UnknownParent)}
         if let Some(r)=self.invalid.get(&x.parent_hash){return blk(format!("ancestorInvalid {r}"))}
+        if self.blocks[&x.parent_hash].pruned{return Err(Reject::NeedsRebuild(x.parent_hash))}
+        let p=&self.blocks[&x.parent_hash];
         // 2. linkage and H_END.
         if x.h!=p.height+1{return blk("2 height")}
         if x.h>cp.H_END{return blk("10a H_END")}
@@ -238,7 +249,7 @@ impl Chain{
         let entry=Entry{hash,header:x.clone(),body:b.body.clone(),height:x.h,parent:Some(p.hash),total_work:p.total_work.saturating_add(work(&x.target)),
             import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,
             result:Some(ParentResult{block_hash:B256::from(hash),winner:addr(&owner),shares}),receipts:out.receipts,tx_hashes,
-            cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes};
+            cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,pruned:false,drawn:ctx.proposer};
         Ok((entry,ctx))
     }
 
@@ -280,8 +291,9 @@ impl Chain{
         let r2=hashes::recover_address(&hashes::sig_msg(&template_id(&u2.ut_raw)),&s2).map_err(|_|Reject::Block("ev1 sig2".into()))?;
         if r1!=r2{return blk("ev1 signers differ")}
         // DrawIndex: the signer must be Draw(h,0) for that parent on this branch.
-        let parent=self.ancestor_at(p,u1.h-1).filter(|e|e.hash==u1.parent_hash).ok_or_else(||Reject::Block("ev1 parent not on branch".into()))?;
-        let m=self.membership(parent,u1.h)?;if self.draw(parent,&m,u1.h)?[..]!=r1[..]{return blk("ev1 signer not drawn")}
+        let drawn=if u1.h==p.height+1{ if u1.parent_hash!=p.hash{return blk("ev1 parent not on branch")} let m=self.membership(p,u1.h)?;self.draw(p,&m,u1.h)? }
+            else{ let at=self.ancestor_at(p,u1.h).filter(|e|e.parent==Some(u1.parent_hash)).ok_or_else(||Reject::Block("ev1 height not on branch".into()))?;at.drawn };
+        if drawn[..]!=r1[..]{return blk("ev1 signer not drawn")}
         Ok((addr(&r1),None))
     }
     fn evidence_type2(&self,p:&Entry,f:&[crate::rlp::Item<'_>],h_incl:u64)->Result<(Address,Option<u64>),Reject>{
@@ -298,9 +310,10 @@ impl Chain{
         while let Some(e)=cur{
             if e.height==0||e.height+u64::from(self.spec.cp().E_win)<h_incl{break}
             if template_id(&e.header.ut_raw)==tid{
-                let gp=self.blocks.get(&e.parent.unwrap()).unwrap();let ctx=self.child_ctx(gp,e.header.a)?;
-                let owner=ctx.assignment.owner(nonce).ok_or_else(||Reject::Block("ev2 owner".into()))?;
-                if owner!=a1{return blk("ev2 signer not owner(nonce)")}
+                // owner(nonce) of the committed block is its recorded winner (D142).
+                if e.header.nonce!=nonce{return blk("ev2 nonce is not the block nonce")}
+                let owner=e.result.as_ref().map(|r|r.winner).ok_or_else(||Reject::Block("ev2 owner".into()))?;
+                if owner.0.0!=a1{return blk("ev2 signer not owner(nonce)")}
                 return Ok((addr(&a1),Some(e.height)));
             }
             cur=e.parent.and_then(|x|self.blocks.get(&x));
@@ -316,6 +329,26 @@ impl Chain{
         better
     }
     pub fn mark_invalid(&mut self,hash:[u8;32],why:String){self.invalid.insert(hash,why);}
+    /// R21 retention: drop states of blocks at height <= head-K_hist (genesis kept).
+    pub fn retain(&mut self){
+        let cut=self.head().height.saturating_sub(self.k_hist);
+        for e in self.blocks.values_mut(){ if e.height>0&&e.height<=cut&&!e.pruned{e.state=InMemoryDB::default();e.pruned=true;} }
+    }
+    /// TrieRebuild: re-executes from the nearest retained ancestor and checks
+    /// every stateRoot against the committed header.
+    pub fn ensure_state(&mut self,hash:&[u8;32])->Result<(),Reject>{
+        let mut path=vec![];let mut cur=*hash;
+        while self.blocks.get(&cur).map(|e|e.pruned).unwrap_or(false){path.push(cur);cur=self.blocks[&cur].parent.ok_or_else(||Reject::Block("rebuild root".into()))?;}
+        for h in path.into_iter().rev(){
+            let e=self.blocks[&h].clone();let p=self.blocks[&e.parent.unwrap()].clone();
+            let ctx=self.child_ctx(&p,e.header.a)?;let effects=self.evidence_effects(&p,&e.body,e.height)?;
+            let proposer=if e.signed{Proposer::Signed(Address::from_slice(&e.header.proposer))}else{Proposer::Fallback};
+            let out=self.execute(&p,&ctx,e.ts,proposer,&e.body,effects)?;
+            if out.state_root.0!=e.header.state_root{return blk("rebuild stateRoot mismatch")}
+            let x=self.blocks.get_mut(&h).unwrap();x.state=out.state;x.pruned=false;self.rebuilds+=1;
+        }
+        Ok(())
+    }
     fn key(&self,h:&[u8;32])->(u8,u64,[u8;32]){let e=&self.blocks[h];(if e.signed{0}else{1},e.import_seq,e.hash)}
     /// t1 ≻ t2: greater W, or equal W and smaller key at the children of the LCA.
     pub fn better(&self,t1:&[u8;32],t2:&[u8;32])->bool{

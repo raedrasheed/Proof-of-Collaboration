@@ -131,7 +131,9 @@ impl Node{
     /// Validates, journals (fsync) and inserts a block. Returns Ok(true) if new head.
     pub fn import(&mut self,b:Block,from:Option<PeerId>)->Result<bool,Reject>{
         let hash=b.hash();
-        let res=self.chain.validate(&b,Some(now_s()),self.cfg.phi);
+        let mut res=self.chain.validate(&b,Some(now_s()),self.cfg.phi);
+        if let Err(Reject::NeedsRebuild(p))=&res{let p=*p;self.log("TrieRebuild for a fork below the K_hist window");
+            if let Err(e)=self.chain.ensure_state(&p){return Err(e)}res=self.chain.validate(&b,Some(now_s()),self.cfg.phi);}
         let (entry,_)=match res{
             Ok(v)=>v,
             Err(Reject::UnknownParent)=>{
@@ -148,7 +150,7 @@ impl Node{
         if let Err(e)=self.journal.append(&record){self.log(&format!("FATAL journal append: {e:?}"));std::process::exit(70);}
         self.received.insert(hash,now_ms());
         let old_head=self.chain.head;
-        let new_head=self.chain.insert(entry);self.stats.imported+=1;
+        let new_head=self.chain.insert(entry);self.stats.imported+=1;self.chain.retain();
         self.broadcast(&Msg::Block{header:b.header.encoded.clone(),body:b.body.encode()},from);
         if new_head{
             if self.chain.get(&self.chain.head).and_then(|e|e.parent)!=Some(old_head){self.stats.reorgs+=1;}

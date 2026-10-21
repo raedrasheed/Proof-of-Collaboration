@@ -171,7 +171,7 @@ impl Sv{
     fn settle(&mut self,j:u64)->U256{
         let d=u64::from(self.net.profile.cp().D);let before=chain_facts(&self.state).burned_total;
         let block=NativeBlockContext{height:U256::from(j+d),timestamp:U256::from(1_800_000_100u64),gas_limit:U256::from(8_000_000u64),base_fee:U256::ZERO,prevrandao:B256::ZERO};
-        let cp=self.net.profile.cp();let mut ex=Exec{state:self.state.clone(),profile:&self.net.profile,block,origin:Address::ZERO,used:0,limits:CodeLimits{runtime:cp.B_code_max,logical:cp.CODE_CAP}};
+        let cp=self.net.profile.cp();let mut ex=Exec{state:self.state.clone(),profile:&self.net.profile,block,origin:Address::ZERO,used:0,limits:CodeLimits{runtime:cp.B_code_max,logical:cp.CODE_CAP},meter:Meter::default()};
         let mut data=selector("settle(uint256)");enc_u256(&mut data,U256::from(j));ex.call("settle",escrow(),data).unwrap();
         let after=chain_facts(&ex.state).burned_total;self.state=ex.state;after-before
     }

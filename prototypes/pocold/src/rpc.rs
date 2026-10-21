@@ -83,7 +83,9 @@ fn block_by_tag<'a>(n:&'a Node,tag:&Value)->Option<&'a Entry>{
 }
 fn state_for<'a>(n:&'a Node,tag:&Value)->Result<&'a revm::InMemoryDB,(i64,String)>{
     if tag.as_str()==Some("pending"){return Ok(&n.pool_state())}
-    block_by_tag(n,tag).map(|e|&e.state).ok_or((-32001,"unknown block".into()))
+    let e=block_by_tag(n,tag).ok_or((-32001,"unknown block".to_string()))?;
+    if e.pruned{return Err((-32017,"state outside the retained trie window (K_hist)".into()))}
+    Ok(&e.state)
 }
 fn call(n:&mut Node,m:&str,p:&[Value])->R{
     let cp=n.chain.spec.cp();
@@ -159,7 +161,7 @@ fn simulate(n:&Node,o:&Value,tag:&Value,gas:Option<u64>)->Result<ExecutionResult
     let mut st=e.state.clone();
     // eth_call simulation: fund the caller for value transfers, never committed.
     if let Some(a)=st.accounts.get_mut(&tx.caller){a.info.balance=a.info.balance.max(tx.value);}
-    native::execute_in_context(&st,tx,&ctx).map(|r|r.result).map_err(|e|(-32000,format!("{e:?}")))
+    native::execute_for_profile(&st,tx,&ctx,&n.chain.spec.profile).map(|r|r.result).map_err(|e|(-32000,format!("{e:?}")))
 }
 fn find_tx<'a>(n:&'a Node,h:&B256)->Option<(&'a Entry,usize)>{
     for x in n.chain.canonical.iter().rev(){let e=&n.chain.blocks[x];if let Some(i)=e.tx_hashes.iter().position(|t|t==h){return Some((e,i))}}None

@@ -11,6 +11,7 @@
 #[path="../../lp1-node/src/asert.rs"] #[allow(dead_code)] pub mod asert;
 #[path="../../lp1-node/src/assignment.rs"] #[allow(dead_code)] pub mod assignment;
 #[path="../../lp1-node/src/timing.rs"] #[allow(dead_code)] pub mod timing;
+pub mod site;
 pub mod types;pub mod chain;pub mod store;pub mod miner;pub mod net;pub mod node;pub mod rpc;
 
 use pocol_lp4_execution::devnet;
