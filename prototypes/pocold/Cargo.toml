@@ -12,7 +12,8 @@ revm = { version = "=19.7.0", features = ["serde"] }
 serde_json = "=1.0.145"
 sha2 = "=0.9.9"
 sha3 = "=0.9.1"
-libsecp256k1 = "=0.5.0"
+# k256 (as in lp4-execution) replaces the unmaintained libsecp256k1 0.5.0 in the shared hashes.rs (audit 2026-10-22).
+k256 = { version = "=0.13.4", features = ["ecdsa"] }
 
 [profile.release]
 debug = 1

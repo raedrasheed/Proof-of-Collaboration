@@ -125,12 +125,14 @@ pub fn check_sig_shape(sig: &[u8]) -> Result<([u8; 64], u8), SigFault> {
 /// Recovers the 20-byte address keccak(pub64)[12..] that produced `sig` over `msg`.
 pub fn recover_address(msg: &H256, sig: &[u8]) -> Result<[u8; 20], SigFault> {
     let (rs, v) = check_sig_shape(sig)?;
-    let m = libsecp256k1::Message::parse(msg);
-    let s = libsecp256k1::Signature::parse_standard_slice(&rs).map_err(|_| SigFault::RRange)?;
-    let id = libsecp256k1::RecoveryId::parse(v).map_err(|_| SigFault::BadV)?;
-    let pk = libsecp256k1::recover(&m, &s, &id).map_err(|_| SigFault::NotRecoverable)?;
-    let ser = pk.serialize();
-    let k = keccak256(&ser[1..]);
+    // k256 replaces the unmaintained libsecp256k1 0.5.0 (audit 2026-10-22, dependency review):
+    // same verdicts and addresses on 151,463 vectors behind this shape filter, and identical
+    // RFC 6979 signatures (development/audit-2026-10-22/evidence/secp-equivalence.md).
+    let s = k256::ecdsa::Signature::from_slice(&rs).map_err(|_| SigFault::RRange)?;
+    let id = k256::ecdsa::RecoveryId::from_byte(v).ok_or(SigFault::BadV)?;
+    let pk = k256::ecdsa::VerifyingKey::recover_from_prehash(msg, &s, id).map_err(|_| SigFault::NotRecoverable)?;
+    let ser = pk.to_encoded_point(false);
+    let k = keccak256(&ser.as_bytes()[1..]);
     let mut a = [0u8; 20];
     a.copy_from_slice(&k[12..]);
     Ok(a)
