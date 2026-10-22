@@ -21,10 +21,23 @@
    },
    "affectedCode": "prototypes/pocold/src/types.rs ordered_root; chain.rs validate; node.rs import/mark_invalid",
    "plannedRepair": "see REPAIR-PLAN.md#a01",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "ac3a951",
+    "d132203"
+   ],
+   "verification": [
+    "pocold consensus::a01_malformed_or_unbound_bodies_reject_only_the_copy (7 unbound copies, then the real body becomes head)",
+    "consensus::a01_committed_invalid_body_is_still_a_block_rejection_and_cached",
+    "consensus::a_valid_header_with_a_foreign_body_rejects_only_that_copy",
+    "witness A01 NOT_REPRODUCED",
+    "e2e devnet partition/heal/restart/replay",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A02",
@@ -37,10 +50,26 @@
    },
    "affectedCode": "prototypes/lp4-execution/src/devnet.rs build/load; apply.rs Genesis::build; pocold/src/lib.rs load_spec; chain.rs Spec",
    "plannedRepair": "see REPAIR-PLAN.md#a02",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "10678de",
+    "d132203"
+   ],
+   "verification": [
+    "lp4 admission::tests (R1-R26 rule boundaries, audit reproductions, determinism, approved profiles admitted)",
+    "compile_fail doc tests (no bypass of Admitted / Genesis::build)",
+    "pocold admission::{load_refuses_the_audited_profiles_and_admits_the_valid_one, init_devnet_refuses_gate_invalid_timing_and_writes_nothing}",
+    "witnesses A02-R9, A02-R13, A02-SYS_SLOT_MAX NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "R14/R19 timing is a representative measurement on the booting machine, not a worst-case bound",
+    "R25d is the declared synthetic devnet calibration",
+    "R26: RpcGuard mechanisms pocold does not implement keep nominal values (A13-DERIVATION.md §4)",
+    "D-A02-PROFILE devnet and e2e profiles need owner confirmation",
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A03",
@@ -53,10 +82,21 @@
    },
    "affectedCode": "prototypes/lp4-execution/src/user_phase.rs; native.rs; apply.rs",
    "plannedRepair": "see REPAIR-PLAN.md#a03",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "10678de"
+   ],
+   "verification": [
+    "lp4 apply::tests::a03::* (LOG_BLOCK_MAX below/at/above, 546/547 logs, cumulative logs, LOG_CAP, dirty keys/accounts, SLOT_CAP/ACCT_CAP, SYS allowance, revert except nonce and fee, roots)",
+    "pocold consensus::a03_over_limit_log_halts_the_transaction_and_the_block_is_valid",
+    "witness A03 NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "LOG-ACCT-01, D-A03-DIRTY and D-A03-CAPS are consensus decisions taken under the standing authorization and need owner confirmation",
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A04",
@@ -69,10 +109,24 @@
    },
    "affectedCode": "prototypes/pocold/src/store.rs open",
    "plannedRepair": "see REPAIR-PLAN.md#a04",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "20bedce",
+    "d132203"
+   ],
+   "verification": [
+    "pocold store::a04_* (audit case, every single-bit flip, truncation, boundary edits, duplicates, commit damage, uncommitted tail, v1 migration)",
+    "torn tail at every offset",
+    "witness A04 NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "journal format v2 (experimental local storage); v1 migrates only when fully verified",
+    "reordered complete records pass the framing layer (replay fails closed)",
+    "hardware power loss not tested",
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A05",
@@ -85,10 +139,25 @@
    },
    "affectedCode": "prototypes/pocold/src/net.rs; rpc.rs serve/conn; node.rs orphans/invalid cache",
    "plannedRepair": "see REPAIR-PLAN.md#a05",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "a2dbf16",
+    "d132203"
+   ],
+   "verification": [
+    "pocold net::* (idle peers, Hello-only handshake, oversized/stalled frames, slow reader, churn, outbound slots under an inbound flood, RPC cap refuses excess unread, batches)",
+    "rpc unit tests (RESP_MAX with request id, BATCH_RESP_MAX members not run)",
+    "consensus::range_sync_reaches_the_peer_head_through_truncated_responses",
+    "consensus::get_logs_limits_answer_32020_with_resume_data (network.md:298)",
+    "witness A05 NOT_REPRODUCED (see FINDINGS-EVIDENCE note)",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "RPC work deadline not tested in isolation",
+    "loopback only; RpcGuard memory accounting not implemented",
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A06",
@@ -101,10 +170,23 @@
    },
    "affectedCode": "prototypes/pocol-extension/src/sw.js wallet()/profiles; viewer.js",
    "plannedRepair": "see REPAIR-PLAN.md#a06",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "51aa8f7",
+    "4856842"
+   ],
+   "verification": [
+    "extension tests/worker_test.mjs (51 checks on the real worker; of the original 45, 28 fail on 090eae4)",
+    "real Chrome e2e_browser.mjs A06 checks (conflict, unsigned display, identity before submission, lock, profile change, endpoint change, 30 s check)",
+    "witnesses A06-conflict, A06-sign-before-approval, A06-lock-and-endpoint-change NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "a signed submission proceeds if the wallet locks while transport capacity is awaited (signing is the commitment point)",
+    "the 30 s check revokes on a proven identity mismatch only, not on transport errors",
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A07",
@@ -117,10 +199,22 @@
    },
    "affectedCode": "prototypes/pocol-extension/src/lib/rp.js decodeSpec",
    "plannedRepair": "see REPAIR-PLAN.md#a07",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "51aa8f7",
+    "4856842"
+   ],
+   "verification": [
+    "tests/decoder_diff.mjs (1151 items, 0 mismatches against the Rust verdicts)",
+    "pocold decoder_reference::reference_verdicts_for_the_decoder_corpus",
+    "worker_test A07 review case (linear-time gsVersion detail)",
+    "witness A07 NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A08",
@@ -133,10 +227,20 @@
    },
    "affectedCode": "prototypes/pocol-extension/src/lib/rp.js decodeHeader/verifyWindow",
    "plannedRepair": "see REPAIR-PLAN.md#a08",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "51aa8f7"
+   ],
+   "verification": [
+    "decoder corpus (every UT field, seal, shares, winner signature)",
+    "live RP mutations in e2e_browser.mjs",
+    "witness A08 NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A09",
@@ -149,10 +253,19 @@
    },
    "affectedCode": "prototypes/pocol-extension/src/lib/transport.js request/Pool",
    "plannedRepair": "see REPAIR-PLAN.md#a09",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "51aa8f7"
+   ],
+   "verification": [
+    "worker_test A09 (peak <= SESSION_RECV_MAX; release on fetch error, deadline, HTTP 500, pool exhaustion)",
+    "witness A09 NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A10",
@@ -165,10 +278,19 @@
    },
    "affectedCode": "prototypes/pocold/src/rpc.rs conn/handle",
    "plannedRepair": "see REPAIR-PLAN.md#a10",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "a2dbf16"
+   ],
+   "verification": [
+    "pocold net::a10_origin_deny_applies_to_every_batch_member",
+    "witness A10 NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A11",
@@ -181,10 +303,20 @@
    },
    "affectedCode": "prototypes/pocold/src/node.rs rebuild_pool/on_new_head",
    "plannedRepair": "see REPAIR-PLAN.md#a11",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "a2dbf16",
+    "d132203"
+   ],
+   "verification": [
+    "pocold consensus::{a11_reorg_restores_detached_transactions_without_resubmission, a11_excludes_included_and_conflicting_transactions_and_keeps_order}",
+    "witness A11 NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A12",
@@ -197,10 +329,19 @@
    },
    "affectedCode": "prototypes/pocol-extension/src/sw.js route(storage_set); lib/records.js write",
    "plannedRepair": "see REPAIR-PLAN.md#a12",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "51aa8f7"
+   ],
+   "verification": [
+    "worker_test A12 (unsettled write keeps its slot; slots return on settlement)",
+    "witness A12 NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A13",
@@ -213,10 +354,24 @@
    },
    "affectedCode": "prototypes/lp4-execution/src/resources.rs; development/lp4/p7-resources/DERIVATION.md; pocold chain.rs retention",
    "plannedRepair": "see REPAIR-PLAN.md#a13",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "25be2da",
+    "d132203"
+   ],
+   "verification": [
+    "lp4 resources::tests::{snapshot_model_bounds_measured_clone_bytes, sys_gas_envelope_fixture}",
+    "pool meter equals a recount after zero-value calls (EIP-161 commit shared with the block phase)",
+    "apply::tests::a03::a13_reads_and_empty_calls_leave_no_container_residue (mutation fails)",
+    "pocold consensus::{a13_side_branch_states_are_capped_and_rebuilt_on_demand (mutation fails), a13_rebuild_of_a_deep_fork_keeps_only_the_target_state, a13_boot_refuses_a_bound_above_the_memory_budget, a13_pool_pending_state_is_capped_and_normalized (mutation fails)}",
+    "A13-DERIVATION.md",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "open obligations in A13-DERIVATION.md §4 (gas monotonicity, representative timing, stack residency, CPU of pool re-execution and root rebuild, RpcGuard mechanisms, RetentionStore not implemented)",
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   },
   {
    "id": "A14",
@@ -229,10 +384,46 @@
    },
    "affectedCode": "prototypes/pocol-extension/src/lib/transport.js request",
    "plannedRepair": "see REPAIR-PLAN.md#a14",
-   "repairCommits": [],
-   "verification": [],
-   "remainingLimitations": [],
-   "disposition": "OPEN"
+   "repairCommits": [
+    "51aa8f7",
+    "d132203"
+   ],
+   "verification": [
+    "worker_test A14 (13 malformed shapes rejected; exact result and error accepted)",
+    "rpc unit test: -32008 carries the request id",
+    "witness A14 NOT_REPRODUCED",
+    "integration on e3a24b1: PASS (evidence/integration.json)",
+    "witnesses on the final commit: evidence/witnesses-final.log"
+   ],
+   "remainingLimitations": [
+    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
+   ],
+   "disposition": "CLOSED-WITH-LIMITATIONS"
   }
- ]
+ ],
+ "finalCommit": "e3a24b107145a507ff84a3505f941dc4f856c166",
+ "integration": {
+  "result": "PASS",
+  "evidence": "evidence/integration.json",
+  "note": "Integration ran on e3a24b1 = cedabe7 plus an evidence commit; the later commits change development/ only."
+ },
+ "independentReview": "Three independent read-only reviews by separate agent instances (not an external human audit): Rust side and extension side of 090eae4..4856842, then the review-fix commits. Confirmed findings were fixed in d132203, 4856842 and cedabe7, or documented as residuals (REPAIR-REPORT.md section 3).",
+ "dependencies": {
+  "libsecp256k1 0.5.0": "unmaintained (cryptographic). Replaced by k256 0.13.4 in pocold (equivalence: evidence/secp-equivalence.md). Kept in lp1-node, the accepted LP3 evaluator pinned to Rust 1.58.1 (k256 0.13 needs >= 1.65).",
+  "rand 0.7.3": "RUSTSEC-2026-0097 = GHSA-cq8v-f236-94qc (one advisory, conditional on the log feature, not enabled). Reachable only through libsecp256k1: gone from pocold, kept in lp1-node.",
+  "derivative 2.2.0, paste 1.0.15": "unmaintained notices, build-time proc-macros via revm/alloy. Kept; replacing them needs a revm upgrade."
+ },
+ "blocked": [
+  "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)",
+  "audit attachments (FINDINGS.json, COVERAGE.md, REPRODUCE.md, overlays, SHA256SUMS) not provided",
+  "Rust 1.58.1 not available here (lp1-node lockfile unchanged from 090eae4)"
+ ],
+ "statusNote": "Every finding is CLOSED-WITH-LIMITATIONS: repaired and verified on the final commit, but Windows verification of that exact commit is blocked by platform, and some findings carry the further limitations listed.",
+ "lastCodeCommit": "cedabe7fe13f1c478097c677d06aa56f68a87dd5",
+ "witnesses": {
+  "commit": "ed25c7ef26f7b5cf8baafc939437c1b5c9e7bd0d",
+  "result": "18 observations, all NOT_REPRODUCED",
+  "log": "evidence/witnesses-final.log",
+  "programs": "kept local (BASELINE.md)"
+ }
 }
