@@ -13,7 +13,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.a
 spec = importlib.util.spec_from_file_location("run_lp10", os.path.join(ROOT, "prototypes", "lp10", "run_lp10.py"))
 lp10 = importlib.util.module_from_spec(spec); spec.loader.exec_module(lp10)
 P = lambda *x: os.path.join(ROOT, "prototypes", *x)
-SUITES = [("lp1-node-tests", P("lp1-node"), ["cargo", "test", "--offline", "--no-fail-fast"], 1800),
+# lp1-node runs with its accepted toolchain, Rust 1.58.1 (rustup); the other crates pin 1.99.1 in rust-toolchain.toml.
+SUITES = [("lp1-node-tests", P("lp1-node"), ["cargo", "+1.58.1", "test", "--offline", "--locked", "--no-fail-fast"], 1800),
           ("ext-build", P("pocol-extension"), ["node", "build.mjs"], 300)] + lp10.SUITES
 
 def main():
@@ -24,7 +25,8 @@ def main():
     os.makedirs(logs, exist_ok=True)
     git = lambda *x: subprocess.run(["git", "-C", ROOT, *x], capture_output=True, text=True).stdout.strip()
     ev = {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain")), "host": lp10.platform.platform(),
-          "toolchain": {"cargo": lp10.version(["cargo", "--version"]), "rustc": lp10.version(["rustc", "--version"]), "node": lp10.version(["node", "--version"]), "python": lp10.platform.python_version()},
+          "toolchain": {"cargo": lp10.version(["cargo", "--version"]), "rustc": lp10.version(["rustc", "--version"]), "rustcLp1": lp10.version(["rustc", "+1.58.1", "--version"]),
+                        "rustcPinned": subprocess.run(["rustc", "--version"], cwd=P("pocold"), capture_output=True, text=True).stdout.strip(), "node": lp10.version(["node", "--version"]), "python": lp10.platform.python_version()},
           "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "logs": logs, "suites": []}
     ok_all = True
     for name, cwd, cmd, tmo in SUITES:
