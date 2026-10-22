@@ -54,7 +54,7 @@ peers) at 7,112,758,897 B (6.62 GiB), above the 6 GiB budget: `Node::open` refus
 approved option 1 of D-A13-BUDGET: reduce local, non-consensus limits and keep the 6 GiB budget. That
 approval does not cover consensus changes and waives no specification requirement.
 
-Itemized model, before (45712cd) and after. `Bound::items` names every term; at 45712cd's values the
+Itemized model, before (45712cd) and after (current head `687ac38`: SIDE_BLOCKS_MAX 320, the exiting-threads term). `Bound::items` names every term; at 45712cd's values the
 itemized arithmetic reproduces 45712cd's total exactly (7,071,790,705 B without configured peers, as its
 failing boot test printed; two peers add 40,968,192 B).
 
@@ -72,7 +72,7 @@ failing boot test printed; two peers add 40,968,192 B).
 | history | transaction index and receipts (TX_CAP) | 7.2 | 7.2 |
 | history | logs (LOG_CAP) | 1,056.0 | 1,056.0 |
 | history | evidence | 0.5 | 0.5 |
-| side | SIDE_BLOCKS_MAX stored side blocks | 285.2 | 105.9 |
+| side | SIDE_BLOCKS_MAX stored side blocks | 285.2 | 132.3 (cap 256→320, round 2) |
 | queues | transaction pool | 124.2 | 62.1 |
 | queues | orphan blocks | 16.6 | 16.6 |
 | queues | future blocks | 16.0 | 16.0 |
@@ -89,12 +89,13 @@ failing boot test printed; two peers add 40,968,192 B).
 | rpc | request parse tree | 8.8 | 8.8 |
 | rpc | answer being built | 48.0 | 80.0 (corrected) |
 | threads | I/O thread stacks and heap | 27.9 | 15.7 |
+| threads | exiting not-yet-joined (conservative) | — | 10.5 |
 | threads | consensus stack | 16.0 | 16.0 |
 | threads | main stack and heap | 1.0 | 1.0 |
 | threads | exited-stack cache | 40.0 | 40.0 |
 | execution | frames, code analysis, preallocations, precompiles | 128.6 | 128.6 |
 | execution | memory and operation classes (worst gas split) | 1,461.4 | 1,002.5 |
-| **total** | | **6,783.3** (7,112,758,897 B) | **5,326.0** (5,584,711,217 B) |
+| **total** | | **6,783.3** (7,112,758,897 B) | **5,363.1** (5,623,469,297 B) |
 
 Changes, each checked to be local before it was made: none changes block validity, state roots, gas
 rules or accepted-transaction semantics, none goes below a normative minimum, and a maximum-size valid
@@ -128,7 +129,7 @@ Not changed, and why:
 
 Reserve. The boot gate is now stricter: the model total must fit in 7/8 of the budget
 (`RESERVE_KEEP_EIGHTHS`), so 12.5% (768 MiB of 6 GiB) is kept for what the model does not count.
-- Devnet default: model total 5,584,711,217 B (5.20 GiB). Required budget ceil(8·total/7) = 6,382,527,106 B.
+- Devnet default: model total 5,623,469,297 B (5.237 GiB). Required budget ceil(8·total/7) = 6,426,822,054 B (≈ 15 MiB under the 6 GiB budget, over the 768 MiB reserve).
   That leaves 59,923,838 B beyond the reserve.
 - What the reserve is for: allocator chunk headers and size-class rounding, which add up to about 31 B
   per allocation; fragmentation and per-thread arenas, which are not bounded; and the inspection-based
@@ -164,7 +165,7 @@ Second independent review (of 45712cd..b132a05). Its findings and what was done:
 ### 2b. Model total, measured RSS and guaranteed ceiling
 
 - **Model total** (this section): requested heap plus reserved stacks with every cap at its maximum at
-  once, under the conditions of §4. Devnet default: 5,584,711,217 B.
+  once, under the conditions of §4. Devnet default: 5,623,469,297 B.
 - **Measured RSS**: what a real run touched. See `evidence/rss-*.json` (`tools/measure_rss.py`: a 3-node
   release devnet, idle production, then ordinary and bounded adversarial RPC load), summarised below.
   It is not the bound: a run reaches none of the caps.
@@ -291,7 +292,7 @@ admission is refused while any remains (D-A02-SCOPE).
 |---|---|---|---|
 | 1 | SYS gas is monotone in the domain fields (GAS_ENVELOPE covers every profile in GAS_DOMAIN) | OPEN | No opcode-level worst-case derivation. Admission condition `gas-monotonicity-assumed` (R18) |
 | 2 | R14/R19 timing is a worst-case bound | OPEN | `measure` applies one synthetic GAS_LIMIT compute workload per phase on this host, a representative sample. Not a bound for worst-case state size, world-root rebuild, PAY or settlement paths. Admission condition `timing-not-a-bound` (R14, R19) |
-| 3a | thread stacks keep ≤ 64 KiB resident | ENFORCED (replaced) | Every thread is spawned with an explicit reservation and counted at it. The thread inventory is enforced by join ordering, exiting threads included: the acceptor, listener and dialers join a finished thread before reusing its place (`threads::reap`); a reader joins its writer; the miner is joined before the next one starts. Tests: `peer_threads_stay_within_the_inventory_while_consensus_is_stalled` (invariant), `miner_replacement_keeps_at_most_one_miner_thread` (exact handle high-water 1; its mutation, start before join, fails), F1's lost-wakeup unit test (its mutation fails). Residual: the main thread's stack is platform-reserved, counted at 1 MiB because main only spawns and joins (INSPECTION) |
+| 3a | thread stacks and the exiting-thread overlap | ENFORCED (measured + conservative) | Every thread is spawned with an explicit reservation and counted at it (io_threads). The inventory is enforced by join ordering: the acceptor, listener and dialers join a finished thread before reusing its place (`threads::reap`); a reader joins its writer; the miner is joined before the next starts. A thread can finish between its reaper's visits: the bound on exiting-not-yet-joined threads is E = peers_max + dials + conn_max (writers join synchronously; singletons never respawn), counted CONSERVATIVELY at a full IO_STACK each (10.5 MiB). Measurement (evidence/threadmem.rs, evidence/THREAD-INVENTORY.md): a finished joinable thread retains only ~25.8 KiB, not 256 KiB — the bulk returns to the glibc stack cache (the 40 MiB STACK_CACHE term) — so the term is an upper bound, not the measured figure, as the owner directed (measurement is evidence, not a guaranteed ceiling). Tests: `peer_threads_stay_within_the_inventory_while_consensus_is_stalled`, `miner_replacement_keeps_at_most_one_miner_thread` (handle high-water 1; mutation fails), F1's lost-wakeup unit test. Residual: the main thread's stack is platform-reserved, counted at 1 MiB (INSPECTION) |
 | 3b | allocator per-allocation overhead and fragmentation | OPEN (reserve kept) | Not modelled; the total is requested bytes. The boot gate keeps 1/8 of the budget outside the model (D-A13-BUDGET). Measured: full-cap snapshot clones use 0.45 of their model in RSS; header estimate for history under 8 MB (§2b). Fragmentation is not bounded. Status condition `allocator-overhead` |
 | 4 | revm per-transaction journal, engine cache and memory fit in the transient-snapshot allowance | DERIVED (replaced, corrected) | Its own term, §3a (1,131.2 MiB at 30M gas): operation classes (unpaid loads included), memory over a gas split, a fixed part (per-frame code analysis, BLOCKHASH cache). Validated publicly at model level and by private adversarial measurements, each case against its own term (PRIVATE-REVIEW-PACKAGE.md). Depends on the revm 19.7 facts listed in §3a (status condition `revm-representation`). One execution at a time is by INSPECTION |
 | 5 | world-root rebuild per block; `eth_getTransactionByHash` chain scan | OPEN (CPU) | Not memory terms; part of the timing obligation (2) |
@@ -306,18 +307,18 @@ admission is refused while any remains (D-A02-SCOPE).
 | 14 | RPC answers held by connections | ENFORCED | Response pools (`rpc::answer`): the class maximum is reserved before the request runs and released when the reply drops; a full heavy pool answers busy before anything runs. Tests `response_pools_reserve_shrink_and_release` and `a_full_heavy_pool_answers_busy_before_anything_runs` (its mutation, reservations never fail, fails) |
 | 15 | RPC request bodies, queued and in flight | ENFORCED | A body of exactly Content-Length ≤ REQ_BUF. Queued heavy bodies are capped at queued_max and released when skipped. Test `abandoned_queued_bodies_are_capped_and_released` (peak = cap; its mutation, no cap, fails) |
 | 16 | the answer being built: one member's JSON tree and string ≤ 4 × RESP_MAX | INSPECTION | The parse tree of the request is ENFORCED (JSON_VALUES_MAX before parsing, `parse_bytes_max`). The member's result tree is bounded by RESP_MAX of output (`capped`), but its tree-to-text ratio is counted at 4 by inspection |
-| 18 | adoption of a heavier competing branch at any depth ≤ R_keep (network.md:143) | OPEN (architectural) | pocold holds a competing branch in memory as side blocks until it is heavier, at most SIDE_BLOCKS_MAX = 256. A branch longer than that is not adopted. Its evicted blocks are refused, so the node neither re-executes nor re-journals them, and it needs a manual checkpoint (governance.md:200). This was introduced with the round-1 side-block cap; round 2 tried 64, which a review showed made it worse, and went back to 256. Holding R_keep = 2048 side blocks costs about 2048 × 0.42 MB ≈ 0.85 GB more, which does not fit the budget beside the other terms. Meeting the rule within the budget needs disk-backed blocks (the spec's redb). Tests: `a_competing_branch_within_side_blocks_max_is_adopted` (a 150-block-deep fork; its mutation, the cap at 64, fails) and `side_blocks_stay_within_the_cap_after_a_reorg_and_evicted_blocks_are_not_taken_again` (mutations: one-pass trimming, no refusal; each fails) |
+| 18 | adoption of a heavier competing branch at any depth ≤ R_keep (network.md:143) | OPEN (architectural); depth raised 256 → 320 | Fork choice (`better`, `rebuild_canonical`) walks a branch's ancestors through resident `self.blocks`, and `retain` drops only leaves (no holes), so a competing branch must be FULLY resident to be adopted: the one-shot adoption depth IS SIDE_BLOCKS_MAX. Round 2 raised it 256 → 320 (the largest value fitting the budget with margin, D-A13-BUDGET addendum) via the tested validate()+insert() path. A branch deeper than 320 is PRESERVED in the journal (lossless) and NOT refused forever; it is simply not adopted in one shot — the node stays on the valid lighter chain (consensus.md D118: fetched by sync; §11: manual checkpoint beyond R_keep). Reaching R_keep = 2048 within budget needs the block bodies off the heap (~0.85 GB otherwise), i.e. a redb block store + streaming reorg — a consensus-critical mechanism PROPOSED for explicit owner approval (proposals/D-REORG-REDB.md), not implemented. No consensus rule is weakened: the node never adopts an invalid chain. Tests: `adopt_a_heavier_branch_at_the_cap_and_survive_restart` (a 270-deep heavier branch is adopted and survives restart; mutation cap=256 fails it), `a_branch_deeper_than_the_cap_is_preserved_not_adopted` (a 382-deep branch is kept in the journal, not adopted, reopens without panic), and `a_competing_branch_within_side_blocks_max_is_adopted` (150-deep) |
 | 17 | the budget's reserve | ENFORCED (gate) | `check` requires the model total ≤ 7/8 of the budget (`RESERVE_KEEP_EIGHTHS`). The boot test asserts that the default boots, that one byte below its requirement is refused, and that exactly the requirement boots |
 
 Consequence:
 - The devnet admission is an **experimental-devnet admission** (D-A02-SCOPE), reported as such at boot
   and in `status`.
-- The 5.20 GiB model total (5,584,711,217 B) is conditional on:
+- The 5.237 GiB model total (5,623,469,297 B) is conditional on:
   - item 3b, which has a 12.5% reserve kept for it but is not proven;
   - item 4's revm facts;
   - items 11, 13 and 16, which rest on inspection.
 - It is not a measured value and not a guaranteed ceiling (§2b).
-- A13 is not closed: items 1, 2, 3b, 5, 6 (CPU), 7 (CPU), 8, 10 and 18 remain open acceptance obligations.
+- A13 is not closed: items 1, 2, 3b, 5, 6 (CPU), 7 (CPU), 8, 10 and 18 (R_keep adoption beyond depth 320, D-REORG-REDB proposed) remain open acceptance obligations.
 
 ## 4-r1. Open obligations as recorded in round 1 (kept for history)
 

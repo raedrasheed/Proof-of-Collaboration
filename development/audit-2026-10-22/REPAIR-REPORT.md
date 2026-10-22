@@ -41,7 +41,7 @@ accepted. The disposition is the weakest of them.
 | A05 HIGH | partly | partly | RpcGuard partly implemented; no preemption; light methods light by size only | PARTIALLY RESOLVED |
 | A06 HIGH | yes | yes, real Chrome | A request already initiated may be broadcast (reported, never "cancelled") | VERIFIED (Linux), BLOCKED BY ENVIRONMENT |
 | A07–A12, A14 | yes | yes | — | VERIFIED (Linux), BLOCKED BY ENVIRONMENT |
-| A13 HIGH | partly | partly | Open: gas monotonicity, worst-case timing, allocator overhead, CPU costs, RetentionStore, adoption depth ≤ R_keep (architectural); no guaranteed memory ceiling | PARTIALLY RESOLVED |
+| A13 HIGH | partly | partly | Open: gas monotonicity, worst-case timing, allocator overhead, CPU costs, RetentionStore, adoption depth (raised 256→320, below R_keep; architectural, D-REORG-REDB proposed); no guaranteed memory ceiling | PARTIALLY RESOLVED |
 
 ## 2. What was repaired
 
@@ -150,8 +150,13 @@ __REVIEW2__
   - Inspection-only items remain.
   - There is no guaranteed process-memory ceiling. The measured RSS of a run is not the bound.
   - **Architectural blocker:** adoption of a heavier branch at any depth ≤ R_keep = 2048
-    (network.md:143) needs about 0.85 GB more of in-memory side blocks, which does not fit beside the
-    rest. pocold's adoption depth is SIDE_BLOCKS_MAX = 256. Meeting the rule needs disk-backed blocks.
+    (network.md:143). Fork choice walks resident ancestors and retention drops only leaves, so a
+    competing branch must be fully resident to be adopted: the one-shot adoption depth IS
+    SIDE_BLOCKS_MAX, raised 256 → 320 in round 2 (the budget maximum, via the tested path). A deeper
+    branch is preserved in the journal (lossless), not refused; the node stays on the valid lighter
+    chain (D118 "fetched by sync", §11 manual checkpoint). Reaching R_keep needs block bodies off the
+    heap (~0.85 GB otherwise): proposals/D-REORG-REDB.md, PROPOSED, needs owner approval. No consensus
+    rule is weakened (an invalid chain is never adopted).
 - **A05:** RpcGuard is implemented only in part. Not implemented:
   - HEAVY/LIGHT permits and QUEUE_WAIT;
   - scratch budgets;

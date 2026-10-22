@@ -31,6 +31,7 @@ tree. Debug build unless noted.
 | M13 | the reservation is released before the answer is written | `an_answer_is_reserved_until_its_connection_has_written_it` | first run: **not caught** (the first sample landed between the answer being built and the connection taking it). The test now requires the reservation still to be there a second later. Rerun: caught |
 | M14 | the busy path parses the body unconditionally | `rpc::tests::a_busy_answer_does_not_parse_an_over_limit_body` (counting allocator) | first run: not run (the runner's exact name lacked the module path, so 0 tests passed). Rerun with the full name: caught |
 | M15 | tx_json carries `raw` beside `input` (the old encoding) | `a_max_size_transaction_is_answered_in_the_light_lane` (release) | caught |
+| M16 | SIDE_BLOCKS_MAX back to 256 (the pre-R_keep cap) | `adopt_a_heavier_branch_at_the_cap_and_survive_restart` (a fixed 270-deep branch; release) | caught (the depth>256 precondition, then no adoption) |
 
 A control that is not caught is recorded as such. M2, M7 and M13 were not caught by the first tests;
 the tests were strengthened and the mutations rerun. M14's first run executed no test, which the

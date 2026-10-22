@@ -499,6 +499,18 @@ returns 404 until the file is on `main`, so it has not run.
   transaction, breaks no normative minimum, refuses no valid maximum-size block, and removes no history
   the reorganisation rules need.
 - K_hist (32), RPC_CONN_MAX (32), consensus caps and the TRANSIENT_SNAPSHOTS inventory are unchanged.
+
+#### Addendum (round 2, R_keep adoption and threads)
+- **SIDE_BLOCKS_MAX 256 → 320.** Fork choice walks resident ancestors and retention drops only
+  leaves, so a competing branch must be fully resident to be adopted: the one-shot adoption depth IS
+  SIDE_BLOCKS_MAX. 320 is the largest value fitting the 6 GiB budget with margin, raising adoption
+  depth 25% via the tested path. A branch deeper than 320 is preserved in the journal (lossless), not
+  refused; full R_keep=2048 needs block bodies off the heap (**D-REORG-REDB, proposed**, not
+  implemented; A13-DERIVATION §4 item 18). No consensus rule is weakened.
+- **Exiting-not-yet-joined threads** are now an explicit model term (peers_max + dials + conn_max,
+  conservative at a full IO_STACK each; measured ~25.8 KiB, evidence/THREAD-INVENTORY.md).
+- Model total 5,623,469,297 B (5.237 GiB); required budget 6,426,822,054 B, ≈ 15 MiB under 6 GiB over
+  the 768 MiB reserve.
 - Architectural blocker found: adoption at any depth ≤ R_keep = 2048 would need about 0.85 GB more of
   in-memory side blocks, which does not fit. It needs disk-backed blocks (A13-DERIVATION §4 item 18).
   Pocold's adoption depth is SIDE_BLOCKS_MAX = 256, as at 45712cd.

@@ -70,7 +70,7 @@ F = [
    "OPEN: CPU costs (world-root rebuild, chain scans, pool re-execution, deep-fork rebuild) (§4.5–4.7)", "OPEN: RetentionStore and the redb trie are not implemented (§4.10); the specification's node targets <= 750 MiB plus 192 MiB RPC (network.md:158), pocold's in-memory architecture needs 5.13 GiB of model",
    "INSPECTION only: transient-snapshot inventory, one EVM execution at a time, the answer-being-built tree ratio (§4.11, §4.13, §4.16)", "DERIVED with stated revm 19.7 facts: execution memory, operation classes (§4.4, §3a)",
    "No guaranteed process-memory ceiling exists (§2b)",
-   "OPEN (architectural): adoption of a heavier branch at any depth <= R_keep (2048, network.md:143) is not met; pocold holds at most SIDE_BLOCKS_MAX = 256 side blocks in memory, and R_keep-depth adoption within the budget needs disk-backed blocks (§4.18)"], [], ["D-A13-BUDGET (owner approved option 1: local limits reduced, 6 GiB kept)"]),
+   "OPEN (architectural): adoption of a heavier branch at depth <= R_keep (2048, network.md:143) is met only to SIDE_BLOCKS_MAX = 320 (raised from 256; a deeper branch is preserved in the journal, not adopted in one shot); full R_keep needs block bodies off the heap, proposed as D-REORG-REDB (§4.18)"], [], ["D-A13-BUDGET (owner approved option 1: local limits reduced, 6 GiB kept)"]),
  ("A14", "LOW", "JSON-RPC responses not correlated with the request", ["51aa8f7", "d132203"], ["worker_test.mjs A14 (13 malformed shapes)", "rpc unit tests (-32008 carries the request id)"], [], [], []),
 ]
 
