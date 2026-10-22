@@ -31,7 +31,8 @@
       "passed": 136,
       "failed": 0
      },
-     "pass": true
+     "pass": true,
+     "correction": "round 2: 'pass' here was computed after excluding tests/store_journal.rs. Those 11 tests executed on Linux and failed (UnsupportedPlatform: Windows-only journal); the suite's actual outcome is exit 101, i.e. FAIL. The failure is the expected platform limitation (identical on 090eae4), recorded separately since round 2."
     },
     {
      "suite": "ext-build",
@@ -135,7 +136,8 @@
     }
    ],
    "result": "PASS",
-   "finished": "2026-10-22T10:36:48Z"
+   "finished": "2026-10-22T10:36:48Z",
+   "correction": "round 2: this run's overall 'PASS' relied on the lp1-node classification above; with actual outcomes it is FAIL, with every failure being the expected platform limitation."
   },
   {
    "commit": "e3a24b107145a507ff84a3505f941dc4f856c166",
@@ -168,7 +170,8 @@
       "passed": 136,
       "failed": 0
      },
-     "pass": true
+     "pass": true,
+     "correction": "round 2: 'pass' here was computed after excluding tests/store_journal.rs. Those 11 tests executed on Linux and failed (UnsupportedPlatform: Windows-only journal); the suite's actual outcome is exit 101, i.e. FAIL. The failure is the expected platform limitation (identical on 090eae4), recorded separately since round 2."
     },
     {
      "suite": "ext-build",
@@ -272,7 +275,9 @@
     }
    ],
    "result": "PASS",
-   "finished": "2026-10-22T11:06:12Z"
+   "finished": "2026-10-22T11:06:12Z",
+   "correction": "round 2: this run's overall 'PASS' relied on the lp1-node classification above; with actual outcomes it is FAIL, with every failure being the expected platform limitation."
   }
- ]
+ ],
+ "note": "Runs are kept as recorded. Round-1 runs carry 'correction' fields; round-2 runs record actual outcomes (pass = exit 0) and classify the expected platform limitation separately."
 }

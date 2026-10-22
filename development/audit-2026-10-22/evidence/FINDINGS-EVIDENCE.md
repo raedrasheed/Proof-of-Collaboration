@@ -7,9 +7,34 @@ How to read this file:
   - **regression**: the tests in the product suites that assert the corrected behaviour;
   - **witness on the repair**: the same observation rerun on the repaired code.
 - A witness prints REPRODUCED or NOT_REPRODUCED. It is an observation, never an acceptance pass.
-- The witness programs themselves are kept local (see BASELINE.md). Their observation lines are in
+- The witness programs are reconstructed (the audit's programs were not received) and are not committed
+  (see WITNESS-CONTROLS.md). Their observation lines are in
   [witnesses-final.log](witnesses-final.log).
 - Integration results for the final commit are in [integration.json](integration.json).
+
+## Round 2 additions (owner review of PR #27)
+
+Statuses are in [../FINDING-STATUS.json](../FINDING-STATUS.json), on five separate axes:
+- implemented;
+- verified;
+- partially resolved;
+- blocked (environment / decision);
+- accepted (none).
+
+The round-1 table below is kept as history. Its "Witness on the repair" column describes
+reconstructed witnesses: the audit's original programs were not received.
+
+| Finding | Round-2 change | New evidence (mutation controls in brackets) |
+|---|---|---|
+| A02 | D-A02-SCOPE: RpcFacts with absent fields as 0; experimental-devnet vs specification scope; conditions reported | admission `r26_predicates_are_the_gate_conjunction` (20,000 configurations; every predicate decisive), `absent_rpc_fields_enter_the_gate_as_zero_never_nominal`, `specification_scope_refuses_every_open_condition`, `experimental_devnet_waives_only_r26_predicates_reading_absent_fields`; pocold `pocold_admission_is_an_experimental_devnet_with_absent_rpc_mechanisms` |
+| A03 | consensus decisions written up as proposals (PROPOSED) with independent vectors | `apply::tests::a03::proposals::*` replay the model's recommended alternative; D3 invalid block at the real ACCT_DIRTY_BLOCK_MAX |
+| A05 | work deadline, light lane, tick coalescing, REQ_BUF | `rpc_work_deadline_skips_expired_work_and_releases_resources` (queued requests answered at 400–407 ms, 10 skipped, 19 batch members not started, threads released) [no skip, no batch deadline, no tick coalescing: each fails]; `legitimate_requests_progress_under_bounded_heavy_load` (86/86 answered, worst 1.57 s < one heavy call) [no light lane: fails, all 504]; `rpc_request_buffer_covers_headers_and_body` |
+| A06 | submission states signed → queued → initiated → broadcast | worker barrier scenarios A06-R2 (7) [no re-check; no hook and no re-check; submission under the mutex: each fails]; real Chrome e2e A06-R2 (4), 78/78 |
+| A13 | thread reservations, thread inventory, execution term; per-assumption status | `execution_model_bounds_measured_adversarial_peaks` (worst measured 93 MB ≤ 934 MB bound), `peer_threads_stay_within_the_inventory_while_consensus_is_stalled` (worst 13 = bound 13; the old-ordering mutation is **not** detected: the ordering holds by construction); A13 bound record 5.87 GiB (conditional) |
+| all | witnesses with positive controls | [witnesses-r2.log](witnesses-r2.log), [WITNESS-CONTROLS.md](WITNESS-CONTROLS.md): 17 NOT_REPRODUCED, 15 controls OK |
+| lp1-node | the actual Linux outcome recorded | store_journal: 11 tests executed and **failed** (UnsupportedPlatform). This is the expected platform limitation, identical on 090eae4, and is classified separately in integration.json |
+
+## Round 1 table
 
 | Finding | Reproduced on 090eae4 | Repair | Regression tests (product suites) | Witness on the repair |
 |---|---|---|---|---|

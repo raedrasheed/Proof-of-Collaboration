@@ -216,6 +216,9 @@ Rules for this repair:
   assertion was weakened.
 
 ### D-A03 LOG-ACCT-01 — log accounting for LOG_BLOCK_MAX (consensus; affects roots)
+Round 2: this decision changes roots. It is presented for an owner decision in
+[proposals/LOG-ACCT-01.md](proposals/LOG-ACCT-01.md) and is **PROPOSED, not approved**. The text below
+is the round-1 record.
 Ambiguity: execution.md fixes LOG_BLOCK_MAX = 32 KiB with exceptional halt and names a derived log count of
 546 (LG2: 546 logs succeed, 547 halt). storage.md gives the stored log size as 36+len. Neither states how
 topics count, nor whether the 546 count is a separate limit.
@@ -269,9 +272,9 @@ admission.rs` assembles its facts from the real artifacts and labels them:
   `Node` never gets it.
 - R25d: the devnet's H_cal is recorded as a synthetic fixture (chosen difficulty, not a measured rate);
   target_g is computed from it with the R25d formula.
-- R26: the RpcGuard values pocold implements come from its code (`pocold::rpc_facts`); the mechanisms it
-  does not implement keep nominal values and are listed in A13-DERIVATION.md §4 (review finding: all of
-  R26 used the nominal values).
+- R26 (round 1): the RpcGuard values pocold implements came from its code (`pocold::rpc_facts`), and the
+  mechanisms it does not implement kept nominal values. **Superseded in round 2 by D-A02-SCOPE:** nominal
+  values for missing mechanisms are not evidence, so absent fields now enter the gate as 0.
 
 ### D-A02-PROPOSER — when the signed proposer builds (local production, not consensus)
 With Φ=0 a template stamped max(L(0), C) while C < L(0) is in the future for every receiver, which then
@@ -279,6 +282,8 @@ correctly ignores it, leaving only the proposer mining. The proposer now waits u
 building. The timestamp formula is unchanged; only the moment of building moves.
 
 ### D-A03-CAPS — SLOT_CAP and ACCT_CAP bound the user state
+Round 2: **PROPOSED, not approved**. See [proposals/D-A03-CAPS.md](proposals/D-A03-CAPS.md) for the normative text, alternatives,
+examples, effects and independent vectors. The text below is the round-1 record.
 Ambiguity: genesis `check_caps` counted every account and slot, including the five system programs, against
 SLOT_CAP/ACCT_CAP, while the spec gives system storage its own bound (SYS_SLOT_MAX, R18) and makes the caps
 an exceptional halt (a SYSTEM call cannot halt). Counting system slots would let user transactions fill
@@ -291,6 +296,8 @@ caps; the preserved LP4 test of post-phase-2 cap atomicity now uses SYS_SLOT_MAX
 storage phase 2 writes.
 
 ### D-A03-DIRTY — what DIRTY_BLOCK_MAX and ACCT_DIRTY_BLOCK_MAX count
+Round 2: **PROPOSED, not approved**. See [proposals/D-A03-DIRTY.md](proposals/D-A03-DIRTY.md) for the normative text, alternatives,
+examples, effects and independent vectors. The text below is the round-1 record.
 Per block, the union over USER transactions of the storage keys and accounts whose value changed in the
 transaction (net per transaction; an account receiving and paying out the same amount is unchanged). A
 transaction whose diff would exceed either set halts. The halt's own nonce/fee effects always apply; if
@@ -298,6 +305,8 @@ even they would exceed ACCT_DIRTY_BLOCK_MAX (or create an account beyond ACCT_CA
 be included (block invalid; builders skip it, as for TX_CAP).
 
 ### D-A03-SYSUSER — the user-context SYS allowance
+Round 2: **PROPOSED, not approved**. See [proposals/D-A03-SYSUSER.md](proposals/D-A03-SYSUSER.md) for the normative text, alternatives,
+examples, effects and independent vectors. The text below is the round-1 record.
 Counted as storage keys of the five system programs changed by USER transactions (≤ SYS_KEYS_USER_MAX), the
 programs whose storage they change (≤ 16), and none while closing (`SysWriteClosing`); each is an exceptional
 halt. Escrow balance credits (coinbase tips) and the ChunkFactory nonce are not storage writes. The v1
@@ -363,6 +372,8 @@ hundreds of GiB), or exempt the devnet from the memory check (rejected: it is th
 - `complete_record_corruption_is_never_skipped` no longer accepts an `Ok` outcome.
 
 ### D-BODY-MAX — BODY_MAX bounds the encoded body on every path (consensus alignment)
+Round 2: **PROPOSED, not approved**. See [proposals/D-BODY-MAX.md](proposals/D-BODY-MAX.md) for the normative text, alternatives,
+examples, effects and independent vectors. The text below is the round-1 record.
 - consensus.md:56: Body = [txs, evidence] ≤ BODY_MAX.
   - `Body::decode` (blocks from peers and from the journal) checked the encoded length.
   - `Chain::validate` (every import, own blocks included) checked the sum of item bytes.
@@ -408,3 +419,57 @@ hundreds of GiB), or exempt the devnet from the memory check (rejected: it is th
 ### D-A04-FORMAT — journal v2
 An experimental local storage format, not a protocol change. v1 migrates only when it parses completely;
 an ambiguous v1 journal is never auto-repaired.
+
+## Round 2 decisions (owner review of PR #27)
+
+### D-A02-SCOPE — experimental-devnet admission is not specification compliance
+- `admission::Scope::{Specification, ExperimentalDevnet}`.
+- `RpcFacts` carries only the RpcGuard fields a node enforces. An absent field enters the gate as 0,
+  never as a nominal value.
+- ExperimentalDevnet admits only a simnet profile on a simnet node. It waives only the R26 predicates
+  that read absent fields; pocold has 4 checked and 14 waived. It reports every `Condition`:
+  - `rpc-absent` or `rpc-fixture`;
+  - `calibration-synthetic`;
+  - `timing-not-a-bound`;
+  - `gas-monotonicity-assumed`;
+  - `gate-deferred-*`;
+  - `r21-retention-stress`.
+- Specification refuses while any condition remains, so no current pocold profile is specification
+  compliant.
+- pocold boots only experimental-devnet admissions and says so at boot, in devnet.json and in status.
+- REQ_BUF now covers the request line, headers and body together (network.md:229).
+
+### D-A13-R2 — each assumption is enforced, derived, inspected or kept open
+See A13-DERIVATION.md §4.
+- Thread stacks: enforced by explicit reservations, with the inventory enforced by join and release
+  ordering.
+- EVM execution memory: a derived term with measured adversarial peaks. eth_call is capped at
+  PER_CALL_GAS.
+- Still open: allocator overhead and fragmentation, gas monotonicity, worst-case timing, CPU costs and
+  RetentionStore.
+- The 5.87 GiB devnet bound is conditional on those.
+
+### D-A05-R2 — the RPC work deadline, the light lane and tick coalescing (local, not consensus)
+- Requests whose deadline passed before the consensus thread reached them are skipped. Batch members
+  are not started after the deadline (−32020 {deadline}). Both are counted.
+- Light lane: network.md's light methods, single requests of ≤ 4 KiB, classified by a borrowed probe
+  that allocates nothing in proportion to the body.
+  - It is drained before every main event and between heavy batch members.
+  - It is a partial step towards RpcGuard's HEAVY/LIGHT classes. Those classes' memory pools, rate
+    buckets and compute deadlines are still not implemented (D-A02-SCOPE reports them as absent).
+- Timer ticks are coalesced. An idle node behind an old head built one fallback template per 50 ms
+  tick, and the queue filled with ticks ahead of blocks and RPC.
+
+### D-A06-SUBMIT — wallet submission states
+signed → queued for transport → request initiated → broadcast.
+- Signing stays under ProfileMutex. Submission runs outside it.
+- A profile mutation cancels pending work at the start of its turn.
+- Before initiation, every transition cancels the submission and nothing is sent.
+- After the reservation, eligibility is re-checked synchronously immediately before fetch.
+- After initiation, nothing is reported as cancelled.
+- Changed test expectation: a profile change requested during signing now cancels the
+  not-yet-initiated submission. Round 1 sent it to the old endpoint.
+
+### D-WIN-R2 — Windows verification
+See [WINDOWS-VERIFICATION.md](WINDOWS-VERIFICATION.md). A scoped manual workflow is prepared. Dispatch
+returns 404 until the file is on `main`, so it has not run.
