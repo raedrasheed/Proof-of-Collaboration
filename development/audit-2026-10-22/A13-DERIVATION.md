@@ -112,7 +112,7 @@ block is processed as before.
 | undercounts found by the second review | — | −41.5 | a working copy's growing table (38.2), the lossy header copy (up to 3 B per input byte), one event held by each blocked forwarder | none |
 | light answers | eth_getTransactionByHash carried `raw` beside `input` (about 4 × TX_MAX) | — | the standard fields only (raw only when the transaction does not decode), within network.md:201's 2·TX_MAX + 2 KiB, so a TX_MAX transaction stays answerable in the light lane | none |
 | side_max | 8 → 2 | 253.5 | NodeLocal parameter (consensus.md:29: local, outside CP); R11/R20/R21 hold | a third competing side tip's state is pruned and rebuilt on demand from its nearest retained ancestor (CPU, §4 item 6) |
-| SIDE_BLOCKS_MAX | 256 → 64 → **256** (reverted) | 179.3 at 256, by the gas bound on transactions per side block | The second review showed that 64 made a heavier branch more than about 64 blocks long unadoptable. network.md:143 requires adoption up to R_keep (2048), and a branch is held as side blocks until it is heavier. 256 is the value at 45712cd. The saving now comes from a proven tightening instead: a validated block holds at most GAS_LIMIT/21,000 = 380 transactions, not BODY_MAX/85 = 2,313 | adoption depth stays about 256 (below R_keep: §4 item 18); the cap holds after a reorg; evicted hashes are refused when received again |
+| SIDE_BLOCKS_MAX | 256 → 64 → **256** (reverted) | 179.3 at 256, by the gas bound on transactions per side block | The second review showed that 64 made a heavier branch more than about 64 blocks long unadoptable. network.md:143 requires adoption up to R_keep (2048), and a branch is held as side blocks until it is heavier. 256 is the value at 45712cd. The saving now comes from a proven tightening instead: a validated block holds at most GAS_LIMIT/21,000 = 380 transactions, not BODY_MAX/85 = 2,313 | adoption depth is SIDE_BLOCKS_MAX, reverted to 256 here and then raised to 320 in round 2 (below R_keep: §4 item 18); the cap holds after a reorg; evicted hashes are refused when received again |
 | POOL_MAX_BYTES | 64 → 32 MiB | 62.1 | network.md:157 "pool ≤ 64 MiB" (an upper limit) | 256 transactions of TX_MAX (128 KiB) or 4096 small ones; beyond, −32016 |
 | peers_max (inbound) | 32 → 8 | 72.3 (queues and threads) | network.md:156 "≤ 50 peers" (an upper limit) | at most 8 inbound peers; a devnet node has 2 |
 | EVENT_QUEUE | 256 → 128 | 32.1 | network.md:156 "queue ≤ 256" (an upper limit) | senders block earlier (backpressure) |
@@ -130,7 +130,7 @@ Not changed, and why:
 Reserve. The boot gate is now stricter: the model total must fit in 7/8 of the budget
 (`RESERVE_KEEP_EIGHTHS`), so 12.5% (768 MiB of 6 GiB) is kept for what the model does not count.
 - Devnet default: model total 5,623,469,297 B (5.237 GiB). Required budget ceil(8·total/7) = 6,426,822,054 B (≈ 15 MiB under the 6 GiB budget, over the 768 MiB reserve).
-  That leaves 59,923,838 B beyond the reserve.
+  That leaves 15,628,890 B (≈ 14.9 MiB) unused below the budget (reconciliation and workload RSS: §2b).
 - What the reserve is for: allocator chunk headers and size-class rounding, which add up to about 31 B
   per allocation; fragmentation and per-thread arenas, which are not bounded; and the inspection-based
   inventories (§4 items 11, 13, 16).
@@ -164,29 +164,57 @@ Second independent review (of 45712cd..b132a05). Its findings and what was done:
 
 ### 2b. Model total, measured RSS and guaranteed ceiling
 
-- **Model total** (this section): requested heap plus reserved stacks with every cap at its maximum at
-  once, under the conditions of §4. Devnet default: 5,623,469,297 B.
-- **Measured RSS**: what a real run touched. See `evidence/rss-*.json` (`tools/measure_rss.py`: a 3-node
-  release devnet, idle production, then ordinary and bounded adversarial RPC load), summarised below.
-  It is not the bound: a run reaches none of the caps.
-- **Guaranteed process-memory ceiling: none.** The model leaves allocator overhead and fragmentation
-  open, and nothing in the process enforces a ceiling. An operating-system limit (cgroup `memory.max`,
-  `RLIMIT_AS`) would turn an overrun into a failure rather than make the bound hold; none is configured.
+Reported on five separate axes, so none is read as the others.
 
-Measured on b132a05 (release, Linux, 4 CPUs):
+**1. Calculated model terms** (`pocold::resources::derive`, every cap at its maximum at once, under §4's
+conditions). Devnet default: **5,623,469,297 B = 5.237 GiB**. The itemized terms are §2a's "after" column;
+`Bound::items` is the machine-readable form, printed by `a13_bound_breakdown`.
 
-| measurement | result | what it shows |
-|---|---|---|
-| 3-node devnet, 90 s idle then 90 s of load (`evidence/rss-b132a05.json`, on b132a05, before the second review's changes); load: 39,815 light requests, 1,960 30M-gas eth_calls, 194 20-member heavy batches, 187 transfers; height 157, 4 peers each | peak RSS 11.9–12.0 MB per node (VmHWM); model at b132a05 5,506,111,035 B | ordinary operation is far below the model; a short run fills none of the caps, so this is no evidence about the worst case. It is rerun on the final commit (`evidence/rss-<final>.json`) |
-| 10 clones of a full-cap state (20,005 accounts, 115,536 slots spread over them; `lp4-execution/tests/rss_snapshot.rs`) | RSS growth 181,104,640 B against 10 × 40,006,582 B modelled: 0.45 of the model | for the largest term (snapshots, 1.7 GiB of the model), the model's own slack covers the allocator's headers, rounding and page use |
+**2. Explicit reserve** (the 1/8 boot gate, `RESERVE_KEEP_EIGHTHS = 7`). The gate admits a boot only when
+`budget_required(total) = ceil(8·total/7) ≤ MEM_BUDGET`. For the devnet total that is
+ceil(8 × 5,623,469,297 / 7) = **6,426,822,054 B**, so the reserve it holds back is
+6,426,822,054 − 5,623,469,297 = **803,352,757 B = 766.1 MiB** for what the model does not count.
 
-Allocation-header estimate for the other large terms (glibc: at most 31 B per allocation):
-- history: about 10 allocations per block × 20,001 blocks, plus one per receipt (≤ TX_CAP): under 7 MB;
-- logs: inside encoded receipts, about 1 per receipt: under 1 MB;
+**3. Remaining budget** (unused headroom below the 6 GiB cap after the gate):
+6,442,450,944 − 6,426,822,054 = **15,628,890 B = 14.9 MiB**.
+
+These three reconcile exactly to the budget:
+5,623,469,297 (model) + 803,352,757 (reserve) + 15,628,890 (unused) = 6,442,450,944 B = 6.000 GiB.
+The owner's review quoted the pre-round-2 figures "5.20 GiB … 50 MiB". Raising SIDE_BLOCKS_MAX 256 → 320
+added 56.0 MiB of side-block state and the exiting-threads term added 10.5 MiB, so the model rose to
+5.237 GiB and the unused headroom fell from ≈ 50 MiB to 14.9 MiB. The 766 MiB reserve is unchanged.
+
+**4. Measured peak RSS under each workload.** `tools/measure_rss.py`: a 3-node release devnet, 90 s idle
+production, then 90 s of ordinary and bounded-adversarial RPC load. This is what a real run touched; it
+reaches none of the caps, so it is not evidence about the worst case and is not the bound.
+
+| run (commit) | workload | peak RSS / node (VmHWM) | threads / node | model total | RSS ÷ model |
+|---|---|---:|---:|---:|---:|
+| final (`d610492`, code tree-equal to `bb9d8b8`; `evidence/rss-final.json`) | 90 s idle, then 48,065 light + 2,287 30M-gas eth_calls + 242 heavy batches + 187 transfers; height 154, 4 peers each | 12.26–12.32 MB (idle 10.5–10.6 MB) | 26–29 | 5,623,469,297 B | 0.0022 |
+| b132a05 (`evidence/rss-b132a05.json`, before the second review's changes) | 39,815 light + 1,960 eth_calls + 194 batches + 187 transfers; height 157, 4 peers | 11.9–12.0 MB | — | 5,506,111,035 B | 0.0022 |
+| 10 full-cap state clones (`lp4-execution/tests/rss_snapshot.rs`) | 20,005 accounts, 115,536 slots | +181,104,640 B vs 10 × 40,006,582 B modelled | — | — | 0.45 |
+
+The devnet run sits at 0.22% of the model: a 3-node, 154-block run fills none of the caps (no max side
+branch, no full canonical history to H_END, no full response pools). The state-clone run is the only one
+that loads the largest single term (snapshots, 1.72 GiB of the model) to its cap, and there the model's
+own slack covers the allocator's headers and page use at 0.45 of the modelled bytes. One passing RSS run
+is not a worst-case proof.
+
+**5. Unmodelled overhead and unresolved assumptions.** No guaranteed process-memory ceiling exists. The
+model leaves open, and the 766 MiB reserve is the margin (not a proof) for:
+- allocator per-allocation headers and size-class rounding (glibc ≤ 31 B/allocation; estimated below);
+- fragmentation and per-thread arenas (not bounded by anything);
+- the inspection-based inventories (§4 items 11, 13, 16);
+- the five conditions `derive` records on the live `a13` status (allocator overhead, transient-snapshot
+  inventory, main-thread stack, revm representation, CPU/timing), echoed in `evidence/rss-final.json`.
+
+Allocation-header estimate for the large terms (glibc, ≤ 31 B/allocation):
+- history: ≈ 10 allocations/block × 20,001 blocks, plus one per receipt (≤ TX_CAP): under 7 MB;
+- logs: ≈ 1 per receipt, inside encoded receipts: under 1 MB;
 - execution and RPC terms: a few large buffers.
 
-Fragmentation and per-thread arenas are not bounded by any of this. Item 3b stays OPEN; the 12.5%
-reserve is the margin kept for it, not a proof.
+An operating-system limit (cgroup `memory.max`, `RLIMIT_AS`) would turn an overrun into a failure rather
+than make the bound hold; none is configured. §4 item 3b stays OPEN.
 
 R21 fact (admission): (K_hist + side_max) × snapshot = 34 × 38.2 MiB = 1.27 GiB ≤ HIST_TRIE_BUDGET, so the devnet is
 admitted without the simnet retentionStress exception; at network-scale caps the bound exceeds the budget

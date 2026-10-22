@@ -13,11 +13,11 @@
 |---|---|
 | Audited snapshot | `090eae4dc059d1a7df330d9fe674c873ac515564` (branch `claude/affectionate-pascal-rjhh2k`) |
 | Repair branch, PR | `claude/audit-repair-a01-a14`, [PR #27](https://github.com/raedrasheed/Proof-of-Collaboration/pull/27) (draft) |
-| Last implementation commit (prototypes/ and .github/) | `__IMPL__` |
-| Integration-tested commit | `__INTEG__` |
-| Witness-tested commit | `__WIT__` |
-| Real-Chrome-tested commit | `__CHROME__` |
-| PR head | `__PRHEAD__` |
+| Last implementation commit (prototypes/ and .github/) | `687ac38` |
+| Integration-tested commit | `c19dc8a` (code = 687ac38) |
+| Witness-tested commit | `ec09120` (code = 687ac38) |
+| Real-Chrome-tested commit | `c19dc8a` (in the integration) |
+| PR head | latest commit on `claude/audit-repair-a01-a14` (docs-only after `687ac38`; see EVIDENCE-RECONCILIATION.md) |
 | Tree equivalence | [EVIDENCE-RECONCILIATION.md](EVIDENCE-RECONCILIATION.md) |
 | Plan, decisions | [REPAIR-PLAN.md](REPAIR-PLAN.md) |
 | Per-finding status (five axes) | [FINDING-STATUS.json](FINDING-STATUS.json) |
@@ -93,7 +93,29 @@ Commands:
 
 Earlier passing results are not reused as evidence for this code.
 
-__VERIFY__
+Results on the final code, separated by outcome (commit roles in EVIDENCE-RECONCILIATION.md; the
+prototypes/ tree is `68ece272a3c7` at `687ac38`, `c19dc8a` and `ec09120` alike, so these apply to the
+implementation commit):
+
+- **PASS (Linux, release integration on `c19dc8a`, evidence/integration.json):** lp4-execution 162;
+  pocold 110 (including the two R_keep adoption tests); extension build + 234 unit; 3-node devnet 17
+  checks; website publishing 20 checks; real Chrome 79 checks; integrated Chrome 18 checks. Toolchains:
+  cargo/rustc 1.97.0; lp1-node rustc 1.58.1; pinned rustc 1.99.1; node 22.22.0.
+- **FAIL — expected platform limitation only:** lp1-node `store_journal`, 11 Windows-only tests
+  executed on Linux and failed (UnsupportedPlatform), identical on `090eae4`; the integration records
+  `failuresOnlyExpectedPlatformLimitation = true`. Not counted as a pass (§5).
+- **NOT RUN:** Windows verification (the scoped workflow returns 404 on dispatch until its file is on
+  main; §5, WINDOWS-VERIFICATION.md).
+- **Witnesses (`ec09120`, evidence/witnesses-r2-final.log):** 17 observations, all NOT_REPRODUCED; 15
+  positive controls OK, 0 MISSING, 0 erroneous REPRODUCED. An observation with its control, not an
+  acceptance pass.
+- **Measured RSS (final code, evidence/rss-final.json):** 12.26–12.32 MB VmHWM per node under idle +
+  bounded adversarial load, 0.22% of the model. Measured, not the model bound and not a ceiling
+  (A13-DERIVATION §2b).
+- **Debug build (lp4-execution and pocold, single-threaded) and the mutation controls re-run on the
+  final code (evidence/mutations-final.json, run in an isolated worktree with a positive control per
+  test and zero-matching-test runs rejected):** in progress at the time of this commit; their results
+  are appended here and in evidence/MUTATIONS-R2.md on completion.
 
 ## 4. Independent review
 
@@ -125,7 +147,12 @@ Round 2: two more reviews by separate agent instances, which ran code in scratch
 These are agent reviews, not an external human audit, and the shared GitHub account is not an
 independent approval. The owner has not yet reviewed the consensus proposals.
 
-__REVIEW2__
+Both round-2 reviews ran the code in scratch copies, and every finding was treated as a defect with its
+own regression test and a mutation control (evidence/MUTATIONS-R2.md), not as a test expectation to
+adjust. The second review's highest findings (SIDE_BLOCKS_MAX 64 blocking adoption, the duplicate-record
+restart failure) were HIGH; SIDE_BLOCKS_MAX was reverted to 256 and then raised to 320 on the tested
+path, and the gap to R_keep is kept open as an architectural limitation (§5, D-REORG-REDB). No review
+weakened a consensus rule, and no review constitutes acceptance.
 
 ## 5. Remaining limitations and blocked evidence
 
