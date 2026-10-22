@@ -697,3 +697,55 @@ fn grow(h:&mut Net,parent:[u8;32],n:usize,first:&dyn Fn(&Net,[u8;32])->Block)->V
     assert!(v["result"].get("raw").is_none());assert!(a.body.len()<=2*txmax+2048,"{} B",a.body.len());
     let _=std::fs::remove_dir_all(&dir);
 }
+
+// ---------------- R_keep adoption depth (point 1): the cap, the boundary, and restart ----------------
+/// A heavier competing branch whose fork is just under the side-block cap is adopted through the
+/// tested validate()+insert() fork-choice path (it stays fully resident), and the adopted head
+/// survives a restart (plain journal replay rebuilds it).
+#[test] fn adopt_a_heavier_branch_at_the_cap_and_survive_restart(){
+    use pocold::{chain::SIDE_BLOCKS_MAX,node::Node};
+    // A fixed depth of 270: deeper than the previous cap (256) so adoption works only because the cap
+    // was raised to 320 (mutation control: cap=256 fails this), yet within the new cap.
+    let depth=270usize;assert!(depth>256&&depth<SIDE_BLOCKS_MAX,"270 is above the old cap, below the new one ({SIDE_BLOCKS_MAX})");
+    let mut a=net();let g=a.chain.head;
+    let ours=grow(&mut a,g,depth,&|n,p|signed(n,p,Body::default(),0));
+    let mut b=net();let target=a.chain.head().total_work;let mut theirs=vec![];let mut p=g;
+    while b.chain.head().total_work<=target{let x=fallback(&b,p,0);import(&mut b,&x);b.chain.retain();p=x.hash();theirs.push(x);}
+    for _ in 0..2{let x=fallback(&b,p,0);import(&mut b,&x);p=x.hash();theirs.push(x);}
+    assert!(theirs.len()>256&&theirs.len()<=SIDE_BLOCKS_MAX,"the competing branch ({}) exceeds the old cap but fits the new",theirs.len());
+    let (mut n,dir,conf)=retention_node("cap-adopt");
+    for x in &ours{n.import(x.clone(),None).unwrap();}
+    let mut max_side=0;for x in &theirs{n.import(x.clone(),None).unwrap_or_else(|e|panic!("h={}: {e:?}",x.header.h));max_side=max_side.max(n.chain.side_counts().0);assert!(n.chain.side_counts().0<=SIDE_BLOCKS_MAX);}
+    let tip=theirs.last().unwrap().hash();assert_eq!(n.chain.head,tip,"the heavier branch of depth {} is adopted",theirs.len());
+    let height=n.chain.head().height;drop(n);
+    let r=Node::open(conf(),admitted(&cfg(&["a","b","c"]))).expect("reopen");
+    assert_eq!(r.chain.head,tip,"restart replays to the adopted head");assert_eq!(r.chain.head().height,height);
+    println!("ADOPT-CAP {}",serde_json::json!({"ourDepth":depth,"theirDepth":theirs.len(),"cap":SIDE_BLOCKS_MAX,"maxSide":max_side,"adoptedHeight":height}));
+    let _=std::fs::remove_dir_all(&dir);
+}
+/// The boundary (A13-DERIVATION §4 item 18, OPEN): a heavier branch forked DEEPER than the cap is
+/// NOT adopted in one shot (its upper blocks are peeled, fork choice cannot assemble it), but every
+/// block is preserved in the journal (lossless, not refused forever), the node does not panic, and a
+/// restart replays to the same canonical head. This is the documented R_keep gap: the node stays on
+/// a valid lighter chain (it never adopts an invalid one); full depth needs the proposed redb store.
+#[test] fn a_branch_deeper_than_the_cap_is_preserved_not_adopted(){
+    use pocold::{chain::SIDE_BLOCKS_MAX,node::Node};
+    let depth=SIDE_BLOCKS_MAX+40;let mut a=net();let g=a.chain.head;
+    let ours=grow(&mut a,g,depth,&|n,p|signed(n,p,Body::default(),0));
+    let mut b=net();let target=a.chain.head().total_work;let mut theirs=vec![];let mut p=g;
+    while b.chain.head().total_work<=target{let x=fallback(&b,p,0);import(&mut b,&x);b.chain.retain();p=x.hash();theirs.push(x);}
+    for _ in 0..2{let x=fallback(&b,p,0);import(&mut b,&x);p=x.hash();theirs.push(x);}
+    assert!(theirs.len()>SIDE_BLOCKS_MAX,"the competing branch ({}) is deeper than the cap",theirs.len());
+    let ours_tip=ours.last().unwrap().hash();
+    let (mut n,dir,conf)=retention_node("cap-deep");
+    for x in &ours{n.import(x.clone(),None).unwrap();}
+    let rec0=n.journal_records();
+    for x in &theirs{let _=n.import(x.clone(),None);assert!(n.chain.side_counts().0<=SIDE_BLOCKS_MAX,"cap holds");}
+    assert_eq!(n.chain.head,ours_tip,"the too-deep heavier branch is NOT adopted; the node stays on the valid lighter chain");
+    assert!(n.journal_records()>rec0,"every competing block is preserved in the journal (lossless)");
+    drop(n);
+    let r=Node::open(conf(),admitted(&cfg(&["a","b","c"]))).expect("reopen without panic");
+    assert_eq!(r.chain.head,ours_tip,"restart replays to the same canonical head");
+    println!("ADOPT-OPEN {}",serde_json::json!({"ourDepth":depth,"theirDepth":theirs.len(),"cap":SIDE_BLOCKS_MAX,"headUnchanged":true}));
+    let _=std::fs::remove_dir_all(&dir);
+}

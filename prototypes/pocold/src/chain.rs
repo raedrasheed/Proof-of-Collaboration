@@ -12,13 +12,16 @@ pub fn truncate(why:&str)->String{if why.len()<=REASON_MAX{return why.to_string(
 /// governance.md R_keep: a non-canonical block this far below the head is removed (A13).
 pub const R_KEEP:u64=2048;
 /// Non-canonical blocks kept in total (A13); the lowest-work leaves leave first.
-/// Non-canonical blocks kept in memory (local retention, not validity). A competing branch is held
-/// as side blocks until it is heavier, so a branch longer than this cannot be adopted: pocold's
-/// adoption depth is about SIDE_BLOCKS_MAX, below the R_keep (2048) of network.md ("adoption at
-/// depth <= R_keep"). Holding R_keep blocks needs disk-backed blocks (the spec's redb), which pocold
-/// does not have (A13-DERIVATION §4 item 18). Round 2 kept 256 after a review showed that 64 made
-/// branches over 64 blocks unadoptable.
-pub const SIDE_BLOCKS_MAX:usize=256;
+/// Non-canonical blocks kept in memory (local retention, not validity). Fork choice (`better`,
+/// `rebuild_canonical`) walks a branch's ancestors in `self.blocks`, and `retain` only drops leaves,
+/// so a competing branch must be FULLY resident to be adopted: pocold's one-shot adoption depth IS
+/// SIDE_BLOCKS_MAX. This is memory-bound (the A13 side-block term) and below the R_keep=2048 of
+/// network.md:143 ("adoption at depth <= R_keep"). Reaching R_keep within the 6 GiB budget needs the
+/// block bodies off the heap (the spec's redb block store + a streaming reorg), which is PROPOSED,
+/// not implemented (A13-DERIVATION §4 item 18, D-REORG-REDB). Raised 256 -> 320 in round 2 as the
+/// largest value fitting the budget with margin (D-A13-BUDGET addendum); a branch deeper than this
+/// is not adopted in one shot but is preserved in the journal (lossless), not refused forever.
+pub const SIDE_BLOCKS_MAX:usize=320;
 /// Hashes of side blocks removed by retention, remembered so that a copy received again is refused
 /// before it is validated or journaled (a branch longer than SIDE_BLOCKS_MAX would otherwise be
 /// re-fetched, re-executed and re-journaled every sync turn). FIFO, a cache only.

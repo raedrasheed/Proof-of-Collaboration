@@ -145,8 +145,16 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // Threads: reserved stacks (an upper bound on their resident stack) and per-thread heap.
     use crate::threads::{IO_STACK,CONSENSUS_STACK};
     let io=io_threads(l.peers_max,dials,r.conn_max)?;
+    // Exiting-not-yet-joined threads (point 3): a reader/outbound-reader/RPC-conn thread can finish
+    // between its reaper's visits. Bound E = peers_max + dials + conn_max (writers are joined by
+    // their reader synchronously; singletons never respawn). Measured ~25.8 KiB resident each (the
+    // bulk of the stack returns to the exited-stack cache counted below); counted CONSERVATIVELY at a
+    // full IO_STACK each, so the term is an upper bound, not the measured figure (evidence/thread-
+    // inventory + threadmem). 
+    let exiting=(l.peers_max+dials+r.conn_max) as u128;
     let th=[("threads/I/O thread stacks and heap",mul(io,IO_STACK as u128+THREAD_HEAP)?),("threads/consensus stack",CONSENSUS_STACK as u128),
-        ("threads/main stack and heap",MAIN_STACK_RESIDENT+2*THREAD_HEAP),("threads/exited-stack cache",STACK_CACHE)];
+        ("threads/main stack and heap",MAIN_STACK_RESIDENT+2*THREAD_HEAP),("threads/exited-stack cache",STACK_CACHE),
+        ("threads/exiting not-yet-joined (conservative)",mul(exiting,IO_STACK as u128)?)];
     let threads=add(&th.map(|x|x.1))?;items.extend(th);
     // EVM execution buffers, journal, transient storage and loaded state (A13 obligation 4).
     let (gas,code_max)=(memory::execution_gas(cp.GAS_LIMIT),u128::from(cp.B_code_max));
