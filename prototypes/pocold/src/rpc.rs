@@ -53,9 +53,12 @@ impl Default for Limits{
 /// Also: heavy requests refused because QUEUED_MAX bodies were already waiting, requests
 /// refused by JSON_VALUES_MAX, and requests answered busy because the heavy pool was full.
 #[derive(Debug,Default)]
-pub struct RpcCounters{pub refused:AtomicUsize,pub active:AtomicUsize,pub expired:AtomicUsize,pub expired_members:AtomicUsize,pub queue_full:AtomicUsize,pub too_complex:AtomicUsize,pub busy:AtomicUsize}
+/// Gauges: heavy bodies queued now (all servers of the process), Wake events sent for the light
+/// lane, and light requests pushed into it.
+pub struct RpcCounters{pub refused:AtomicUsize,pub active:AtomicUsize,pub expired:AtomicUsize,pub expired_members:AtomicUsize,pub queue_full:AtomicUsize,pub too_complex:AtomicUsize,pub busy:AtomicUsize,
+    pub queued:AtomicUsize,pub wakes:AtomicUsize,pub light_pushed:AtomicUsize}
 pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0),active:AtomicUsize::new(0),expired:AtomicUsize::new(0),expired_members:AtomicUsize::new(0),
-    queue_full:AtomicUsize::new(0),too_complex:AtomicUsize::new(0),busy:AtomicUsize::new(0)};
+    queue_full:AtomicUsize::new(0),too_complex:AtomicUsize::new(0),busy:AtomicUsize::new(0),queued:AtomicUsize::new(0),wakes:AtomicUsize::new(0),light_pushed:AtomicUsize::new(0)};
 
 /// Heavy request bodies waiting in the main queue, per server: the body of a request whose
 /// connection already answered 504 stays there until the node dequeues it, so the connection
@@ -64,10 +67,10 @@ pub fn queued_max(l:&Limits)->usize{2*l.conn_max.max(1)}
 /// One queued heavy body; dropping it (when the node has handled or skipped the request)
 /// frees its place.
 pub struct Held(Arc<AtomicUsize>);
-impl Drop for Held{fn drop(&mut self){self.0.fetch_sub(1,Ordering::SeqCst);}}
+impl Drop for Held{fn drop(&mut self){self.0.fetch_sub(1,Ordering::SeqCst);COUNTERS.queued.fetch_sub(1,Ordering::SeqCst);}}
 fn hold(c:&Arc<AtomicUsize>,max:usize)->Option<Held>{
     if c.fetch_add(1,Ordering::SeqCst)>=max{c.fetch_sub(1,Ordering::SeqCst);return None}
-    Some(Held(c.clone()))
+    COUNTERS.queued.fetch_add(1,Ordering::SeqCst);Some(Held(c.clone()))
 }
 /// A request for the consensus thread: body, reply, whether it carried an Origin header (a
 /// site), the instant after which nobody waits for the answer, its lane, and its queue place
@@ -107,6 +110,8 @@ impl RespPools{
     }
     /// Reserved bytes (heavy, light), for status and tests.
     pub fn in_use(&self)->(usize,usize){(self.heavy.0.load(Ordering::SeqCst),self.light.0.load(Ordering::SeqCst))}
+    /// Reserves `n` heavy bytes directly (tests hold the pool full with it).
+    pub fn hold_heavy(&self,n:usize)->Option<Resv>{Self::take(&self.heavy,n)}
 }
 pub struct Resv{pool:Arc<AtomicUsize>,n:usize}
 impl Resv{fn shrink(&mut self,to:usize){if to<self.n{self.pool.fetch_sub(self.n-to,Ordering::SeqCst);self.n=to;}}}
@@ -149,7 +154,9 @@ impl LightLane{
     /// Asks the node to drain the lane unless a Wake is already pending. A full main queue
     /// needs none: the node drains the lane before every event it takes.
     pub fn wake(&self,node:&SyncSender<Event>){
-        if !self.wake.swap(true,Ordering::SeqCst)&&node.try_send(Event::Wake).is_err(){self.wake.store(false,Ordering::SeqCst);}
+        if !self.wake.swap(true,Ordering::SeqCst){
+            if node.try_send(Event::Wake).is_ok(){COUNTERS.wakes.fetch_add(1,Ordering::SeqCst);}else{self.wake.store(false,Ordering::SeqCst);}
+        }
     }
 }
 
@@ -216,7 +223,14 @@ fn conn(mut s:TcpStream,node:SyncSender<Event>,light:LightLane,l:&Limits,queued:
     };
     if method==0{return respond(&mut s,204,"")}
     if method==2{return respond(&mut s,405,"{}")}
-    if len>REQ_BUF.saturating_sub(head_end){return respond(&mut s,413,"{}")}
+    if len>REQ_BUF.saturating_sub(head_end){
+        // Closing with unread input makes the kernel reset the connection, which can discard the
+        // 413 before the client reads it: shut down the write side and drain at most REQ_BUF more
+        // bytes within the read deadline first.
+        respond(&mut s,413,"{}")?;let _=s.shutdown(std::net::Shutdown::Write);
+        let mut left=REQ_BUF;while left>0{match read_until(&mut s,&mut tmp,deadline){Ok(0)|Err(_)=>break,Ok(n)=>left=left.saturating_sub(n)}}
+        return Ok(())
+    }
     let mut body=Vec::with_capacity(len);body.extend_from_slice(&buf[head_end..buf.len().min(head_end+len)]);drop(buf);
     while body.len()<len{let want=(len-body.len()).min(READ_CHUNK);let n=read_until(&mut s,&mut tmp[..want],deadline)?;if n==0{break}body.extend_from_slice(&tmp[..n]);}
     // A10: with an Origin header ORIGIN_DENY applies to the request and to every batch member,
@@ -229,6 +243,7 @@ fn conn(mut s:TcpStream,node:SyncSender<Event>,light:LightLane,l:&Limits,queued:
         // The lane holds one request per connection; a full lane (expired requests not yet
         // skipped) is 503.
         if light.tx.try_send(Event::Rpc(Request{body,reply:tx,site,deadline:work_by,light:true,held:None})).is_err(){return respond(&mut s,503,"{}")}
+        COUNTERS.light_pushed.fetch_add(1,Ordering::SeqCst);
         light.wake(&node);
     }else{
         let Some(held)=hold(queued,queued_max(l)) else{COUNTERS.queue_full.fetch_add(1,Ordering::SeqCst);return respond(&mut s,503,"{}")};
@@ -403,6 +418,10 @@ fn call(n:&mut Node,m:&str,p:&[Value])->R{
             if f["fromBlock"].as_str().map(|s|!s.starts_with("0x")).unwrap_or(true)||f["toBlock"].as_str().map(|s|!s.starts_with("0x")).unwrap_or(true){return Err(bad("numeric fromBlock/toBlock").into())}
             logs(n,f)}
         "pocol_status"=>Ok(n.status_json()),
+        // Local RPC statistics (pocold's counters and gauges, not the RpcGuard RpcStats record).
+        "pocol_getRpcStats"=>{let c=&COUNTERS;let g=|a:&AtomicUsize|a.load(Ordering::SeqCst);let (h,l)=n.resp_pools().in_use();
+            Ok(json!({"refused":g(&c.refused),"active":g(&c.active),"expired":g(&c.expired),"expiredMembers":g(&c.expired_members),"queueFull":g(&c.queue_full),
+                "tooComplex":g(&c.too_complex),"busy":g(&c.busy),"queued":g(&c.queued),"wakes":g(&c.wakes),"lightPushed":g(&c.light_pushed),"heavyReserved":h,"lightReserved":l}))}
         "pocol_getRejects"=>Ok(json!(n.rejects.iter().map(|(h,w)|json!({"hash":h,"reason":w})).collect::<Vec<_>>())),
         "pocol_getHeaders"=>{let from=p.first().and_then(|x|x.as_u64().or_else(||parse_u64(x))).ok_or(bad("from"))?;let count=p.get(1).and_then(|x|x.as_u64().or_else(||parse_u64(x))).ok_or(bad("count"))?;
             if count==0||count>512{return Err(bad("count 1..512").into())}
@@ -504,6 +523,15 @@ mod tests{
         assert!(big.contains("-32008")&&big.len()<200,"{}",&big[..big.len().min(200)]);
         // The error answers the request (A14 clients require the request id).
         let v:serde_json::Value=serde_json::from_str(&big).unwrap();assert_eq!(v["id"],7);
+    }
+    /// Response pools: a reservation is refused once the pool would exceed its size; shrinking
+    /// returns the difference; dropping returns the rest; light holds conn_max+1 class maxima.
+    #[test] fn response_pools_reserve_shrink_and_release(){
+        let l=super::Limits{conn_max:3,..Default::default()};let p=super::RespPools::new(&l);
+        let a=p.hold_heavy(super::HEAVY_RESP_POOL-10).unwrap();assert!(p.hold_heavy(11).is_none());let mut b=p.hold_heavy(10).unwrap();
+        assert_eq!(p.in_use().0,super::HEAVY_RESP_POOL);b.shrink(4);assert_eq!(p.in_use().0,super::HEAVY_RESP_POOL-6);drop(a);assert_eq!(p.in_use().0,4);drop(b);assert_eq!(p.in_use().0,0);
+        let lights:Vec<_>=(0..4).map(|_|super::RespPools::take(&p.light,super::LIGHT_RESP_MAX).expect("a light reservation never fails within conn_max+1")).collect();
+        assert!(super::RespPools::take(&p.light,1).is_none());drop(lights);assert_eq!(p.in_use().1,0);
     }
     #[test] fn batch_members_beyond_the_byte_limit_are_not_run(){
         let items:Vec<serde_json::Value>=(0..5).map(|i|serde_json::json!({"jsonrpc":"2.0","id":i,"method":"m"})).collect();let mut ran=vec![];

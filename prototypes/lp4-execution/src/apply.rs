@@ -110,6 +110,8 @@ pub struct BlockOutput{
     pub log_bytes:u64,
     /// USER transactions that halted exceptionally (A03), by index.
     pub halts:Vec<(usize,crate::user_phase::Halt)>,
+    /// Accounts the USER phase made dirty (ACCT_DIRTY_BLOCK_MAX metering; reporting, not a root input).
+    pub dirty_accounts:u64,
 }
 
 /// Parent-state facts used by consensus (finality, closing, membership).
@@ -319,7 +321,7 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
     let state_root=state_root(&state)?;
     let facts=chain_facts(&state);
     Ok(BlockOutput{state,state_root,transactions_root:c.transactions_root,receipts_root:c.receipts_root,evidence_root,logs_bloom:c.logs_bloom,gas_used:c.gas_used,
-        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec()})
+        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts()})
 }
 
 /// T17: Escrow surplus = balance-(Σpending+heldTotal+burnedTotal) >= 0, and

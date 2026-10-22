@@ -130,11 +130,23 @@ impl Peer{
     /// the peer is kept and asks again.
     pub fn offer(&self,m:&Msg)->bool{self.enqueue(m,self.out.max/2).is_ok()}
     pub fn queued_bytes(&self)->usize{self.out.q.lock().map(|q|q.1).unwrap_or(0)}
-    /// The flag is set under the queue lock: the writer tests it under that lock before waiting,
-    /// so a close between its test and its wait cannot lose the wakeup (the reader joins the writer).
-    pub fn close(&self){{let _q=self.out.q.lock();self.out.closed.store(true,Ordering::SeqCst);}self.out.cv.notify_all();let _=self.sock.shutdown(std::net::Shutdown::Both);}
+    pub fn close(&self){close_outbox(&self.out);let _=self.sock.shutdown(std::net::Shutdown::Both);}
 }
 
+/// The flag is set under the queue lock: the writer tests it under that lock before waiting, so
+/// a close between its test and its wait cannot lose the wakeup (the reader joins the writer).
+fn close_outbox(out:&Outbox){{let _q=out.q.lock();out.closed.store(true,Ordering::SeqCst);}out.cv.notify_all();}
+/// The writer's wait for its next frame; None once the peer is closed. `between` runs after the
+/// closed test and before the wait, with the lock held (a test hook; a no-op in the node).
+fn next_frame(out:&Outbox,between:&dyn Fn())->Option<Vec<u8>>{
+    let Ok(mut q)=out.q.lock() else{return None};
+    loop{
+        if out.closed.load(Ordering::SeqCst){return None}
+        if let Some(f)=q.0.pop_front(){q.1-=f.len();return Some(f)}
+        between();
+        q=match out.cv.wait(q){Ok(q)=>q,Err(_)=>return None};
+    }
+}
 static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
 /// Reads exactly `buf` before `deadline`; false on EOF, error or deadline.
 fn read_by(r:&mut TcpStream,buf:&mut [u8],deadline:Instant)->bool{
@@ -169,9 +181,7 @@ fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net
     let writer=crate::threads::spawn(format!("peer-{id}-w"),crate::threads::IO_STACK,move||{
         let mut w=writer;let _=w.set_write_timeout(Some(write_deadline));
         loop{
-            let frame={let Ok(mut q)=out.q.lock() else{break};
-                loop{if out.closed.load(Ordering::SeqCst){return}if let Some(f)=q.0.pop_front(){q.1-=f.len();break f}
-                    q=match out.cv.wait(q){Ok(q)=>q,Err(_)=>return};}};
+            let Some(frame)=next_frame(&out,&||{}) else{return};
             if let Err(e)=w.write_all(&frame){
                 // A write that cannot finish within write_deadline: the peer stopped reading.
                 if matches!(e.kind(),std::io::ErrorKind::WouldBlock|std::io::ErrorKind::TimedOut){wpeer.counters.dropped_slow.fetch_add(1,Ordering::SeqCst);}
@@ -242,4 +252,30 @@ pub fn dial(addr:SocketAddr,events:SyncSender<NetEvent>,connected:Arc<Mutex<std:
             std::thread::sleep(Duration::from_millis(300));
         }
     }).expect("spawn dialer");
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    use std::sync::mpsc;
+    /// Review F1: a close that lands after the writer found the outbox open and before it waits
+    /// must still wake it. The hook holds the writer exactly there (with the queue lock) while the
+    /// close is issued; the writer must then return within the timeout. Deterministic: the close
+    /// is issued only once the writer is at the hook, and the hook is released only after the close
+    /// has either completed (a close that ignores the lock) or blocked on the lock for 200 ms.
+    #[test] fn a_close_between_the_writers_test_and_its_wait_wakes_it(){
+        let out=Arc::new(Outbox{q:Mutex::new((VecDeque::new(),0)),cv:Condvar::new(),closed:AtomicBool::new(false),max:1<<20});
+        let (at_tx,at_rx)=mpsc::channel::<()>();let (go_tx,go_rx)=mpsc::channel::<()>();let (done_tx,done_rx)=mpsc::channel();
+        let o=out.clone();let go=Mutex::new(go_rx);let at=Mutex::new(at_tx);
+        std::thread::spawn(move||{let hook=||{let _=at.lock().unwrap().send(());let _=go.lock().unwrap().recv();};let _=done_tx.send(next_frame(&o,&hook));});
+        at_rx.recv_timeout(Duration::from_secs(5)).expect("the writer reaches the point between its test and its wait");
+        let (closed_tx,closed_rx)=mpsc::channel();let c=out.clone();
+        std::thread::spawn(move||{close_outbox(&c);let _=closed_tx.send(());});
+        let closed_first=closed_rx.recv_timeout(Duration::from_millis(200)).is_ok();
+        drop(go_tx);
+        let r=done_rx.recv_timeout(Duration::from_secs(5));
+        assert!(matches!(r,Ok(None)),"the writer was not woken by the close (close completed before the wait: {closed_first}): {r:?}");
+        assert!(!closed_first,"the close must wait for the writer to release the queue lock");
+        closed_rx.recv_timeout(Duration::from_secs(5)).expect("the close completes once the writer waits");
+    }
 }

@@ -192,6 +192,8 @@ impl Node{
     }
     /// The RPC response pools (rpc::answer reserves from them).
     pub fn resp_pools(&self)->crate::rpc::RespPools{self.resp.clone()}
+    /// The light lane (rpc::serve pushes into it).
+    pub fn light_lane(&self)->crate::rpc::LightLane{self.light.clone()}
     pub fn handle(&mut self,ev:Event){
         match ev{
             Event::Tick=>{self.tick_pending.store(false,std::sync::atomic::Ordering::SeqCst);self.tick()}

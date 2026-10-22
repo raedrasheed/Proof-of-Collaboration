@@ -2,7 +2,7 @@
 //! on a real node over loopback sockets. Limits are shrunk so every case stays small.
 use std::io::{Read,Write};
 use std::net::{TcpListener,TcpStream};
-use std::sync::atomic::Ordering;
+use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
 use std::time::{Duration,Instant};
 use pocold::{chain::Spec,net::{self,Msg},node::{Config,Limits,Node}};
 use pocol_lp4_execution::{devnet::{self,DevnetConfig},txsign::Tx};
@@ -225,36 +225,156 @@ fn counter(c:&std::sync::atomic::AtomicUsize)->usize{c.load(Ordering::SeqCst)}
 /// While a 30M-gas eth_call holds the consensus thread, requests queued behind it get 504 at the
 /// work deadline (not when the work would end), are never run once it has passed, and release
 /// their connection threads; a batch stops starting members at the deadline.
+/// The heavy call's duration on this host and build: the shorter of two warm runs on a node with
+/// a wide deadline. Deadlines under test are fractions of it, so the tests do not depend on how
+/// fast the build is.
+fn heavy_duration()->Duration{
+    let mut wide=small();wide.rpc.work_deadline=Duration::from_secs(60);let w=start("heavy-duration",wide);
+    (0..2).map(|_|{let (code,t)=timed(w.rpc,HEAVY);assert_eq!(code,200);t}).min().unwrap()
+}
+fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id":9,"method":"pocol_getRpcStats","params":[]}"#,false);serde_json::from_str::<serde_json::Value>(&b).unwrap()["result"].clone()}
+/// Review F8: the work deadline, independently of build speed. The deadline under test is a
+/// quarter of the heavy call's measured duration d, so the heavy call always outlasts it:
+/// - the heavy caller is answered 504 at the deadline, while the work runs on;
+/// - light requests sent meanwhile are run (200) when they are drained before the heavy event,
+///   or wait behind it and expire (504); one dequeued after its deadline is skipped, never run,
+///   so the skipped count is at most the 504s, and at least one is skipped;
+/// - in a batch whose first member runs past the deadline, the 19 later members are not started;
+/// - afterwards no connection thread, queued body or response reservation is left.
 #[test] fn rpc_work_deadline_skips_expired_work_and_releases_resources(){let _g=serial();
-    let mut l=small();l.rpc.work_deadline=Duration::from_millis(400);let r=start("deadline",l);
-    let c=&pocold::rpc::COUNTERS;let (e0,m0)=(counter(&c.expired),counter(&c.expired_members));
-    // The heavy call alone (warm-up), without a deadline in the way: its duration on this host.
-    let mut wide=small();wide.rpc.work_deadline=Duration::from_secs(60);let w=start("deadline-wide",wide);
-    let (code,heavy)=timed(w.rpc,HEAVY);assert_eq!(code,200);assert!(heavy>Duration::from_millis(900),"the heavy call must outlast the deadline: {heavy:?}");
-    let base=threads();
-    // 250 ms: the heavy call has left the queue (behind at most one coalesced tick) and holds the
-    // consensus thread; light requests that arrive now wait for it (they are drained before the
-    // next event, never in the middle of one).
-    let h=std::thread::spawn({let p=r.rpc;move||timed(p,HEAVY)});std::thread::sleep(Duration::from_millis(250));
-    let quick:Vec<_>=(0..10).map(|_|{let p=r.rpc;std::thread::spawn(move||timed(p,LIGHT))}).collect();
-    let quick:Vec<(u16,Duration)>=quick.into_iter().map(|t|t.join().unwrap()).collect();
-    let (hc,ht)=h.join().unwrap();
-    assert_eq!(hc,504);assert!(ht<Duration::from_millis(900),"the caller is answered at the deadline, not after the work: {ht:?}");
-    for (code,t) in &quick{assert_eq!(*code,504);assert!(*t>=Duration::from_millis(350)&&*t<Duration::from_millis(900),"{t:?}");}
-    // Once the consensus thread is free, the expired requests are skipped, not run (no polling
-    // here: a poll that expired would be counted too).
-    std::thread::sleep(heavy+Duration::from_millis(500));
-    assert_eq!(counter(&c.expired)-e0,10,"each request whose deadline passed in the queue was skipped");
-    assert_eq!(rpc(r.rpc,LIGHT,false).0,200,"the node serves again");
-    // A heavy batch: the first member runs past the deadline; the 19 after it are not started.
+    let c=&pocold::rpc::COUNTERS;let d=heavy_duration();let dl=(d/4).max(Duration::from_millis(2));
+    let mut l=small();l.rpc.work_deadline=dl;let r=start("deadline",l);
+    let base=threads();let (e0,m0)=(counter(&c.expired),counter(&c.expired_members));
+    let stop=Arc::new(AtomicBool::new(false));
+    let h=std::thread::spawn({let p=r.rpc;move||timed(p,HEAVY)});
+    let lights:Vec<_>=(0..8).map(|_|{let (p,stop)=(r.rpc,stop.clone());std::thread::spawn(move||{let mut v=vec![];while !stop.load(Ordering::SeqCst){v.push(rpc(p,LIGHT,false).0)}v})}).collect();
+    let (hc,ht)=h.join().unwrap();std::thread::sleep(d);stop.store(true,Ordering::SeqCst);
+    let codes:Vec<u16>=lights.into_iter().flat_map(|t|t.join().unwrap()).collect();
+    assert_eq!(hc,504);assert!(ht>=dl&&ht<d,"the heavy caller is answered at the deadline ({dl:?}), not after the work ({d:?}): {ht:?}");
+    // 503: the light lane is full of requests that expired behind the heavy call and are not yet
+    // skipped; they were never queued.
+    assert!(codes.iter().all(|c|matches!(*c,200|503|504)),"{codes:?}");let late=codes.iter().filter(|c|**c==504).count();
+    assert!(wait_until(10_000,||rpc(r.rpc,LIGHT,false).0==200),"the node serves again");
+    let skipped=counter(&c.expired)-e0;
+    assert!(late>=1&&skipped>=1&&skipped<=late,"light 504s {late}, skipped {skipped} (of {} light requests)",codes.len());
+    // A batch: the first member runs past the deadline; the 19 after it are not started.
     let mut b=vec![HEAVY.to_string()];b.extend((0..19).map(|_|LIGHT.to_string()));let body=format!("[{}]",b.join(","));
-    let (code,t)=timed(r.rpc,&body);assert_eq!(code,504);assert!(t<Duration::from_millis(900),"{t:?}");
-    std::thread::sleep(heavy+Duration::from_millis(500));
-    assert_eq!(counter(&c.expired_members)-m0,19,"members after the deadline are not started");
-    // Resources: no connection thread is left behind.
-    assert!(wait_until(3000,||counter(&c.active)==0&&threads()<=base+2),"active={} threads {} vs {base}",counter(&c.active),threads());
-    println!("DEADLINE {}",serde_json::json!({"workDeadlineMs":400,"heavyMs":heavy.as_millis() as u64,"heavyAnsweredMs":ht.as_millis() as u64,
-        "queuedAnsweredMs":quick.iter().map(|q|q.1.as_millis() as u64).collect::<Vec<_>>(),"skipped":counter(&c.expired)-e0,"batchMembersNotRun":counter(&c.expired_members)-m0}));
+    let (code,t)=timed(r.rpc,&body);assert_eq!(code,504);assert!(t<d,"{t:?}");
+    assert!(wait_until(10_000,||counter(&c.expired_members)-m0==19),"members after the deadline are not started: {}",counter(&c.expired_members)-m0);
+    // Resources: connection threads, queued bodies and reservations are all released.
+    assert!(wait_until(5000,||counter(&c.active)==0&&threads()<=base+2),"active={} threads {} vs {base}",counter(&c.active),threads());
+    let st=stats(r.rpc);assert_eq!(st["queued"],0);assert_eq!(st["heavyReserved"],0);assert_eq!(st["lightReserved"],pocold::rpc::LIGHT_RESP_MAX,"only the stats request itself is reserved");
+    println!("DEADLINE {}",serde_json::json!({"heavyMs":d.as_millis() as u64,"workDeadlineMs":dl.as_millis() as u64,"heavyAnsweredMs":ht.as_millis() as u64,
+        "lightRequests":codes.len(),"light504":late,"light503":codes.iter().filter(|c|**c==503).count(),"skipped":skipped,"batchMembersNotRun":counter(&c.expired_members)-m0}));
+}
+/// Review F4: the body of a heavy request whose caller already got 504 stays queued until the
+/// node reaches it. At most queued_max (2·conn_max) are held at any moment, a further heavy
+/// request is 503 (counted), and every held body is released when the node skips it.
+#[test] fn abandoned_queued_bodies_are_capped_and_released(){let _g=serial();
+    let c=&pocold::rpc::COUNTERS;let d=heavy_duration();
+    let mut l=small();l.rpc.conn_max=2;l.rpc.work_deadline=(d/8).max(Duration::from_millis(1));let qmax=pocold::rpc::queued_max(&l.rpc);let r=start("queued",l);
+    let (f0,q0)=(counter(&c.queue_full),counter(&c.queued));
+    let stop=Arc::new(AtomicBool::new(false));let peak=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sampler={let (stop,peak)=(stop.clone(),peak.clone());std::thread::spawn(move||while !stop.load(Ordering::SeqCst){peak.fetch_max(counter(&pocold::rpc::COUNTERS.queued).saturating_sub(q0),Ordering::SeqCst);std::thread::yield_now();})};
+    let mut rounds=0;
+    while counter(&c.queue_full)==f0&&rounds<5{rounds+=1;
+        // One heavy call holds the consensus thread for about d; two senders keep abandoning
+        // heavy requests (each answered 504 at d/8, its body left queued).
+        let h=std::thread::spawn({let p=r.rpc;move||rpc(p,HEAVY,false).0});std::thread::sleep(d/16);
+        let senders:Vec<_>=(0..2).map(|_|{let p=r.rpc;std::thread::spawn(move||{let t=Instant::now();let mut v=vec![];while t.elapsed()<d{v.push(rpc(p,HEAVY,false).0)}v})}).collect();
+        for s in senders{s.join().unwrap();}h.join().unwrap();
+        assert!(wait_until(30_000,||counter(&c.queued)==q0),"queued bodies are released once skipped: {}",counter(&c.queued));
+    }
+    stop.store(true,Ordering::SeqCst);sampler.join().unwrap();
+    let full=counter(&c.queue_full)-f0;let peak=peak.load(Ordering::SeqCst);
+    assert!(full>=1,"queued_max was reached and a heavy request refused 503 ({rounds} rounds, peak {peak})");
+    assert!(peak<=qmax,"at most queued_max ({qmax}) bodies are held: {peak}");
+    assert_eq!(stats(r.rpc)["queued"],0);
+    println!("QUEUED {}",serde_json::json!({"queuedMax":qmax,"peakQueued":peak,"refused503":full,"rounds":rounds}));
+}
+/// Response pools on a node: with the heavy pool held full, a heavy batch carrying a transaction
+/// is answered -32021 busy for every member and nothing runs (the transaction is not pooled);
+/// with the pool free the same batch runs. An answer's reservation is its size while the reply
+/// lives and is released when the reply drops.
+#[test] fn a_full_heavy_pool_answers_busy_before_anything_runs(){let _g=serial();
+    use pocold::rpc::{answer,Request,HEAVY_RESP_POOL};
+    let dir=std::env::temp_dir().join(format!("pocold-net-pools-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let cfg=Config{dir,name:"pools".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()};
+    let mut n=Node::open(cfg,spec()).unwrap();let pools=n.resp_pools();
+    let tx=Tx{chain_id:777940,nonce:0,max_priority:U256::from(1u64),max_fee:U256::from(10_000_000_000u64),gas:21000,to:Some(revm::primitives::Address::ZERO),value:U256::ZERO,data:Default::default()}.sign_1559(&devnet::account_key("alice"));
+    let body=format!(r#"[{{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["0x{}"]}},{{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}}]"#,hex(&tx));
+    let req=|b:&str|{let (t,_r)=std::sync::mpsc::channel();Request{body:b.as_bytes().to_vec(),reply:t,site:false,deadline:Instant::now()+Duration::from_secs(30),light:false,held:None}};
+    let held=pools.hold_heavy(HEAVY_RESP_POOL-1024).unwrap();
+    let busy=answer(&mut n,&req(&body));let v:serde_json::Value=serde_json::from_str(&busy.body).unwrap();
+    assert!(v.as_array().map_or(false,|a|a.len()==2&&a.iter().all(|i|i["error"]["code"]==-32021)),"every member is busy: {v}");
+    assert_eq!(n.pool.txs.len(),0,"nothing ran: the transaction was not pooled");drop(busy);drop(held);assert_eq!(pools.in_use().0,0);
+    let ok=answer(&mut n,&req(&body));let v:serde_json::Value=serde_json::from_str(&ok.body).unwrap();
+    assert!(v[0]["result"].is_string(),"with the pool free the batch runs: {v}");assert_eq!(n.pool.txs.len(),1);
+    assert_eq!(pools.in_use().0,ok.body.capacity(),"the reservation shrank to the answer");drop(ok);assert_eq!(pools.in_use().0,0,"released with the reply");
+}
+fn hex(b:&[u8])->String{b.iter().map(|x|format!("{x:02x}")).collect()}
+/// Light/heavy scheduling, deterministically (review F2, F9): a turn runs at most LIGHT_TURN
+/// waiting light requests, then the node wakes itself for the rest, so any other event waits for
+/// at most LIGHT_TURN light executions however many are queued. Light requests do overtake heavy
+/// ones that arrived earlier (and run between a batch's members): HTTP requests sent concurrently
+/// have no order, and a client that needs one waits for each answer.
+#[test] fn a_light_turn_runs_at_most_light_turn_requests_then_wakes_the_node(){let _g=serial();
+    use pocold::{node::{Event,LIGHT_TURN},rpc::Request};
+    let dir=std::env::temp_dir().join(format!("pocold-net-turn-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let cfg=Config{dir,name:"turn".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()};
+    let mut n=Node::open(cfg,spec()).unwrap();let lane=n.light_lane();
+    let (t,r)=std::sync::mpsc::channel();let queued=20;
+    for _ in 0..queued{lane.tx.try_send(Event::Rpc(Request{body:LIGHT.as_bytes().to_vec(),reply:t.clone(),site:false,deadline:Instant::now()+Duration::from_secs(30),light:true,held:None})).unwrap();}
+    let w0=counter(&pocold::rpc::COUNTERS.wakes);
+    n.drain_light();let first=r.try_iter().count();
+    assert_eq!(first,LIGHT_TURN,"one turn runs LIGHT_TURN light requests");
+    assert!(lane.wake.load(Ordering::SeqCst)&&counter(&pocold::rpc::COUNTERS.wakes)==w0+1,"a full turn wakes the node for the rest");
+    n.drain_light();assert_eq!(r.try_iter().count(),LIGHT_TURN);n.drain_light();assert_eq!(r.try_iter().count(),queued-2*LIGHT_TURN,"the last turn takes what is left");
+}
+/// Review F2: under a light flood the main queue holds at most one Wake at a time, so far fewer
+/// Wakes are sent than light requests pushed, and main events still progress: a new peer's
+/// handshake is answered and a heavy request completes, each within a bound that does not grow
+/// with the flood (before every main event at most LIGHT_TURN light requests run).
+#[test] fn a_light_flood_coalesces_wakes_and_main_events_progress(){let _g=serial();
+    let c=&pocold::rpc::COUNTERS;let d=heavy_duration();let r=start("flood",small());
+    let (w0,p0)=(counter(&c.wakes),counter(&c.light_pushed));
+    let stop=Arc::new(AtomicBool::new(false));
+    let flood:Vec<_>=(0..16).map(|_|{let (p,stop)=(r.rpc,stop.clone());std::thread::spawn(move||{let mut n=0;while !stop.load(Ordering::SeqCst){if rpc(p,LIGHT,false).0==200{n+=1}}n})}).collect();
+    std::thread::sleep(Duration::from_millis(500));
+    // A peer's handshake is a main event: Connected makes the node send its Hello.
+    let t=Instant::now();let mut s=connect(&r);s.write_all(&hello(&r,"flood-peer")).unwrap();
+    let mut len=[0u8;4];s.read_exact(&mut len).unwrap();let mut f=vec![0u8;u32::from_be_bytes(len) as usize];s.read_exact(&mut f).unwrap();
+    let hello_at=t.elapsed();assert!(matches!(Msg::decode(&f),Ok(Msg::Hello{..})),"the node answers the handshake");
+    let (hc,ht)=timed(r.rpc,HEAVY);
+    stop.store(true,Ordering::SeqCst);let served:usize=flood.into_iter().map(|h|h.join().unwrap()).sum();
+    let (wakes,pushed)=(counter(&c.wakes)-w0,counter(&c.light_pushed)-p0);
+    println!("FLOOD {}",serde_json::json!({"lightServed":served,"lightPushed":pushed,"wakes":wakes,"helloMs":hello_at.as_millis() as u64,"heavyMs":ht.as_millis() as u64,"heavyAloneMs":d.as_millis() as u64}));
+    assert!(served>=100,"the flood ran: {served}");
+    assert!(wakes>=1&&wakes*2<pushed,"Wakes are coalesced: {wakes} for {pushed} light requests");
+    assert!(hello_at<Duration::from_secs(2),"the handshake progressed under the flood: {hello_at:?}");
+    assert_eq!(hc,200);assert!(ht<d*4+Duration::from_secs(1),"the heavy request progressed under the flood: {ht:?} (alone {d:?})");
+}
+/// Review F7: the miner is joined before it is replaced, so a mining node never has two miner
+/// threads. The node mines alone (fallback templates) until height 6, and every new template
+/// replaces the miner; /proc is sampled continuously for threads named "miner". The node stops
+/// at that height, so it does not load the tests after this one.
+#[test] fn miner_replacement_keeps_at_most_one_miner_thread(){let _g=serial();
+    #[cfg(not(target_os="linux"))]{eprintln!("THREADS-NOT-MEASURED");return}
+    let miners=||->Vec<String>{std::fs::read_dir("/proc/self/task").unwrap().filter_map(|e|{let e=e.ok()?;let n=std::fs::read_to_string(e.path().join("comm")).ok()?;(n.trim()=="miner").then(||e.file_name().to_string_lossy().to_string())}).collect()};
+    let before=miners().len();assert_eq!(before,0,"no miner runs before the test");
+    let dir=std::env::temp_dir().join(format!("pocold-net-miner-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let cfg=Config{dir,name:"miner".into(),miner:Some(devnet::miner_identity("a").key),listen:None,peers:vec![],rpc:None,stop_at:Some(6),log:false,limits:small()};
+    let mut node=Node::open(cfg,spec()).unwrap();node.start_network().unwrap();let run=std::thread::spawn(move||node.run());
+    let (mut peak,mut seen)=(0usize,std::collections::HashSet::new());let t=Instant::now();
+    while t.elapsed()<Duration::from_secs(120)&&!run.is_finished(){let m=miners();peak=peak.max(m.len());seen.extend(m);}
+    assert!(run.is_finished(),"the mining node reached height 6");run.join().unwrap();
+    assert!(wait_until(2000,||miners().is_empty()),"the miner is joined when the node stops");
+    let handles=pocold::miner::PEAK.load(Ordering::SeqCst);
+    println!("MINER {}",serde_json::json!({"minerThreadsSeen":seen.len(),"peakConcurrentSampled":peak,"peakLiveHandles":handles}));
+    assert!(seen.len()>=2,"the miner was replaced at least once: {} miner threads seen",seen.len());
+    // Exact: the handle count bounds the threads at every instant; sampling /proc is a cross-check.
+    assert_eq!(handles,1,"a miner was started before the previous one was joined");
+    assert!(peak<=1,"at most one miner thread at a time: {peak}");
 }
 /// Bounded adversarial load: 4 connections send 30M-gas eth_calls back to back, and 2 send
 /// 20-member heavy batches. Each request holds the consensus thread for at most one heavy member

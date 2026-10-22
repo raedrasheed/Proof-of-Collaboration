@@ -42,13 +42,15 @@ pub struct UserContext{
 #[derive(Clone,Debug,PartialEq,Eq)] pub struct UserCommitments{
  pub transactions_root:B256,pub receipts_root:B256,pub gas_used:u64,pub logs_bloom:[u8;256],
 }
-pub struct UserCandidate{state:InMemoryDB,commitments:UserCommitments,receipts:Vec<Vec<u8>>,tips:U256,log_bytes:u64,halts:Vec<(usize,Halt)>}
+pub struct UserCandidate{state:InMemoryDB,commitments:UserCommitments,receipts:Vec<Vec<u8>>,tips:U256,log_bytes:u64,halts:Vec<(usize,Halt)>,dirty_accounts:u64}
 impl UserCandidate{
  pub fn state(&self)->&InMemoryDB{&self.state}
  /// Charged log bytes of this block (LOG-ACCT-01).
  pub fn log_bytes(&self)->u64{self.log_bytes}
  /// Transactions that halted exceptionally, by index.
  pub fn halts(&self)->&[(usize,Halt)]{&self.halts}
+ /// Accounts the block's USER transactions made dirty (ACCT_DIRTY_BLOCK_MAX metering; reporting only).
+ pub fn dirty_accounts(&self)->u64{self.dirty_accounts}
  pub fn commitments(&self)->&UserCommitments{&self.commitments}
  pub fn receipts(&self)->&[Vec<u8>]{&self.receipts}
  pub fn tips(&self)->U256{self.tips}
@@ -258,7 +260,7 @@ fn execute_user_phase_inner_ctx(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&Nativ
   commit_tx(&mut state,result.state,profile.is_some());
  }
  let commitments=UserCommitments{transactions_root:receipts::ordered_root(raw,entry_budget).map_err(|_|UserError::Root)?,receipts_root:receipts::ordered_root(&encoded,entry_budget).map_err(|_|UserError::Root)?,gas_used:used,logs_bloom:bloom};
- Ok(UserCandidate{state,commitments,receipts:encoded,tips,log_bytes:meter.log_bytes,halts})
+ Ok(UserCandidate{state,commitments,receipts:encoded,tips,log_bytes:meter.log_bytes,halts,dirty_accounts:meter.dirty_accts.len() as u64})
 }
 /// Validates USER-phase commitments only. No storage/block acceptance side effect.
 pub fn validate_user_phase(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&NativeBlockContext,byte_budget:usize,entry_budget:usize,expected:&UserCommitments)->Result<UserCandidate,UserError>{

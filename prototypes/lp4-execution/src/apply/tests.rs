@@ -366,7 +366,13 @@ mod a03{
                     assert!(format!("{err:?}").contains(&format!("DirtyAccounts({})",e["invalidAt"])),"{}: {err:?}",s["id"]);continue;
                 }
                 let o=o.unwrap_or_else(|x|panic!("{}: {x:?}",s["id"]));let r=receipts(&o);
-                for (i,t) in e["txs"].as_array().unwrap().iter().enumerate(){assert_eq!(u64::from(r[i].0),t["status"].as_u64().unwrap(),"{} tx {i}",s["id"]);}
+                for (i,t) in e["txs"].as_array().unwrap().iter().enumerate(){
+                    assert_eq!(u64::from(r[i].0),t["status"].as_u64().unwrap(),"{} tx {i}",s["id"]);
+                    // The precise outcome: which halt (none for a successful transaction).
+                    let halt=o.halts.iter().find(|(j,_)|*j==i).map(|(_,h)|halt_name(h));
+                    assert_eq!(halt,t["halt"].as_str(),"{} tx {i}: halt",s["id"]);
+                }
+                assert_eq!(o.dirty_accounts,e["dirtyAccounts"].as_u64().unwrap(),"{}: dirty accounts after the block",s["id"]);
             }
         }
         /// C1–C3 with SLOT_CAP = the genesis user slots + the model's headroom; C4 (system storage past SYS_SLOT_MAX)
