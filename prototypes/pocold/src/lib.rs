@@ -12,6 +12,7 @@
 #[path="../../lp1-node/src/assignment.rs"] #[allow(dead_code)] pub mod assignment;
 #[path="../../lp1-node/src/timing.rs"] #[allow(dead_code)] pub mod timing;
 pub mod site;
+pub mod secp_backend;
 pub mod types;pub mod chain;pub mod store;pub mod miner;pub mod net;pub mod node;pub mod rpc;pub mod resources;
 
 use pocol_lp4_execution::{admission::{self,NodeLocal,Request,Timing},devnet,gate::FactClass,profile::{NodeKind,ProfileKind}};

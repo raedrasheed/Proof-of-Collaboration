@@ -31,6 +31,5 @@ harness = false
 # Exact versions already cached on the root machine; offline build with the lock file root generates.
 sha2 = "=0.9.9"
 sha3 = "=0.9.1"
-# k256 (as in lp4-execution) replaces the unmaintained libsecp256k1 0.5.0 (audit 2026-10-22).
-k256 = { version = "=0.13.4", features = ["ecdsa"] }
+libsecp256k1 = "=0.5.0"
 serde_json = "=1.0.79"

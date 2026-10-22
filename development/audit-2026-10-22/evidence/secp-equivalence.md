@@ -7,13 +7,18 @@
   consensus-relevant.
 - No product code signed with libsecp256k1: pocold signs with lp4-execution `txsign` (k256).
 - `rand 0.7.3` (RUSTSEC-2026-0097, alias GHSA-cq8v-f236-94qc; conditional on the `log` feature, which the
-  feature tree does not enable) was reachable only as a dependency of libsecp256k1.
+  feature tree does not enable) was reachable only as a dependency of libsecp256k1. It leaves pocold and
+  stays in lp1-node.
 
 ## Change
-- The `recover_address` body uses `k256::ecdsa::{Signature::from_slice, RecoveryId::from_byte,
-  VerifyingKey::recover_from_prehash}`.
-- The unchanged `check_sig_shape` filter still runs first: r ∈ [1, n), s ∈ [1, n/2], v ∈ {0, 1}, length 65.
+- `recover_address` keeps the unchanged `check_sig_shape` filter (r ∈ [1, n), s ∈ [1, n/2], v ∈ {0, 1},
+  length 65). It then calls `crate::secp_backend::recover_uncompressed`, which each crate supplies:
+  - pocold `src/secp_backend.rs`: `k256::ecdsa::{Signature::from_slice, RecoveryId::from_byte,
+    VerifyingKey::recover_from_prehash}`;
+  - lp1-node `src/secp_backend.rs`: the original libsecp256k1 calls, moved verbatim.
 - Error mapping is kept: unparsable → RRange, bad id → BadV, no point → NotRecoverable.
+- lp1-node keeps libsecp256k1 because of its accepted Rust 1.58.1 toolchain. The k256 0.13 tree needs
+  ≥ 1.65 (base64ct 1.8.3: 1.85). Its Cargo.toml and Cargo.lock are unchanged from 090eae4.
 
 ## Equivalence run
 - Tool: `development/audit-2026-10-22/tools/secp-equiv` (both crates linked; source SHA-256
@@ -33,7 +38,7 @@ Mismatches: **0**. Raw output: `{"cases":{"A honest signatures":50000,"B BadV":2
 
 ## Regression vectors after the change
 - lp1-node: all suites pass, including the accepted fixtures `fixtures_integration::a3_signatures_and_hash_oracle`
-  and `adversarial_lp3`.
+  and `adversarial_lp3`. They ran on the lp1-node backend, and also on k256 during the reverted first attempt.
   - `store_journal` (11 tests) is BLOCKED BY PLATFORM. It fails identically on the audited snapshot
     090eae4: `UnsupportedPlatform("exclusive single-writer enforcement is implemented only on Windows")`.
 - pocold and lp4-execution suites and the live devnet runs: see the integration record.

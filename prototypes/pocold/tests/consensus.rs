@@ -263,7 +263,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     // LP10 finding: a node that imported a fork child of a block below the K_hist window
     // (live TrieRebuild) must replay that journal; replay applies the same TrieRebuild.
     use pocold::node::{Config,Node};
-    let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
+    let c=cfg(&["a","b","c"]);
     let spec=|| admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-replay-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
     let conf=||Config{dir:dir.clone(),name:"r".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()};
@@ -286,7 +286,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     // Review finding (HIGH): a peer relaying a real header with a mismatched body must not get the
     // block marked invalid; the correct body is accepted afterwards.
     use pocold::node::{Config,Node};
-    let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
+    let c=cfg(&["a","b","c"]);
     let spec=admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-copy-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
     let mut node=Node::open(Config{dir:dir.clone(),name:"c".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},spec).unwrap();
@@ -301,7 +301,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
 // ---------------- audit A01 regressions: unbound bodies never poison a valid header ----------------
 fn a01_node(tag:&str)->(pocold::node::Node,std::path::PathBuf){
     use pocold::node::{Config,Node};
-    let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
+    let c=cfg(&["a","b","c"]);
     let spec=admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-a01-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
     (Node::open(Config{dir:dir.clone(),name:"a01".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},spec).unwrap(),dir)

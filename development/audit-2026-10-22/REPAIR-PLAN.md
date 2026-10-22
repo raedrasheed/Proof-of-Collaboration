@@ -162,11 +162,15 @@ Rules for this repair:
   Establish reachability. Replace libsecp256k1 only with vector-verified equivalence (signatures, recovery,
   encodings).
 - As implemented (D-DEP-SECP): libsecp256k1 0.5.0 was reachable only through `hashes::recover_address`
-  (lp1-node, shared into pocold). That function now uses k256 0.13.4, which was already in pocold's and
-  lp4-execution's lockfiles via revm and txsign. rand 0.7.3 was reachable only through libsecp256k1, so it
-  leaves both lockfiles, and with it the conditional advisory. derivative 2.2.0 and paste 1.0.15 are
-  build-time proc-macros reached through revm/alloy. They stay: replacing them needs a revm upgrade, which is
-  out of scope. They are unmaintained notices, not vulnerabilities.
+  (lp1-node `hashes.rs`, compiled into pocold by `#[path]`). The recovery call now goes through a per-crate
+  `secp_backend`:
+  - pocold, the node: k256 0.13.4, already locked in pocold and lp4-execution via revm and txsign;
+  - lp1-node, the accepted LP3 reference evaluator: its accepted libsecp256k1, unchanged.
+- rand 0.7.3 was reachable only through libsecp256k1, so it leaves pocold's lockfile; it stays only in
+  lp1-node's, where the advisory's `log` feature is not enabled.
+- derivative 2.2.0 and paste 1.0.15 are build-time proc-macros reached through revm/alloy. They stay:
+  replacing them needs a revm upgrade, which is out of scope. They are unmaintained notices, not
+  vulnerabilities.
 
 ## Decisions
 
@@ -275,7 +279,7 @@ H_END 20000 / H_CLOSE 19000, side_max 8. Bound 4.71 GiB ≤ the 6 GiB node budge
 the simnet retentionStress exception. Alternatives: keep network caps and raise the budget (rejected:
 hundreds of GiB), or exempt the devnet from the memory check (rejected: it is the A13 requirement).
 
-### D-DEP-SECP — k256 replaces libsecp256k1 for recovery (no consensus change intended)
+### D-DEP-SECP — k256 replaces libsecp256k1 in the node; the reference evaluator keeps its accepted set
 - Reachability: `recover_address` verifies header proposer signatures and winner signatures. A different
   verdict there would split consensus between versions. So the replacement was accepted only after an
   equivalence check with both libraries linked side by side, behind the unchanged `check_sig_shape` filter
@@ -287,20 +291,22 @@ hundreds of GiB), or exempt the devnet from the memory check (rejected: it is th
     are not x-coordinates);
   - 200 messages near n;
   - 3 wrong lengths.
-- Result: identical verdicts and addresses (0 mismatches). RFC 6979 signatures from both libraries were
-  byte-identical in all 50 000 cases. Evidence: `evidence/secp-equivalence.md`.
-- The accepted LP3 fixtures (`fixtures_integration::a3_signatures_and_hash_oracle`, `adversarial_lp3`) pass
-  unchanged.
-- Lockfiles:
-  - k256 0.13.4 and its dependencies take the versions already locked in pocold.
-  - lp1-node, removed: the libsecp256k1 tree, i.e. libsecp256k1 and its core/gen crates, rand 0.7.3 with
-    rand_chacha/rand_core 0.5/rand_hc, hmac-drbg, crypto-mac, hmac 0.8, getrandom 0.1, wasi 0.9, arrayref,
-    base64 0.12, crunchy, and its serde derive (serde_derive, proc-macro2, quote, syn, unicode-xid).
-  - lp1-node, added: the k256 tree (ecdsa, elliptic-curve, rfc6979, hmac 0.12, sha2 0.10, …).
-  - lp1-node, moved: generic-array 0.14.5 → 0.14.9 and libc 0.2.117 → 0.2.191, because the k256 tree
-    requires those minimums.
-  - No other package changed; the pre-existing lp1-node pins (serde_json 1.0.79, sha2 0.9.9, sha3 0.9.1, …)
-    are untouched.
+- Result: identical verdicts and keys (0 mismatches). RFC 6979 signatures from both libraries were
+  byte-identical in all 50 000 cases. Evidence: `evidence/secp-equivalence.md`. The two code paths compared
+  are exactly the two `secp_backend` bodies.
+- Why lp1-node keeps libsecp256k1:
+  - lp1-node declares `rust-version = "1.58"`, and its README requires `cargo build/test --offline` to pass
+    on Rust 1.58.1 with the accepted lock (the LP3 S1 Windows workflow uses 1.58.1).
+  - The k256 0.13 tree needs Rust ≥ 1.65 (base64ct 1.8.3 needs 1.85). A first attempt that moved lp1-node to
+    k256 was reverted for this reason.
+  - lp1-node's Cargo.toml and Cargo.lock are byte-identical to the audited snapshot.
+- Alternatives not taken:
+  - an older k256 for lp1-node: not in the offline registry, and an older line of the same library;
+  - a revm upgrade for derivative/paste: broad and consensus-relevant.
+- Residual: the unmaintained crate remains in the reference evaluator only. Moving it is a one-function
+  change once the LP3 toolchain pin is lifted.
+- Compatibility: no root, encoding or verdict change (equivalence above). pocold's lockfile only loses the
+  libsecp256k1 tree, including rand 0.7.3; nothing is added.
 
 ### D-A04-FORMAT — journal v2
 An experimental local storage format, not a protocol change. v1 migrates only when it parses completely;
