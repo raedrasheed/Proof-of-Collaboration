@@ -102,6 +102,7 @@ impl Node{
             pool:Pool{txs:vec![],pending_state:head_state,bytes:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;
         if rec.torn_tail{node.log("recovered torn journal tail into a new journal");}
+        if rec.migrated_v1{node.log("migrated a fully verified v1 journal to format v2 (original kept as blocks.journal.v1-n)");}
         Ok(node)
     }
     pub fn log(&self,m:&str){if self.cfg.log{eprintln!("[{} {}] {m}",self.cfg.name,now_ms()%100_000_000);}}
