@@ -1,172 +1,203 @@
-# Audit repair report: A01–A14 and dependencies
+# Audit repair report: A01–A14 and dependencies (round 2)
+
+> **Status: not accepted, not closed.**
+> - PR #27 is a draft.
+> - No finding is closed. Acceptance belongs to the owner, and none is recorded.
+> - Six consensus proposals are awaiting the owner's decision.
+> - A13 keeps open obligations, including an architectural blocker (§5).
+> - Windows was not run.
+>
+> This report replaces the round-1 report. §7 lists what round 1 overstated.
 
 | Item | Value |
 |---|---|
 | Audited snapshot | `090eae4dc059d1a7df330d9fe674c873ac515564` (branch `claude/affectionate-pascal-rjhh2k`) |
-| Repair branch | `claude/audit-repair-a01-a14` |
-| Final repaired code | `cedabe7fe13f1c478097c677d06aa56f68a87dd5`. Integration ran on `e3a24b1` (= cedabe7 plus an evidence commit) and the witnesses on `ed25c7e`; later commits change `development/` only |
+| Repair branch, PR | `claude/audit-repair-a01-a14`, [PR #27](https://github.com/raedrasheed/Proof-of-Collaboration/pull/27) (draft) |
+| Last implementation commit (prototypes/ and .github/) | `__IMPL__` |
+| Integration-tested commit | `__INTEG__` |
+| Witness-tested commit | `__WIT__` |
+| Real-Chrome-tested commit | `__CHROME__` |
+| PR head | `__PRHEAD__` |
+| Tree equivalence | [EVIDENCE-RECONCILIATION.md](EVIDENCE-RECONCILIATION.md) |
 | Plan, decisions | [REPAIR-PLAN.md](REPAIR-PLAN.md) |
-| Tracker | [FINDING-STATUS.json](FINDING-STATUS.json) |
-| Evidence | [evidence/FINDINGS-EVIDENCE.md](evidence/FINDINGS-EVIDENCE.md), [evidence/integration.json](evidence/integration.json), [evidence/witnesses-final.log](evidence/witnesses-final.log) |
+| Per-finding status (five axes) | [FINDING-STATUS.json](FINDING-STATUS.json) |
+| A13 derivation, breakdown, assumptions | [A13-DERIVATION.md](A13-DERIVATION.md) |
+| Consensus proposals | [proposals/](proposals/README.md) |
 | Arabic dashboard | [DASHBOARD-AR.md](DASHBOARD-AR.md) |
 
-Final acceptance below rests on the repaired code and the evidence listed, not on test counts. A witness
-printing NOT_REPRODUCED is an observation, not an acceptance pass.
+A witness printing NOT_REPRODUCED is an observation, not an acceptance pass. Test counts are not acceptance.
 
-## 1. What was repaired
+## 1. Status per finding
 
-| Finding | Repair (commits) | Corrected behaviour |
-|---|---|---|
-| A01 HIGH | ac3a951, d132203 | A body is bound to the header roots before any body check. An unbound or uncommittable copy is an envelope fault, never a verdict on the hash. Orphan copies are deduplicated by header and body, and a junk copy triggers a re-request. |
-| A02 HIGH | 10678de, d132203 | Every boot path (init-devnet, run, status, tests) goes through the full accepted ParamGate (R1–R26), whose facts come from the real artifacts. `Admitted` is the only bootable type. Timing is measured on the booting machine. R26 uses pocold's implemented RPC limits. |
-| A03 HIGH | 10678de | LOG_BLOCK_MAX (LOG-ACCT-01 charges), 546 logs, LOG_CAP, DIRTY_BLOCK_MAX, ACCT_DIRTY_BLOCK_MAX, SLOT_CAP/ACCT_CAP (user state) and the user-context SYS allowance are enforced as exceptional halts: all gas charged, state reverted except nonce and fee, status 0, block valid. SYS_SLOT_MAX is checked after each block. |
-| A04 HIGH | 20bedce, d132203, cedabe7 | Journal v2: authenticated record lengths and a two-slot commit file (separate sectors). Corruption of committed data fails closed with files untouched. Only bytes after the committed end (at most one record, both commit slots intact) are an interrupted append; any tail after an extra uncommitted record fails closed. v1 migrates only when fully verified. |
-| A05 HIGH | a2dbf16, d132203, cedabe7 | P2P: inbound caps (peers, pre-Hello), Hello/frame/idle deadlines, per-peer writer threads with bounded queues, bounded event queues, separate outbound connections, range re-requests rotated among peers. RPC: connection cap (excess refused unread), whole-request/write/work deadlines, streamed batches with BATCH_RESP_MAX, log results bounded with −32020 resume data (network.md:298). |
-| A06 HIGH | 51aa8f7, 4856842, cedabe7 | Signing eligibility across lock, timeout, wallet replacement, profile change/conflict/invalidity and endpoint identity change. Wallet and profile epochs are re-checked after every await, and transitions cancel pending approvals. The dialog shows the unsigned bytes and the signer signs exactly them, only after approval, under ProfileMutex (eligibility → identity → eligibility). A 30 s identity check runs. Dialogs are withdrawn when a session ends, and approve is armed 600 ms after a dialog appears. |
-| A07 MEDIUM | 51aa8f7, 4856842 | The extension's GenesisSpec decoder mirrors the accepted Rust decoder (stage order, details, widths, bounds). Differential: 1151 items, 0 mismatches. |
-| A08 HIGH | 51aa8f7 | The RP header decoder validates every field like the Rust header decoder before any trust result (same corpus). |
-| A09 MEDIUM | 51aa8f7 | The session receive share is taken synchronously and released exactly once on every path. |
-| A10 MEDIUM | a2dbf16 | With an Origin header, ORIGIN_DENY applies to every batch member before any member runs. |
-| A11 MEDIUM | a2dbf16, d132203 | Transactions of detached blocks return to the pool, minus those on the new branch, revalidated, in deterministic order. They are read before pruning. |
-| A12 MEDIUM | 51aa8f7 | Storage admission is released when the write settles, not on the reply. |
-| A13 HIGH | 25be2da, d132203, cedabe7 | Memory bound derived from the actual representation (container model checked against a counting allocator), state normalization, enforced side-branch, queue, RPC and batch caps, and a pool whose pending state commits like a block (EIP-161, normalization) under the block caps. The bound is checked at `Node::open`: 4.92 GiB ≤ 6 GiB at the devnet default. Open obligations are listed in A13-DERIVATION.md §4. |
-| A14 LOW | 51aa8f7, d132203 | Only a JSON-RPC 2.0 response with the request id and exactly one of result/error is accepted. The node's oversize error carries the id. |
-| Dependencies | 541b78b, 330c7d7 | pocold recovers signatures with k256 instead of the unmaintained libsecp256k1 0.5.0, so rand 0.7.3 leaves its tree. Equivalence: 151 463 cases, 0 mismatches, plus identical RFC 6979 signatures. lp1-node keeps its accepted Rust 1.58.1 set. |
+Each finding is recorded on five separate axes: implemented, verified, partially resolved, blocked and
+accepted. The disposition is the weakest of them.
 
-## 2. Verification on the final commit
+| Finding | Implemented | Verified (Linux) | Remaining | Disposition |
+|---|---|---|---|---|
+| A01 HIGH | yes | yes | D-BODY-MAX proposal | BLOCKED BY DECISION |
+| A02 HIGH | yes | yes | Only an experimental-devnet admission is possible; timing is a sample, not a bound | PARTIALLY RESOLVED |
+| A03 HIGH | yes (recommended alternatives, provisional) | yes; independent vectors | LOG-ACCT-01, D-A03-DIRTY, D-A03-CAPS, D-A03-SYSUSER, LOG-CAP-AGGREGATE | BLOCKED BY DECISION |
+| A04 HIGH | yes | yes | Power loss untested; journal v2 untested on Windows | VERIFIED (Linux), BLOCKED BY ENVIRONMENT |
+| A05 HIGH | partly | partly | RpcGuard partly implemented; no preemption; light methods light by size only | PARTIALLY RESOLVED |
+| A06 HIGH | yes | yes, real Chrome | A request already initiated may be broadcast (reported, never "cancelled") | VERIFIED (Linux), BLOCKED BY ENVIRONMENT |
+| A07–A12, A14 | yes | yes | — | VERIFIED (Linux), BLOCKED BY ENVIRONMENT |
+| A13 HIGH | partly | partly | Open: gas monotonicity, worst-case timing, allocator overhead, CPU costs, RetentionStore, adoption depth ≤ R_keep (architectural); no guaranteed memory ceiling | PARTIALLY RESOLVED |
 
-Commands: `python3 development/audit-2026-10-22/tools/run_integration.py` (the LP10 suites plus lp1-node and
-the extension build) and the witness runner kept local with the witness programs.
-- Host: Linux, 4 CPUs.
-- Toolchain: rustc/cargo 1.97.0, Node 22.22.0, Python 3, Playwright Chromium 1194. The repository pins Rust
-  1.99.1, but rustup is not available here (BASELINE.md).
+## 2. What was repaired
 
-Integration on `e3a24b107145a507ff84a3505f941dc4f856c166` (clean tree), all exit statuses recorded in
-[evidence/integration.json](evidence/integration.json):
+Round 1 (commits listed in FINDING-STATUS.json): the repairs of A01–A14 and the dependency changes, as
+described per finding in REPAIR-PLAN.md.
 
-| Suite | Command | Result |
-|---|---|---|
-| lp1-node | `cargo test --offline --no-fail-fast` | 136 passed, 0 failed; `store_journal` 11 BLOCKED BY PLATFORM (Windows-only exclusive writer, fails identically on 090eae4) |
-| lp4-execution | `cargo test --release --offline` | 151 passed, 0 failed |
-| pocold | `cargo build/test --release --offline` | 87 passed, 0 failed |
-| Extension release build and unit suite | `node build.mjs`, `node tests/unit.mjs` | build ok; 226/226 (includes the decoder differential and 51 worker checks) |
-| 3-node devnet: partition, heal, restart, replay | `python3 tests/e2e_devnet.py` | 17/17 |
-| Website publishing and persistence | `python3 tests/e2e_site.py` | 20/20 |
-| Real Chrome: wallet transitions, sandbox, DNR, storage, worker lifecycle | `node tests/e2e_browser.mjs` | 74/74 |
-| Real Chrome with the integrated devnet (reorg/restart) | `node tests/e2e_integrated.mjs` | 18/18 |
+Round 2, on the owner's review:
+- **Admission scope (D-A02-SCOPE).**
+  - RpcGuard facts that pocold does not enforce are absent, never nominal, and enter the gate as 0.
+  - Only an experimental-devnet admission is possible, and only for a Simnet profile on a Simnet node.
+  - The specification scope refuses every current profile and lists the open conditions.
+  - The RPC field inventory is tied to `RpcLimits` at compile time.
+- **A13: each assumption enforced, derived, inspected or kept open (A13-DERIVATION §4).**
+  - Thread stacks are reserved explicitly, and exiting threads are joined before reuse.
+  - The EVM execution model was rebuilt from per-gas operation classes, which cover entries revm loads
+    before charging their cold cost.
+  - RPC request and answer memory is enforced: exact-size bodies, a queued-body cap, a JSON value cap
+    and response pools.
+- **D-A13-BUDGET (owner approved option 1).** At 45712cd the corrected model put the default devnet at
+  6.62 GiB, over the 6 GiB budget. Local, non-consensus reductions, two proven accounting corrections
+  and the response pools bring it to 5.20 GiB. The boot gate now keeps a 1/8 reserve.
+- **RPC work deadline, light lane and tick coalescing (D-A05-R2)**, then the review fixes:
+  - a single pending Wake;
+  - LIGHT_TURN;
+  - the 413 drain;
+  - the peer-close lost wakeup;
+  - one miner thread at a time.
+- **Wallet submission states (D-A06-SUBMIT): signed, queued for transport, request initiated, broadcast.**
+  - Epochs and eligibility are rechecked after the transport reservation and immediately before
+    submission.
+  - A queued submission is cancelled on lock or revocation.
+  - A broadcast transaction is never claimed cancelled.
+- **Consensus decision proposals** (proposals/): for each, the exact normative text, the alternatives,
+  a minimal example, the effects, and independent expected-result vectors. All are **PROPOSED**; none is
+  approved.
+- **Windows scope workflow** prepared, with explicit toolchains and the evidence bound to a full SHA. It
+  has not run (§5).
 
-Other evidence:
-- **Witnesses on `ed25c7e` (same code):** 18 observations, all NOT_REPRODUCED
-  ([evidence/witnesses-final.log](evidence/witnesses-final.log)). This covers A01, A02 ×3, A03, A04, A05
-  (live), A06 ×3, A07, A08, A09, A10 (live), A11, A12 and A14. On 090eae4 the same observations reproduced
-  (BASELINE.md).
-- **Controls:**
-  - the worker tests on a build of 090eae4: 28 of 45 fail;
-  - mutation controls fail for the pool meter, the pool commit, range sync, normalization and side-state
-    pruning ([evidence/FINDINGS-EVIDENCE.md](evidence/FINDINGS-EVIDENCE.md)).
-- **Independent references:**
-  - the decoder differential against the Rust decoders (1151 items, 0 mismatches);
-  - the secp256k1 equivalence (151 463 cases, 0 mismatches);
-  - Solidity bytecode reproducibility: five system runtimes, plus the Website runtime and initcode,
-    identical with solc 0.8.28 ([evidence/bytecode-reproducibility.json](evidence/bytecode-reproducibility.json)).
-- **Timing margin:** the per-phase apply times measured at boot are 8–10 ms against t_exec = 1 s.
+## 3. Verification on the final implementation commit
 
-## 3. Independent review
+Commands:
+- `python3 development/audit-2026-10-22/tools/run_integration.py`: lp1-node with its accepted Rust 1.58.1,
+  the extension build, and the LP10 suites (lp4 and pocold in release, extension unit, 3-node devnet,
+  website publishing, real Chrome, Chrome with the integrated devnet).
+- Debug runs of lp4-execution and pocold.
+- The mutation controls (evidence/MUTATIONS-R2.md).
+- The witness runner (programs in the private package).
+- `tools/measure_rss.py`.
 
-Three read-only reviews by separate agent instances, none of which ran code. They are not an external human
-audit.
-1. **Rust side of 090eae4..4856842.** Confirmed findings:
-   - the pool's pending state was uncapped;
-   - batch responses were built before they were measured;
-   - inbound connections could take the slots for outbound dials;
-   - range sync stopped after the first truncated response;
-   - an interrupted append could be reported as corruption;
-   - timing facts were read from a file;
-   - RPC eviction contradicted the spec;
-   - the H_CLOSE transition was no longer covered;
-   - suspicions confirmed on inspection: orphan slot capture, two different BODY_MAX measures, the A11
-     order, a thread-spawn leak.
+Earlier passing results are not reused as evidence for this code.
 
-   All were fixed in d132203.
-2. **Extension side of 51aa8f7.** The A06 signing path was found sound. Confirmed edge cases:
-   - a site opened during a profile change was not revoked;
-   - stale dialogs survived a revocation;
-   - a queued dialog could be approved by a double click (pre-existing);
-   - quadratic gsVersion detail;
-   - −32008 without the request id;
-   - an unlock racing a wallet replacement;
-   - negative quantities from the endpoint.
+__VERIFY__
 
-   All fixed in 4856842. The submission after a post-signing lock is documented.
-3. **The review-fix commits d132203 and 4856842.** No consensus-safety regression. Confirmed:
-   - the pool commit lacked the EIP-161 cleanup (medium);
-   - log limits answered without resume data;
-   - range requests followed unchecked heights;
-   - a revoked tab's DNR rules lingered;
-   - a journal double fault;
-   - batch accounting details;
-   - the thread count.
+## 4. Independent review
 
-   All fixed in cedabe7, with new tests.
+Round 1:
+- three reviews by separate agent instances (Rust side, extension side, review-fix commits);
+- all confirmed findings were fixed (REPAIR-PLAN.md).
 
-Residual suspicions recorded, not fixed:
-- a peer on a higher but lower-work fork is asked for ranges once a second;
-- two concurrent unlocks can report "wallet changed during unlock";
-- a multi-megabyte specVersion takes about 5 s to describe;
-- the RPC connection test cannot tell a reset from a crash, beyond its successful-request check.
+Round 2: two more reviews by separate agent instances, which ran code in scratch copies.
+1. **df63725 (F1–F9).** All nine were fixed, each with a test and a mutation control:
+   - a lost wakeup in the peer outbox;
+   - an unbounded light-lane Wake;
+   - the execution model's state accounting;
+   - RPC request memory undercounted;
+   - the scope guard let Synthetic through;
+   - the field inventory was not tied to RpcLimits;
+   - miner and thread overlap;
+   - build-speed-dependent tests;
+   - light requests overtaking heavy ones (documented).
+2. **45712cd..b132a05 (the D-A13-BUDGET range).** Findings (A13-DERIVATION §2a):
+   - SIDE_BLOCKS_MAX 64 blocked the adoption of long branches (HIGH): reverted to 256;
+   - a restart failure on duplicate journal records (HIGH): fixed;
+   - an unbounded parse on the busy path: fixed;
+   - the side-block term after a reorg: fixed;
+   - a light-answer regression for TX_MAX transactions: fixed;
+   - two host-dependent tests: fixed;
+   - test gaps and small undercounts: fixed;
+   - the stats method's name: renamed.
 
-## 4. Decisions that need owner confirmation
+These are agent reviews, not an external human audit, and the shared GitHub account is not an
+independent approval. The owner has not yet reviewed the consensus proposals.
 
-These were taken under the standing authorization and are documented with alternatives in REPAIR-PLAN.md.
-Some change roots or validity:
-
-- **LOG-ACCT-01** (consensus, affects roots): a log is charged 36 + 32·topics + data bytes against
-  LOG_BLOCK_MAX, with at most 546 logs per block. A log with 32 733–32 768 data bytes now halts.
-- **D-A03-DIRTY** (consensus): if a halt's own nonce/fee effects would exceed ACCT_DIRTY_BLOCK_MAX, the
-  block is invalid, because no state exists to fall back to. The spec text says exceptional halt.
-- **D-A03-CAPS** (consensus): SLOT_CAP/ACCT_CAP bound the user state; system storage is bounded by
-  SYS_SLOT_MAX. The preserved LP4 issuance test now uses SYS_SLOT_MAX (cp[40]).
-- **D-BODY-MAX** (consensus alignment): BODY_MAX bounds the encoded body on the local path too, as
-  consensus.md and the network path do.
-- **D-A02-PROFILE**:
-  - devnet defaults: T_blk 4, D_att 25, dFbWait 3;
-  - caps: the approved caps/64, SYS_SLOT_MAX 65536, R_max 0, H_END 20000;
-  - e2e profiles: c 8, D_att 41.
-
-  The old profiles fail ParamGate.
-- **D-A06-CONFLICT**: both profiles of a chainId with two genesis hashes are read-only.
-- **D-A04-UNCOMMITTED / journal v2**: the local storage format changes (experimental; v1 migrates when it
-  verifies).
+__REVIEW2__
 
 ## 5. Remaining limitations and blocked evidence
 
-- **Windows: BLOCKED BY PLATFORM.**
-  - No Windows host is available in this environment.
-  - The repository's "LP3 S1 Windows verification (manual)" workflow (lp1-node with Rust 1.58.1) runs only
-    on manual dispatch and uses the owner's Actions minutes, so it was not dispatched.
-  - lp1-node `store_journal` (11 tests) needs Windows and fails identically on 090eae4.
-  - pocold's own Windows behaviour (file locks, sockets) is untested.
-- **Audit attachments** (FINDINGS.json, COVERAGE.md, REPRODUCE.md, overlays, SHA256SUMS) were not
-  provided. Verification against them is blocked; every finding was reproduced independently from
-  REPORT.md.
-- **Rust 1.58.1** is not available here. lp1-node's Cargo.toml and Cargo.lock are byte-identical to the
-  audited snapshot, and its only code change moves four lines behind a module boundary.
-- A13 open obligations (A13-DERIVATION.md §4):
-  - gas monotonicity is assumed;
-  - timing is representative, not worst-case;
-  - thread stack residency is assumed;
-  - pool re-execution and the full root rebuild cost CPU;
-  - RpcGuard memory accounting, scratch budgets, pacing and rate buckets are not implemented (R26 keeps
-    their nominal values);
-  - the RetentionStore/redb trie is not implemented.
-- Documented residuals:
-  - A06: a signed submission proceeds if the wallet locks while transport capacity is awaited. The 30 s
-    check does not revoke read access on transport errors.
-  - A05: the RPC work deadline is not tested in isolation; loopback only.
-  - A04: reordered complete records pass the framing layer (replay then fails closed); hardware power
-    loss is not tested.
-- Dependencies:
-  - libsecp256k1 0.5.0 and rand 0.7.3 remain in lp1-node (accepted toolchain pin).
-  - derivative 2.2.0 and paste 1.0.15 (build-time proc-macros via revm/alloy) remain; replacing them
-    requires a revm upgrade.
-- Not done: no merge into main, no deployment, no real funds. Exploit-shaped witness programs stay local.
+- **Windows: not run.**
+  - The scoped workflow `audit-r2-windows-verify.yml` returns 404 on dispatch until its file is on
+    `main`, and merging is not authorised (WINDOWS-VERIFICATION.md).
+  - The repository is public, so a run would use free standard runners.
+  - pocold's and the extension's Windows behaviour is untested: journal v2 file replacement and
+    directory fsync, sockets, thread counts.
+- **lp1-node `store_journal` (11 tests):** executed on Linux and **failed** with UnsupportedPlatform.
+  This is the expected platform limitation (Windows-only atomic journal), identical on 090eae4, and is
+  recorded as failures, not passes.
+- **Original audit programs** (FINDINGS.json, REPRODUCE.md, overlays, SHA256SUMS): not received. Every
+  witness was reconstructed from REPORT.md and carries a positive control.
+- **A13** (A13-DERIVATION §4):
+  - Open:
+    - gas monotonicity;
+    - worst-case timing;
+    - allocator overhead and fragmentation (a reserve is kept, but nothing proves it suffices);
+    - CPU costs;
+    - RetentionStore and redb.
+  - Inspection-only items remain.
+  - There is no guaranteed process-memory ceiling. The measured RSS of a run is not the bound.
+  - **Architectural blocker:** adoption of a heavier branch at any depth ≤ R_keep = 2048
+    (network.md:143) needs about 0.85 GB more of in-memory side blocks, which does not fit beside the
+    rest. pocold's adoption depth is SIDE_BLOCKS_MAX = 256. Meeting the rule needs disk-backed blocks.
+- **A05:** RpcGuard is implemented only in part. Not implemented:
+  - HEAVY/LIGHT permits and QUEUE_WAIT;
+  - scratch budgets;
+  - rate buckets;
+  - per-class compute deadlines;
+  - the send watchdog.
+
+  A running request is not preempted.
+- **A02:** only an experimental-devnet admission is possible. The R14/R19 timing sample fails closed
+  under CPU contention: pocold's consensus tests in a debug build fail when run in parallel, and pass
+  single-threaded on an idle host.
+- **A06:** a request already initiated may reach the network and is reported as initiated or broadcast.
+- **A04:** real power loss is untested.
+- **Dependencies:** libsecp256k1 0.5.0 and rand 0.7.3 remain in lp1-node (accepted toolchain pin).
+  derivative and paste remain as build-time proc-macros via revm.
+
+## 6. Decisions
+
+- **Approved by the owner:**
+  - D-A13-BUDGET (option 1, local);
+  - engineering decisions taken under the standing authorization (REPAIR-PLAN.md).
+- **Proposed, awaiting the owner** (they change roots or validity):
+  - LOG-ACCT-01;
+  - D-A03-DIRTY (including the block-invalid halt-residue case);
+  - D-A03-CAPS;
+  - D-BODY-MAX;
+  - D-A03-SYSUSER;
+  - LOG-CAP-AGGREGATE.
+
+  The implementation uses the recommended alternatives provisionally. Passing tests do not approve
+  them. The historical M1 files are unchanged.
+
+## 7. Corrections to round 1
+
+- "Closed with limitations" for every finding was overstated. No finding is closed (§1).
+- **Witnesses:** "18/18 NOT_REPRODUCED" was 17 observations. Round 1 had no positive controls; round 2
+  adds one per witness.
+- **A13:** "4.92 GiB ≤ 6 GiB" was not an upper bound. Three things were undercounted or assumed:
+  - thread stacks were assumed resident at 64 KiB;
+  - EVM execution memory was assumed;
+  - RPC answers were undercounted.
+
+  The corrected model exceeded the budget until D-A13-BUDGET. The current 5.20 GiB is still conditional.
+- **Windows** was labelled "blocked by platform". It is not run, for the precise reason in §5.
+- **lp1-node:** the 11 `store_journal` tests were described as blocked. They executed and failed.
+- **Rust 1.58.1** was said to be unavailable. It was installed through rustup, and lp1-node now runs
+  with it in the integration.
+- **A06:** round 1 left a submission proceeding after a lock while transport capacity was awaited.
+  That gap is closed by the submission states.
