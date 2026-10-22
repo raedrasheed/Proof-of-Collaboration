@@ -94,6 +94,17 @@ pub fn normalize(db:&mut InMemoryDB,touched:&[Address]){
  }
  if db.accounts.capacity()>2*db.accounts.len()+16{db.accounts.shrink_to_fit()}
 }
+/// Commits one transaction's state diff. EIP161 cleanup, as in the existing Cancun control runner:
+/// CacheDB::commit alone keeps touched empty accounts, so they are removed before the next
+/// transaction; with `normalized`, only live entries are kept (A13). The USER phase of a block and
+/// the pool's pending state both commit through here.
+pub fn commit_tx(state:&mut InMemoryDB,diff:EvmState,normalized:bool){
+ let removed:Vec<_>=diff.iter().filter(|(_,a)|a.is_selfdestructed()||(a.is_touched()&&a.is_empty())).map(|(a,_)|*a).collect();
+ let touched:Vec<_>=diff.iter().filter(|(_,a)|a.is_touched()).map(|(a,_)|*a).collect();
+ state.commit(diff);
+ for address in removed{let a=state.accounts.entry(address).or_default();a.account_state=AccountState::NotExisting;a.storage.clear();a.info=Default::default();}
+ if normalized{normalize(state,&touched)}
+}
 /// Code bytes no existing account references (A13), kept out of later snapshots.
 pub fn drop_unreferenced_code(db:&mut InMemoryDB){
  let used:HashSet<B256>=db.accounts.values().filter_map(|a|a.info()).map(|i|i.code_hash).collect();
@@ -244,13 +255,7 @@ fn execute_user_phase_inner_ctx(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&Nativ
   tips=tips.checked_add(tip.checked_mul(U256::from(gas)).ok_or(UserError::Arithmetic)?).ok_or(UserError::Arithmetic)?;
   encoded.push(receipts::encode(signed.kind(),result.result.is_success(),used,result.result.logs()).map_err(|_|UserError::Root)?);
   for (a,b) in bloom.iter_mut().zip(receipts::bloom(result.result.logs())){*a|=b}
-  // EIP161 cleanup, as in the existing Cancun control runner. CacheDB::commit
-  // alone keeps touched empty accounts; remove them before the next transaction.
-  let removed:Vec<_>=result.state.iter().filter(|(_,a)|a.is_selfdestructed()||(a.is_touched()&&a.is_empty())).map(|(a,_)|*a).collect();
-  let touched:Vec<_>=result.state.iter().filter(|(_,a)|a.is_touched()).map(|(a,_)|*a).collect();
-  state.commit(result.state);
-  for address in removed{let a=state.accounts.entry(address).or_default();a.account_state=AccountState::NotExisting;a.storage.clear();a.info=Default::default();}
-  if profile.is_some(){normalize(&mut state,&touched)}
+  commit_tx(&mut state,result.state,profile.is_some());
  }
  let commitments=UserCommitments{transactions_root:receipts::ordered_root(raw,entry_budget).map_err(|_|UserError::Root)?,receipts_root:receipts::ordered_root(&encoded,entry_budget).map_err(|_|UserError::Root)?,gas_used:used,logs_bloom:bloom};
  Ok(UserCandidate{state,commitments,receipts:encoded,tips,log_bytes:meter.log_bytes,halts})

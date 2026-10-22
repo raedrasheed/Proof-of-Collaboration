@@ -328,9 +328,17 @@ hundreds of GiB), or exempt the devnet from the memory check (rejected: it is th
   node from reaching its peers.
 - Range sync: `Peer::offer` stops a response at half the requester's queue. The requester now asks the
   best announced peer for the next range when its head has not moved for 1 s, at most once a second.
-- Pool: the pending state follows the block caps (SLOT_CAP, ACCT_CAP, SYS_SLOT_MAX) and is normalized
-  after every transaction. A transaction that would pass a cap is refused (`-32000 … SlotCap`), because it
-  would halt in a block. POOL_MAX_TXS = 4096 bounds the re-execution work at each new head.
+- Pool: the pending state follows the block caps (SLOT_CAP, ACCT_CAP, SYS_SLOT_MAX). A transaction that
+  would pass a cap is refused (`-32000 … SlotCap`), because it would halt in a block. POOL_MAX_TXS = 4096
+  bounds the re-execution work at each new head.
+- Second review: the pool committed transactions without the block's EIP-161 cleanup. revm touches the
+  target of every zero-value call, so empty accounts accumulated and the meter drifted. Both now commit
+  through `user_phase::commit_tx`, and a test checks the meter against a recount.
+- Second review: eth_getLogs limits answer −32020 {reason ∈ {resultBytes, resultCount, scanBytes},
+  fromBlock, lastCompleteBlock, nextFromBlock} (network.md:298), instead of −32005 without data.
+- Second review: range requests rotate among the peers that announce a higher head, so an inflated
+  (unverified) height cannot monopolize them. Batch accounting counts every delivered byte, and error items
+  echo an id only up to 128 B.
 
 ### D-A04-UNCOMMITTED — bytes after the committed end are an interrupted append
 - Rule: if every committed record verifies, and what follows the committed end is at most one maximal
@@ -341,7 +349,10 @@ hundreds of GiB), or exempt the devnet from the memory check (rejected: it is th
 - Still failing closed:
   - fewer verified records than committed, or the verified end before the committed end;
   - more than one maximal record of trailing bytes;
-  - anything after an extra, uncommitted complete record (that would be a second uncommitted append).
+  - any tail (garbage, strict prefix or zeros) after an extra, uncommitted complete record (that would
+    be a second uncommitted append);
+  - a non-record tail while a commit slot is damaged. The surviving older slot may predate the last
+    commit (second review: a double fault would otherwise drop a committed record).
 - Commit slots now sit at offsets 0 and 4096 (separate sectors). The first v2 layout (128 bytes, both
   slots adjacent) is read and rewritten in the new layout on open.
 - Compatibility: only journals written by this branch use v2, and they open unchanged. v1 handling is

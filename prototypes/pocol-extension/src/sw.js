@@ -23,6 +23,7 @@ let unlocked = null; // {seed, until}
 const RPC_TIMEOUT_MS = 10000, LOGS_TIMEOUT_MS = 30000, LOG_RANGE_MAX = 1024;
 const WALLET_PER_MIN = 5;
 const IDENTITY_CHECK_MS = 30000; // browser.md: identity at open, every 30 s and at signing
+const REVOKE_DNR_GRACE_MS = 2000;
 
 // ---------------- profiles ----------------
 export function netKeyOf(chainId, genesisHash) {
@@ -168,7 +169,8 @@ async function openSite({ name, site, path, tabId }) {
   if (!/^0x[0-9a-fA-F]{40}$/.test(site)) throw new Error('site address');
   if (tabId === undefined) throw Object.assign(new Error('a site opens only in a viewer tab'), { code: 4900 });
   opening.set(tabId, (opening.get(tabId) || 0) + 1);
-  try { return await openVerified(profile, site, path, tabId, ep0); } finally { opening.set(tabId, opening.get(tabId) - 1); if (!opening.get(tabId)) opening.delete(tabId); }
+  // A refused or failed open leaves no rules behind (removeDnr keeps them while a session or another open holds the tab).
+  try { return await openVerified(profile, site, path, tabId, ep0); } finally { opening.set(tabId, opening.get(tabId) - 1); if (!opening.get(tabId)) opening.delete(tabId); removeDnr(tabId).catch(() => {}); }
 }
 async function openVerified(profile, site, path, tabId, ep0) {
   /*@fault noDnr*/await installDnr(tabId);/*@else*//* TEST FAULT: DNR not installed *//*@end*/
@@ -195,6 +197,8 @@ async function openVerified(profile, site, path, tabId, ep0) {
   sess.revoke = () => { sess.closed = true; sessions.delete(sessionId); removeDnr(tabId).catch(() => {}); };
   sessions.set(sessionId, sess);
   await booted; const snap = await records.load(profile.netKey, site); const storage = snap.dict;
+  // Revoked while its storage loaded (e.g. a profile change): the viewer must not connect to it.
+  if (sess.closed) return { ok: false, error: { code: 4901, message: 'network profile changed while the site was opening; open it again' } };
   const norm = normalize(path || '/'); const target = norm === '' ? s.entry : norm;
   return { ok: true, sessionId, version: s.version, publishedBlock: s.publishedBlock, entry: s.entry, path: target, notFound: norm === null || !s.files.has(target), files, storage, storageError: snap.error || null, trust, netKey: profile.netKey };
 }
@@ -331,11 +335,12 @@ chrome.runtime.onConnect.addListener((port) => {
     p.dismiss = () => { if (waiting.delete(id)) { post({ dismiss: id }); resolve(false); } };
     return p;
   };
-  // keepDnr: after a revocation the tab keeps its DNR rules until it closes or opens again, so the
-  // frame being torn down is never left with CSP alone.
-  const end = (keepDnr = false) => {
+  // After a revocation the tab keeps its DNR rules for REVOKE_DNR_GRACE_MS while the viewer tears
+  // the frame down (never CSP alone), then they go as on any session end.
+  const end = (revoked = false) => {
     alive = false; sess.closed = true; clearInterval(tick); cancelApprovals((s) => s === sess, 4900, 'disconnected');
-    for (const r of waiting.values()) r(false); waiting.clear(); sessions.delete(sid); if (!keepDnr) removeDnr(sess.tabId).catch(() => {});
+    for (const r of waiting.values()) r(false); waiting.clear(); sessions.delete(sid);
+    if (revoked) setTimeout(() => { removeDnr(sess.tabId).catch(() => {}); }, REVOKE_DNR_GRACE_MS); else removeDnr(sess.tabId).catch(() => {});
   };
   // A changed identity or profile tears the frame down and cancels the session's requests (4901);
   // their replies are flushed before the port closes.

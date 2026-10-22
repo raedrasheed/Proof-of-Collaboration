@@ -13,7 +13,8 @@ use crate::{node::{Event,Node},types::*,chain::{self,Entry}};
 pub const MAX_BODY:usize=1024*1024;
 /// RpcGuard RESP_MAX and LOGS_SCAN_BYTES (governance.md): a larger response is replaced
 /// by -32008; eth_getLogs stops after scanning this many log data bytes, or once its result
-/// would exceed RESP_MAX or LOGS_COUNT_MAX logs (-32005), so it never builds more.
+/// would exceed RESP_MAX or LOGS_COUNT_MAX logs: -32020 {reason, fromBlock, lastCompleteBlock,
+/// nextFromBlock} (network.md:298), so it never builds more.
 pub const RESP_MAX:usize=8*1024*1024;pub const LOGS_SCAN_BYTES:usize=32*1024*1024;pub const LOGS_COUNT_MAX:usize=10000;
 /// Batches (network.md): at most BATCH_MAX members; the member that makes the delivered bytes
 /// exceed BATCH_RESP_MAX, and every later one, is answered -32020 {batchBytes} without running.
@@ -120,11 +121,16 @@ pub fn handle_with(n:&mut Node,body:&[u8],site:bool)->String{
 /// of answers plus the member being built (A13). The member that makes the delivered bytes
 /// exceed `limit`, and every later one, is answered -32020 {batchBytes} without running.
 fn batch(items:&[Value],limit:usize,mut run:impl FnMut(usize,&Value)->String)->String{
-    let mut out=String::from("[");let mut sent=0usize;let mut over=false;
+    // Every delivered byte counts (brackets and separators included). An error item echoes the
+    // request id only while it stays within ERR_ITEM_MAX (256 B).
+    let mut out=String::from("[");let mut over=false;
     for (k,i) in items.iter().enumerate(){
         let mut s=if over{String::new()}else{run(k,i)};
-        if over||sent+s.len()>limit{over=true;s=json!({"jsonrpc":"2.0","id":id_of(i),"error":{"code":-32020,"message":"batch response limit","data":{"reason":"batchBytes"}}}).to_string();}
-        sent+=s.len();if k>0{out.push(',');}out.push_str(&s);
+        if over||out.len()+1+s.len()+1>limit{
+            over=true;let id=id_of(i);let id=if id.to_string().len()<=128{id}else{Value::Null};
+            s=json!({"jsonrpc":"2.0","id":id,"error":{"code":-32020,"message":"batch response limit","data":{"reason":"batchBytes"}}}).to_string();
+        }
+        if k>0{out.push(',');}out.push_str(&s);
     }
     out.push(']');out
 }
@@ -132,9 +138,13 @@ fn one(n:&mut Node,v:&Value)->Value{
     if !v.is_object(){return err(&Value::Null,-32600,"invalid request")}
     let id=v["id"].clone();let p=v["params"].as_array().cloned().unwrap_or_default();
     let m=match v["method"].as_str(){Some(m)=>m,None=>return err(&id,-32600,"invalid request")};
-    match call(n,m,&p){Ok(r)=>json!({"jsonrpc":"2.0","id":id,"result":r}),Err((c,msg))=>err(&id,c,&msg)}
+    match call(n,m,&p){Ok(r)=>json!({"jsonrpc":"2.0","id":id,"result":r}),Err(f)=>fail_json(&id,f)}
 }
-type R=Result<Value,(i64,String)>;
+/// An RPC error with optional data (network.md: −32020 carries {reason, fromBlock, …}).
+struct Fail(i64,String,Option<Value>);
+impl From<(i64,String)> for Fail{fn from((c,m):(i64,String))->Self{Fail(c,m,None)}}
+type R=Result<Value,Fail>;
+fn fail_json(id:&Value,f:Fail)->Value{match f.2{None=>err(id,f.0,&f.1),Some(d)=>json!({"jsonrpc":"2.0","id":id,"error":{"code":f.0,"message":f.1,"data":d}})}}
 fn bad(m:&str)->(i64,String){(-32602,m.to_string())}
 
 fn block_by_tag<'a>(n:&'a Node,tag:&Value)->Option<&'a Entry>{
@@ -182,17 +192,17 @@ fn call(n:&mut Node,m:&str,p:&[Value])->R{
             let s=state_for(n,p.get(2).unwrap_or(&Value::Null))?;let v=s.accounts.get(&a).and_then(|x|x.storage.get(&k).copied()).unwrap_or_default();
             Ok(json!(hex(&v.to_be_bytes::<32>())))}
         "eth_call"=>{let o=p.first().ok_or(bad("call"))?;let r=simulate(n,o,p.get(1).unwrap_or(&Value::Null),None)?;
-            match r{ExecutionResult::Success{output,..}=>Ok(json!(hex(output.data()))),ExecutionResult::Revert{output,..}=>Err((3,format!("execution reverted:{}",hex(&output)))),ExecutionResult::Halt{reason,..}=>Err((-32000,format!("halt {reason:?}")))}}
+            match r{ExecutionResult::Success{output,..}=>Ok(json!(hex(output.data()))),ExecutionResult::Revert{output,..}=>Err(Fail::from((3,format!("execution reverted:{}",hex(&output))))),ExecutionResult::Halt{reason,..}=>Err(Fail::from((-32000,format!("halt {reason:?}"))))}}
         "eth_estimateGas"=>{
             let o=p.first().ok_or(bad("call"))?;let tag=Value::String("latest".into());
             let first=simulate(n,o,&tag,Some(cp.GAS_LIMIT))?;
-            let used=match first{ExecutionResult::Success{gas_used,..}=>gas_used,ExecutionResult::Revert{output,..}=>return Err((3,format!("execution reverted:{}",hex(&output)))),ExecutionResult::Halt{reason,..}=>return Err((-32000,format!("halt {reason:?}")))};
+            let used=match first{ExecutionResult::Success{gas_used,..}=>gas_used,ExecutionResult::Revert{output,..}=>return Err(Fail::from((3,format!("execution reverted:{}",hex(&output))))),ExecutionResult::Halt{reason,..}=>return Err(Fail::from((-32000,format!("halt {reason:?}"))))};
             let (mut lo,mut hi)=(used,cp.GAS_LIMIT);
             while lo+1000<hi{let mid=(lo+hi)/2;match simulate(n,o,&tag,Some(mid)){Ok(ExecutionResult::Success{..})=>hi=mid,_=>lo=mid}}
             Ok(json!(qty(hi)))
         }
         "eth_sendRawTransaction"=>{let raw=p.first().and_then(|x|x.as_str()).and_then(|s|unhex(s).ok()).ok_or(bad("raw"))?;
-            n.submit_tx(raw,true).map(|h|json!(format!("{h}"))).map_err(|e|{let code=e.split(' ').next().and_then(|c|c.parse().ok()).unwrap_or(-32000);(code,e)})}
+            n.submit_tx(raw,true).map(|h|json!(format!("{h}"))).map_err(|e|{let code=e.split(' ').next().and_then(|c|c.parse().ok()).unwrap_or(-32000);Fail(code,e,None)})}
         "eth_getBlockByNumber"=>{let e=block_by_tag(n,p.first().unwrap_or(&Value::Null));Ok(e.map(|e|block_json(n,e,p.get(1).and_then(|x|x.as_bool()).unwrap_or(false))).unwrap_or(Value::Null))}
         "eth_getBlockByHash"=>{let h=p.first().and_then(|x|x.as_str()).and_then(|s|unhex(s).ok()).ok_or(bad("hash"))?;
             Ok(h.try_into().ok().and_then(|h:[u8;32]|n.chain.get(&h)).map(|e|block_json(n,e,p.get(1).and_then(|x|x.as_bool()).unwrap_or(false))).unwrap_or(Value::Null))}
@@ -208,19 +218,19 @@ fn call(n:&mut Node,m:&str,p:&[Value])->R{
                 let e=n.chain.get(&h).filter(|e|n.chain.canonical_at(e.height).map(|c|c.hash==e.hash).unwrap_or(false)).ok_or((-32001,"unknown or non-canonical block".to_string()))?;let mut g=f.clone();g["fromBlock"]=json!(qty(e.height));g["toBlock"]=json!(qty(e.height));
                 if let Some(o)=g.as_object_mut(){o.remove("blockHash");}
                 return logs(n,&g)}
-            if f["fromBlock"].as_str().map(|s|!s.starts_with("0x")).unwrap_or(true)||f["toBlock"].as_str().map(|s|!s.starts_with("0x")).unwrap_or(true){return Err(bad("numeric fromBlock/toBlock"))}
+            if f["fromBlock"].as_str().map(|s|!s.starts_with("0x")).unwrap_or(true)||f["toBlock"].as_str().map(|s|!s.starts_with("0x")).unwrap_or(true){return Err(bad("numeric fromBlock/toBlock").into())}
             logs(n,f)}
         "pocol_status"=>Ok(n.status_json()),
         "pocol_getRejects"=>Ok(json!(n.rejects.iter().map(|(h,w)|json!({"hash":h,"reason":w})).collect::<Vec<_>>())),
         "pocol_getHeaders"=>{let from=p.first().and_then(|x|x.as_u64().or_else(||parse_u64(x))).ok_or(bad("from"))?;let count=p.get(1).and_then(|x|x.as_u64().or_else(||parse_u64(x))).ok_or(bad("count"))?;
-            if count==0||count>512{return Err(bad("count 1..512"))}
+            if count==0||count>512{return Err(bad("count 1..512").into())}
             let mut out=vec![];for h in from..from+count{if let Some(e)=n.chain.canonical_at(h){if h>0{out.push(hex(&e.header.encoded));}}else{break}}Ok(json!(out))}
         "pocol_getBlockRlp"=>{let e=block_by_tag(n,p.first().unwrap_or(&Value::Null)).ok_or((-32001,"unknown block".to_string()))?;
             Ok(json!({"header":hex(&e.header.encoded),"body":hex(&e.body.encode())}))}
         "pocol_getMiners"=>{let s=&n.chain.head().state;Ok(json!(apply::record_list(s).iter().map(|id|{let r=apply::miner_record(s,*id).unwrap();
             json!({"id":format!("{id:#x}"),"status":r.status,"tomb":r.tomb,"bondState":r.bond_state,"lastShare":r.last_share,"reward":format!("{:#x}",r.reward),"rewardBalance":qty256(s.accounts.get(&r.reward).map(|a|a.info.balance).unwrap_or_default())})}).collect::<Vec<_>>()))}
         "pocol_getTemplate"=>Ok(n.template_json()),
-        _=>Err((-32601,format!("method {m} not found"))),
+        _=>Err(Fail::from((-32601,format!("method {m} not found")))),
     }
 }
 fn next_base(n:&Node)->U256{let h=n.chain.head();if h.height==0{chain::from_fixed_lp4(&n.chain.spec.cp().baseFee0)}else{pocol_lp4_execution::fees::next_base_fee(h.base_fee,h.gas_used,h.header.gas_limit).unwrap_or(h.base_fee)}}
@@ -286,18 +296,20 @@ fn logs(n:&Node,f:&Value)->R{
     let head=n.chain.head().height;
     let from=match f["fromBlock"].as_str(){None|Some("latest")=>head,Some("earliest")=>0,Some(_)=>parse_u64(&f["fromBlock"]).ok_or(bad("fromBlock"))?};
     let to=match f["toBlock"].as_str(){None|Some("latest")=>head,Some(_)=>parse_u64(&f["toBlock"]).ok_or(bad("toBlock"))?};
-    if to<from||to-from+1>1024{return Err((-32020,"range > 1024 blocks".into()))}
+    if to<from||to-from+1>1024{return Err(Fail::from((-32020,"range > 1024 blocks".into())))}
     let addrs:Vec<Address>=match &f["address"]{Value::String(s)=>s.parse().ok().into_iter().collect(),Value::Array(a)=>a.iter().filter_map(parse_addr).collect(),_=>vec![]};
     let topics:Vec<Option<Vec<B256>>>=f["topics"].as_array().map(|t|t.iter().map(|x|match x{Value::Null=>None,Value::String(s)=>s.parse().ok().map(|b|vec![b]),Value::Array(a)=>Some(a.iter().filter_map(|y|y.as_str()?.parse().ok()).collect()),_=>None}).collect()).unwrap_or_default();
+    // network.md:298: the block x whose logs would pass a limit is not returned; the client resumes from x.
+    let stop=|reason:&str,x:u64|Fail(-32020,format!("log query limit ({reason})"),Some(json!({"reason":reason,"fromBlock":qty(from),"lastCompleteBlock":if x>from{Value::from(qty(x-1))}else{Value::Null},"nextFromBlock":qty(x)})));
     let mut out=vec![];let mut scanned=0usize;let mut bytes=2usize;
     for h in from..=to{let Some(e)=n.chain.canonical_at(h) else{break};
-        scanned+=e.receipts.iter().map(|r|r.len()).sum::<usize>();if scanned>LOGS_SCAN_BYTES{return Err((-32005,"log scan limit".into()))}
+        scanned+=e.receipts.iter().map(|r|r.len()).sum::<usize>();if scanned>LOGS_SCAN_BYTES{return Err(stop("scanBytes",h))}
         for i in 0..e.receipts.len(){let r=receipt_json(n,e,i);for l in r["logs"].as_array().cloned().unwrap_or_default(){
             let a:Address=l["address"].as_str().unwrap().parse().unwrap();if !addrs.is_empty()&&!addrs.contains(&a){continue}
             let lt:Vec<B256>=l["topics"].as_array().unwrap().iter().map(|x|x.as_str().unwrap().parse().unwrap()).collect();
             if topics.iter().enumerate().any(|(k,want)|match want{None=>false,Some(w)=>lt.get(k).map(|t|!w.contains(t)).unwrap_or(true)}){continue}
-            bytes+=l.to_string().len()+1;if bytes>RESP_MAX-1024{return Err((-32005,"log response limit".into()))}
-            out.push(l);if out.len()>LOGS_COUNT_MAX{return Err((-32005,"too many logs".into()))}}}}
+            bytes+=l.to_string().len()+1;if bytes>RESP_MAX-1024{return Err(stop("resultBytes",h))}
+            out.push(l);if out.len()>LOGS_COUNT_MAX{return Err(stop("resultCount",h))}}}}
     Ok(Value::Array(out))
 }
 

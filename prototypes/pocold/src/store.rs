@@ -19,7 +19,9 @@
 //!     with every committed record verified and at most one maximal record of bytes after them, those
 //!     bytes were never committed (appends commit before the next starts), so they are an interrupted
 //!     append whatever they contain (review finding: a crash can persist a later page of an append
-//!     before its header page);
+//!     before its header page). This needs both commit slots valid or never written: with a damaged
+//!     slot the surviving one may predate the last commit;
+//!   * any tail after a complete record beyond the commit count → `Corrupt` (two appends in flight);
 //! Fewer verified records than the commit count (damaged or truncated committed data) → `Corrupt`.
 //! A v1 journal (`POCOLJ1`) is migrated only when it parses completely with no tail; otherwise the
 //! store refuses to open (`LegacyNeedsReview`) and nothing is modified.
@@ -53,12 +55,16 @@ fn slot_bytes(binding:&[u8;32],seq:u64,count:u64,end:u64)->[u8;SLOT]{
     let mut s=[0u8;SLOT];s[..8].copy_from_slice(&seq.to_be_bytes());s[8..16].copy_from_slice(&count.to_be_bytes());s[16..24].copy_from_slice(&end.to_be_bytes());
     s[24..56].copy_from_slice(&slot_check(binding,seq,count,end));s
 }
-/// The valid commit slot with the larger seq: (seq, count, end).
-fn read_commit(bytes:&[u8],binding:&[u8;32])->Option<(u64,u64,u64)>{
+/// The valid commit slot with the larger seq: (seq, count, end), and whether a slot is damaged
+/// (neither valid nor never written, i.e. all zero).
+fn read_commit(bytes:&[u8],binding:&[u8;32])->Option<((u64,u64,u64),bool)>{
     let second=match bytes.len(){n if n==SLOT_STRIDE+SLOT=>SLOT_STRIDE,n if n==2*SLOT=>SLOT,_=>return None};
     let parse=|s:&[u8]|{let u=|i:usize|u64::from_be_bytes(s[i..i+8].try_into().unwrap());let (seq,count,end)=(u(0),u(8),u(16));
         (s[24..56]==slot_check(binding,seq,count,end)[..]&&s[56..].iter().all(|b|*b==0)).then_some((seq,count,end))};
-    match (parse(&bytes[..SLOT]),parse(&bytes[second..second+SLOT])){(Some(a),Some(b))=>Some(if a.0>=b.0{a}else{b}),(Some(a),None)|(None,Some(a))=>Some(a),_=>None}
+    let (s0,s1)=(&bytes[..SLOT],&bytes[second..second+SLOT]);
+    let damaged=[s0,s1].iter().any(|s|parse(s).is_none()&&s.iter().any(|b|*b!=0));
+    let best=match (parse(s0),parse(s1)){(Some(a),Some(b))=>Some(if a.0>=b.0{a}else{b}),(Some(a),None)|(None,Some(a))=>Some(a),_=>None};
+    best.map(|b|(b,damaged))
 }
 pub fn encode_frame(payload:&[u8])->Vec<u8>{
     let mut rec=Vec::with_capacity(payload.len()+OVERHEAD);let len=payload.len() as u32;
@@ -135,10 +141,12 @@ pub fn open(dir:&Path,binding:&[u8;32])->Result<Recovered,StoreError>{
     }
     if &bytes[..8]!=MAGIC{return Err(StoreError::Binding)}
     let mut cbytes=Vec::new();match File::open(&cpath){Ok(mut f)=>{f.read_to_end(&mut cbytes)?;},Err(_)=>return Err(StoreError::MissingCommit)}
-    let (seq,count,cend)=read_commit(&cbytes,binding).ok_or(StoreError::CommitCorrupt)?;
+    let ((seq,count,cend),slot_damaged)=read_commit(&cbytes,binding).ok_or(StoreError::CommitCorrupt)?;
     let (payloads,pos,tail)=parse_v2(&bytes,40);
-    // Bytes that cannot be a record but lie after every committed record were never committed.
-    let uncommitted=payloads.len() as u64==count&&pos as u64==cend&&bytes.len()-pos<=MAX_RECORD+OVERHEAD;
+    // Bytes that cannot be a record but lie after every committed record were never committed. Not
+    // when a commit slot is damaged: the surviving older slot may predate the last commit (second
+    // review: a double fault would otherwise drop a committed record).
+    let uncommitted=!slot_damaged&&payloads.len() as u64==count&&pos as u64==cend&&bytes.len()-pos<=MAX_RECORD+OVERHEAD;
     let tail=if matches!(tail,Tail::Corrupt)&&uncommitted{Tail::Torn}else{tail};
     if matches!(tail,Tail::Corrupt){return Err(StoreError::Corrupt(payloads.len() as u64))}
     // Committed data must all be present and verified; extra complete records were fsynced before a crash
@@ -146,6 +154,9 @@ pub fn open(dir:&Path,binding:&[u8;32])->Result<Recovered,StoreError>{
     // A crash between the journal fsync and the commit update leaves at most one such record.
     if (payloads.len() as u64)<count||(pos as u64)<cend||(payloads.len() as u64)>count+1{return Err(StoreError::Corrupt(payloads.len() as u64))}
     let torn=matches!(tail,Tail::Torn);
+    // A tail after a complete uncommitted record would be a second append in flight; appends commit
+    // before the next begins, so that is damage, not a crash.
+    if torn&&payloads.len() as u64==count+1{return Err(StoreError::Corrupt(payloads.len() as u64))}
     if torn{
         // Recovery: preserve the original bytes (fsynced copy), write the verified prefix to a new
         // file (fsynced), atomically replace the journal, fsync the directory.

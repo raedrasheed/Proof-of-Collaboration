@@ -329,7 +329,9 @@ async function main() {
       listed.find((x) => x.name === 'devnet').conflict === true && listed.find((x) => x.name === 'othernet').conflict === true && conflictReq === 4100 && (await page.isHidden('#modal')), `${conflictReq} ${JSON.stringify(listed.map((x) => [x.name, x.conflict]))}`);
     await b.send({ type: 'profiles.remove', name: 'othernet' });
     const accP = fr.evaluate(() => ethereum.request({ method: 'eth_requestAccounts' }));
-    await page.waitForSelector('#modal[data-kind=confirmAccounts]:not([hidden])'); await page.click('#approve');
+    await page.waitForSelector('#modal[data-kind=confirmAccounts]:not([hidden])'); const armedAtOnce = await page.$eval('#approve', (b) => !b.disabled);
+    ok('A06 Chrome: approve is not armed the moment a dialog appears (a double click cannot approve it)', armedAtOnce === false);
+    await page.click('#approve');
     const accts = await accP; ok('BR14 eth_requestAccounts after click returns the per-network wallet address', accts.length === 1 && accts[0].toLowerCase() === wAddr.toLowerCase(), accts[0]);
     const s2 = info.accounts.find((a) => a.label === 'bob').address;
     const txP = fr.evaluate(([from, to]) => ethereum.request({ method: 'eth_sendTransaction', params: [{ from, to, value: '0x1' }] }), [accts[0], s2]);
@@ -376,9 +378,13 @@ async function main() {
     tap.genesisOverride = null;
     ok('A06 Chrome: endpoint genesis changed before signing -> the frame is torn down with 4901, nothing sent', /4901/.test(revokedText) && tapCount('eth_sendRawTransaction') === 1 && !(await page.$('#stage iframe')), revokedText);
     // browser.md: the identity is also checked every 30 s; an idle session on a changed endpoint ends.
-    const pI = await openSite(b, 'devnet', S_A); await siteFrame(pI.page); tap.genesisOverride = '0x' + '77'.repeat(32); const tI = Date.now();
+    const pI = await openSite(b, 'devnet', S_A); const fI = (await siteFrame(pI.page)).fr;
+    // A dialog is open when the session ends: it must be withdrawn with the frame.
+    fI.evaluate(() => pocol.openExternal('https://example.org/')).catch(() => {}); await pI.page.waitForSelector('#modal[data-kind=confirmExternal]:not([hidden])');
+    tap.genesisOverride = '0x' + '77'.repeat(32); const tI = Date.now();
     await pI.page.waitForSelector('#stage .err', { timeout: 45000 }).catch(() => {}); const dI = Date.now() - tI; const idleText = await pI.page.textContent('#stage'); tap.genesisOverride = null;
     ok('A06 Chrome: periodic identity check ends an idle session whose endpoint genesis changed (4901 within 30 s + slack)', /4901/.test(idleText) && dI <= 40000, `${dI} ms: ${idleText}`);
+    ok('A06 Chrome: the open dialog is withdrawn when the session is revoked', await pI.page.isHidden('#modal'));
     await pI.page.close();
 
     // --- netKey binding: another network's profile against this endpoint is refused ---

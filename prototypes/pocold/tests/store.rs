@@ -129,9 +129,16 @@ fn three_records(name:&str)->(PathBuf,Vec<u8>){
     // More than one maximal record of such bytes cannot be a single interrupted append.
     let mut big=j.clone();big.extend(std::iter::repeat_n(0x5au8,store::MAX_RECORD+OV+1));let d=store_with(&dir,"a04-big",&big);
     assert!(matches!(store::open(&d,&B),Err(StoreError::Corrupt(3))));assert_eq!(fs::read(d.join("blocks.journal")).unwrap(),big,"untouched");let _=fs::remove_dir_all(&d);
-    // Garbage after a complete record beyond the commit count would be a second uncommitted append.
-    let mut two=j.clone();two.extend(store::encode_frame(&[7u8;20]));two.extend([0xde,0xad,0xbe,0xef,0x01,0x02,0x03,0x04,0x05]);let d=store_with(&dir,"a04-two",&two);
-    assert!(matches!(store::open(&d,&B),Err(StoreError::Corrupt(4))));let _=fs::remove_dir_all(&d);
+    // Any tail after a complete record beyond the commit count would be a second uncommitted append.
+    for (what,tail) in [("garbage",vec![0xde,0xad,0xbe,0xef,0x01,0x02,0x03,0x04,0x05]),("strict prefix",store::encode_frame(&[8u8;30])[..20].to_vec()),("zeros",vec![0u8;12])]{
+        let mut two=j.clone();two.extend(store::encode_frame(&[7u8;20]));two.extend(tail);let d=store_with(&dir,"a04-two",&two);
+        assert!(matches!(store::open(&d,&B),Err(StoreError::Corrupt(4))),"{what} after an uncommitted record");let _=fs::remove_dir_all(&d);
+    }
+    // With a damaged commit slot the surviving older slot may predate the last commit: no leniency.
+    let c=fs::read(dir.join("blocks.commit")).unwrap();
+    let d=store_with(&dir,"a04-dmg",&g);let mut bad=c.clone();let newest=if c[4096..4104].iter().any(|b|*b!=0)&&u64::from_be_bytes(c[4096..4104].try_into().unwrap())>u64::from_be_bytes(c[..8].try_into().unwrap()){4096}else{0};
+    bad[newest+30]^=0x01;fs::write(d.join("blocks.commit"),&bad).unwrap();
+    assert!(matches!(store::open(&d,&B),Err(StoreError::Corrupt(_))),"damaged newest slot + non-record tail fails closed");let _=fs::remove_dir_all(&d);
 }
 #[test] fn a04_commit_file_damage(){
     let (dir,_)=three_records("a04-commit");let c=fs::read(dir.join("blocks.commit")).unwrap();

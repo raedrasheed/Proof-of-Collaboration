@@ -82,7 +82,8 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // result stopping at RESP_MAX), counted as 4 x RESP_MAX.
     let r=&limits.rpc;use crate::rpc::{MAX_BODY,RESP_MAX,BATCH_RESP_MAX,BATCH_MAX};
     let rpc=add(&[mul(r.conn_max as u128,(MAX_BODY+16384+BATCH_RESP_MAX+BATCH_MAX*256) as u128)?,(BATCH_RESP_MAX+4*RESP_MAX) as u128])?;
-    let threads=mul(add(&[2*l.peers_max as u128,3*dials as u128,r.conn_max as u128,8])?,STACK_RESIDENT)?;
+    // Per configured peer: dialer, event forwarder, reader and writer.
+    let threads=mul(add(&[2*l.peers_max as u128,4*dials as u128,r.conn_max as u128,8])?,STACK_RESIDENT)?;
     let total=add(&[mul(snapshots,snapshot_bytes)?,code,history,side_blocks,queues,rpc,threads])?;
     let _=size_of::<Header>()+size_of::<Body>();
     Some(Bound{snapshots,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,total})

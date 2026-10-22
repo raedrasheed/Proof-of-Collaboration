@@ -206,6 +206,15 @@ export async function workerChecks(dist) {
     const w = await world(); w.env.nonce = -1; const t = realNow(); const r = await w.reply(w.tx());
     ok('A06 review: a negative quantity from the endpoint fails the request (no hang, nothing sent)', code(r) === -32603 && realNow() - t < 3000 && w.count('eth_sendRawTransaction') === 0, JSON.stringify(r));
   });
+  await scenario(async () => {
+    // Earlier scenarios' workers resolve the global chrome mock at call time: let their delayed DNR
+    // removals (revocations of tab 7 sessions, REVOKE_DNR_GRACE_MS) fire before this world exists.
+    await sleep(2500);
+    const w = await world(); const tab = (r) => r.filter((x) => x.condition.tabIds[0] === 7); const before = tab(w.mock.rules()).length;
+    w.env.genesis = '0x' + '77'.repeat(32); w.tick.f(); await w.port.next((m) => m.revoked, 2000); await sleep(100);
+    const during = tab(w.mock.rules()).length; await sleep(2300); const after = tab(w.mock.rules()).length;
+    ok('A06 review: a revoked tab keeps its DNR rules while the frame is torn down, then they are removed', before === 2 && during === 2 && after === 0, `${before} -> ${during} -> ${after}`);
+  });
   globalThis.setInterval = realSI; globalThis.clearInterval = realCI; Date.now = realNow;
   // ---- A07 review: the gsVersion detail of a huge specVersion item is computed in linear time ----
   {

@@ -8,7 +8,7 @@ use std::sync::{Arc,Mutex,mpsc::{self,Receiver,Sender,SyncSender}};
 use std::time::{Duration,SystemTime,UNIX_EPOCH};
 use crate::{hashes,header::Header};
 use pocol_lp4_execution::{apply::ParentResult,txsign::Key,wire,native::{self,NativeBlockContext},user_phase::{self,PoolMeter}};
-use revm::{InMemoryDB,DatabaseCommit,primitives::{Address,B256,U256}};
+use revm::{InMemoryDB,primitives::{Address,B256,U256}};
 use crate::{chain::{self,Chain,ChildCtx,Entry,Reject,Spec},miner::{self,MinerEvent,MinerHandle},net::{self,Msg,NetEvent,Peer,PeerId},store::{self,Journal},types::*};
 
 pub struct Config{
@@ -72,7 +72,7 @@ pub struct Node{
     peers:HashMap<PeerId,Peer>,
     /// Range sync: the height each peer announced (Hello) or relayed, our head height and when it
     /// last changed, and when a range was last requested.
-    peer_heights:HashMap<PeerId,u64>,sync_mark:(u64,u128),sync_ask_ms:u128,
+    peer_heights:HashMap<PeerId,u64>,sync_mark:(u64,u128),sync_ask_ms:u128,sync_turn:usize,
     outbound:Arc<Mutex<HashSet<String>>>,
     pub tx:SyncSender<Event>,
     rx:Receiver<Event>,
@@ -135,7 +135,7 @@ impl Node{
         let fwd=tx.clone();std::thread::spawn(move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}});
         let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());
         let net=net::Net::new(cfg.limits.net.clone());
-        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_heights:HashMap::new(),sync_mark:(0,0),sync_ask_ms:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,miner_tx,prod:None,
+        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_heights:HashMap::new(),sync_mark:(0,0),sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
             pool:Pool{txs:vec![],pending_state:head_state,bytes:0,meter},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;
@@ -262,8 +262,9 @@ impl Node{
         let r=native::execute_for_profile(&self.pool.pending_state,env.tx_env(),&ctx,self.chain.spec.profile()).map_err(|e|format!("-32000 {e:?}"))?;
         // A13: the effects must stay within the caps a block enforces; then only live entries are kept.
         self.pool.meter.admit(&self.pool.pending_state,&r.state).map_err(|h|format!("-32000 pending state would exceed a cap ({h:?})"))?;
-        let touched:Vec<Address>=r.state.keys().copied().collect();
-        self.pool.pending_state.commit(r.state);user_phase::normalize(&mut self.pool.pending_state,&touched);user_phase::drop_unreferenced_code(&mut self.pool.pending_state);
+        // The same commit as a block's USER phase (EIP-161 cleanup, normalization), so the meter
+        // follows the pending state exactly (second review: touched empty accounts were kept).
+        user_phase::commit_tx(&mut self.pool.pending_state,r.state,true);user_phase::drop_unreferenced_code(&mut self.pool.pending_state);
         self.pool.bytes+=raw.len();self.pool.txs.push((hash,raw.clone()));
         if relay{self.broadcast(&Msg::Tx{raw},None);}
         Ok(hash)
@@ -349,6 +350,8 @@ impl Node{
             let mut body=if effects.len()==body.evidence.len(){body}else{Body{txs:txs.clone(),evidence:vec![]}};
             // Evidence shares BODY_MAX with the transactions: drop transactions until the encoded body fits.
             while body.encode().len()>self.chain.spec.cp().BODY_MAX as usize&&!body.txs.is_empty(){body.txs.pop();}txs=body.txs.clone();
+            // Evidence alone over BODY_MAX (not reachable with E_max·EVID_BYTES_MAX < BODY_MAX): build without it.
+            let effects=if body.encode().len()>self.chain.spec.cp().BODY_MAX as usize{body.evidence.clear();vec![]}else{effects};
             match self.chain.build_signed(p,key,now_s(),body.clone(),effects){
                 Ok((h,_,_))=>return Some((h,body)),
                 Err(Reject::Block(why))=>{
@@ -400,8 +403,12 @@ impl Node{
         let ours=self.chain.head().height;
         if ours!=self.sync_mark.0{self.sync_mark=(ours,now);return}
         if now.saturating_sub(self.sync_mark.1)<1000||now.saturating_sub(self.sync_ask_ms)<1000{return}
-        let best=self.peer_heights.iter().filter(|(_,h)|**h>ours).max_by_key(|(_,h)|**h).map(|(i,h)|(*i,*h));
-        if let Some((id,h))=best{if let Some(p)=self.peers.get(&id){p.send(&Msg::GetRange{start:ours+1,count:(h-ours).min(512)});self.sync_ask_ms=now;}}
+        // Peers announcing more blocks are asked in turn, so one that lies about its height (Hello
+        // heights are unverified) gets only its share of the requests.
+        let mut ahead:Vec<(PeerId,u64)>=self.peer_heights.iter().filter(|(_,h)|**h>ours).map(|(i,h)|(*i,*h)).collect();ahead.sort();
+        if ahead.is_empty(){return}
+        let (id,h)=ahead[self.sync_turn%ahead.len()];self.sync_turn=self.sync_turn.wrapping_add(1);
+        if let Some(p)=self.peers.get(&id){p.send(&Msg::GetRange{start:ours+1,count:(h-ours).min(512)});self.sync_ask_ms=now;}
     }
     fn tick(&mut self){
         self.sync_ranges(now_ms());
@@ -464,8 +471,10 @@ impl Node{
             }
             Msg::Block{header,body}=>{
                 let Ok(h)=decode_header(&header) else{return};
-                if let Some(x)=self.peer_heights.get_mut(&from){*x=(*x).max(h.h);}
                 let Ok(b)=Body::decode(&body,self.chain.spec.cp().BODY_MAX as usize) else{return};
+                // Relayed heights are unverified (a block ahead of us is an orphan here); sync_ranges
+                // asks the peers in turn, so an inflated height cannot monopolize the requests.
+                if let Some(x)=self.peer_heights.get_mut(&from){*x=(*x).max(h.h);}
                 let _=self.import(Block{header:h,body:b},Some(from));
             }
             Msg::Template{shell,body}=>{
@@ -500,6 +509,8 @@ impl Node{
 }
 impl Node{
     pub fn pool_state(&self)->&InMemoryDB{&self.pool.pending_state}
+    /// The pool meter's (user slots, user accounts, system slots).
+    pub fn pool_live(&self)->(u64,u64,u64){self.pool.meter.live()}
     pub fn peer_count(&self)->usize{self.peers.len()}
     pub fn status_json(&self)->serde_json::Value{
         let h=self.chain.head();

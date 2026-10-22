@@ -502,6 +502,18 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     let entries=|n:&Node|n.pool_state().accounts.values().map(|a|a.storage.len()).sum::<usize>();let e0=entries(&node);
     let tx=Tx{chain_id:777910,nonce:2,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:1_000_000,to:None,value:U256::ZERO,data:read.into()}.sign_1559(&alice);
     node.submit_tx(tx,false).unwrap();assert_eq!(entries(&node),e0,"200 SLOADs add no storage entries");
+    // Second review: zero-value calls touch empty accounts. They are removed as in a block (EIP-161),
+    // so neither the pending state nor the meter drifts.
+    let profile=admitted(&c);let recount=|n:&Node|pocol_lp4_execution::user_phase::PoolMeter::of(n.pool_state(),profile.profile()).live();
+    let accounts=|n:&Node|n.pool_state().accounts.len();let a0=accounts(&node);assert_eq!(node.pool_live(),recount(&node));
+    for k in 0..3u64{let to=Address::from([0xee;20]);
+        let tx=Tx{chain_id:777910,nonce:3+k,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:21000,to:Some(to),value:U256::ZERO,data:Default::default()}.sign_1559(&alice);
+        node.submit_tx(tx,false).unwrap();assert_eq!(node.pool_live(),recount(&node),"meter = recount after zero-value transfer {k}");}
+    // A constructor making 300 zero-value CALLs to fresh addresses leaves none of them behind.
+    let mut calls=Vec::new();for i in 0..300u16{calls.extend([0x60,0x00,0x60,0x00,0x60,0x00,0x60,0x00,0x60,0x00,0x61,(i>>8) as u8,i as u8,0x61,0xff,0xff,0xf1,0x50]);}calls.push(0x00);
+    let tx=Tx{chain_id:777910,nonce:6,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:8_000_000,to:None,value:U256::ZERO,data:calls.into()}.sign_1559(&alice);
+    node.submit_tx(tx,false).unwrap();assert_eq!(node.pool_live(),recount(&node),"meter = recount after 300 empty calls");
+    assert!(accounts(&node)<=a0+2,"touched empty accounts are not kept: {} -> {}",a0,accounts(&node));
     let _=std::fs::remove_dir_all(&dir);
 }
 
@@ -541,4 +553,30 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     let mut b=remine_signed(&n,h,ctx.proposer);b.body=body.clone();
     assert!(matches!(n.chain.validate(&b,None,0),Err(Reject::Block(s)) if s.contains("BODY_MAX")),"the locally checked limit is the encoded one");
     assert!(Body::decode(&body.encode(),max).is_err(),"peers reject the same body at decode");
+}
+
+// ---------------- second review: eth_getLogs limits answer -32020 with resume data (network.md:298) ----------------
+#[test] fn get_logs_limits_answer_32020_with_resume_data(){
+    use pocold::node::{Config,Node};
+    let mut n=net();let alice=devnet::account_key("alice");
+    // Init code: 546 LOG0 of zero bytes (the per-block log count limit), then STOP.
+    let mut init=vec![0x61,0x02,0x22,0x5b];// PUSH2 546; JUMPDEST(3)
+    init.extend([0x5f,0x5f,0xa0,0x60,0x01,0x90,0x03,0x80,0x60,0x03,0x57,0x00]);// PUSH0 PUSH0 LOG0; PUSH1 1 SWAP1 SUB; DUP1 PUSH1 3 JUMPI; STOP
+    let mut first=0;
+    for k in 0..19u64{let head=n.chain.head;
+        let tx=Tx{chain_id:777910,nonce:k,max_priority:U256::from(1u64),max_fee:U256::from(100_000_000_000u64),gas:2_000_000,to:None,value:U256::ZERO,data:init.clone().into()}.sign_1559(&alice);
+        let b=signed(&n,head,Body{txs:vec![tx],evidence:vec![]},0);import(&mut n,&b);if k==0{first=n.chain.head().height;}}
+    let dir=std::env::temp_dir().join(format!("pocold-logs-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let mut node=Node::open(Config{dir:dir.clone(),name:"logs".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},admitted(&cfg(&["a","b","c"]))).unwrap();
+    let mut hs:Vec<_>=n.chain.blocks.values().filter(|e|e.height>0).map(|e|(e.height,e.hash)).collect();hs.sort();
+    for (_,h) in hs{let e=n.chain.blocks[&h].clone();node.import(Block{header:e.header,body:e.body},None).unwrap();}
+    let q=format!(r#"{{"jsonrpc":"2.0","id":5,"method":"eth_getLogs","params":[{{"fromBlock":"0x{:x}","toBlock":"latest"}}]}}"#,first);
+    let v:serde_json::Value=serde_json::from_str(&pocold::rpc::handle(&mut node,q.as_bytes())).unwrap();
+    let e=&v["error"];assert_eq!(e["code"],-32020,"{v}");assert_eq!(e["data"]["reason"],"resultCount");assert_eq!(v["id"],5);
+    // 18 complete blocks hold 9828 logs; the 19th would pass LOGS_COUNT_MAX = 10000.
+    let x=first+18;assert_eq!(e["data"]["nextFromBlock"],format!("0x{x:x}"));assert_eq!(e["data"]["lastCompleteBlock"],format!("0x{:x}",x-1));assert_eq!(e["data"]["fromBlock"],format!("0x{first:x}"));
+    // Resuming from nextFromBlock succeeds.
+    let q=format!(r#"{{"jsonrpc":"2.0","id":6,"method":"eth_getLogs","params":[{{"fromBlock":"0x{x:x}","toBlock":"latest"}}]}}"#);
+    let v:serde_json::Value=serde_json::from_str(&pocold::rpc::handle(&mut node,q.as_bytes())).unwrap();assert_eq!(v["result"].as_array().map(|a|a.len()),Some(546),"{}",&v.to_string()[..200.min(v.to_string().len())]);
+    let _=std::fs::remove_dir_all(&dir);
 }
