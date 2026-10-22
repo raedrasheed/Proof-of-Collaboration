@@ -28,7 +28,8 @@ def main():
     for name, cwd, cmd, tmo in SUITES:
         if (only and name not in only) or name in skip: continue
         t = time.time(); print(f"== {name}: {' '.join(cmd)}", flush=True)
-        try: r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=tmo); code, out = r.returncode, r.stdout + r.stderr
+        # stderr merged into stdout: cargo's "Running <binary>" lines must stay next to their results.
+        try: r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=tmo); code, out = r.returncode, r.stdout
         except subprocess.TimeoutExpired as e: code, out = -1, (e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")) + "\nTIMEOUT"
         open(os.path.join(logs, f"{name}.log"), "w").write(out)
         s = {"suite": name, "cmd": " ".join(cmd), "exit": code, "seconds": round(time.time() - t, 1), "summary": lp10.summarize(name, out)}
