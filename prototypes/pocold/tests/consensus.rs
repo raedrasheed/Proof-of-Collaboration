@@ -291,3 +291,51 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     assert_eq!(node.chain.head,good.hash());
     let _=std::fs::remove_dir_all(&dir);
 }
+
+// ---------------- audit A01 regressions: unbound bodies never poison a valid header ----------------
+fn a01_node(tag:&str)->(pocold::node::Node,std::path::PathBuf){
+    use pocold::node::{Config,Node};
+    let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
+    let spec=Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes,profile:d.profile,genesis:d.genesis};
+    let dir=std::env::temp_dir().join(format!("pocold-a01-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    (Node::open(Config{dir:dir.clone(),name:"a01".into(),miner:None,listen:None,peers:vec![],rpc:None,delta_rel:600,phi:100_000_000,gamma:1,stop_at:None,log:false},spec).unwrap(),dir)
+}
+#[test] fn a01_malformed_or_unbound_bodies_reject_only_the_copy(){
+    let n=net();let g=n.chain.head;let good=fallback(&n,g,0);
+    let tx=Tx{chain_id:777910,nonce:0,max_priority:U256::from(1u64),max_fee:U256::from(10_000_000_000u64),gas:21000,to:Some(Address::ZERO),value:U256::ZERO,data:Default::default()}.sign_1559(&devnet::account_key("alice"));
+    let copies:Vec<(&str,Body)>=vec![
+        ("empty tx item",Body{txs:vec![vec![]],evidence:vec![]}),
+        ("empty evidence item",Body{txs:vec![],evidence:vec![vec![]]}),
+        ("empty tx among valid ones",Body{txs:vec![tx.clone(),vec![]],evidence:vec![]}),
+        ("undecodable tx bytes",Body{txs:vec![vec![0xff,0x01,0x02]],evidence:vec![]}),
+        ("undecodable evidence bytes",Body{txs:vec![],evidence:vec![vec![0xc1]]}),
+        ("valid tx, header commits to the empty body",Body{txs:vec![tx],evidence:vec![]}),
+        ("oversized tx item",Body{txs:vec![vec![0x02;200_000]],evidence:vec![]}),
+    ];
+    let (mut node,dir)=a01_node("copies");
+    for (what,body) in &copies{
+        let r=node.import(Block{header:good.header.clone(),body:body.clone()},None);
+        assert!(matches!(r,Err(Reject::Envelope(_))),"{what}: must be an envelope rejection, got {r:?}");
+    }
+    assert!(node.import(good.clone(),None).expect("legitimate body after every malformed copy"),"becomes head");
+    assert_eq!(node.chain.head,good.hash());
+    let _=std::fs::remove_dir_all(&dir);
+}
+#[test] fn a01_committed_invalid_body_is_still_a_block_rejection_and_cached(){
+    // The header commits to a body whose content is invalid: that is a verdict on the block hash.
+    let mut n=net();for _ in 0..2{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);}
+    let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    let good=signed(&n,head,Body::default(),0);
+    let garbage=Body{txs:vec![vec![0x02,0xc0]],evidence:vec![]};
+    let mut h=good.header.clone();h.tx_root=pocold::types::ordered_root(&garbage.txs).unwrap();reseal(&mut h);
+    let mut b=remine_signed(&n,h,ctx.proposer);b.body=garbage;
+    let r=n.chain.validate(&b,None,0);
+    assert!(matches!(r,Err(Reject::Block(_))),"committed invalid content is a block rejection, got {:?}",r.err());
+    // Through the node: the hash is cached as invalid and a resubmission is refused.
+    let (mut node,dir)=a01_node("committed");
+    let parent=n.chain.blocks[&head].parent.unwrap();
+    for h in [parent,head]{let e=n.chain.blocks[&h].clone();node.import(Block{header:e.header,body:e.body},None).unwrap();}
+    assert!(matches!(node.import(b.clone(),None),Err(Reject::Block(_))));
+    assert!(matches!(node.import(b,None),Err(Reject::Block(s)) if s.contains("known invalid")),"cached verdict for committed content");
+    let _=std::fs::remove_dir_all(&dir);
+}

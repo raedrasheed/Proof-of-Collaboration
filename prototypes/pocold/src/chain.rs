@@ -232,8 +232,9 @@ impl Chain{
         // Body binding first (D129): the block hash commits the header only and the body through
         // tx_root/evidence_root. A body that does not match is another copy, not an invalid block:
         // envReject, never marked invalid. Body-content checks below run on the bound body only.
-        let tx_root=crate::types::ordered_root(&b.body.txs)?;let ev_root=crate::types::ordered_root(&b.body.evidence)?;
-        if tx_root!=x.tx_root||ev_root!=x.evidence_root{return Err(Reject::Envelope("15 body does not match the header roots".into()))}
+        // An uncomputable commitment (empty item) is also a copy fault: no header can commit to it (audit A01).
+        let bound=crate::types::body_commitment(&b.body.txs)==Some(x.tx_root)&&crate::types::body_commitment(&b.body.evidence)==Some(x.evidence_root);
+        if !bound{return Err(Reject::Envelope("15 body does not match the header roots".into()))}
         // 1 (body): sizes and evidence bounds before any evidence evaluation.
         if b.body.txs.iter().any(|t|t.len()>cp.TX_MAX as usize){return blk("1 TX_MAX")}
         let body_bytes:usize=b.body.txs.iter().chain(b.body.evidence.iter()).map(|t|t.len()).sum();
