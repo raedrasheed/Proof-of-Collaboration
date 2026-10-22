@@ -37,11 +37,11 @@ Assumptions and where they are enforced:
 
 | term | formula | enforced by |
 |---|---|---|
-| snapshots | (1 genesis + K_hist + side_max + 10 transient) × snapshot | `Chain::retain` (K_hist window; side states ≤ side_max, lowest work pruned first); transient: apply copy, USER copy, per-tx engine and PAY copies, production clones, pool state and its copies, rolling rebuild (2). The pool's pending state commits through the block's `commit_tx` (EIP-161 cleanup, normalization) and refuses a transaction whose effects would pass SLOT_CAP, ACCT_CAP or SYS_SLOT_MAX (`PoolMeter`, checked against a recount), so it is one snapshot like the others |
+| snapshots | (1 genesis + K_hist + side_max + 10 transient) × snapshot, plus one snapshot for a table growing in a working copy (old and new tables alive at once, one table at a time) | `Chain::retain` (K_hist window; side states ≤ side_max, lowest work pruned first); transient: apply copy, USER copy, per-tx engine and PAY copies, production clones, pool state and its copies, rolling rebuild (2). The pool's pending state commits through the block's `commit_tx` (EIP-161 cleanup, normalization) and refuses a transaction whose effects would pass SLOT_CAP, ACCT_CAP or SYS_SLOT_MAX (`PoolMeter`, checked against a recount), so it is one snapshot like the others |
 | code | snapshots × (CODE_CAP · 9/8 + 97 B per code entry) | `code_caps::validate_snapshot` (logical code per state); counted unshared |
 | history | (H_END+1) × per-block + TXBYTES_CAP + TX_CAP × 380 B + LOG_CAP × 33/32 + identities × (EVID_BYTES_MAX+24) | H_END (apply_block); TX_CAP/TXBYTES_CAP chain-cumulative (block invalid); LOG_CAP (USER `Halt::LogCap`); evidence ≤ one per identity ever (a tombstoned record makes further evidence a host error), identities ≤ M_max + R_max · H_END |
 | per block | 3 × (map slot of `Entry` 1184 B) + 2 × header_max + bloom/sig/proposer + 8·S + 32·(S+1) shares + 64·M ranges + an empty state | header_max = 768 + 9·S_max (network.md 3067 B for S=256) |
-| side blocks | SIDE_BLOCKS_MAX (64) × (per-block + BODY_MAX + receipts + LOG_BLOCK_MAX) | `Chain::retain`: ≤ 64 non-canonical blocks (lowest-work leaves leave first), none R_keep (2048) or more below the head, descendants removed with them (local retention, consensus.md §10) |
+| side blocks | SIDE_BLOCKS_MAX (256) × (per-block + BODY_MAX + min(BODY_MAX/85, GAS_LIMIT/21000) transactions with receipts + LOG_BLOCK_MAX) | `Chain::retain`, after every import and on replay: ≤ 256 non-canonical blocks (the lowest-work leaf goes first, repeatedly, so the cap holds right after a reorg too), none R_keep (2048) or more below the head, descendants removed with them; removed hashes are refused if received again (EVICTED_MAX). A stored side block was validated, so its transactions are bounded by its gas: each reserves its gas limit against GAS_LIMIT and uses ≥ 21,000 (user_phase) |
 | queues | pool (32 MiB and ≤ POOL_MAX_TXS = 4096 transactions, plus entries) + orphans (16 MiB) + future (64) + templates (64) + seen caches (4096) + invalid (4096) + rejects (256) + receipt times (1024) + evidence pool (64) + per-peer queues for (peers_max = 8 inbound + one per dialer) + event queues (EVENT_QUEUE 128, NET_EVENT_QUEUE 32 per forwarder) | constants in `node.rs`, `chain.rs`, `net.rs` (A05) |
 | rpc | conn_max × (2·(HEAD_MAX + READ_CHUNK) + REQ_BUF) requests + HEAVY_RESP_POOL (48 MiB) + (conn_max + 1) × LIGHT_RESP_MAX (512 KiB) + conn_max × SMALL_REPLY_MAX + queued_max (2·conn_max) × REQ_BUF + conn_max × LIGHT_BODY_MAX + parse tree (`parse_bytes_max`) + answer being built (3 × BATCH_BYTES_HARD + 4 × RESP_MAX) | `rpc.rs`: connection cap (excess refused unread; finished threads joined before their slot is reused), REQ_BUF over request line, headers and body together, a header buffer allocated once and a body of exactly Content-Length; response pools (`answer`: class maximum reserved before the request runs, shrunk to the answer, released when the reply drops; a full heavy pool is −32021 busy before anything runs; a light answer over LIGHT_RESP_MAX is −32008); queued heavy bodies capped (`Held`, 503 beyond); JSON_VALUES_MAX before parsing (−32600); batch members run and serialized one at a time with the delivered bytes ≤ BATCH_RESP_MAX; `capped` (RESP_MAX → −32008); eth_getLogs stopping at RESP_MAX, LOGS_COUNT_MAX or LOGS_SCAN_BYTES |
 | threads | (2 × peers_max + 4 × dials + conn_max + 6) × (IO_STACK 256 KiB + 4 KiB heap) + CONSENSUS_STACK 16 MiB + main thread 1 MiB + glibc stack cache 40 MiB | every thread is created by `pocold::threads::spawn` with an explicit reservation, so its resident stack cannot exceed it. Inventory (`resources::io_threads`): per inbound peer a reader and a writer, per configured peer a dialer, a forwarder, a reader and a writer, conn_max RPC connection threads, and 6 singletons (miner, two forwarders, timer, P2P listener, RPC acceptor). Exiting threads count too: the RPC acceptor, the P2P listener and each dialer join a finished thread before its place is reused (`threads::reap`), a reader joins its writer, and the old miner is joined before the next one starts (`miner::PEAK`, tested). The consensus thread runs every command; main only spawns and joins it |
@@ -63,6 +63,7 @@ failing boot test printed; two peers add 40,968,192 B).
 | snapshots | head and K_hist retained states | 1,259.1 | 1,259.1 |
 | snapshots | side_max side-branch states | 305.2 | 76.3 |
 | snapshots | transient working copies | 381.5 | 381.5 |
+| snapshots | table growth in a working copy | — | 38.2 |
 | code | head and K_hist retained states | 135.3 | 135.3 |
 | code | side_max side-branch states | 32.8 | 8.2 |
 | code | transient working copies | 41.0 | 41.0 |
@@ -71,7 +72,7 @@ failing boot test printed; two peers add 40,968,192 B).
 | history | transaction index and receipts (TX_CAP) | 7.2 | 7.2 |
 | history | logs (LOG_CAP) | 1,056.0 | 1,056.0 |
 | history | evidence | 0.5 | 0.5 |
-| side | SIDE_BLOCKS_MAX stored side blocks | 285.2 | 71.3 |
+| side | SIDE_BLOCKS_MAX stored side blocks | 285.2 | 105.9 |
 | queues | transaction pool | 124.2 | 62.1 |
 | queues | orphan blocks | 16.6 | 16.6 |
 | queues | future blocks | 16.0 | 16.0 |
@@ -80,8 +81,8 @@ failing boot test printed; two peers add 40,968,192 B).
 | queues | rejection and evidence caches | 2.0 | 2.0 |
 | queues | peer send queues and frames | 85.1 | 25.0 |
 | queues | main event queue | 64.1 | 32.0 |
-| queues | network event forwarders | 48.0 | 24.0 |
-| rpc | connection requests (conn_max) | 33.5 | 33.5 |
+| queues | network event forwarders | 48.0 | 24.8 |
+| rpc | connection requests (conn_max) | 33.5 | 35.0 |
 | rpc | answers held by connections | 512.2 (32 × 16 MiB) | 64.7 (pools) |
 | rpc | queued heavy bodies (queued_max) | 64.0 | 64.0 |
 | rpc | light lane (conn_max) | 0.1 | 0.1 |
@@ -93,19 +94,24 @@ failing boot test printed; two peers add 40,968,192 B).
 | threads | exited-stack cache | 40.0 | 40.0 |
 | execution | frames, code analysis, preallocations, precompiles | 128.6 | 128.6 |
 | execution | memory and operation classes (worst gas split) | 1,461.4 | 1,002.5 |
-| **total** | | **6,783.3** (7,112,758,897 B) | **5,251.0** (5,506,111,035 B) |
+| **total** | | **6,783.3** (7,112,758,897 B) | **5,326.0** (5,584,711,217 B) |
 
 Changes, each checked to be local before it was made: none changes block validity, state roots, gas
-rules or accepted-transaction semantics; none goes below a normative minimum; a maximum-size valid block
-is processed as before; no history the reorganization rules need is removed.
+rules or accepted-transaction semantics, none goes below a normative minimum, and a maximum-size valid
+block is processed as before.
+- One change failed the reorganization check after it was made: SIDE_BLOCKS_MAX 64 made long competing
+  branches unadoptable (second review). It was reverted to the 45712cd value, 256.
+- The remaining gap between 256 and R_keep predates this decision and is recorded as §4 item 18.
 
 | change | before → after | saved (MiB) | why it is local and within the specification | operational trade-off |
 |---|---|---:|---|---|
 | RPC response pools (mechanism) | 16 MiB per connection → 48 MiB heavy + (conn_max+1) × 512 KiB light | 447.5 | modelled on RpcGuard LIGHT_RESP_MAX, HEAVY_RESP_MEM, LIGHT_RESP_MEM (network.md (ج)); RpcGuard is local (consensus.md:29); RPC_CONN_MAX stays 32 | a heavy request meeting a full pool is answered −32021 busy at once (no QUEUE_WAIT); a light answer over 512 KiB is −32008. Not the RpcGuard permit mechanism, so the RpcGuard fields stay absent in admission |
 | execution classes (accounting correction) | 1,461.4 → 1,002.5 | 458.9 | proof (§3a): an empty storage map allocates nothing (`loaded_accounts_start_with_unallocated_storage_maps`), so a map's share belongs to the account's first slot | none |
 | answer being built (correction) | 48.0 → 80.0 | −32.0 | the batch String grows (counted at 3 × its maximum) | none |
+| undercounts found by the second review | — | −41.5 | a working copy's growing table (38.2), the lossy header copy (up to 3 B per input byte), one event held by each blocked forwarder | none |
+| light answers | eth_getTransactionByHash carried `raw` beside `input` (about 4 × TX_MAX) | — | the standard fields only (raw only when the transaction does not decode), within network.md:201's 2·TX_MAX + 2 KiB, so a TX_MAX transaction stays answerable in the light lane | none |
 | side_max | 8 → 2 | 253.5 | NodeLocal parameter (consensus.md:29: local, outside CP); R11/R20/R21 hold | a third competing side tip's state is pruned and rebuilt on demand from its nearest retained ancestor (CPU, §4 item 6) |
-| SIDE_BLOCKS_MAX | 256 → 64 | 213.9 | consensus.md §10 (D118) keeps at most one non-canonical block per height and fetches a branch that later becomes heavier by sync; "local retention, not validity" | past 64 side blocks the lowest-work leaves are dropped and re-fetched by sync if their branch becomes heavier |
+| SIDE_BLOCKS_MAX | 256 → 64 → **256** (reverted) | 179.3 at 256, by the gas bound on transactions per side block | The second review showed that 64 made a heavier branch more than about 64 blocks long unadoptable. network.md:143 requires adoption up to R_keep (2048), and a branch is held as side blocks until it is heavier. 256 is the value at 45712cd. The saving now comes from a proven tightening instead: a validated block holds at most GAS_LIMIT/21,000 = 380 transactions, not BODY_MAX/85 = 2,313 | adoption depth stays about 256 (below R_keep: §4 item 18); the cap holds after a reorg; evicted hashes are refused when received again |
 | POOL_MAX_BYTES | 64 → 32 MiB | 62.1 | network.md:157 "pool ≤ 64 MiB" (an upper limit) | 256 transactions of TX_MAX (128 KiB) or 4096 small ones; beyond, −32016 |
 | peers_max (inbound) | 32 → 8 | 72.3 (queues and threads) | network.md:156 "≤ 50 peers" (an upper limit) | at most 8 inbound peers; a devnet node has 2 |
 | EVENT_QUEUE | 256 → 128 | 32.1 | network.md:156 "queue ≤ 256" (an upper limit) | senders block earlier (backpressure) |
@@ -122,8 +128,8 @@ Not changed, and why:
 
 Reserve. The boot gate is now stricter: the model total must fit in 7/8 of the budget
 (`RESERVE_KEEP_EIGHTHS`), so 12.5% (768 MiB of 6 GiB) is kept for what the model does not count.
-- Devnet default: model total 5,506,111,035 B (5.13 GiB). Required budget ceil(8·total/7) = 6,292,698,326 B.
-  That leaves 149,752,618 B beyond the reserve.
+- Devnet default: model total 5,584,711,217 B (5.20 GiB). Required budget ceil(8·total/7) = 6,382,527,106 B.
+  That leaves 59,923,838 B beyond the reserve.
 - What the reserve is for: allocator chunk headers and size-class rounding, which add up to about 31 B
   per allocation; fragmentation and per-thread arenas, which are not bounded; and the inspection-based
   inventories (§4 items 11, 13, 16).
@@ -135,10 +141,30 @@ The boot test asserts four things separately (`a13_boot_refuses_a_bound_above_th
 - exactly the requirement boots;
 - network-scale caps (ACCT_CAP 10^6, SLOT_CAP 4·10^6) are refused.
 
+Second independent review (of 45712cd..b132a05). Its findings and what was done:
+- **SIDE_BLOCKS_MAX 64 blocked adoption of branches longer than about 64 blocks (HIGH).** Reverted to
+  256, and the gap to R_keep is recorded (§4 item 18).
+- **Restart failed on duplicate journal records of re-fetched evicted blocks (HIGH).** Evicted hashes
+  are refused on import. Replay retains after every record, as live import does, and skips duplicates
+  and records of evicted blocks.
+- **The busy path parsed over-limit bodies (MEDIUM).** It now applies JSON_VALUES_MAX first
+  (`a_busy_answer_does_not_parse_an_over_limit_body`).
+- **The side-block term did not hold right after a reorg (MEDIUM).** Trimming now repeats until the
+  cap holds.
+- **eth_getTransactionByHash for TX_MAX transactions answered −32008 (MEDIUM).** Fixed: `raw` is
+  dropped from the answer.
+- **Two tests depended on the host (MEDIUM).** The miner test now stops at height 2 and counts starts;
+  the flood test no longer asserts a ratio, and a deterministic wake test was added.
+- **Test gaps (LOW).** Added the end-to-end reservation test (`an_answer_is_reserved_until_its_connection_has_written_it`,
+  whose mutation fails) and corrected the inventory test's bound for one not-yet-joined RPC thread.
+- **Undercounts (LOW).** Added to the model.
+- **The stats method reused the spec's name (LOW).** Renamed `pocold_rpcCounters`; pocol_getRpcStats
+  stays unavailable.
+
 ### 2b. Model total, measured RSS and guaranteed ceiling
 
 - **Model total** (this section): requested heap plus reserved stacks with every cap at its maximum at
-  once, under the conditions of §4. Devnet default: 5,506,111,035 B.
+  once, under the conditions of §4. Devnet default: 5,584,711,217 B.
 - **Measured RSS**: what a real run touched. See `evidence/rss-*.json` (`tools/measure_rss.py`: a 3-node
   release devnet, idle production, then ordinary and bounded adversarial RPC load), summarised below.
   It is not the bound: a run reaches none of the caps.
@@ -150,7 +176,7 @@ Measured on b132a05 (release, Linux, 4 CPUs):
 
 | measurement | result | what it shows |
 |---|---|---|
-| 3-node devnet, 90 s idle then 90 s of load (`evidence/rss-b132a05.json`); load: 39,815 light requests, 1,960 30M-gas eth_calls, 194 20-member heavy batches, 187 transfers; height 157, 4 peers each | peak RSS 11.9–12.0 MB per node (VmHWM); model 5,506,111,035 B | ordinary operation is far below the model; a short run fills none of the caps, so this is no evidence about the worst case |
+| 3-node devnet, 90 s idle then 90 s of load (`evidence/rss-b132a05.json`, on b132a05, before the second review's changes); load: 39,815 light requests, 1,960 30M-gas eth_calls, 194 20-member heavy batches, 187 transfers; height 157, 4 peers each | peak RSS 11.9–12.0 MB per node (VmHWM); model at b132a05 5,506,111,035 B | ordinary operation is far below the model; a short run fills none of the caps, so this is no evidence about the worst case. It is rerun on the final commit (`evidence/rss-<final>.json`) |
 | 10 clones of a full-cap state (20,005 accounts, 115,536 slots spread over them; `lp4-execution/tests/rss_snapshot.rs`) | RSS growth 181,104,640 B against 10 × 40,006,582 B modelled: 0.45 of the model | for the largest term (snapshots, 1.7 GiB of the model), the model's own slack covers the allocator's headers, rounding and page use |
 
 Allocation-header estimate for the other large terms (glibc: at most 31 B per allocation):
@@ -280,17 +306,18 @@ admission is refused while any remains (D-A02-SCOPE).
 | 14 | RPC answers held by connections | ENFORCED | Response pools (`rpc::answer`): the class maximum is reserved before the request runs and released when the reply drops; a full heavy pool answers busy before anything runs. Tests `response_pools_reserve_shrink_and_release` and `a_full_heavy_pool_answers_busy_before_anything_runs` (its mutation, reservations never fail, fails) |
 | 15 | RPC request bodies, queued and in flight | ENFORCED | A body of exactly Content-Length ≤ REQ_BUF. Queued heavy bodies are capped at queued_max and released when skipped. Test `abandoned_queued_bodies_are_capped_and_released` (peak = cap; its mutation, no cap, fails) |
 | 16 | the answer being built: one member's JSON tree and string ≤ 4 × RESP_MAX | INSPECTION | The parse tree of the request is ENFORCED (JSON_VALUES_MAX before parsing, `parse_bytes_max`). The member's result tree is bounded by RESP_MAX of output (`capped`), but its tree-to-text ratio is counted at 4 by inspection |
+| 18 | adoption of a heavier competing branch at any depth ≤ R_keep (network.md:143) | OPEN (architectural) | pocold holds a competing branch in memory as side blocks until it is heavier, at most SIDE_BLOCKS_MAX = 256. A branch longer than that is not adopted. Its evicted blocks are refused, so the node neither re-executes nor re-journals them, and it needs a manual checkpoint (governance.md:200). This was introduced with the round-1 side-block cap; round 2 tried 64, which a review showed made it worse, and went back to 256. Holding R_keep = 2048 side blocks costs about 2048 × 0.42 MB ≈ 0.85 GB more, which does not fit the budget beside the other terms. Meeting the rule within the budget needs disk-backed blocks (the spec's redb). Tests: `a_competing_branch_within_side_blocks_max_is_adopted` (a 150-block-deep fork; its mutation, the cap at 64, fails) and `side_blocks_stay_within_the_cap_after_a_reorg_and_evicted_blocks_are_not_taken_again` (mutations: one-pass trimming, no refusal; each fails) |
 | 17 | the budget's reserve | ENFORCED (gate) | `check` requires the model total ≤ 7/8 of the budget (`RESERVE_KEEP_EIGHTHS`). The boot test asserts that the default boots, that one byte below its requirement is refused, and that exactly the requirement boots |
 
 Consequence:
 - The devnet admission is an **experimental-devnet admission** (D-A02-SCOPE), reported as such at boot
   and in `status`.
-- The 5.13 GiB model total (5,506,111,035 B) is conditional on:
+- The 5.20 GiB model total (5,584,711,217 B) is conditional on:
   - item 3b, which has a 12.5% reserve kept for it but is not proven;
   - item 4's revm facts;
   - items 11, 13 and 16, which rest on inspection.
 - It is not a measured value and not a guaranteed ceiling (§2b).
-- A13 is not closed: items 1, 2, 3b, 5, 6 (CPU), 7 (CPU), 8 and 10 remain open acceptance obligations.
+- A13 is not closed: items 1, 2, 3b, 5, 6 (CPU), 7 (CPU), 8, 10 and 18 remain open acceptance obligations.
 
 ## 4-r1. Open obligations as recorded in round 1 (kept for history)
 

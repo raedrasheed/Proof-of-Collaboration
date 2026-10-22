@@ -12,9 +12,17 @@ pub fn truncate(why:&str)->String{if why.len()<=REASON_MAX{return why.to_string(
 /// governance.md R_keep: a non-canonical block this far below the head is removed (A13).
 pub const R_KEEP:u64=2048;
 /// Non-canonical blocks kept in total (A13); the lowest-work leaves leave first.
-/// Non-canonical blocks kept (local retention, not validity: consensus.md §10 keeps at most one
-/// per height and fetches a branch that later becomes heavier by sync). D-A13-BUDGET: 256 -> 64.
-pub const SIDE_BLOCKS_MAX:usize=64;
+/// Non-canonical blocks kept in memory (local retention, not validity). A competing branch is held
+/// as side blocks until it is heavier, so a branch longer than this cannot be adopted: pocold's
+/// adoption depth is about SIDE_BLOCKS_MAX, below the R_keep (2048) of network.md ("adoption at
+/// depth <= R_keep"). Holding R_keep blocks needs disk-backed blocks (the spec's redb), which pocold
+/// does not have (A13-DERIVATION §4 item 18). Round 2 kept 256 after a review showed that 64 made
+/// branches over 64 blocks unadoptable.
+pub const SIDE_BLOCKS_MAX:usize=256;
+/// Hashes of side blocks removed by retention, remembered so that a copy received again is refused
+/// before it is validated or journaled (a branch longer than SIDE_BLOCKS_MAX would otherwise be
+/// re-fetched, re-executed and re-journaled every sync turn). FIFO, a cache only.
+pub const EVICTED_MAX:usize=1024;
 /// Bound of the invalid-block cache (A05). A forgotten entry is only re-validated.
 pub const INVALID_MAX:usize=4096;
 
@@ -96,6 +104,8 @@ pub enum Reject{
     NeedsRebuild([u8;32]),
     Future,
     Duplicate,
+    /// Removed by local retention (SIDE_BLOCKS_MAX or R_keep) and not taken again (EVICTED_MAX).
+    Evicted,
 }
 fn blk<T>(s:impl Into<String>)->Result<T,Reject>{Err(Reject::Block(s.into()))}
 
@@ -114,6 +124,8 @@ pub struct Chain{
     invalid_order:std::collections::VecDeque<[u8;32]>,
     /// tid -> (proposer, parent, h) for equivocation detection (evidence type 1).
     pub seen_templates:BTreeMap<(u64,[u8;32]),Vec<(Vec<u8>,Vec<u8>)>>,
+    /// Side blocks removed by retention (EVICTED_MAX, FIFO) and how many were removed in all.
+    evicted:std::collections::HashSet<[u8;32]>,evicted_order:std::collections::VecDeque<[u8;32]>,pub evicted_total:u64,
 }
 
 pub fn u256_fixed(v:&Fixed)->U256{from_fixed(v)}
@@ -128,7 +140,7 @@ impl Chain{
             receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![]};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
         let k_hist=u64::from(spec.local().k_hist);
-        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new()}
+        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0}
     }
     pub fn head(&self)->&Entry{&self.blocks[&self.head]}
     pub fn get(&self,h:&[u8;32])->Option<&Entry>{self.blocks.get(h)}
@@ -382,28 +394,41 @@ impl Chain{
     /// A13 side-branch bounds: at most `side_max` non-canonical blocks keep a state (the
     /// lowest-work ones are pruned first and rebuilt on demand); a non-canonical block
     /// R_KEEP or more below the head is removed with its descendants; and at most
-    /// SIDE_BLOCKS_MAX non-canonical blocks are kept, the lowest-work leaves leaving first.
+    /// SIDE_BLOCKS_MAX non-canonical blocks are kept: the lowest-work leaf goes first, repeatedly
+    /// (its parent may become a leaf), so the bound holds after every call, a reorg included.
     pub fn retain(&mut self){
         let head_h=self.head().height;let cut=head_h.saturating_sub(self.k_hist);
         for e in self.blocks.values_mut(){ if e.height>0&&e.height<=cut&&!e.pruned{e.state=InMemoryDB::default();e.pruned=true;} }
-        let side:Vec<(U256,u64,[u8;32],u64,bool)>=self.blocks.values().filter(|e|e.height>0&&!self.is_canonical(&e.hash)).map(|e|(e.total_work,e.import_seq,e.hash,e.height,e.pruned)).collect();
-        if side.is_empty(){return}
-        let mut removed=false;
-        for (_,_,h,height,_) in &side{if height+R_KEEP<=head_h{self.blocks.remove(h);removed=true;}}
-        if side.len()>SIDE_BLOCKS_MAX{
-            let parents:std::collections::HashSet<[u8;32]>=self.blocks.values().filter_map(|e|e.parent).collect();
-            let mut leaves:Vec<&(U256,u64,[u8;32],u64,bool)>=side.iter().filter(|x|self.blocks.contains_key(&x.2)&&!parents.contains(&x.2)).collect();leaves.sort();
-            let over=side.len()-SIDE_BLOCKS_MAX;for x in leaves.into_iter().take(over){self.blocks.remove(&x.2);removed=true;}
-        }
+        let side=|c:&Chain|->Vec<[u8;32]>{c.blocks.values().filter(|e|e.height>0&&!c.is_canonical(&e.hash)).map(|e|e.hash).collect()};
+        let mut gone:Vec<[u8;32]>=side(self).into_iter().filter(|h|self.blocks[h].height+R_KEEP<=head_h).collect();
+        for h in &gone{self.blocks.remove(h);}
         // Descendants of a removed block go too (their parent is gone).
-        while removed{removed=false;let orphaned:Vec<[u8;32]>=self.blocks.values().filter(|e|e.parent.map_or(false,|p|!self.blocks.contains_key(&p))).map(|e|e.hash).collect();
-            for h in orphaned{self.blocks.remove(&h);removed=true;}}
-        let mut with_state:Vec<&(U256,u64,[u8;32],u64,bool)>=side.iter().filter(|x|!x.4&&self.blocks.contains_key(&x.2)).collect();
+        loop{let orphaned:Vec<[u8;32]>=self.blocks.values().filter(|e|e.parent.map_or(false,|p|!self.blocks.contains_key(&p))).map(|e|e.hash).collect();
+            if orphaned.is_empty(){break}for h in orphaned{self.blocks.remove(&h);gone.push(h);}}
+        let side_now=side(self);
+        if side_now.len()>SIDE_BLOCKS_MAX{
+            let mut children:HashMap<[u8;32],usize>=HashMap::new();
+            for e in self.blocks.values(){if let Some(p)=e.parent{*children.entry(p).or_insert(0)+=1;}}
+            let is_side:std::collections::HashSet<[u8;32]>=side_now.iter().copied().collect();
+            let key=|c:&Chain,h:&[u8;32]|{let e=&c.blocks[h];std::cmp::Reverse((e.total_work,e.import_seq,*h))};
+            let mut leaves:std::collections::BinaryHeap<_>=side_now.iter().filter(|h|!children.contains_key(*h)).map(|h|key(self,h)).collect();
+            let mut n=side_now.len();
+            while n>SIDE_BLOCKS_MAX{
+                let Some(std::cmp::Reverse((_,_,h)))=leaves.pop() else{break};
+                let parent=self.blocks.remove(&h).and_then(|e|e.parent);gone.push(h);n-=1;
+                if let Some(p)=parent{if let Some(c)=children.get_mut(&p){*c-=1;if *c==0&&is_side.contains(&p){children.remove(&p);leaves.push(key(self,&p));}}}
+            }
+        }
+        for h in gone{self.evicted_total+=1;if self.evicted.insert(h){self.evicted_order.push_back(h);}}
+        while self.evicted_order.len()>EVICTED_MAX{if let Some(old)=self.evicted_order.pop_front(){self.evicted.remove(&old);}}
+        let mut with_state:Vec<(U256,u64,[u8;32])>=side(self).into_iter().filter(|h|!self.blocks[h].pruned).map(|h|{let e=&self.blocks[&h];(e.total_work,e.import_seq,h)}).collect();
         let side_max=self.spec.local().side_max as usize;
         if with_state.len()>side_max{with_state.sort();let over=with_state.len()-side_max;
             let drop:Vec<[u8;32]>=with_state.into_iter().take(over).map(|x|x.2).collect();
             for h in drop{if let Some(e)=self.blocks.get_mut(&h){e.state=InMemoryDB::default();e.pruned=true;}}}
     }
+    /// Whether retention removed this block recently (it is then not taken again).
+    pub fn was_evicted(&self,hash:&[u8;32])->bool{self.evicted.contains(hash)}
     /// Non-canonical blocks, and those holding a state (A13 accounting, status).
     pub fn side_counts(&self)->(usize,usize){let side=self.blocks.values().filter(|e|e.height>0&&!self.is_canonical(&e.hash));let (mut n,mut s)=(0,0);for e in side{n+=1;if !e.pruned{s+=1}}(n,s)}
     /// TrieRebuild: re-executes from the nearest retained ancestor and checks

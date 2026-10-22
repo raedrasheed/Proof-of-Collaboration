@@ -31,6 +31,23 @@ pub mod threads{
     }
 }
 pub mod types;pub mod chain;pub mod store;pub mod miner;pub mod net;pub mod node;pub mod rpc;pub mod resources;
+/// Unit tests only: a counting allocator (per thread, while switched on) so tests can bound the
+/// heap a code path requests.
+#[cfg(test)]
+pub(crate) mod alloc_meter{
+    use std::alloc::{GlobalAlloc,Layout,System};use std::cell::Cell;
+    thread_local!{static ON:Cell<bool>=const{Cell::new(false)};static NOW:Cell<isize>=const{Cell::new(0)};static PEAK:Cell<isize>=const{Cell::new(0)};}
+    fn add(d:isize){let _=ON.try_with(|on|if on.get(){let _=NOW.try_with(|n|{n.set(n.get()+d);let _=PEAK.try_with(|p|p.set(p.get().max(n.get())));});});}
+    struct Meter;
+    unsafe impl GlobalAlloc for Meter{
+        unsafe fn alloc(&self,l:Layout)->*mut u8{let p=unsafe{System.alloc(l)};if !p.is_null(){add(l.size() as isize)}p}
+        unsafe fn dealloc(&self,p:*mut u8,l:Layout){unsafe{System.dealloc(p,l)};add(-(l.size() as isize))}
+        unsafe fn realloc(&self,p:*mut u8,l:Layout,n:usize)->*mut u8{let q=unsafe{System.realloc(p,l,n)};if !q.is_null(){add(n as isize-l.size() as isize)}q}
+    }
+    #[global_allocator] static A:Meter=Meter;
+    /// Highest heap bytes requested at once while `f` runs (relative to its start).
+    pub fn peak<T>(f:impl FnOnce()->T)->(T,isize){ON.with(|o|o.set(true));NOW.with(|n|n.set(0));PEAK.with(|p|p.set(0));let r=f();let x=PEAK.with(|p|p.get());ON.with(|o|o.set(false));(r,x)}
+}
 
 use pocol_lp4_execution::{admission::{self,NodeLocal,Request},devnet,gate::FactClass,profile::{NodeKind,ProfileKind}};
 

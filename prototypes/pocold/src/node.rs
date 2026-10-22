@@ -135,13 +135,17 @@ impl Node{
             let block=Block{header,body};
             // Same rules as live import: a journaled fork child of a block below the K_hist window
             // needs the TrieRebuild that import performed before journaling it.
+            // Replay retains after every record, as live import does, so it removes the same blocks.
+            // A record of a block retention removed, or of its descendant, is skipped (live import
+            // refused it or kept it only until then); a duplicate is the same block again.
+            if chain.was_evicted(&block.hash())||chain.was_evicted(&block.header.parent_hash){continue}
             let (entry,_)=match chain.validate(&block,None,0){
+                Err(Reject::Duplicate)=>continue,
                 Err(Reject::NeedsRebuild(p))=>{chain.ensure_state(&p).map_err(|e|format!("replay {i}: rebuild {e:?}"))?;chain.validate(&block,None,0).map_err(|e|format!("replay {i}: {e:?}"))?}
                 r=>r.map_err(|e|format!("replay {i}: {e:?}"))?,
             };
             if result_bytes(&entry.result)!=rb{return Err(format!("parentResultMismatch at record {i}"))}
-            chain.insert(entry);
-            if i%64==63{chain.retain();}
+            chain.insert(entry);chain.retain();
         }
         chain.retain();
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
@@ -219,6 +223,8 @@ impl Node{
     /// Validates, journals (fsync) and inserts a block. Returns Ok(true) if new head.
     pub fn import(&mut self,b:Block,from:Option<PeerId>)->Result<bool,Reject>{
         let hash=b.hash();
+        // A block retention removed is not validated, journaled or requested again (chain::EVICTED_MAX).
+        if self.chain.was_evicted(&hash){return Err(Reject::Evicted)}
         let mut res=self.chain.validate(&b,Some(now_s()),self.capital_phi());
         if let Err(Reject::NeedsRebuild(p))=&res{let p=*p;self.log("TrieRebuild for a fork below the K_hist window");
             if let Err(e)=self.chain.ensure_state(&p){return Err(e)}res=self.chain.validate(&b,Some(now_s()),self.capital_phi());}

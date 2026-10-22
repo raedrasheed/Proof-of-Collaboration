@@ -19,5 +19,20 @@ tree. Debug build unless noted.
 | F6 | drop `timer_eps_ms` from the RPC field list | build | caught at compile time (the exhaustive `RpcLimits` pattern) |
 | F8 dirty | report DirtyKeys where the block meter halts on dirty accounts | `apply::tests::a03::proposals::d_a03_dirty_vectors` (release) | caught (D2 tx 0: halt kind) |
 
-A control that is not caught is recorded as such. M2 and M7 were not caught by the first tests; the
-tests were strengthened and the mutations rerun. M8 remains probabilistic.
+## After the second review (45712cd..b132a05)
+
+| id | mutation | test | result |
+|---|---|---|---|
+| M1b | a Wake for every light request | `light_lane_wakes_coalesce_until_taken` (deterministic; the flood test no longer asserts a ratio, which depended on build speed) | caught |
+| M9 | retain evicts only the leaves present at the call (the old one-pass trimming) | `side_blocks_stay_within_the_cap_after_a_reorg_and_evicted_blocks_are_not_taken_again` (release) | caught |
+| M10 | an evicted block is validated and journaled again | same | caught |
+| M11 | replay fails on a duplicate record | `replay_skips_a_duplicate_record` (release) | caught |
+| M12 | SIDE_BLOCKS_MAX 64 (the reverted reduction) | `a_competing_branch_within_side_blocks_max_is_adopted` (a 150-block-deep fork; release) | caught |
+| M13 | the reservation is released before the answer is written | `an_answer_is_reserved_until_its_connection_has_written_it` | first run: **not caught** (the first sample landed between the answer being built and the connection taking it). The test now requires the reservation still to be there a second later. Rerun: caught |
+| M14 | the busy path parses the body unconditionally | `rpc::tests::a_busy_answer_does_not_parse_an_over_limit_body` (counting allocator) | first run: not run (the runner's exact name lacked the module path, so 0 tests passed). Rerun with the full name: caught |
+| M15 | tx_json carries `raw` beside `input` (the old encoding) | `a_max_size_transaction_is_answered_in_the_light_lane` (release) | caught |
+
+A control that is not caught is recorded as such. M2, M7 and M13 were not caught by the first tests;
+the tests were strengthened and the mutations rerun. M14's first run executed no test, which the
+runner reported as a pass; it now uses the full name. M8 remains probabilistic. The whole set is rerun
+on the final implementation commit (FINAL section below, once run).

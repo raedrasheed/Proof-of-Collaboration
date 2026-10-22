@@ -137,12 +137,12 @@ fn request_id(body:&[u8])->Value{
 fn busy(body:&[u8])->String{
     let e=|i:&Value|{let id=id_of(i);let id=if id.to_string().len()<=128{id}else{Value::Null};
         json!({"jsonrpc":"2.0","id":id,"error":{"code":-32021,"message":"busy","data":{"reason":"busy","retryAfterMs":250}}}).to_string()};
-    if json_values(body)<=JSON_VALUES_MAX{
-        if let Ok(Value::Array(items))=serde_json::from_slice::<Value>(body){
-            if !items.is_empty()&&items.len()<=BATCH_MAX{return format!("[{}]",items.iter().map(e).collect::<Vec<_>>().join(","))}
-        }
+    // Parsed only within JSON_VALUES_MAX, like any request (the parse-tree term).
+    if json_values(body)>JSON_VALUES_MAX{return e(&Value::Null)}
+    match serde_json::from_slice::<Value>(body){
+        Ok(Value::Array(items)) if !items.is_empty()&&items.len()<=BATCH_MAX=>format!("[{}]",items.iter().map(e).collect::<Vec<_>>().join(",")),
+        Ok(v)=>e(&v),Err(_)=>e(&Value::Null),
     }
-    e(&serde_json::from_slice::<Value>(body).unwrap_or(Value::Null))
 }
 
 /// The light lane: conn_max places and a wake flag, so the main queue holds at most one Wake
@@ -418,8 +418,9 @@ fn call(n:&mut Node,m:&str,p:&[Value])->R{
             if f["fromBlock"].as_str().map(|s|!s.starts_with("0x")).unwrap_or(true)||f["toBlock"].as_str().map(|s|!s.starts_with("0x")).unwrap_or(true){return Err(bad("numeric fromBlock/toBlock").into())}
             logs(n,f)}
         "pocol_status"=>Ok(n.status_json()),
-        // Local RPC statistics (pocold's counters and gauges, not the RpcGuard RpcStats record).
-        "pocol_getRpcStats"=>{let c=&COUNTERS;let g=|a:&AtomicUsize|a.load(Ordering::SeqCst);let (h,l)=n.resp_pools().in_use();
+        // pocold's own RPC counters and gauges (process-wide). Not the RpcGuard pocol_getRpcStats
+        // record of network.md, which pocold does not implement (that method stays unavailable).
+        "pocold_rpcCounters"=>{let c=&COUNTERS;let g=|a:&AtomicUsize|a.load(Ordering::SeqCst);let (h,l)=n.resp_pools().in_use();
             Ok(json!({"refused":g(&c.refused),"active":g(&c.active),"expired":g(&c.expired),"expiredMembers":g(&c.expired_members),"queueFull":g(&c.queue_full),
                 "tooComplex":g(&c.too_complex),"busy":g(&c.busy),"queued":g(&c.queued),"wakes":g(&c.wakes),"lightPushed":g(&c.light_pushed),"heavyReserved":h,"lightReserved":l}))}
         "pocol_getRejects"=>Ok(json!(n.rejects.iter().map(|(h,w)|json!({"hash":h,"reason":w})).collect::<Vec<_>>())),
@@ -462,7 +463,10 @@ fn block_json(n:&Node,e:&Entry,full:bool)->Value{
 }
 fn tx_json(n:&Node,e:&Entry,i:usize)->Value{
     let raw=&e.body.txs[i];let env=wire::decode_for_profile(raw,n.chain.spec.profile());
-    let mut v=json!({"hash":format!("{}",e.tx_hashes[i]),"blockHash":hex(&e.hash),"blockNumber":qty(e.height),"transactionIndex":qty(i as u64),"raw":hex(raw)});
+    // The standard fields; `raw` only when the transaction does not decode (then there is no
+    // `input`), so an answer stays within network.md's 2·TX_MAX + 2 KiB and LIGHT_RESP_MAX.
+    let mut v=json!({"hash":format!("{}",e.tx_hashes[i]),"blockHash":hex(&e.hash),"blockNumber":qty(e.height),"transactionIndex":qty(i as u64)});
+    if env.is_err(){v["raw"]=json!(hex(raw));}
     if let Ok(env)=env{let t=env.tx_env();v["from"]=json!(format!("{:#x}",env.sender()));v["to"]=t.transact_to.to().map(|a|json!(format!("{a:#x}"))).unwrap_or(Value::Null);
         v["nonce"]=json!(qty(t.nonce.unwrap_or(0)));v["gas"]=json!(qty(t.gas_limit));v["value"]=json!(qty256(t.value));v["input"]=json!(hex(&t.data));v["type"]=json!(qty(env.kind() as u64));
         v["gasPrice"]=json!(qty256(t.gas_price));if let Some(pf)=t.gas_priority_fee{v["maxPriorityFeePerGas"]=json!(qty256(pf));v["maxFeePerGas"]=json!(qty256(t.gas_price));}v["chainId"]=json!(qty(n.chain.spec.chain_id()));}
@@ -526,6 +530,14 @@ mod tests{
     }
     /// Response pools: a reservation is refused once the pool would exceed its size; shrinking
     /// returns the difference; dropping returns the rest; light holds conn_max+1 class maxima.
+    /// Second review: a busy answer to a body over JSON_VALUES_MAX is built without parsing it, so
+    /// its heap stays far below the parse-tree term (the body itself is the caller's).
+    #[test] fn a_busy_answer_does_not_parse_an_over_limit_body(){
+        let body=format!("[{}0]","0,".repeat(400_000));assert!(super::json_values(body.as_bytes())>super::JSON_VALUES_MAX);
+        let (a,peak)=crate::alloc_meter::peak(||super::busy(body.as_bytes()));
+        assert!(a.contains("-32021")&&a.contains("\"id\":null"),"{a}");
+        assert!(peak<64*1024,"the busy path requested {peak} B for an unparsed body");
+    }
     #[test] fn response_pools_reserve_shrink_and_release(){
         let l=super::Limits{conn_max:3,..Default::default()};let p=super::RespPools::new(&l);
         let a=p.hold_heavy(super::HEAVY_RESP_POOL-10).unwrap();assert!(p.hold_heavy(11).is_none());let mut b=p.hold_heavy(10).unwrap();

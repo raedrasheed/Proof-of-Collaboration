@@ -18,10 +18,12 @@ impl Drop for MinerHandle{fn drop(&mut self){self.stop();if let Some(t)=self.thr
 /// between its spawn and the join in its handle's Drop, so the handles bound the threads: a peak
 /// above one per mining node means a miner was started before the previous one was joined.
 pub static LIVE:AtomicUsize=AtomicUsize::new(0);pub static PEAK:AtomicUsize=AtomicUsize::new(0);
+/// Miners started in the process (each new template starts one).
+pub static STARTS:AtomicUsize=AtomicUsize::new(0);
 
 pub fn start(tid:[u8;32],start:u64,end:u64,target:Fixed,t_share:Fixed,max_shares:usize,events:Sender<MinerEvent>)->MinerHandle{
     let stop=Arc::new(AtomicBool::new(false));let flag=stop.clone();
-    PEAK.fetch_max(LIVE.fetch_add(1,Ordering::SeqCst)+1,Ordering::SeqCst);
+    PEAK.fetch_max(LIVE.fetch_add(1,Ordering::SeqCst)+1,Ordering::SeqCst);STARTS.fetch_add(1,Ordering::SeqCst);
     let thread=crate::threads::spawn("miner",crate::threads::IO_STACK,move||{
         let mut n=start;let mut hashes=0u64;let mut shares=0usize;
         loop{

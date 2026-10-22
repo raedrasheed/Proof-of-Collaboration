@@ -197,8 +197,10 @@ fn small()->Limits{
 }
 /// A13 thread inventory under a stalled consensus thread: heavy eth_calls (30M gas) keep it
 /// busy while peers fill the event queue and churn. Every reader joins its writer and delivers
-/// Closed before it releases its slot, so the threads alive never exceed two per peer slot plus
-/// the RPC connection in use (and this test's own threads).
+/// Closed before it releases its slot, and the listener joins finished readers before reusing a
+/// slot, so the threads alive never exceed two per peer slot plus the RPC connection in use and at
+/// most one that has finished but is not yet joined (the acceptor joins it at the next accept); the
+/// A13 inventory counts conn_max RPC threads (and this test's own threads).
 #[test] fn peer_threads_stay_within_the_inventory_while_consensus_is_stalled(){let _g=serial();
     let r=start("inventory",small());let base=threads();let peers_max=6usize;
     let stop=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -212,9 +214,9 @@ fn small()->Limits{
     while t.elapsed()<Duration::from_secs(6){worst=worst.max(threads().saturating_sub(base+own));std::thread::sleep(Duration::from_millis(3));}
     stop.store(true,Ordering::SeqCst);let calls=heavy.join().unwrap();let conns:usize=churn.into_iter().map(|h|h.join().unwrap()).sum();
     assert!(calls>=2&&conns>=10,"the scenario ran: {calls} heavy calls, {conns} peer connections");
-    assert!(worst<=2*peers_max+1,"threads beyond the inventory: {worst} > {}",2*peers_max+1);
+    assert!(worst<=2*peers_max+2,"threads beyond the inventory: {worst} > {}",2*peers_max+2);
     assert!(wait_until(5000,||live(&r)==0&&threads()<=base+2),"live={} threads {} vs {base}",live(&r),threads());
-    println!("INVENTORY {}",serde_json::json!({"worstExtraThreads":worst,"bound":2*peers_max+1,"heavyCalls":calls,"peerConnections":conns}));
+    println!("INVENTORY {}",serde_json::json!({"worstExtraThreads":worst,"bound":2*peers_max+2,"heavyCalls":calls,"peerConnections":conns}));
 }
 
 // ---------------- round 2: the RPC work deadline, tested on its own ----------------
@@ -232,7 +234,8 @@ fn heavy_duration()->Duration{
     let mut wide=small();wide.rpc.work_deadline=Duration::from_secs(60);let w=start("heavy-duration",wide);
     (0..2).map(|_|{let (code,t)=timed(w.rpc,HEAVY);assert_eq!(code,200);t}).min().unwrap()
 }
-fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id":9,"method":"pocol_getRpcStats","params":[]}"#,false);serde_json::from_str::<serde_json::Value>(&b).unwrap()["result"].clone()}
+/// pocold's RPC counters. A heavy request: while it runs it holds its own RESP_MAX reservation.
+fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id":9,"method":"pocold_rpcCounters","params":[]}"#,false);serde_json::from_str::<serde_json::Value>(&b).unwrap()["result"].clone()}
 /// Review F8: the work deadline, independently of build speed. The deadline under test is a
 /// quarter of the heavy call's measured duration d, so the heavy call always outlasts it:
 /// - the heavy caller is answered 504 at the deadline, while the work runs on;
@@ -263,7 +266,7 @@ fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id
     assert!(wait_until(10_000,||counter(&c.expired_members)-m0==19),"members after the deadline are not started: {}",counter(&c.expired_members)-m0);
     // Resources: connection threads, queued bodies and reservations are all released.
     assert!(wait_until(5000,||counter(&c.active)==0&&threads()<=base+2),"active={} threads {} vs {base}",counter(&c.active),threads());
-    let st=stats(r.rpc);assert_eq!(st["queued"],0);assert_eq!(st["heavyReserved"],0);assert_eq!(st["lightReserved"],pocold::rpc::LIGHT_RESP_MAX,"only the stats request itself is reserved");
+    let st=stats(r.rpc);assert_eq!(st["queued"],1,"only the stats request itself is queued");assert_eq!(st["heavyReserved"],pocold::rpc::RESP_MAX,"only the stats request itself is reserved");assert_eq!(st["lightReserved"],0);
     println!("DEADLINE {}",serde_json::json!({"heavyMs":d.as_millis() as u64,"workDeadlineMs":dl.as_millis() as u64,"heavyAnsweredMs":ht.as_millis() as u64,
         "lightRequests":codes.len(),"light504":late,"light503":codes.iter().filter(|c|**c==503).count(),"skipped":skipped,"batchMembersNotRun":counter(&c.expired_members)-m0}));
 }
@@ -289,7 +292,7 @@ fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id
     let full=counter(&c.queue_full)-f0;let peak=peak.load(Ordering::SeqCst);
     assert!(full>=1,"queued_max was reached and a heavy request refused 503 ({rounds} rounds, peak {peak})");
     assert!(peak<=qmax,"at most queued_max ({qmax}) bodies are held: {peak}");
-    assert_eq!(stats(r.rpc)["queued"],0);
+    assert_eq!(stats(r.rpc)["queued"],1,"only the stats request itself");
     println!("QUEUED {}",serde_json::json!({"queuedMax":qmax,"peakQueued":peak,"refused503":full,"rounds":rounds}));
 }
 /// Response pools on a node: with the heavy pool held full, a heavy batch carrying a transaction
@@ -331,10 +334,9 @@ fn hex(b:&[u8])->String{b.iter().map(|x|format!("{x:02x}")).collect()}
     assert!(lane.wake.load(Ordering::SeqCst)&&counter(&pocold::rpc::COUNTERS.wakes)==w0+1,"a full turn wakes the node for the rest");
     n.drain_light();assert_eq!(r.try_iter().count(),LIGHT_TURN);n.drain_light();assert_eq!(r.try_iter().count(),queued-2*LIGHT_TURN,"the last turn takes what is left");
 }
-/// Review F2: under a light flood the main queue holds at most one Wake at a time, so far fewer
-/// Wakes are sent than light requests pushed, and main events still progress: a new peer's
-/// handshake is answered and a heavy request completes, each within a bound that does not grow
-/// with the flood (before every main event at most LIGHT_TURN light requests run).
+/// Review F2: under a light flood main events still progress: a new peer's handshake is answered
+/// and a heavy request completes, each within a bound that does not grow with the flood (before
+/// every main event at most LIGHT_TURN light requests run).
 #[test] fn a_light_flood_coalesces_wakes_and_main_events_progress(){let _g=serial();
     let c=&pocold::rpc::COUNTERS;let d=heavy_duration();let r=start("flood",small());
     let (w0,p0)=(counter(&c.wakes),counter(&c.light_pushed));
@@ -350,29 +352,34 @@ fn hex(b:&[u8])->String{b.iter().map(|x|format!("{x:02x}")).collect()}
     let (wakes,pushed)=(counter(&c.wakes)-w0,counter(&c.light_pushed)-p0);
     println!("FLOOD {}",serde_json::json!({"lightServed":served,"lightPushed":pushed,"wakes":wakes,"helloMs":hello_at.as_millis() as u64,"heavyMs":ht.as_millis() as u64,"heavyAloneMs":d.as_millis() as u64}));
     assert!(served>=100,"the flood ran: {served}");
-    assert!(wakes>=1&&wakes*2<pushed,"Wakes are coalesced: {wakes} for {pushed} light requests");
+    // How many coalesce depends on how fast the node drains (build speed): only the bound is asserted
+    // here; coalescing itself is checked deterministically by light_lane_wakes_coalesce_until_taken.
+    assert!(wakes>=1&&wakes<=pushed,"{wakes} Wakes for {pushed} light requests");
     assert!(hello_at<Duration::from_secs(2),"the handshake progressed under the flood: {hello_at:?}");
     assert_eq!(hc,200);assert!(ht<d*4+Duration::from_secs(1),"the heavy request progressed under the flood: {ht:?} (alone {d:?})");
 }
 /// Review F7: the miner is joined before it is replaced, so a mining node never has two miner
-/// threads. The node mines alone (fallback templates) until height 6, and every new template
-/// replaces the miner; /proc is sampled continuously for threads named "miner". The node stops
-/// at that height, so it does not load the tests after this one.
+/// threads. The node mines alone (fallback templates) until height 2; every new template replaces
+/// the miner (at least two start). Exact: the handle high-water mark is 1. Cross-check: /proc is
+/// sampled for threads named "miner". The node stops at that height, so it does not load the tests
+/// after this one; on a slow host it only takes longer.
 #[test] fn miner_replacement_keeps_at_most_one_miner_thread(){let _g=serial();
     // /proc sampling is a Linux cross-check; the handle high-water mark is exact on every platform.
     let miners=||->Vec<String>{if !cfg!(target_os="linux"){return vec![]}std::fs::read_dir("/proc/self/task").unwrap().filter_map(|e|{let e=e.ok()?;let n=std::fs::read_to_string(e.path().join("comm")).ok()?;(n.trim()=="miner").then(||e.file_name().to_string_lossy().to_string())}).collect()};
     if !cfg!(target_os="linux"){eprintln!("THREADS-NOT-MEASURED (miner sampling)");}
     let before=miners().len();assert_eq!(before,0,"no miner runs before the test");
     let dir=std::env::temp_dir().join(format!("pocold-net-miner-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
-    let cfg=Config{dir,name:"miner".into(),miner:Some(devnet::miner_identity("a").key),listen:None,peers:vec![],rpc:None,stop_at:Some(6),log:false,limits:small()};
+    let cfg=Config{dir,name:"miner".into(),miner:Some(devnet::miner_identity("a").key),listen:None,peers:vec![],rpc:None,stop_at:Some(2),log:false,limits:small()};
+    let s0=pocold::miner::STARTS.load(Ordering::SeqCst);
     let mut node=Node::open(cfg,spec()).unwrap();node.start_network().unwrap();let run=std::thread::spawn(move||node.run());
     let (mut peak,mut seen)=(0usize,std::collections::HashSet::new());let t=Instant::now();
-    while t.elapsed()<Duration::from_secs(120)&&!run.is_finished(){let m=miners();peak=peak.max(m.len());seen.extend(m);}
-    assert!(run.is_finished(),"the mining node reached height 6");run.join().unwrap();
+    while t.elapsed()<Duration::from_secs(600)&&!run.is_finished(){let m=miners();peak=peak.max(m.len());seen.extend(m);}
+    assert!(run.is_finished(),"the mining node reached height 2");run.join().unwrap();
+    let starts=pocold::miner::STARTS.load(Ordering::SeqCst)-s0;
     assert!(wait_until(2000,||miners().is_empty()),"the miner is joined when the node stops");
     let handles=pocold::miner::PEAK.load(Ordering::SeqCst);
-    println!("MINER {}",serde_json::json!({"minerThreadsSeen":seen.len(),"peakConcurrentSampled":peak,"peakLiveHandles":handles}));
-    if cfg!(target_os="linux"){assert!(seen.len()>=2,"the miner was replaced at least once: {} miner threads seen",seen.len());}
+    println!("MINER {}",serde_json::json!({"minerStarts":starts,"minerThreadsSeen":seen.len(),"peakConcurrentSampled":peak,"peakLiveHandles":handles}));
+    assert!(starts>=2,"the miner was replaced at least once: {starts} started");
     // Exact: the handle count bounds the threads at every instant; sampling /proc is a cross-check.
     assert_eq!(handles,1,"a miner was started before the previous one was joined");
     assert!(peak<=1,"at most one miner thread at a time: {peak}");
@@ -400,4 +407,40 @@ fn hex(b:&[u8])->String{b.iter().map(|x|format!("{x:02x}")).collect()}
     assert!(legit.len()>=4&&rounds>=6,"the load ran: {} legit, {rounds} adversarial",legit.len());
     assert_eq!(ok,legit.len(),"every legitimate request is answered: {legit:?}");
     assert!(worst<=bound,"worst legitimate latency {worst:?} > {bound:?}");
+}
+/// Review F2, deterministically: while a Wake is pending, further light requests send none; once
+/// the node takes it (the run loop clears the flag), the next request sends one again.
+#[test] fn light_lane_wakes_coalesce_until_taken(){let _g=serial();
+    let dir=std::env::temp_dir().join(format!("pocold-net-wake-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let cfg=Config{dir,name:"wake".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()};
+    let n=Node::open(cfg,spec()).unwrap();let lane=n.light_lane();let w0=counter(&pocold::rpc::COUNTERS.wakes);
+    for _ in 0..5{lane.wake(&n.tx);}
+    assert_eq!(counter(&pocold::rpc::COUNTERS.wakes)-w0,1,"five light requests, one pending Wake");
+    lane.wake.store(false,Ordering::SeqCst);lane.wake(&n.tx);
+    assert_eq!(counter(&pocold::rpc::COUNTERS.wakes)-w0,2,"after the node takes it, the next request wakes it again");
+}
+/// Response pools, end to end: an answer is reserved until its connection has written it. A heavy
+/// batch whose answer (about 16 MiB) is larger than the socket buffers is sent to a client that
+/// does not read: while it waits, the heavy pool holds the answer; once the client reads it all,
+/// the reservation is gone. (A regression that releases the reservation before the write fails.)
+#[test] fn an_answer_is_reserved_until_its_connection_has_written_it(){let _g=serial();
+    let mut l=small();l.rpc.write_deadline=Duration::from_secs(30);l.rpc.work_deadline=Duration::from_secs(60);let r=start("resv",l);
+    // Each member reverts with 1 MiB of memory (PUSH3 0x100000 PUSH1 0 REVERT), answered as
+    // "execution reverted:<hex>": 2 MiB per member; the batch stops at BATCH_RESP_MAX (about 14 MiB).
+    // An unread socket takes the send buffer (tcp_wmem max) plus the receiver's unread window.
+    let member=r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"data":"0x621000006000fd","gas":"0x1c9c380"},"latest"]}"#;
+    let body=format!("[{}]",vec![member;10].join(","));
+    let mut s=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();
+    write!(s,"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
+    // Wait until the answer is built and its write is blocked on the unread socket.
+    let want=(pocold::rpc::RESP_MAX as u64)+(12<<20);
+    let built=wait_until(60_000,||stats(r.rpc)["heavyReserved"].as_u64().unwrap_or(0)>=want);
+    // The first sample can land just after the answer is built; the reservation must still be there
+    // a second later, while the write waits for the client.
+    std::thread::sleep(Duration::from_secs(1));let during=stats(r.rpc)["heavyReserved"].as_u64().unwrap();
+    assert!(built&&during>=want,"while the client does not read, the pool holds its answer: {during} B reserved");
+    let mut out=Vec::new();s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();let _=s.read_to_end(&mut out);
+    assert!(out.len()>(12<<20),"the client reads the whole answer: {} B",out.len());
+    assert!(wait_until(10_000,||stats(r.rpc)["heavyReserved"].as_u64()==Some(pocold::rpc::RESP_MAX as u64)),"after the write the reservation is released (only the stats request's own remains)");
+    println!("RESERVED {}",serde_json::json!({"reservedWhileUnread":during,"answerBytes":out.len()}));
 }

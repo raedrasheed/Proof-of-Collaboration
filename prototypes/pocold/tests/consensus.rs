@@ -619,3 +619,81 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     assert_eq!(d.items.iter().map(|x|x.1).sum::<u128>(),d.total);
     println!("A13-BREAKDOWN {}",serde_json::json!({"total":d.total.to_string(),"items":d.items.iter().map(|(k,v)|serde_json::json!([k,v.to_string()])).collect::<Vec<_>>()}));
 }
+
+// ---------------- second round-2 review: side-branch retention, eviction and replay ----------------
+fn retention_node(tag:&str)->(pocold::node::Node,std::path::PathBuf,impl Fn()->pocold::node::Config){
+    use pocold::node::{Config,Node};
+    let dir=std::env::temp_dir().join(format!("pocold-retain-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let d=dir.clone();let conf=move||Config{dir:d.clone(),name:"retain".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()};
+    (Node::open(conf(),admitted(&cfg(&["a","b","c"]))).unwrap(),dir,conf)
+}
+/// `n` blocks from `parent`: the first by `first`, then fallbacks at attempt 0.
+fn grow(h:&mut Net,parent:[u8;32],n:usize,first:&dyn Fn(&Net,[u8;32])->Block)->Vec<Block>{
+    let mut out=vec![];let mut p=parent;for i in 0..n{let b=if i==0{first(h,p)}else{fallback(h,p,0)};import(h,&b);h.chain.retain();p=b.hash();out.push(b);}out
+}
+/// A heavier competing branch whose fork is 150 blocks deep (more than the 64 a review showed
+/// unadoptable, within SIDE_BLOCKS_MAX) is adopted: the node switches to its tip.
+#[test] fn a_competing_branch_within_side_blocks_max_is_adopted(){
+    let depth=150usize;let mut a=net();let g=a.chain.head;
+    let ours=grow(&mut a,g,depth,&|n,p|signed(n,p,Body::default(),0));
+    let mut b=net();let target=a.chain.head().total_work;let mut theirs=vec![];let mut p=g;
+    while b.chain.head().total_work<=target{let x=fallback(&b,p,0);import(&mut b,&x);b.chain.retain();p=x.hash();theirs.push(x);}
+    for _ in 0..2{let x=fallback(&b,p,0);import(&mut b,&x);p=x.hash();theirs.push(x);}
+    let (mut n,dir,_)=retention_node("adopt");
+    for x in &ours{n.import(x.clone(),None).unwrap();}
+    for x in &theirs{n.import(x.clone(),None).unwrap_or_else(|e|panic!("h={}: {e:?}",x.header.h));assert!(n.chain.side_counts().0<=pocold::chain::SIDE_BLOCKS_MAX);}
+    assert_eq!(n.chain.head,theirs.last().unwrap().hash(),"the heavier branch ({} blocks against {depth}) is adopted",theirs.len());
+    let _=std::fs::remove_dir_all(&dir);
+}
+/// A reorg that turns more than SIDE_BLOCKS_MAX canonical blocks into side blocks: retention trims
+/// them to the cap at once (lowest-work leaves first, repeatedly). An evicted block received again is
+/// refused before it is validated or journaled, and the node reopens to the same head.
+#[test] fn side_blocks_stay_within_the_cap_after_a_reorg_and_evicted_blocks_are_not_taken_again(){
+    use pocold::{chain::SIDE_BLOCKS_MAX,node::Node};
+    let depth=SIDE_BLOCKS_MAX+24;let mut a=net();let g=a.chain.head;
+    // Ours starts at attempt 1 (a later timestamp, less work per block); theirs is heavier sooner.
+    let ours=grow(&mut a,g,depth,&|n,p|fallback(n,p,1));
+    let mut b=net();let target=a.chain.head().total_work;let mut theirs=vec![];let mut p=g;
+    while b.chain.head().total_work<=target{let x=fallback(&b,p,0);import(&mut b,&x);b.chain.retain();p=x.hash();theirs.push(x);}
+    let (mut n,dir,conf)=retention_node("cap");
+    for x in &ours{n.import(x.clone(),None).unwrap();}
+    let mut max_side=0;
+    for x in &theirs{let _=n.import(x.clone(),None);let (s,_)=n.chain.side_counts();max_side=max_side.max(s);assert!(s<=SIDE_BLOCKS_MAX,"{s} side blocks after h={}",x.header.h);}
+    assert_eq!(n.chain.head,theirs.last().unwrap().hash());assert!(n.chain.evicted_total>=(depth-SIDE_BLOCKS_MAX) as u64,"evicted {}",n.chain.evicted_total);
+    let tip=ours.last().unwrap();assert!(!n.chain.blocks.contains_key(&tip.hash()),"the lowest-work leaf went first");
+    let records=n.journal_records();
+    assert!(matches!(n.import(tip.clone(),None),Err(pocold::chain::Reject::Evicted)),"an evicted block is refused");
+    assert_eq!(n.journal_records(),records,"and not journaled again");
+    let head=n.chain.head;drop(n);
+    let r=Node::open(conf(),admitted(&cfg(&["a","b","c"]))).expect("the node reopens");
+    assert_eq!(r.chain.head,head,"to the same head");assert!(r.chain.side_counts().0<=SIDE_BLOCKS_MAX);
+    println!("RETENTION {}",serde_json::json!({"ourBlocks":depth,"theirBlocks":theirs.len(),"maxSide":max_side,"evicted":r.chain.evicted_total}));
+    let _=std::fs::remove_dir_all(&dir);
+}
+/// A journal record of a block already present (a re-import that live retention had removed) is
+/// skipped on replay: the node reopens to the same head.
+#[test] fn replay_skips_a_duplicate_record(){
+    use pocold::node::Node;
+    let mut h=net();let g=h.chain.head;let blocks=grow(&mut h,g,3,&|n,p|signed(n,p,Body::default(),0));
+    let (mut n,dir,conf)=retention_node("dup");for x in &blocks{n.import(x.clone(),None).unwrap();}let head=n.chain.head;let binding=n.chain.spec.genesis_hash();drop(n);
+    {let mut rec=pocold::store::open(&dir,&binding).unwrap();let again=rec.payloads[1].clone();rec.journal.append(&again).unwrap();}
+    let r=Node::open(conf(),admitted(&cfg(&["a","b","c"]))).expect("the node reopens despite the duplicate record");
+    assert_eq!(r.chain.head,head);let _=std::fs::remove_dir_all(&dir);
+}
+/// Second review: a valid, included transaction of TX_MAX bytes is fetched by hash in the light lane,
+/// and its answer stays within network.md's 2·TX_MAX + 2 KiB (no `raw` beside `input`).
+#[test] fn a_max_size_transaction_is_answered_in_the_light_lane(){
+    let mut h=net();let g=h.chain.head;let txmax=h.chain.spec.cp().TX_MAX as usize;let alice=devnet::account_key("alice");
+    let mk=|len:usize|Tx{chain_id:777910,nonce:0,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:2_000_000,to:Some(devnet::account_key("bob").address()),value:U256::ZERO,data:vec![0u8;len].into()}.sign_1559(&alice);
+    let mut len=txmax-200;while mk(len+1).len()<=txmax{len+=1;}
+    let raw=mk(len);assert!(raw.len()<=txmax&&raw.len()+64>txmax);let hash=revm::primitives::keccak256(&raw);
+    let b=signed(&h,g,Body{txs:vec![raw.clone()],evidence:vec![]},0);import(&mut h,&b);
+    let (mut n,dir,_)=retention_node("txmax");n.import(b,None).unwrap();assert_eq!(n.chain.head().body.txs.len(),1);
+    let body=format!(r#"{{"jsonrpc":"2.0","id":3,"method":"eth_getTransactionByHash","params":["{hash}"]}}"#);assert!(pocold::rpc::is_light(body.as_bytes()));
+    let (t,_r)=std::sync::mpsc::channel();
+    let a=pocold::rpc::answer(&mut n,&pocold::rpc::Request{body:body.into_bytes(),reply:t,site:false,deadline:std::time::Instant::now()+std::time::Duration::from_secs(30),light:true,held:None});
+    let v:serde_json::Value=serde_json::from_str(&a.body).unwrap();
+    assert_eq!(v["result"]["hash"],format!("{hash}"),"answered, not -32008: {}",&a.body[..a.body.len().min(200)]);
+    assert!(v["result"].get("raw").is_none());assert!(a.body.len()<=2*txmax+2048,"{} B",a.body.len());
+    let _=std::fs::remove_dir_all(&dir);
+}

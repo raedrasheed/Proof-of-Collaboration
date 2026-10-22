@@ -37,6 +37,10 @@ const _:()=assert!(crate::rpc::CALL_GAS_MAX<=pocol_lp4_execution::apply::PER_CAL
 pub fn io_threads(peers_max:usize,dials:usize,conn_max:usize)->Option<u128>{add(&[mul(2,peers_max as u128)?,mul(4,dials as u128)?,conn_max as u128,6])}
 /// Smallest valid transaction encoding (a signed legacy transfer exceeds it).
 pub const MIN_TX_BYTES:u128=85;
+/// Intrinsic gas of every transaction. A block's transactions reserve their gas limits against
+/// GAS_LIMIT and use at least this each (user_phase: the reservation check and `used <= limit`), so a
+/// valid block holds at most GAS_LIMIT / TX_GAS_MIN transactions.
+pub const TX_GAS_MIN:u128=21_000;
 /// Receipt encoding without logs: status, cumulative gas, a 256-byte bloom, list headers.
 pub const RECEIPT_BASE:u128=300;
 /// Longest stored rejection reason (chain::REASON_MAX) and status rejects kept (node).
@@ -80,6 +84,9 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let (retained,side_states)=(1+u128::from(k_hist),u128::from(side_max));
     let mut items=vec![("snapshots/head and K_hist retained states",mul(retained,snapshot_bytes)?),("snapshots/side_max side-branch states",mul(side_states,snapshot_bytes)?),
         ("snapshots/transient working copies",mul(TRANSIENT_SNAPSHOTS,snapshot_bytes)?),
+        // A table that grows in a working copy keeps its old allocation until the new one is filled:
+        // one table at a time (single consensus thread), at most a whole snapshot's tables.
+        ("snapshots/table growth in a working copy",snapshot_bytes),
         ("code/head and K_hist retained states",mul(retained,code_per)?),("code/side_max side-branch states",mul(side_states,code_per)?),("code/transient working copies",mul(TRANSIENT_SNAPSHOTS,code_per)?)];
     // Per block kept in memory: the map slot (Entry inline), the canonical index, header heap
     // (encoded, ut_raw, bloom, proposer, sig, share nonces), ParentResult shares, nonce ranges
@@ -98,8 +105,9 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let hist=[("history/blocks (H_END+1)",mul(u128::from(cp.H_END)+1,per_block)?),("history/transaction bytes (TXBYTES_CAP)",u128::from(cp.TXBYTES_CAP)),
         ("history/transaction index and receipts (TX_CAP)",mul(u128::from(cp.TX_CAP),24+24+32+RECEIPT_BASE)?),("history/logs (LOG_CAP)",u128::from(caps::LOG_CAP)/32*33),("history/evidence",evidence)];
     let history=add(&hist.map(|x|x.1))?;items.extend(hist);
-    // Side blocks: <= SIDE_BLOCKS_MAX (Chain::retain), each a full block of its own.
-    let side_txs=u128::from(cp.BODY_MAX)/MIN_TX_BYTES;
+    // Side blocks: <= SIDE_BLOCKS_MAX (Chain::retain, after every import), each a full, validated
+    // block of its own: its transactions are bounded by its body and by its gas.
+    let side_txs=(u128::from(cp.BODY_MAX)/MIN_TX_BYTES).min(u128::from(cp.GAS_LIMIT)/TX_GAS_MIN);
     let side_block=add(&[per_block,mul(u128::from(cp.E_max),u128::from(cp.EVID_BYTES_MAX))?,u128::from(cp.BODY_MAX),mul(side_txs,24+24+32+RECEIPT_BASE)?,u128::from(caps::LOG_BLOCK_MAX)/32*33])?;
     let side_blocks=mul(chain::SIDE_BLOCKS_MAX as u128,side_block)?;items.push(("side/SIDE_BLOCKS_MAX stored side blocks",side_blocks));
     // Queues and caches (node.rs, net.rs constants).
@@ -112,12 +120,13 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
         mul(node::EVIDENCE_POOL_MAX as u128,u128::from(cp.EVID_BYTES_MAX)+24)?,mul(node::FUTURE_MAX as u128,32)?])?;
     // Inbound peers <= peers_max; outbound <= one per dialer (net::dial).
     let peers=mul(l.peers_max as u128+dials as u128,add(&[l.queue_bytes_max as u128,2*frame,4096])?)?;
-    let (main_events,net_events)=(mul(node::EVENT_QUEUE as u128,frame+256)?,mul((1+dials) as u128,mul(net::NET_EVENT_QUEUE as u128,frame+256)?)?);
+    // Each forwarder also holds the one event it is blocked sending (+1).
+    let (main_events,net_events)=(mul(node::EVENT_QUEUE as u128,frame+256)?,mul((1+dials) as u128,mul(net::NET_EVENT_QUEUE as u128+1,frame+256)?)?);
     let q=[("queues/transaction pool",pool),("queues/orphan blocks",orphans),("queues/future blocks",future),("queues/templates",templates),("queues/seen sets",seen),
         ("queues/rejection and evidence caches",caches),("queues/peer send queues and frames",peers),("queues/main event queue",main_events),("queues/network event forwarders",net_events)];
     let queues=add(&q.map(|x|x.1))?;items.extend(q);
-    // RPC (rpc::conn): per connection its header buffer (HEAD_MAX+READ_CHUNK, and a lossy copy of
-    // the headers as large) and a body of exactly Content-Length <= REQ_BUF bytes. Answers held
+    // RPC (rpc::conn): per connection its header buffer (HEAD_MAX+READ_CHUNK, and its lossy UTF-8
+    // copy, up to 3 bytes per input byte) and a body of exactly Content-Length <= REQ_BUF bytes. Answers held
     // by connections are within the response pools (rpc::answer: light (conn_max+1) x
     // LIGHT_RESP_MAX, heavy HEAVY_RESP_POOL), except small busy answers and HTTP literals
     // (SMALL_REPLY_MAX each). A heavy body can outlive its connection in the main queue: at most
@@ -127,7 +136,7 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // so far (a growing String: VEC x BATCH_BYTES_HARD) plus one member (its JSON tree and
     // string, a log result stopping at RESP_MAX), counted as 4 x RESP_MAX by inspection.
     let r=&limits.rpc;use crate::rpc::{REQ_BUF,HEAD_MAX,READ_CHUNK,RESP_MAX,LIGHT_BODY_MAX,HEAVY_RESP_POOL,BATCH_BYTES_HARD,SMALL_REPLY_MAX};
-    let rq=[("rpc/connection requests (conn_max)",mul(r.conn_max as u128,(2*(HEAD_MAX+READ_CHUNK)+REQ_BUF) as u128)?),
+    let rq=[("rpc/connection requests (conn_max)",mul(r.conn_max as u128,(4*(HEAD_MAX+READ_CHUNK)+REQ_BUF) as u128)?),
         ("rpc/heavy response pool",HEAVY_RESP_POOL as u128),("rpc/light response pool ((conn_max+1) x LIGHT_RESP_MAX)",crate::rpc::light_pool(r) as u128),
         ("rpc/small answers outside the pools (conn_max)",mul(r.conn_max as u128,SMALL_REPLY_MAX as u128)?),
         ("rpc/queued heavy bodies (queued_max)",mul(crate::rpc::queued_max(r) as u128,REQ_BUF as u128+256)?),("rpc/light lane (conn_max)",mul(r.conn_max as u128,LIGHT_BODY_MAX as u128+256)?),
@@ -144,7 +153,7 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let execution=mul(EXECUTIONS,memory::execution(gas,code_max)?)?;let fixed=mul(EXECUTIONS,memory::fixed_heap(gas,code_max)?)?;
     items.extend([("execution/frames, code analysis, preallocations, precompiles",fixed),("execution/memory and operation classes (worst gas split)",execution.checked_sub(fixed)?)]);
     let total=add(&items.iter().map(|x|x.1).collect::<Vec<_>>())?;
-    debug_assert_eq!(Some(total),add(&[mul(snapshots,snapshot_bytes)?,code,history,side_blocks,queues,rpc,threads,execution]));
+    debug_assert_eq!(Some(total),add(&[mul(snapshots,snapshot_bytes)?,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,execution]));
     let _=size_of::<Header>()+size_of::<Body>();
     Some(Bound{snapshots,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,execution,total,items})
 }

@@ -481,12 +481,14 @@ returns 404 until the file is on `main`, so it has not run.
   covers no consensus change and waives no specification requirement.
 - Trigger: at 45712cd the corrected model put the devnet default at 7,112,758,897 B (6.62 GiB), so
   `Node::open` refused it.
-- Result: 5,506,111,035 B (5.13 GiB), inside the 7/8 reserve the boot gate now enforces. The required
-  budget is 6,292,698,326 B.
+- Result: 5,584,711,217 B (5.20 GiB), inside the 7/8 reserve the boot gate now enforces. The required
+  budget is 6,382,527,106 B (after the second review's corrections).
 - Values, contributions, basis and trade-offs: [A13-DERIVATION.md §2a](A13-DERIVATION.md#2a-d-a13-budget-itemized-bound-reductions-and-reserve-round-2).
   Summary of the changes:
   - side_max 8 → 2;
-  - SIDE_BLOCKS_MAX 256 → 64;
+  - SIDE_BLOCKS_MAX 256 → 64, **reverted to 256** after the second review showed that 64 made a heavier
+    branch longer than about 64 blocks unadoptable (network.md:143: adoption ≤ R_keep). Its term is
+    instead tightened by proof: a validated block holds at most GAS_LIMIT/21,000 transactions;
   - POOL_MAX_BYTES 64 → 32 MiB;
   - inbound peers_max 32 → 8;
   - EVENT_QUEUE 256 → 128;
@@ -497,6 +499,9 @@ returns 404 until the file is on `main`, so it has not run.
   transaction, breaks no normative minimum, refuses no valid maximum-size block, and removes no history
   the reorganisation rules need.
 - K_hist (32), RPC_CONN_MAX (32), consensus caps and the TRANSIENT_SNAPSHOTS inventory are unchanged.
+- Architectural blocker found: adoption at any depth ≤ R_keep = 2048 would need about 0.85 GB more of
+  in-memory side blocks, which does not fit. It needs disk-backed blocks (A13-DERIVATION §4 item 18).
+  Pocold's adoption depth is SIDE_BLOCKS_MAX = 256, as at 45712cd.
 - Alternatives not taken:
   - raising the budget (not authorised);
   - lowering K_hist (it widens the deep-fork rebuild from genesis);
