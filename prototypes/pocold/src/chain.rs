@@ -6,6 +6,13 @@ use pocol_lp4_execution::{admission::{Admitted,NodeLocal},apply::{self,BlockInpu
 use revm::{InMemoryDB,primitives::{Address,B256,U256}};
 use crate::types::*;
 
+/// Longest stored rejection reason (A13 accounting).
+pub const REASON_MAX:usize=256;
+pub fn truncate(why:&str)->String{if why.len()<=REASON_MAX{return why.to_string()}let mut n=REASON_MAX;while !why.is_char_boundary(n){n-=1}why[..n].to_string()}
+/// governance.md R_keep: a non-canonical block this far below the head is removed (A13).
+pub const R_KEEP:u64=2048;
+/// Non-canonical blocks kept in total (A13); the lowest-work leaves leave first.
+pub const SIDE_BLOCKS_MAX:usize=256;
 /// Bound of the invalid-block cache (A05). A forgotten entry is only re-validated.
 pub const INVALID_MAX:usize=4096;
 
@@ -118,7 +125,8 @@ impl Chain{
             target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis().state().clone(),is_final:false,result:None,
             receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![]};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
-        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist:32,rebuilds:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new()}
+        let k_hist=u64::from(spec.local().k_hist);
+        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new()}
     }
     pub fn head(&self)->&Entry{&self.blocks[&self.head]}
     pub fn get(&self,h:&[u8;32])->Option<&Entry>{self.blocks.get(h)}
@@ -364,21 +372,48 @@ impl Chain{
         better
     }
     pub fn mark_invalid(&mut self,hash:[u8;32],why:String){
-        if self.invalid.insert(hash,why).is_none(){self.invalid_order.push_back(hash);}
+        if self.invalid.insert(hash,truncate(&why)).is_none(){self.invalid_order.push_back(hash);}
         while self.invalid_order.len()>INVALID_MAX{if let Some(old)=self.invalid_order.pop_front(){self.invalid.remove(&old);}}
     }
     /// R21 retention: drop states of blocks at height <= head-K_hist (genesis kept).
+    /// A13 side-branch bounds: at most `side_max` non-canonical blocks keep a state (the
+    /// lowest-work ones are pruned first and rebuilt on demand); a non-canonical block
+    /// R_KEEP or more below the head is removed with its descendants; and at most
+    /// SIDE_BLOCKS_MAX non-canonical blocks are kept, the lowest-work leaves leaving first.
     pub fn retain(&mut self){
-        let cut=self.head().height.saturating_sub(self.k_hist);
+        let head_h=self.head().height;let cut=head_h.saturating_sub(self.k_hist);
         for e in self.blocks.values_mut(){ if e.height>0&&e.height<=cut&&!e.pruned{e.state=InMemoryDB::default();e.pruned=true;} }
+        let side:Vec<(U256,u64,[u8;32],u64,bool)>=self.blocks.values().filter(|e|e.height>0&&!self.is_canonical(&e.hash)).map(|e|(e.total_work,e.import_seq,e.hash,e.height,e.pruned)).collect();
+        if side.is_empty(){return}
+        let mut removed=false;
+        for (_,_,h,height,_) in &side{if height+R_KEEP<=head_h{self.blocks.remove(h);removed=true;}}
+        if side.len()>SIDE_BLOCKS_MAX{
+            let parents:std::collections::HashSet<[u8;32]>=self.blocks.values().filter_map(|e|e.parent).collect();
+            let mut leaves:Vec<&(U256,u64,[u8;32],u64,bool)>=side.iter().filter(|x|self.blocks.contains_key(&x.2)&&!parents.contains(&x.2)).collect();leaves.sort();
+            let over=side.len()-SIDE_BLOCKS_MAX;for x in leaves.into_iter().take(over){self.blocks.remove(&x.2);removed=true;}
+        }
+        // Descendants of a removed block go too (their parent is gone).
+        while removed{removed=false;let orphaned:Vec<[u8;32]>=self.blocks.values().filter(|e|e.parent.map_or(false,|p|!self.blocks.contains_key(&p))).map(|e|e.hash).collect();
+            for h in orphaned{self.blocks.remove(&h);removed=true;}}
+        let mut with_state:Vec<&(U256,u64,[u8;32],u64,bool)>=side.iter().filter(|x|!x.4&&self.blocks.contains_key(&x.2)).collect();
+        let side_max=self.spec.local().side_max as usize;
+        if with_state.len()>side_max{with_state.sort();let over=with_state.len()-side_max;
+            let drop:Vec<[u8;32]>=with_state.into_iter().take(over).map(|x|x.2).collect();
+            for h in drop{if let Some(e)=self.blocks.get_mut(&h){e.state=InMemoryDB::default();e.pruned=true;}}}
     }
+    /// Non-canonical blocks, and those holding a state (A13 accounting, status).
+    pub fn side_counts(&self)->(usize,usize){let side=self.blocks.values().filter(|e|e.height>0&&!self.is_canonical(&e.hash));let (mut n,mut s)=(0,0);for e in side{n+=1;if !e.pruned{s+=1}}(n,s)}
     /// TrieRebuild: re-executes from the nearest retained ancestor and checks
     /// every stateRoot against the committed header.
     pub fn ensure_state(&mut self,hash:&[u8;32])->Result<(),Reject>{
         let mut path=vec![];let mut cur=*hash;
         while self.blocks.get(&cur).map(|e|e.pruned).unwrap_or(false){path.push(cur);cur=self.blocks[&cur].parent.ok_or_else(||Reject::Block("rebuild root".into()))?;}
+        if path.is_empty(){return Ok(())}
+        // A13: rolling re-execution. Only the block being extended holds a state; intermediate
+        // states are dropped, so a rebuild of any depth keeps at most two snapshots alive.
+        let mut p=self.blocks.get(&cur).ok_or_else(||Reject::Block("rebuild root".into()))?.clone();
         for h in path.into_iter().rev(){
-            let e=self.blocks[&h].clone();let p=self.blocks[&e.parent.unwrap()].clone();
+            let e=self.blocks[&h].clone();
             let ctx=self.child_ctx(&p,e.header.a)?;let effects=self.evidence_effects(&p,&e.body,e.height)?;
             let proposer=if e.signed{Proposer::Signed(Address::from_slice(&e.header.proposer))}else{Proposer::Fallback};
             let out=self.execute(&p,&ctx,e.ts,proposer,&e.body,effects)?;
@@ -388,8 +423,9 @@ impl Chain{
             let derived=ParentResult{block_hash:B256::from(e.hash),winner:owner(e.header.nonce).ok_or_else(||Reject::Block("rebuild owner".into()))?,
                 shares:e.header.shares.iter().map(|n|owner(*n).map(|o|(*n,o))).collect::<Option<Vec<_>>>().ok_or_else(||Reject::Block("rebuild share owner".into()))?};
             if Some(&derived)!=e.result.as_ref(){return blk("parentResultMismatch")}
-            let x=self.blocks.get_mut(&h).unwrap();x.state=out.state;x.pruned=false;self.rebuilds+=1;
+            let mut next=e;next.state=out.state;next.pruned=false;p=next;self.rebuilds+=1;
         }
+        let x=self.blocks.get_mut(hash).ok_or_else(||Reject::Block("rebuild target".into()))?;x.state=p.state;x.pruned=false;
         Ok(())
     }
     fn key(&self,h:&[u8;32])->(u8,u64,[u8;32]){let e=&self.blocks[h];(if e.signed{0}else{1},e.import_seq,e.hash)}

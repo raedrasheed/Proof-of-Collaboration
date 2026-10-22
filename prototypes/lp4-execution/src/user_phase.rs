@@ -79,6 +79,27 @@ pub fn execute_for_block(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&NativeBlockC
  execute_user_phase_inner_ctx(snapshot,raw,block,byte_budget,entry_budget,Some(profile),ctx)
 }
 
+/// A13: CacheDB::commit stores every accessed slot (zero values and slots that were only
+/// read) and the EIP-161 cleanup leaves NotExisting entries, so containers would grow with
+/// every key ever touched. In this EmptyDB-backed state an absent slot reads 0 and an absent
+/// account does not exist, exactly as those entries do, and roots ignore both; dropping them
+/// keeps every container proportional to the live state that SLOT_CAP/ACCT_CAP bound.
+/// Tables never shrink by themselves, so a table left oversized by such entries is shrunk:
+/// every table then has at most the buckets its current entries need (resources::memory).
+pub fn normalize(db:&mut InMemoryDB,touched:&[Address]){
+ for a in touched{
+  let gone=match db.accounts.get_mut(a){Some(x) if x.account_state==AccountState::NotExisting||x.info().is_none()=>true,
+   Some(x)=>{x.storage.retain(|_,v|*v!=U256::ZERO);if x.storage.capacity()>2*x.storage.len()+8{x.storage.shrink_to_fit()}false},None=>false};
+  if gone{db.accounts.remove(a);}
+ }
+ if db.accounts.capacity()>2*db.accounts.len()+16{db.accounts.shrink_to_fit()}
+}
+/// Code bytes no existing account references (A13), kept out of later snapshots.
+pub fn drop_unreferenced_code(db:&mut InMemoryDB){
+ let used:HashSet<B256>=db.accounts.values().filter_map(|a|a.info()).map(|i|i.code_hash).collect();
+ db.contracts.retain(|h,_|used.contains(h)||*h==revm::primitives::KECCAK_EMPTY||*h==B256::ZERO);
+ if db.contracts.capacity()>2*db.contracts.len()+16{db.contracts.shrink_to_fit()}
+}
 /// Per-block meter of the A03 limits; live counts follow the state incrementally.
 struct BlockMeter{log_bytes:u64,log_count:u64,cum_log:u64,dirty_keys:HashSet<(Address,U256)>,dirty_accts:HashSet<Address>,
     sys_keys:HashSet<(Address,U256)>,sys_accts:HashSet<Address>,live_slots:u64,live_accts:u64,closing:bool,
@@ -197,8 +218,10 @@ fn execute_user_phase_inner_ctx(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&Nativ
   // EIP161 cleanup, as in the existing Cancun control runner. CacheDB::commit
   // alone keeps touched empty accounts; remove them before the next transaction.
   let removed:Vec<_>=result.state.iter().filter(|(_,a)|a.is_selfdestructed()||(a.is_touched()&&a.is_empty())).map(|(a,_)|*a).collect();
+  let touched:Vec<_>=result.state.iter().filter(|(_,a)|a.is_touched()).map(|(a,_)|*a).collect();
   state.commit(result.state);
   for address in removed{let a=state.accounts.entry(address).or_default();a.account_state=AccountState::NotExisting;a.storage.clear();a.info=Default::default();}
+  if profile.is_some(){normalize(&mut state,&touched)}
  }
  let commitments=UserCommitments{transactions_root:receipts::ordered_root(raw,entry_budget).map_err(|_|UserError::Root)?,receipts_root:receipts::ordered_root(&encoded,entry_budget).map_err(|_|UserError::Root)?,gas_used:used,logs_bloom:bloom};
  Ok(UserCandidate{state,commitments,receipts:encoded,tips,log_bytes:meter.log_bytes,halts})

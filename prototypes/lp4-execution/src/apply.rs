@@ -222,8 +222,10 @@ impl<'a> Exec<'a>{
 }
 fn commit_epoch(db:&mut InMemoryDB,state:EvmState){
     let removed:Vec<_>=state.iter().filter(|(_,a)|a.is_selfdestructed()||(a.is_touched()&&a.is_empty())).map(|(a,_)|*a).collect();
+    let touched:Vec<_>=state.iter().filter(|(_,a)|a.is_touched()).map(|(a,_)|*a).collect();
     db.commit(state);
     for address in removed{let a=db.accounts.entry(address).or_default();a.account_state=revm::db::AccountState::NotExisting;a.storage.clear();a.info=Default::default();}
+    crate::user_phase::normalize(db,&touched);
 }
 fn selector(sig:&str)->Vec<u8>{keccak256(sig.as_bytes())[..4].to_vec()}
 fn enc_u256(out:&mut Vec<u8>,v:U256){out.extend(v.to_be_bytes::<32>())}
@@ -307,7 +309,7 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
     if ex.meter.keys.len() as u64>u64::from(cp.SYS_KEYS_BLOCK_MAX){return Err(ApplyError::Budget("SYS_KEYS_BLOCK_MAX"))}
     if ex.meter.accounts.len() as u64>u64::from(cp.SYS_ACCT_BLOCK_MAX){return Err(ApplyError::Budget("SYS_ACCT_BLOCK_MAX"))}
     let meter=ex.meter.clone();
-    let state=ex.state;
+    let mut state=ex.state;crate::user_phase::drop_unreferenced_code(&mut state);
     genesis.image.verify_candidate(&state,profile).map_err(|e|ApplyError::Genesis(format!("candidate {e:?}")))?;
     check_escrow_invariant(&state,profile,h,is_final)?;
 

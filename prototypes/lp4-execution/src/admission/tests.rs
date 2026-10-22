@@ -28,22 +28,23 @@ fn sh()->NodeLocal{NodeLocal::single_host()}
     let (n,t)=base();let a=admit(&n.request(&sh(),Some(&t))).unwrap_or_else(|e|panic!("{e}"));
     assert_eq!(a.genesis_hash(),n.profile.genesis_hash());assert_eq!(a.genesis().root(),n.genesis.root());
     let r=a.report();assert_eq!(r.calibration_class,Some(FactClass::SyntheticFixture));assert_eq!(r.resource_class,Some(FactClass::Measurement));
-    assert!(r.r21_exception&&r.notes.iter().any(|x|x.contains("retentionStress")),"{:?}",r.notes);
+    // D-A13-PROFILE: the retained-state bound fits HIST_TRIE_BUDGET; no R21 exception is used.
+    assert!(!r.r21_exception&&r.historical_bytes<=HIST_TRIE_BUDGET,"{} {:?}",r.historical_bytes,r.notes);
+    let a=admit(&n.request(&NodeLocal{retention_stress:false,..sh()},Some(&t)));assert!(a.is_ok(),"admitted without retentionStress");
     assert!(t.phase_ms.iter().all(|ms|*ms<=1000),"t_exec=1 s must cover every measured phase: {t:?}");
 }
 #[test] fn approved_p11_timing_profile_is_admitted(){
     // P11: T_blk=10, tau=600, c=2, D_att=60, dFbWait=6 with P11 local timing.
     let mut c=cfg();c.t_blk=10;c.tau=600;c.c=2;c.d_att=60;c.d_fb_wait=6;c.hash_rate=1<<14;
-    let n=net(&c);let t=measure(&n.spec_bytes,&n.alloc,1).unwrap();let local=NodeLocal{retention_stress:true,..NodeLocal::p11()};
-    admit(&n.request(&local,Some(&t))).unwrap_or_else(|e|panic!("{e}"));
-    // Without the simnet retention exception pocold's full-snapshot retention fails R21.
-    assert_eq!(rules(admit(&n.request(&NodeLocal::p11(),Some(&t)))),v(&["R21"]));
+    let n=net(&c);let t=measure(&n.spec_bytes,&n.alloc,1).unwrap();
+    admit(&n.request(&NodeLocal::p11(),Some(&t))).unwrap_or_else(|e|panic!("{e}"));
 }
 #[test] fn audit_reproductions_are_rejected_with_their_rules(){
     let (_,t)=base();
     let mut c=cfg();c.s_max=1;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R9"]),"A02-R9 S_max=1");
     let mut c=cfg();c.h_close=c.h_end;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R13"]),"A02-R13 H_CLOSE=H_END");
-    let mut c=cfg();c.sys_slot_max=1;let n=net(&c);
+    // As audited: R_max=2 (the audited devnet default), so the genesis holds 69 system slots.
+    let mut c=cfg();c.r_max=2;c.sys_slot_max=1;let n=net(&c);
     let e=run(&n,&t,&sh()).err().expect("SYS_SLOT_MAX=1 must be rejected");assert_eq!(e.rules,v(&["R18"]));
     let g=Genesis::build(&n.alloc,&n.profile,&SystemPrograms::v1()).unwrap();assert_eq!(resources::sys_slots(g.state()),69,"genesis needs 69 system slots");
 }
@@ -61,7 +62,7 @@ fn sh()->NodeLocal{NodeLocal::single_host()}
 #[test] fn size_membership_and_end_rules_r8_to_r13(){
     let (n,t)=base();
     let mut c=cfg();c.u=19;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R8"]),"U < E_win+D");
-    let mut c=cfg();c.e_win=2049;c.u=2053;c.reg_records_max=16384;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R8"]),"E_win > R_keep");
+    let mut c=cfg();c.e_win=2049;c.u=2053;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R8"]),"E_win > R_keep");
     // Genesis construction itself refuses B_code_max < 24577 (code_caps), so the identity
     // facts are absent as well; the note names the construction failure.
     assert_eq!(run_bytes(&n,&t,&edited(&n,&[(34,24576)]),&sh()),v(&["R9","R23","R24"]),"B_code_max");
@@ -80,10 +81,13 @@ fn sh()->NodeLocal{NodeLocal::single_host()}
     let slow=Timing{phase_ms:[10,10,1001],..t.clone()};assert_eq!(rules(run(&n,&slow,&sh())),v(&["R14","R19"]),"final phase above t_exec");
     let mut g=DEFAULT_GOSSIP;g[1]=196608+685; // template = BODY_MAX + 686-byte envelope
     assert_eq!(rules(run(&n,&t,&NodeLocal{gossip:g,..sh()})),v(&["R15"]));
-    // R16 for this profile: M_max + R_max*(Lmax+LAG) = 64 + 2*(max(40, 2*16+4+1)+2048) = 4240.
-    let mut c=cfg();c.reg_records_max=4239;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R16"]));
-    let mut c=cfg();c.reg_records_max=4240;assert!(run(&net(&c),&t,&sh()).is_ok());
-    assert_eq!(run_bytes(&n,&t,&edited(&n,&[(21,5)]),&sh()),v(&["R17"]),"SWEEP_MAX < R_max+E_max");
+    // R16 with R_max=2: M_max + R_max*(Lmax+LAG) = 64 + 2*(max(40, 2*16+4+1)+2048) = 4240.
+    let mut c=cfg();c.r_max=2;c.reg_records_max=4239;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R16"]));
+    let mut c=cfg();c.r_max=2;c.reg_records_max=4240;assert!(run(&net(&c),&t,&sh()).is_ok());
+    // R16 with the devnet's R_max=0: REG_RECORDS_MAX >= M_max = 64.
+    let mut c=cfg();c.reg_records_max=63;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R16"]));
+    assert_eq!(run_bytes(&n,&t,&edited(&n,&[(21,3)]),&sh()),v(&["R17"]),"SWEEP_MAX < R_max+E_max = 4");
+    assert!(run_bytes(&n,&t,&edited(&n,&[(21,4)]),&sh()).is_empty());
     let b=resources::derive(n.profile.cp());
     let mut c=cfg();c.sys_slot_max=b.slot_min as u32-1;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R18"]));
     let mut c=cfg();c.sys_slot_max=b.slot_min as u32;assert!(run(&net(&c),&t,&sh()).is_ok());
@@ -94,13 +98,17 @@ fn sh()->NodeLocal{NodeLocal::single_host()}
     // R20: Z_close >= ceil(8192/128)+P2+D+1 = 71.
     assert_eq!(run_bytes(&n,&t,&edited(&n,&[(49,70)]),&sh()),v(&["R20"]));
     assert!(run_bytes(&n,&t,&edited(&n,&[(49,71)]),&sh()).is_empty());
-    assert_eq!(rules(run(&n,&t,&NodeLocal{retention_stress:false,..sh()})),v(&["R21"]));
+    // R21 at network-scale caps: pocold's full snapshots exceed HIST_TRIE_BUDGET; only the
+    // simnet retentionStress exception admits it, and a node never gets that exception.
+    let mut c=cfg();c.slot_cap=4_000_000;c.acct_cap=1_000_000;let big=net(&c);
+    assert_eq!(rules(run(&big,&t,&NodeLocal{retention_stress:false,..sh()})),v(&["R21"]));
+    let a=run(&big,&t,&sh()).unwrap();assert!(a.report().r21_exception&&a.report().notes.iter().any(|x|x.contains("retentionStress")));
     // Outside the measured SYS gas domain the gas facts are absent: R18, never assumed.
     let mut c=cfg();c.d=17;c.u=41;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R18"]),"D=17 outside the gas domain");
 }
 #[test] fn identity_rules_r22_to_r26(){
     let (n,t)=base();let tt=rebound(&t,&n.spec_bytes);
-    assert_eq!(rules(admit(&Request{node:NodeKind::Node,..n.request(&sh(),Some(&tt))})),v(&["R21","R22"]),"simnet profile on a node (no simnet retention exception there)");
+    assert_eq!(rules(admit(&Request{node:NodeKind::Node,..n.request(&sh(),Some(&tt))})),v(&["R22"]),"simnet profile on a node: [R22] (governance.md)");
     assert_eq!(rules(admit(&Request{forks:&[(1,0),(2,50)],..n.request(&sh(),Some(&tt))})),v(&["R24"]),"TestFork-v2 is not implemented");
     let mut alloc=n.alloc.clone();let a=devnet::account_key("alice").address();alloc.accounts.get_mut(&a).unwrap().info.balance+=revm::primitives::U256::from(1);
     assert_eq!(rules(admit(&Request{alloc:&alloc,..n.request(&sh(),Some(&tt))})),v(&["R24"]),"alloc does not match allocRoot");

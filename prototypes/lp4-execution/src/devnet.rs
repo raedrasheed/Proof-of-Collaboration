@@ -18,7 +18,7 @@ pub struct DevnetConfig{
     pub w_act:u32,pub theta_inact:u32,pub e_win:u32,pub u:u32,
     pub h_end:u64,pub h_close:u64,pub t_end_offset:u64,pub t_close_offset:u64,pub ret:u32,pub p2:u32,
     pub m_max:u16,pub r_max:u8,pub reg_records_max:u32,pub sys_slot_max:u32,pub z_close:u32,
-    pub gas_limit:u64,pub slot_cap:u64,pub acct_cap:u64,
+    pub gas_limit:u64,pub slot_cap:u64,pub acct_cap:u64,pub code_cap:u64,pub txbytes_cap:u64,pub tx_cap:u64,
     pub alpha_bp:u16,pub gamma_bp:u16,
     /// nonceMode=0 bound multiplier: nMax=min(2^64, c·work(target)).
     pub c:u8,
@@ -29,11 +29,15 @@ pub struct DevnetConfig{
 impl DevnetConfig{
     pub fn new(chain_id:u64,g_ts:u64,miners:&[&str])->Self{
         // D-A02-PROFILE: gate-valid single-host timing (admission::NodeLocal::single_host);
-        // about 2^18 hashes per block.
+        // about 2^18 hashes per block. D-A13-PROFILE: the approved caps/64 limits
+        // (validation.md T18b), SYS_SLOT_MAX above the derived footprint, R_max=0 (the v1
+        // programs implement no registration) and H_END=20000, so that the A13 resident
+        // bound of a node fits its memory budget.
         Self{chain_id,g_ts,hash_rate:1<<16,
             t_blk:4,tau:40,d_att:25,d_fb_wait:3,d:4,w_w:8,m:32,kappa:2,s_max:256,
-            w_act:32,theta_inact:64,e_win:16,u:40,h_end:100_000,h_close:99_000,t_end_offset:10_000_000,t_close_offset:9_990_000,ret:128,p2:2,m_max:64,
-            r_max:2,reg_records_max:8192,sys_slot_max:131072,z_close:160,gas_limit:8_000_000,slot_cap:4_000_000,acct_cap:1_000_000,alpha_bp:1000,gamma_bp:500,c:2,
+            w_act:32,theta_inact:64,e_win:16,u:40,h_end:20_000,h_close:19_000,t_end_offset:10_000_000,t_close_offset:9_990_000,ret:128,p2:2,m_max:64,
+            r_max:0,reg_records_max:8192,sys_slot_max:65536,z_close:160,gas_limit:8_000_000,slot_cap:50_000,acct_cap:20_000,
+            code_cap:1<<21,txbytes_cap:1<<24,tx_cap:20_000,alpha_bp:1000,gamma_bp:500,c:2,
             miners:miners.iter().map(|s|s.to_string()).collect(),
             accounts:vec![("alice".into(),U256::from(10u128.pow(24))),("bob".into(),U256::from(10u128.pow(24)))]}
     }
@@ -44,7 +48,7 @@ impl DevnetConfig{
          n(self.m.into()),n(self.kappa.into()),n(self.s_max.into()),n(self.d.into()),n(self.w_w.into()),n(self.alpha_bp.into()),n(self.gamma_bp.into()),
          big(2_000_000_000_000_000_000),big(100_000_000_000_000_000_000),n(self.r_max.into()),n(self.m_max.into()),n(1),n(self.reg_records_max.into()),n(16),n(64),n(16),
          n(self.w_act.into()),n(self.theta_inact.into()),n(self.e_win.into()),n(self.u.into()),n(4),n(8192),
-         n(self.gas_limit),n(1_000_000_000),n(131072),n(196608),n(32768),n(1<<30),n(1<<33),n(10_000_000),n(self.slot_cap),n(self.acct_cap),
+         n(self.gas_limit),n(1_000_000_000),n(131072),n(196608),n(32768),n(self.code_cap),n(self.txbytes_cap),n(self.tx_cap),n(self.slot_cap),n(self.acct_cap),
          n(self.sys_slot_max.into()),n(2048),n(256),n(512),n(96_000_000),
          n(self.h_end),n(self.g_ts+self.t_end_offset),n(self.h_close),n(self.g_ts+self.t_close_offset),n(self.z_close.into()),n(self.ret.into()),n(self.p2.into())]
     }

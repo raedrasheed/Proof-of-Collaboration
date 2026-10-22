@@ -24,10 +24,18 @@ pub struct Config{
     /// A05 local resource bounds (P2P and RPC separately).
     pub limits:Limits,
 }
-#[derive(Clone,Debug,Default)]
-pub struct Limits{pub net:net::Limits,pub rpc:crate::rpc::Limits}
+#[derive(Clone,Debug)]
+pub struct Limits{pub net:net::Limits,pub rpc:crate::rpc::Limits,
+    /// Node memory budget for the A13 resident bound (resources::check at open).
+    pub mem_budget:u64}
+impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET}}}
+/// Default memory budget of one single-host devnet node.
+pub const MEM_BUDGET:u64=6<<30;
+/// Blocks waiting for their timestamp, buffered templates, equivocation observations,
+/// status rejects and evidence awaiting inclusion (A13 accounting).
+pub const FUTURE_MAX:usize=64;pub const TEMPLATES_MAX:usize=64;pub const SEEN_MAX:usize=4096;pub const REJECTS_MAX:usize=256;pub const EVIDENCE_POOL_MAX:usize=64;
 /// Events waiting for the consensus thread (all sources); senders block when it is full.
-pub const EVENT_QUEUE:usize=1024;
+pub const EVENT_QUEUE:usize=256;
 /// Orphans (blocks whose parent is unknown): parent keys, blocks per parent and bytes, all peers together.
 pub const ORPHAN_PARENTS_MAX:usize=64;pub const ORPHANS_PER_PARENT:usize=16;pub const ORPHAN_BYTES_MAX:usize=16*1024*1024;
 /// Blocks walked on each side of a reorg to restore detached transactions (A11).
@@ -94,6 +102,8 @@ fn result_bytes(r:&Option<ParentResult>)->Vec<u8>{
 impl Node{
     /// Opens the journal, replays and re-executes every committed block.
     pub fn open(cfg:Config,spec:Spec)->Result<Self,String>{
+        // A13: the resident bound of this profile with these limits must fit the budget.
+        crate::resources::check(spec.cp(),spec.local().k_hist,spec.local().side_max,&cfg.limits,cfg.peers.len())?;
         let binding=spec.genesis_hash();
         let rec=store::open(&cfg.dir,&binding).map_err(|e|format!("store: {e:?}"))?;
         let mut chain=Chain::new(spec);
@@ -176,7 +186,7 @@ impl Node{
                 if let Some(id)=from{if let Some(p)=self.peers.get(&id){p.send(&Msg::GetBlock{hash:parent});}}
                 return Err(Reject::UnknownParent);
             }
-            Err(Reject::Future)=>{if self.future.len()<64{self.future.push(b);}return Err(Reject::Future)}
+            Err(Reject::Future)=>{if self.future.len()<FUTURE_MAX{self.future.push(b);}return Err(Reject::Future)}
             Err(Reject::Block(why))=>{self.chain.mark_invalid(hash,why.clone());self.reject(hash,&why);return Err(Reject::Block(why))}
             Err(e)=>{if let Reject::Envelope(w)=&e{self.reject(hash,w);}return Err(e)}
         };
@@ -213,7 +223,7 @@ impl Node{
         let l=self.orphans.remove(parent)?;self.orphan_order.retain(|k|k!=parent);self.orphan_bytes-=l.iter().map(orphan_size).sum::<usize>();Some(l)
     }
     pub fn orphan_stats(&self)->(usize,usize,usize){(self.orphans.len(),self.orphans.values().map(|l|l.len()).sum(),self.orphan_bytes)}
-    fn reject(&mut self,hash:[u8;32],why:&str){self.rejects.push_back((hex(&hash),why.to_string()));if self.rejects.len()>256{self.rejects.pop_front();}self.log(&format!("reject {}: {why}",&hex(&hash)[..14]));}
+    fn reject(&mut self,hash:[u8;32],why:&str){self.rejects.push_back((hex(&hash),chain::truncate(why)));if self.rejects.len()>REJECTS_MAX{self.rejects.pop_front();}self.log(&format!("reject {}: {why}",&hex(&hash)[..14]));}
     fn on_new_head(&mut self,old_head:[u8;32]){
         let detached=self.detached_txs(old_head);
         self.rebuild_pool(detached);
@@ -434,7 +444,7 @@ impl Node{
                     if matches!(&self.prod,Some(p) if p.parent==h.parent_hash&&p.attempt==0){let p=self.chain.get(&h.parent_hash).unwrap().clone();self.lock_fallback(&p,0);}
                 }else if waiting{self.try_lock_signed(h,b);}
                 else if !self.chain.blocks.contains_key(&h.parent_hash)||self.prod.as_ref().map(|p|p.parent!=h.parent_hash).unwrap_or(true){
-                    if self.templates.len()>64{self.templates.clear();}self.templates.insert(h.parent_hash,(h,b,now_ms()));
+                    if self.templates.len()>TEMPLATES_MAX{self.templates.clear();}self.templates.insert(h.parent_hash,(h,b,now_ms()));
                 }
             }
             Msg::Share{tid,nonce}=>{
@@ -479,10 +489,10 @@ impl Node{
         if !matches!(hashes::recover_address(&hashes::sig_msg(&tid),&h.sig),Ok(a) if a[..]==h.proposer[..]){return false}
         let key=(h.parent_hash,h.h);let st=Self::st_bytes(h);
         match self.seen_templates.get(&key){
-            None=>{if self.seen_templates.len()>4096{self.seen_templates.clear();}self.seen_templates.insert(key,(h.ut_raw.clone(),st,h.proposer.clone()));false}
+            None=>{if self.seen_templates.len()>SEEN_MAX{self.seen_templates.clear();}self.seen_templates.insert(key,(h.ut_raw.clone(),st,h.proposer.clone()));false}
             Some((ut,first,prop)) if *ut!=h.ut_raw&&*prop==h.proposer=>{
                 let mut p=Vec::new();crate::rlp::encode_bytes(&[1],&mut p);p.extend(first.clone());p.extend(st);let mut ev=Vec::new();crate::rlp::encode_list_payload(&p,&mut ev);
-                if !self.evidence_pool.contains(&ev){self.log(&format!("equivocation (type 1) by proposer of h={}",h.h));self.evidence_pool.push(ev);}true}
+                if !self.evidence_pool.contains(&ev)&&self.evidence_pool.len()<EVIDENCE_POOL_MAX{self.log(&format!("equivocation (type 1) by proposer of h={}",h.h));self.evidence_pool.push(ev);}true}
             _=>false,
         }
     }
@@ -490,12 +500,12 @@ impl Node{
     fn observe_win(&mut self,h:&Header){
         let tid=template_id(&h.ut_raw);let root=share_root(h);
         match self.seen_wins.get(&(tid,h.nonce)){
-            None=>{if self.seen_wins.len()>4096{self.seen_wins.clear();}self.seen_wins.insert((tid,h.nonce),(root,h.winner_sig));}
+            None=>{if self.seen_wins.len()>SEEN_MAX{self.seen_wins.clear();}self.seen_wins.insert((tid,h.nonce),(root,h.winner_sig));}
             Some((r,sig)) if *r!=root=>{
                 let mut p=Vec::new();crate::rlp::encode_bytes(&[2],&mut p);crate::rlp::encode_bytes(&tid,&mut p);crate::rlp::encode_bytes(&h.nonce.to_be_bytes(),&mut p);
                 crate::rlp::encode_bytes(r,&mut p);crate::rlp::encode_bytes(sig,&mut p);crate::rlp::encode_bytes(&root,&mut p);crate::rlp::encode_bytes(&h.winner_sig,&mut p);
                 let mut ev=Vec::new();crate::rlp::encode_list_payload(&p,&mut ev);
-                if !self.evidence_pool.contains(&ev){self.log(&format!("equivocation (type 2) on h={}",h.h));self.evidence_pool.push(ev);}
+                if !self.evidence_pool.contains(&ev)&&self.evidence_pool.len()<EVIDENCE_POOL_MAX{self.log(&format!("equivocation (type 2) on h={}",h.h));self.evidence_pool.push(ev);}
             }
             _=>{}
         }

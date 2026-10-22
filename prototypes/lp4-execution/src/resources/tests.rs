@@ -5,7 +5,9 @@ use revm::primitives::{Address,B256,U256};
 fn network_like(miners:usize,h_close:u64,h_end:u64)->DevnetConfig{
     let labels:Vec<String>=(0..miners).map(|i|format!("m{i}")).collect();let refs:Vec<&str>=labels.iter().map(|s|s.as_str()).collect();
     let mut c=DevnetConfig::new(777920,1_800_000_000,&refs);
-    c.d=16;c.w_w=64;c.s_max=256;c.m_max=256;c.h_close=h_close;c.h_end=h_end;c.ret=128;c.e_win=2048;c.u=2200;c.w_act=128;c.theta_inact=1024;c
+    c.d=16;c.w_w=64;c.s_max=256;c.m_max=256;c.h_close=h_close;c.h_end=h_end;c.ret=128;c.e_win=2048;c.u=2200;c.w_act=128;c.theta_inact=1024;
+    // Network-scale caps (governance.md), independent of the single-host devnet defaults.
+    c.r_max=2;c.sys_slot_max=131072;c.slot_cap=4_000_000;c.acct_cap=1_000_000;c.code_cap=1<<30;c.txbytes_cap=1<<33;c.tx_cap=10_000_000;c
 }
 
 #[test] fn r18_network_values_and_caps64_minimum_boundary(){
@@ -90,4 +92,53 @@ fn gas_scenario(c:&DevnetConfig,evidence_at:&dyn Fn(u64,&[Address])->Vec<Evidenc
         let bound=crate::admission::GAS_ENVELOPE.iter().find(|(n,_)|n==name).map(|x|x.1);
         assert!(bound.map_or(false,|b|*g<=b),"envelope misses {name}={g} bound={bound:?}");
     }
+}
+
+/// Thread-local allocation meter (only allocations of the measuring thread are counted,
+/// so parallel tests do not disturb it).
+mod alloc_meter{
+    use std::alloc::{GlobalAlloc,Layout,System};use std::cell::Cell;
+    thread_local!{static ON:Cell<bool>=const{Cell::new(false)};static BYTES:Cell<isize>=const{Cell::new(0)};}
+    fn add(d:isize){let _=ON.try_with(|on|if on.get(){let _=BYTES.try_with(|b|b.set(b.get()+d));});}
+    pub struct Meter;
+    unsafe impl GlobalAlloc for Meter{
+        unsafe fn alloc(&self,l:Layout)->*mut u8{let p=unsafe{System.alloc(l)};if !p.is_null(){add(l.size() as isize)}p}
+        unsafe fn dealloc(&self,p:*mut u8,l:Layout){unsafe{System.dealloc(p,l)};add(-(l.size() as isize))}
+        unsafe fn realloc(&self,p:*mut u8,l:Layout,n:usize)->*mut u8{let q=unsafe{System.realloc(p,l,n)};if !q.is_null(){add(n as isize-l.size() as isize)}q}
+    }
+    #[global_allocator] static A:Meter=Meter;
+    /// Net heap bytes `f` leaves allocated (what it returns keeps alive).
+    pub fn measure<T>(f:impl FnOnce()->T)->(T,isize){ON.with(|o|o.set(true));BYTES.with(|b|b.set(0));let r=f();let n=BYTES.with(|b|b.get());ON.with(|o|o.set(false));(r,n)}
+}
+/// A13: the snapshot model bounds the bytes a real clone allocates, for spread slots,
+/// concentrated slots at power-of-two boundaries, grown-then-cleared tables (normalized)
+/// and a state produced by actual block execution.
+#[test] fn snapshot_model_bounds_measured_clone_bytes(){
+    use revm::{InMemoryDB,primitives::{AccountInfo,U256 as RU}};
+    let check=|db:&InMemoryDB,label:&str|{
+        let accounts=db.accounts.len() as u128;let slots=db.accounts.values().map(|a|a.storage.len()).sum::<usize>() as u128;let codes=db.contracts.len() as u128;
+        let (copy,bytes)=alloc_meter::measure(||db.clone());drop(copy);
+        let bound=memory::snapshot(accounts,slots,codes).unwrap();
+        assert!(bytes>0&&(bytes as u128)<=bound,"{label}: clone allocated {bytes} B > model {bound} B (accounts {accounts}, slots {slots}, codes {codes})");
+        (bytes,bound)
+    };
+    let addr=|i:u64|revm::primitives::Address::from_word(RU::from(0x5000_0000u64+i).into());
+    for n in [1u64,7,8,100,1000,3500]{
+        let mut db=InMemoryDB::default();for i in 0..n{db.insert_account_info(addr(i),AccountInfo{nonce:1,..Default::default()});db.insert_account_storage(addr(i),RU::from(1),RU::from(1)).unwrap();}
+        check(&db,&format!("{n} accounts x 1 slot"));
+    }
+    for s in [7u64,8,14,15,448,449,3584,3585]{
+        let mut db=InMemoryDB::default();db.insert_account_info(addr(0),AccountInfo{nonce:1,..Default::default()});
+        for k in 0..s{db.insert_account_storage(addr(0),RU::from(k+1),RU::from(1)).unwrap();}
+        check(&db,&format!("1 account x {s} slots"));
+    }
+    // 3000 slots written then cleared to one: normalization keeps the table proportional.
+    let mut db=InMemoryDB::default();db.insert_account_info(addr(0),AccountInfo{nonce:1,..Default::default()});
+    for k in 0..3000u64{db.insert_account_storage(addr(0),RU::from(k+1),RU::from(1)).unwrap();}
+    for k in 1..3000u64{db.insert_account_storage(addr(0),RU::from(k+1),RU::ZERO).unwrap();}
+    crate::user_phase::normalize(&mut db,&[addr(0)]);assert_eq!(db.accounts[&addr(0)].storage.len(),1);
+    let (b,_)=check(&db,"grown then cleared");assert!(b<8192,"the cleared table was shrunk: {b} B");
+    // A state from real execution (genesis plus blocks).
+    let net=devnet::build(&network_like(16,60,80)).unwrap();check(net.genesis.state(),"genesis");
+    println!("MEMORY-MODEL {}",serde_json::json!({"accountEntry":memory::ACCOUNT_ENTRY,"slotEntry":memory::SLOT_ENTRY,"codeEntry":memory::CODE_ENTRY,"db":memory::DB}));
 }

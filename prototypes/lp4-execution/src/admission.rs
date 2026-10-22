@@ -44,8 +44,8 @@ use crate::{apply::{self,BlockInput,Genesis,ParentResult,Proposer,SystemPrograms
 
 /// governance.md constants entering R8/R11/R21.
 pub const R_KEEP:u32=2048;pub const K_FINAL:u32=60;pub const K_VIEW:u32=12;pub const HIST_TRIE_BUDGET:u64=1_717_986_918;
-/// pocold's frame limit (net::MAX_FRAME) applies to every gossip message type.
-pub const DEFAULT_GOSSIP:[u32;6]=[8<<20;6];
+/// pocold's frame limit (net::MAX_FRAME, 256 KiB) applies to every gossip message type.
+pub const DEFAULT_GOSSIP:[u32;6]=[256<<10;6];
 /// User-context SYS allowance (execution.md, D50/D54/D70): 16 accounts; 0 while closing.
 pub const USER_SYS_ACCOUNTS:u32=16;
 
@@ -63,9 +63,9 @@ pub struct NodeLocal{
 }
 impl NodeLocal{
     /// D-A02-PROFILE (b): one host, one clock, so φ=Φ=0 exactly; Δ=1, t_exec=1, Δ_rel=5, Γ=5.
-    pub fn single_host()->Self{Self{delta:1,phi:0,t_exec:1,delta_rel:5,gamma:5,k_hist:32,side_max:64,gossip:DEFAULT_GOSSIP,retention_stress:true,rpc:RpcLimits::default()}}
+    pub fn single_host()->Self{Self{delta:1,phi:0,t_exec:1,delta_rel:5,gamma:5,k_hist:32,side_max:8,gossip:DEFAULT_GOSSIP,retention_stress:true,rpc:RpcLimits::default()}}
     /// P11 (governance.md): Δ=1, φ=1 (Φ=2), t_exec=1, Δ_rel=8, Γ=5. For multi-host use.
-    pub fn p11()->Self{Self{delta:1,phi:1,t_exec:1,delta_rel:8,gamma:5,k_hist:32,side_max:64,gossip:DEFAULT_GOSSIP,retention_stress:false,rpc:RpcLimits::default()}}
+    pub fn p11()->Self{Self{delta:1,phi:1,t_exec:1,delta_rel:8,gamma:5,k_hist:32,side_max:8,gossip:DEFAULT_GOSSIP,retention_stress:false,rpc:RpcLimits::default()}}
     /// Φ, saturating so that an overflowing φ fails R1 instead of wrapping.
     pub fn capital_phi(&self)->u32{self.phi.checked_mul(2).unwrap_or(u32::MAX)}
 }
@@ -172,9 +172,11 @@ fn fact_identity(bytes:&[u8],hash:&[u8;32],chain_id:u64)->Result<ProfileIdentity
 }
 fn sat_u32(v:u64)->u32{u32::try_from(v).unwrap_or(u32::MAX)}
 fn sat_u64(v:u128)->u64{u64::try_from(v).unwrap_or(u64::MAX)}
-/// R21: (k_hist + side) * (ACCT_CAP*ACCOUNT_BYTES + (SLOT_CAP+SYS_SLOT_MAX)*SLOT_BYTES), in u128.
+/// R21: (k_hist + side_max) full snapshots (pocold keeps full states, no trie sharing) of a
+/// state at ACCT_CAP + 5 accounts and SLOT_CAP + SYS_SLOT_MAX slots, by the container model
+/// `resources::memory` (A13). Saturates on overflow, which then fails R21.
 pub fn historical_bytes(cp:&ConsensusParams,local:&NodeLocal)->u64{
-    let per=u128::from(cp.ACCT_CAP)*u128::from(resources::ACCOUNT_BYTES)+(u128::from(cp.SLOT_CAP)+u128::from(cp.SYS_SLOT_MAX))*u128::from(resources::SLOT_BYTES);
+    let a=u128::from(cp.ACCT_CAP)+5;let per=resources::memory::snapshot(a,u128::from(cp.SLOT_CAP)+u128::from(cp.SYS_SLOT_MAX),a+2).unwrap_or(u128::MAX);
     sat_u64((u128::from(local.k_hist)+u128::from(local.side_max)).saturating_mul(per))
 }
 fn digest(tag:&str,parts:&[&[u8]])->[u8;32]{

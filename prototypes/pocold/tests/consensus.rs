@@ -426,3 +426,45 @@ fn branch(h:&mut Net,parent:[u8;32],count:usize,bodies:&[Body])->Vec<Block>{
     assert_eq!(node.chain.head,new[1].hash());assert!(pool(&node).is_empty(),"included on the new branch: not restored");
     for d in [dir,dir2,dir3]{let _=std::fs::remove_dir_all(&d);}
 }
+
+// ---------------- audit A13 regressions: enforced resource assumptions ----------------
+fn admitted_with(c:&DevnetConfig,local:pocol_lp4_execution::admission::NodeLocal)->Spec{Spec::new(devnet::build(c).unwrap().admit(&local).unwrap_or_else(|e|panic!("{e}")).0)}
+#[test] fn a13_side_branch_states_are_capped_and_rebuilt_on_demand(){
+    let local=pocol_lp4_execution::admission::NodeLocal{side_max:2,..pocold::single_host_local()};
+    let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();let mut keys=HashMap::new();
+    for m in &d.miners{keys.insert(m.id,Key::from_secret(&m.key.secret()).unwrap());}
+    let mut n=Net{chain:Chain::new(admitted_with(&c,local)),keys};let g=n.chain.head;
+    // Five competing children of genesis (attempts 0..4) and a canonical extension.
+    let kids:Vec<Block>=(0..5u32).map(|a|fallback(&n,g,a)).collect();
+    for b in &kids{let (e,_)=n.chain.validate(b,None,0).unwrap();n.chain.insert(e);n.chain.retain();}
+    let (side,with_state)=n.chain.side_counts();assert_eq!(side,4);assert!(with_state<=2,"at most side_max side states: {with_state}");
+    // A pruned side block is rebuilt when a child extends it.
+    let pruned=kids.iter().map(|b|b.hash()).find(|h|!n.chain.is_canonical(h)&&n.chain.blocks[h].pruned).expect("a pruned side block");
+    let child=fallback_on_pruned(&mut n,pruned);
+    let (e,_)=match n.chain.validate(&child,None,0){Err(Reject::NeedsRebuild(p))=>{n.chain.ensure_state(&p).unwrap();n.chain.validate(&child,None,0).unwrap()}r=>r.unwrap()};
+    assert!(n.chain.insert(e),"the rebuilt branch is now the heaviest");
+}
+/// Builds a fallback child of `parent` after rebuilding its state in a scratch copy.
+fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&parent).unwrap();fallback(n,parent,0)}
+#[test] fn a13_rebuild_of_a_deep_fork_keeps_only_the_target_state(){
+    let mut n=net();n.chain.k_hist=4;let mut hashes=vec![n.chain.head];
+    for _ in 0..14{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);n.chain.retain();hashes.push(n.chain.head);}
+    let target=hashes[6];assert!(n.chain.blocks[&target].pruned);
+    n.chain.ensure_state(&target).unwrap();
+    assert!(!n.chain.blocks[&target].pruned,"target rebuilt");
+    for h in &hashes[1..6]{assert!(n.chain.blocks[h].pruned,"intermediate states are not kept (rolling rebuild)");}
+}
+#[test] fn a13_boot_refuses_a_bound_above_the_memory_budget(){
+    use pocold::node::{Config,Limits,Node};
+    let dir=std::env::temp_dir().join(format!("pocold-a13-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let conf=|limits:Limits|Config{dir:dir.clone(),name:"a13".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits};
+    let err=Node::open(conf(Limits{mem_budget:1<<30,..Default::default()}),admitted(&cfg(&["a","b","c"]))).err().expect("1 GiB is below the bound");
+    assert!(err.starts_with("A13 memory bound"),"{err}");
+    // Network-scale caps cannot be held by a full-snapshot node within the default budget.
+    let mut big=cfg(&["a","b","c"]);big.slot_cap=4_000_000;big.acct_cap=1_000_000;
+    let err=Node::open(conf(Limits::default()),admitted(&big)).err().expect("network-scale caps exceed the budget");assert!(err.contains("exceeds the node memory budget"),"{err}");
+    let b=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),32,8,&Limits::default(),0).unwrap();
+    assert!(b.total<=u128::from(pocold::node::MEM_BUDGET),"the devnet default fits: {b:?}");
+    Node::open(conf(Limits::default()),admitted(&cfg(&["a","b","c"]))).expect("the default devnet boots");
+    let _=std::fs::remove_dir_all(&dir);
+}

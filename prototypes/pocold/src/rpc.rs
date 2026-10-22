@@ -11,6 +11,9 @@ use pocol_lp4_execution::{native::{self,NativeBlockContext},wire,apply};
 use crate::{node::{Event,Node},types::*,chain::{self,Entry}};
 
 pub const MAX_BODY:usize=1024*1024;
+/// RpcGuard RESP_MAX and LOGS_SCAN_BYTES (governance.md): a larger response is replaced
+/// by -32008; eth_getLogs stops after scanning this many log data bytes (-32005).
+pub const RESP_MAX:usize=8*1024*1024;pub const LOGS_SCAN_BYTES:usize=32*1024*1024;
 /// ORIGIN_DENY (governance.md): local mining interfaces are never reachable from a site.
 pub const ORIGIN_DENY:[&str;2]=["pocol_submitShare","pocol_getTemplate"];
 
@@ -102,6 +105,7 @@ fn parse_addr(v:&Value)->Option<Address>{v.as_str()?.parse().ok()}
 fn parse_u256(v:&Value)->Option<U256>{v.as_str().and_then(|s|U256::from_str_radix(s.trim_start_matches("0x"),16).ok())}
 
 pub fn handle(n:&mut Node,body:&[u8])->String{handle_with(n,body,false)}
+fn capped(v:Value)->String{let s=v.to_string();if s.len()<=RESP_MAX{s}else{err(&Value::Null,-32008,"response too large").to_string()}}
 /// `site`: the request carried an Origin header. ORIGIN_DENY is decided for the request
 /// and for every batch member before any member executes; a denied member is answered
 /// -32601 and never reaches its method; malformed members are -32600 (A10).
@@ -112,10 +116,10 @@ pub fn handle_with(n:&mut Node,body:&[u8],site:bool)->String{
     if let Value::Array(items)=&v{
         if items.is_empty()||items.len()>20{return err(&Value::Null,-32600,"batch").to_string()}
         let deny:Vec<bool>=items.iter().map(|i|denied(i)).collect();
-        return Value::Array(items.iter().zip(deny).map(|(i,d)|if d{site_err(i)}else{one(n,i)}).collect()).to_string();
+        return capped(Value::Array(items.iter().zip(deny).map(|(i,d)|if d{site_err(i)}else{one(n,i)}).collect()));
     }
     if denied(&v){return site_err(&v).to_string()}
-    one(n,&v).to_string()
+    capped(one(n,&v))
 }
 fn one(n:&mut Node,v:&Value)->Value{
     if !v.is_object(){return err(&Value::Null,-32600,"invalid request")}
@@ -278,12 +282,22 @@ fn logs(n:&Node,f:&Value)->R{
     if to<from||to-from+1>1024{return Err((-32020,"range > 1024 blocks".into()))}
     let addrs:Vec<Address>=match &f["address"]{Value::String(s)=>s.parse().ok().into_iter().collect(),Value::Array(a)=>a.iter().filter_map(parse_addr).collect(),_=>vec![]};
     let topics:Vec<Option<Vec<B256>>>=f["topics"].as_array().map(|t|t.iter().map(|x|match x{Value::Null=>None,Value::String(s)=>s.parse().ok().map(|b|vec![b]),Value::Array(a)=>Some(a.iter().filter_map(|y|y.as_str()?.parse().ok()).collect()),_=>None}).collect()).unwrap_or_default();
-    let mut out=vec![];
+    let mut out=vec![];let mut scanned=0usize;
     for h in from..=to{let Some(e)=n.chain.canonical_at(h) else{break};
+        scanned+=e.receipts.iter().map(|r|r.len()).sum::<usize>();if scanned>LOGS_SCAN_BYTES{return Err((-32005,"log scan limit".into()))}
         for i in 0..e.receipts.len(){let r=receipt_json(n,e,i);for l in r["logs"].as_array().cloned().unwrap_or_default(){
             let a:Address=l["address"].as_str().unwrap().parse().unwrap();if !addrs.is_empty()&&!addrs.contains(&a){continue}
             let lt:Vec<B256>=l["topics"].as_array().unwrap().iter().map(|x|x.as_str().unwrap().parse().unwrap()).collect();
             if topics.iter().enumerate().any(|(k,want)|match want{None=>false,Some(w)=>lt.get(k).map(|t|!w.contains(t)).unwrap_or(true)}){continue}
             out.push(l);if out.len()>10000{return Err((-32005,"too many logs".into()))}}}}
     Ok(Value::Array(out))
+}
+
+#[cfg(test)]
+mod tests{
+    #[test] fn responses_above_resp_max_become_an_error(){
+        let small=super::capped(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"0x1"}));assert!(small.contains("\"result\""));
+        let big=super::capped(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"a".repeat(super::RESP_MAX)}));
+        assert!(big.contains("-32008")&&big.len()<200,"{}",&big[..big.len().min(200)]);
+    }
 }

@@ -54,3 +54,42 @@ pub const ACCOUNT_BYTES:u64=200;pub const SLOT_BYTES:u64=96;
 pub fn r21_retained_bytes(k_hist:u64,side:u64,accounts:u64,slots:u64)->u64{(k_hist+side)*(accounts*ACCOUNT_BYTES+slots*SLOT_BYTES)}
 
 #[cfg(test)] mod tests;
+
+/// A13: resident bytes of one state snapshot (revm `InMemoryDB` as the node keeps it), from
+/// the actual container layout. A hashbrown table of n >= 1 entries has at most
+/// max(4, next_pow2(⌈8n/7⌉)) <= 6 + 16n/7 buckets (tables never shrink, so n is the peak
+/// count; containers are normalized after every commit so the peak follows the live state),
+/// each holding one entry and one control byte, plus a 16-byte trailing group and alignment.
+/// The bound holds for every distribution of slots over accounts: each account's storage
+/// table costs at most (6 + 16·s/7) buckets. Code bytes are reference-counted and shared by
+/// clones, so `code_bytes` counts them separately. Checked u128 arithmetic throughout.
+pub mod memory{
+    use revm::{db::DbAccount,primitives::{Address,B256,Bytecode,U256}};
+    pub const ACCOUNT_ENTRY:u128=std::mem::size_of::<(Address,DbAccount)>() as u128;
+    pub const SLOT_ENTRY:u128=std::mem::size_of::<(U256,U256)>() as u128;
+    pub const CODE_ENTRY:u128=std::mem::size_of::<(B256,Bytecode)>() as u128;
+    pub const HASH_ENTRY:u128=std::mem::size_of::<(U256,B256)>() as u128;
+    pub const DB:u128=std::mem::size_of::<revm::InMemoryDB>() as u128;
+    /// BLOCKHASH window kept in a block's state (apply_block ancestors).
+    pub const ANCESTORS:u128=256;
+    /// Bytes of hashbrown tables holding `n` entries in total spread over `tables` tables.
+    pub fn tables(n:u128,tables:u128,entry:u128)->Option<u128>{
+        if n==0{return Some(0)}
+        let buckets=n.checked_mul(16)?.div_ceil(7).checked_add(tables.checked_mul(6)?)?;
+        buckets.checked_mul(entry.checked_add(1)?)?.checked_add(tables.checked_mul(32)?)
+    }
+    /// One snapshot with at most `accounts` accounts, `slots` storage slots and `codes`
+    /// code entries; None on overflow (the caller rejects).
+    pub fn snapshot(accounts:u128,slots:u128,codes:u128)->Option<u128>{
+        let a=tables(accounts,1,ACCOUNT_ENTRY)?;let s=tables(slots,accounts.min(slots),SLOT_ENTRY)?;
+        let c=tables(codes,1,CODE_ENTRY)?;let h=tables(ANCESTORS,1,HASH_ENTRY)?;
+        a.checked_add(s)?.checked_add(c)?.checked_add(h)?.checked_add(DB)
+    }
+    /// A pruned (default) state: the default code entries and the empty containers.
+    pub fn empty_snapshot()->Option<u128>{tables(2,1,CODE_ENTRY)?.checked_add(DB)}
+    /// Code payload with its analysis (jump table of len/8 bytes plus padding) and the
+    /// shared allocation headers, for `logical` code bytes in `codes` code entries.
+    pub fn code_bytes(logical:u128,codes:u128)->Option<u128>{
+        logical.checked_add(logical/8)?.checked_add(codes.checked_mul(33+64)?)
+    }
+}

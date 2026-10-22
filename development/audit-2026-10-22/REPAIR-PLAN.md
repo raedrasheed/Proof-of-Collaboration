@@ -112,11 +112,13 @@ Rules for this repair:
 - `RecordStore.write` returns `{reply, settled}`. Admission is released on `settled`, never on the reply.
   A write that never settles keeps its admission (bounded by the limit).
 
-### A13 — resource derivations (development/lp4/p7-resources, new derivation document)
-- A conservative derivation over the admitted parameter domain, tied to the code, covering system gas,
-  code bytes and container overhead, retained canonical history, side branches (with an enforced global
-  side-branch cap), indexes, queues and working memory, with checked arithmetic. Obligations that cannot be
-  proved stay open.
+### A13 — resource derivations (development/audit-2026-10-22/A13-DERIVATION.md)
+- As implemented: a container model of the actual snapshot representation (validated against a
+  counting allocator), state normalization so containers follow the live state, rolling TrieRebuild,
+  enforced side-branch caps, RPC response and log-scan caps, bounded evidence/reject/seen queues, and a
+  node bound (snapshots, code, history, side blocks, queues, RPC, threads) checked at `Node::open`
+  against the node memory budget. R21 facts use the same model. Open obligations are listed in the
+  derivation, not claimed.
 
 ### A14 — JSON-RPC response correlation (`transport.js`)
 - Require `jsonrpc === "2.0"`, `id` equal to the request id, exactly one of `result` and `error`, and an
@@ -210,6 +212,15 @@ programs whose storage they change (≤ 16), and none while closing (`SysWriteCl
 halt. Escrow balance credits (coinbase tips) and the ChunkFactory nonce are not storage writes. The v1
 programs expose no USER-callable storage write, so this is enforced but currently vacuous; R18's user
 allowance relies on it.
+
+### D-A13-PROFILE — devnet limits that a full-snapshot node can hold
+pocold keeps full state snapshots and its whole history in memory. At network-scale caps the A13 bound
+is hundreds of GiB, so a single-host devnet must use smaller, approved limits: the caps/64 values of
+validation.md T18b (ACCT_CAP 20000, SLOT_CAP 50000, CODE_CAP 2^21, TXBYTES_CAP 2^24, TX_CAP 20000),
+SYS_SLOT_MAX 65536 (≥ the derived 42138), R_max = 0 (the v1 programs implement no registration),
+H_END 20000 / H_CLOSE 19000, side_max 8. Bound 4.71 GiB ≤ the 6 GiB node budget; R21 then holds without
+the simnet retentionStress exception. Alternatives: keep network caps and raise the budget (rejected:
+hundreds of GiB), or exempt the devnet from the memory check (rejected: it is the A13 requirement).
 
 ### D-A04-FORMAT — journal v2
 An experimental local storage format, not a protocol change. v1 migrates only when it parses completely;

@@ -304,6 +304,18 @@ mod a03{
         let spray=|n:u64|apply(&f,&[tx(0,addr(0x45),Bytes::from(word(n).to_vec()),110_000_000,n)],0).unwrap();
         assert!(spray(2046).halts.is_empty(),"2+2046 = 2048 accounts");assert_eq!(spray(2047).halts,vec![(0,Halt::DirtyAccounts)]);
     }
+    /// SLOAD(i) and CALL(address i+0x2000, value 0) for i in 0..calldata[0..32].
+    const READ:&[u8]=&[0x5f,0x35,0x5b,0x80,0x15,0x61,0x00,0x20,0x57,0x80,0x54,0x50,0x5f,0x5f,0x5f,0x5f,0x5f,0x85,0x61,0x20,0x00,0x01,0x5a,0xf1,0x50,0x60,0x01,0x90,0x03,0x60,0x02,0x56,0x5b,0x00];
+    #[test] fn a13_reads_and_empty_calls_leave_no_container_residue(){
+        let mut c=cfg();c.gas_limit=30_000_000;let f=fx(&c,&[(addr(0x46),READ)]);
+        let o=apply(&f,&[tx(0,addr(0x46),Bytes::from(word(1000).to_vec()),29_000_000,0)],0).unwrap();
+        assert!(o.halts.is_empty());assert!(receipts(&o)[0].0,"the reads and calls succeed");
+        assert!(o.state.accounts.values().all(|a|a.info().is_some()),"no NotExisting account entries remain");
+        assert!(o.state.accounts.values().all(|a|a.storage.values().all(|v|*v!=U256::ZERO)),"no zero-valued slots remain");
+        let r=&o.state.accounts[&addr(0x46)];assert!(r.storage.is_empty()&&r.storage.capacity()<=8,"read-only keys left no table: {}",r.storage.capacity());
+        assert!(o.state.accounts.capacity()<=2*o.state.accounts.len()+16,"accounts table shrunk after 1000 empty calls");
+        assert_eq!(o.state.accounts.len(),f.parent.accounts.len(),"the empty call targets do not persist");
+    }
     #[test] fn slot_and_account_caps_halt_the_transaction(){
         let net=devnet::build(&cfg()).unwrap();let (slots,accts)=crate::user_phase::live_counts(net.genesis.state());
         let mut c=cfg();c.slot_cap=slots+10;c.acct_cap=accts+2+5;// +2: the injected contracts
