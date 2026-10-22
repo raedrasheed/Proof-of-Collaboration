@@ -277,6 +277,151 @@
    "result": "PASS",
    "finished": "2026-10-22T11:06:12Z",
    "correction": "round 2: this run's overall 'PASS' relied on the lp1-node classification above; with actual outcomes it is FAIL, with every failure being the expected platform limitation."
+  },
+  {
+   "commit": "7e0c55936a955ddc25528e5678948a14fa16e010",
+   "dirty": false,
+   "host": "Linux-6.18.44-fc-v140-x86_64-with-glibc2.39",
+   "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustcLp1": "rustc 1.58.1 (db9d1b20b 2022-01-20)",
+    "rustcPinned": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "node": "v22.22.0",
+    "python": "3.11.15"
+   },
+   "started": "2026-10-22T16:31:11Z",
+   "logs": "/tmp/claude-0/-home-user-Proof-of-Collaboration/5c42c059-8cb3-5c8b-83e8-431ffbd082d1/scratchpad/integration-final",
+   "suites": [
+    {
+     "suite": "lp1-node-tests",
+     "cmd": "cargo +1.58.1 test --offline --locked --no-fail-fast",
+     "exit": 101,
+     "seconds": 56.7,
+     "summary": {
+      "passed": 137,
+      "failed": 11
+     },
+     "pass": false,
+     "executedAndFailed": {
+      "binary": "tests/store_journal.rs",
+      "executed": true,
+      "passed": 1,
+      "failed": 11,
+      "unsupportedPlatformErrors": 11
+     },
+     "otherBinaries": {
+      "passed": 136,
+      "failed": 0
+     },
+     "onlyExpectedPlatformLimitation": true,
+     "platformNote": "store_journal uses the Windows-only atomic journal; on this host its tests execute and fail with UnsupportedPlatform, identically on the audited 090eae4. Windows verification is required to pass them."
+    },
+    {
+     "suite": "ext-build",
+     "cmd": "node build.mjs",
+     "exit": 0,
+     "seconds": 0.2,
+     "summary": {},
+     "pass": true
+    },
+    {
+     "suite": "lp4-tests",
+     "cmd": "cargo test --release --offline",
+     "exit": 0,
+     "seconds": 55.0,
+     "summary": {
+      "passed": 162,
+      "failed": 0
+     },
+     "pass": true
+    },
+    {
+     "suite": "pocold-build",
+     "cmd": "cargo build --release --offline",
+     "exit": 0,
+     "seconds": 12.9,
+     "summary": {
+      "lines": [
+       "Compiling pocold v0.1.0 (/home/user/Proof-of-Collaboration/prototypes/pocold)",
+       "    Finished `release` profile [optimized + debuginfo] target(s) in 12.76s"
+      ]
+     },
+     "pass": true
+    },
+    {
+     "suite": "pocold-tests",
+     "cmd": "cargo test --release --offline",
+     "exit": 0,
+     "seconds": 90.7,
+     "summary": {
+      "passed": 108,
+      "failed": 0
+     },
+     "pass": true
+    },
+    {
+     "suite": "ext-unit",
+     "cmd": "node tests/unit.mjs",
+     "exit": 0,
+     "seconds": 31.2,
+     "summary": {
+      "result": "PASS",
+      "passed": 234,
+      "failed": []
+     },
+     "pass": true
+    },
+    {
+     "suite": "e2e-devnet",
+     "cmd": "python3 tests/e2e_devnet.py",
+     "exit": 0,
+     "seconds": 125.2,
+     "summary": {
+      "result": "PASS",
+      "checks": 17
+     },
+     "pass": true
+    },
+    {
+     "suite": "e2e-site",
+     "cmd": "python3 tests/e2e_site.py",
+     "exit": 0,
+     "seconds": 56.8,
+     "summary": {
+      "result": "PASS",
+      "checks": 20
+     },
+     "pass": true
+    },
+    {
+     "suite": "e2e-browser",
+     "cmd": "node tests/e2e_browser.mjs",
+     "exit": 1,
+     "seconds": 202.8,
+     "summary": {
+      "result": "FAIL",
+      "checks": 78,
+      "failed": 2
+     },
+     "pass": false
+    },
+    {
+     "suite": "e2e-integrated",
+     "cmd": "node tests/e2e_integrated.mjs",
+     "exit": 0,
+     "seconds": 195.0,
+     "summary": {
+      "result": "PASS",
+      "checks": 18,
+      "failed": 0
+     },
+     "pass": true
+    }
+   ],
+   "result": "FAIL",
+   "finished": "2026-10-22T16:44:58Z",
+   "failuresOnlyExpectedPlatformLimitation": false
   }
  ],
  "note": "Runs are kept as recorded. Round-1 runs carry 'correction' fields; round-2 runs record actual outcomes (pass = exit 0) and classify the expected platform limitation separately."
