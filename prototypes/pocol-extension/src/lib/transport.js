@@ -54,11 +54,17 @@ export async function request(endpoint, method, params, opts) {
   const limit = RECV_LIMIT.get(method); if (limit === undefined) throw fail('unsupported');
   const { pool, session = null, deadline = 10000, id = 1, fetchImpl = fetch } = opts;
   const shared = opts.shared === undefined ? null : opts.shared;
-  if (session && session.recv + limit > SESSION_RECV_MAX) throw fail('busy');
-  if (!(await pool.reserve(limit, RESERVE_WAIT_MS, shared))) throw fail('busy');
-  if (session) session.recv += limit;
-  const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), deadline);
+  // A09: one ticket covers the session budget and the pool budget. The session share is taken
+  // synchronously (no await between the check and the add), so concurrent requests can never
+  // exceed SESSION_RECV_MAX; every path (busy, timeout, abort, error, success) releases once.
+  if (session) { if (session.recv + limit > SESSION_RECV_MAX) throw fail('busy'); session.recv += limit; }
+  let pooled = false, released = false;
+  const release = () => { if (released) return; released = true; if (pooled) pool.release(limit, shared); if (session) session.recv -= limit; };
+  let ctl = null, timer = null;
   try {
+    if (!(await pool.reserve(limit, RESERVE_WAIT_MS, shared))) throw fail('busy');
+    pooled = true;
+    ctl = new AbortController(); timer = setTimeout(() => ctl.abort(), deadline);
     let res;
     try { res = await fetchImpl(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }), signal: ctl.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' }); }
     catch { throw fail('transport'); }
@@ -77,16 +83,21 @@ export async function request(endpoint, method, params, opts) {
     const buf = new Uint8Array(total); let o = 0; for (const c of chunks) { buf.set(c, o); o += c.length; }
     let text; try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { throw fail('recvParse'); }
     let v; try { v = parseStrict(text, RESP_DEPTH_MAX); } catch (e) { throw fail(e.message === 'depth' ? 'recvDepth' : 'recvParse'); }
+    if (res.status !== 200) throw fail('transport');
     if (v === null || typeof v !== 'object' || Array.isArray(v)) throw fail('recvParse');
-    if (v.error !== undefined) {
-      const e = v.error; const out = { code: Number.isInteger(e && e.code) ? e.code : -32603, message: clip(e && e.message, ERR_MESSAGE_MAX) };
-      if (e && e.data !== undefined) { const d = JSON.stringify(e.data); if (new TextEncoder().encode(d).length <= ERR_DATA_MAX) out.data = e.data; }
+    // A14: a JSON-RPC 2.0 response to exactly this request: version, the request's id, and
+    // exactly one of result and error; an error is {code: integer, message: string, data?}.
+    const has = (k) => Object.prototype.hasOwnProperty.call(v, k);
+    if (v.jsonrpc !== '2.0' || !has('id') || v.id !== id || has('result') === has('error')) throw fail('recvParse');
+    if (has('error')) {
+      const e = v.error;
+      if (e === null || typeof e !== 'object' || Array.isArray(e) || !Number.isInteger(e.code) || typeof e.message !== 'string') throw fail('recvParse');
+      const out = { code: e.code, message: clip(e.message, ERR_MESSAGE_MAX) };
+      if (e.data !== undefined) { const d = JSON.stringify(e.data); if (new TextEncoder().encode(d).length <= ERR_DATA_MAX) out.data = e.data; }
       throw Object.assign(new Error(out.message), { rpc: out });
     }
-    if (res.status !== 200) throw fail('transport');
-    if (!Object.prototype.hasOwnProperty.call(v, 'result')) throw fail('recvParse');
     return v.result;
   } finally {
-    clearTimeout(timer); pool.release(limit, shared); if (session) session.recv -= limit;
+    if (timer !== null) clearTimeout(timer); release();
   }
 }

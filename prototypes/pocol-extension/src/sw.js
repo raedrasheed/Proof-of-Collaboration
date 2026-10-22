@@ -6,7 +6,7 @@ import * as bridge from './lib/bridge.js';
 import { StoreAdmission, qbytes } from './lib/sitestore.js';
 import { RecordStore } from './lib/records.js';
 import * as http from './lib/transport.js';
-import { encryptSeed, decryptSeed, networkKey, addressOf, signTx, LOCK_MS } from './lib/wallet.js';
+import { encryptSeed, decryptSeed, networkKey, addressOf, unsignedTx, signUnsigned, LOCK_MS } from './lib/wallet.js';
 import { keccak } from './lib/crypto.js';
 import * as rlp from './lib/rlp.js';
 import { toHex, fromHex, eq } from './lib/hex.js';
@@ -22,12 +22,22 @@ let globalPending = 0;
 let unlocked = null; // {seed, until}
 const RPC_TIMEOUT_MS = 10000, LOGS_TIMEOUT_MS = 30000, LOG_RANGE_MAX = 1024;
 const WALLET_PER_MIN = 5;
+const IDENTITY_CHECK_MS = 30000; // browser.md: identity at open, every 30 s and at signing
 
 // ---------------- profiles ----------------
 export function netKeyOf(chainId, genesisHash) {
   return toHex(keccak(rlp.encode([new TextEncoder().encode('PoCol-net-v1'), rlp.encUint(BigInt(chainId)), genesisHash])));
 }
-async function profiles() { return (await store.get('profiles')).profiles || []; }
+const storedProfiles = async () => (await store.get('profiles')).profiles || [];
+/** Stored profiles re-validated on every read (A06/A07): a profile that no longer passes
+ *  validation is listed with `invalid` and is unusable; `conflict` is recomputed over the whole
+ *  set, so both profiles of a chainId with two genesis hashes are read-only (D-A06-CONFLICT). */
+async function profiles() {
+  const out = [];
+  for (const p of await storedProfiles()) { try { out.push(validateProfile(p)); } catch (e) { out.push({ name: String(p && p.name), invalid: String(e.message || e) }); } }
+  for (const p of out) if (!p.invalid) p.conflict = out.some((x) => x !== p && !x.invalid && x.chainId === p.chainId && x.genesisHash !== p.genesisHash);
+  return out;
+}
 /** Profile acceptance (browser.md D58/D77/D79): decode genesisPre, hash, chainId. */
 function validateProfile(p) {
   if (!/^[A-Za-z0-9_-]{1,32}$/.test(p.name)) throw new Error('name');
@@ -52,6 +62,64 @@ async function checkNetwork(profile, rpc) {
   if (cid !== BigInt(profile.chainId)) throw Object.assign(new Error('endpoint chainId differs from profile'), { code: 4901 });
   const st = await rpc('pocol_status', []);
   if (st.genesisHash.toLowerCase() !== profile.genesisHash.toLowerCase()) throw Object.assign(new Error('endpoint genesis differs from profile'), { code: 4901 });
+}
+
+// ---------------- signing eligibility (browser.md "أهلية التوقيع", A06) ----------------
+// Every profile change runs under ProfileMutex and bumps eligibilityEpoch; every wallet
+// transition (create, unlock, lock, timeout) bumps walletEpoch. Either cancels pending
+// approvals, and a wallet request re-checks both after every await, so an old request never
+// resumes with a stale key or profile. Signing runs under ProfileMutex: eligibility, identity
+// (endpoint chainId and genesis), a second eligibility check, then the shown bytes are signed.
+let profileChain = Promise.resolve();
+const profileLocked = (f) => { const r = profileChain.then(f); profileChain = r.catch(() => {}); return r; };
+let eligibilityEpoch = 0, walletEpoch = 0;
+const approvals = new Set(); // {sess, cancel(code, message)}
+const epochs = () => ({ profile: eligibilityEpoch, wallet: walletEpoch });
+function cancelApprovals(pred, code, message) { for (const a of [...approvals]) if (pred(a.sess)) a.cancel(code, message); }
+function walletChanged(message) { walletEpoch++; cancelApprovals(() => true, 4100, message); }
+const lockWallet = (message) => { unlocked = null; walletChanged(message); };
+const isUnlocked = () => { if (unlocked && Date.now() > unlocked.until) lockWallet('wallet locked (timeout)'); return !!unlocked; };
+const PROFILE_FIELDS = ['name', 'chainId', 'genesisPre', 'genesisHash', 'endpoint', 'trustLevel', 'netKey'];
+const sameProfile = (a, b) => PROFILE_FIELDS.every((k) => a[k] === b[k]);
+/** A transition since the request captured `ep` (checked after every await). */
+function changed(sess, ep) {
+  if (sess.closed) return E(4900, 'disconnected');
+  if (ep.wallet !== walletEpoch) return E(4100, 'wallet locked or changed');
+  if (ep.profile !== eligibilityEpoch) return E(4901, 'network profiles changed');
+  return null;
+}
+/** signEligible: the profile equals the frozen one (netKey not revoked), no conflict, the session
+ *  is connected, the wallet unlocked, the epochs unchanged, and LN, DEV or RP with h >= 1 and a
+ *  successful window (established at open). */
+async function signEligible(sess, ep) {
+  const cur = (await profiles()).find((p) => p.name === sess.profile.name);
+  const c = changed(sess, ep); if (c) return c;
+  if (!cur || cur.invalid || !sameProfile(cur, sess.profile)) return E(4901, 'network profile changed');
+  if (cur.conflict) return E(4100, 'conflicting network profile is read-only');
+  if (!isUnlocked()) return E(4100, 'wallet locked');
+  if (sess.trust.level === 'RP' && !(sess.trust.ok && sess.trust.head >= 1)) return E(4100, 'RP window not established');
+  return null;
+}
+/** A confirmation that a wallet or profile transition cancels: resolves null (approved) or an error. */
+function approval(sess, ask, q) {
+  const p = ask(q);
+  return new Promise((resolve) => {
+    const a = { sess, cancel: (code, message) => { approvals.delete(a); resolve(E(code, message)); p.dismiss(); } };
+    approvals.add(a);
+    p.then((ok) => { if (approvals.delete(a)) resolve(ok ? null : E(4001, 'user rejected')); });
+  });
+}
+/** Identity of the session's endpoint; a mismatch ends the session with 4901. */
+async function identity(sess) {
+  try { await checkNetwork(sess.profile, rpcFor(sess.profile, pools.trust)); return null; }
+  catch (e) { if (e.code === 4901) { sess.revoke(4901, e.message); return E(4901, e.message); } return transportError(e); }
+}
+/** After a profile change (under ProfileMutex): sessions whose profile was removed, changed or
+ *  invalidated end with 4901; a session whose profile became conflicting stays read-only. */
+async function profilesChanged() {
+  eligibilityEpoch++; cancelApprovals(() => true, 4901, 'network profiles changed');
+  const list = await profiles();
+  for (const s of [...sessions.values()]) { const cur = list.find((p) => p.name === s.profile.name); if (!cur || cur.invalid || !sameProfile(cur, s.profile)) s.revoke(4901, 'network profile changed'); }
 }
 
 // ---------------- DNR isolation (layer 2) ----------------
@@ -95,6 +163,7 @@ chrome.tabs.onRemoved.addListener((tabId) => { removeDnr(tabId).catch(() => {});
 const b64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); };
 async function openSite({ name, site, path, tabId }) {
   const profile = (await profiles()).find((p) => p.name === name); if (!profile) throw new Error('unknown profile ' + name);
+  if (profile.invalid) throw Object.assign(new Error('profile no longer valid: ' + profile.invalid), { code: 4901 });
   if (!/^0x[0-9a-fA-F]{40}$/.test(site)) throw new Error('site address');
   if (tabId === undefined) throw Object.assign(new Error('a site opens only in a viewer tab'), { code: 4900 });
   opening.set(tabId, (opening.get(tabId) || 0) + 1);
@@ -114,8 +183,13 @@ async function openVerified(profile, site, path, tabId) {
   const files = {}; for (const [p, f] of s.files) files[p] = { mime: f.mime, b64: b64(f.data) };
   const sessionId = crypto.randomUUID(); const now = Math.floor(performance.now());
   const recv = { recv: 0 };
-  sessions.set(sessionId, { profile, site: site.toLowerCase(), netKey: profile.netKey, bucket: bridge.newSession(now), approved: false, rpc: rpcFor(profile, pools.site, recv), tabId,
-    confirmPending: false, walletPending: false, walletTimes: [], storeQ: admission.session() });
+  // The session freezes its profile (without the recomputed conflict flag) for signEligible.
+  const frozen = Object.freeze(Object.fromEntries(PROFILE_FIELDS.map((k) => [k, profile[k]])));
+  const sess = { profile: frozen, site: site.toLowerCase(), netKey: profile.netKey, bucket: bridge.newSession(now), approved: null, rpc: rpcFor(profile, pools.site, recv), tabId, trust,
+    confirmPending: false, walletPending: false, walletTimes: [], storeQ: admission.session(), closed: false };
+  // Until the viewer connects, ending the session only drops it (the port handler replaces this).
+  sess.revoke = () => { sess.closed = true; sessions.delete(sessionId); removeDnr(tabId).catch(() => {}); };
+  sessions.set(sessionId, sess);
   await booted; const snap = await records.load(profile.netKey, site); const storage = snap.dict;
   const norm = normalize(path || '/'); const target = norm === '' ? s.entry : norm;
   return { ok: true, sessionId, version: s.version, publishedBlock: s.publishedBlock, entry: s.entry, path: target, notFound: norm === null || !s.files.has(target), files, storage, storageError: snap.error || null, trust, netKey: profile.netKey };
@@ -154,7 +228,12 @@ async function route(sess, m, ctl) {
   if (m.kind === 'storage_set') {
     const q = qbytes(m.method, m.params);
     if (!admission.admit(sess.storeQ, q)) return E(-32005, 'store', { reason: 'store' });
-    try { await booted; return await records.write(sess.netKey, sess.site, m.method, m.params); } finally { admission.release(sess.storeQ, q); }
+    // A12: the admission slot is released when the storage operation settles, not when the frame
+    // gets its reply (a storeTimeout reply can precede settlement; a never-settling write keeps it).
+    let w;
+    try { await booted; w = records.submit(sess.netKey, sess.site, m.method, m.params); } catch (e) { admission.release(sess.storeQ, q); throw e; }
+    w.settled.then(() => admission.release(sess.storeQ, q));
+    return await w.reply;
   }
   if (m.kind === 'nav') {
     if (m.method === 'site_navigate') {
@@ -182,39 +261,53 @@ async function route(sess, m, ctl) {
 }
 // The 15-minute lock is refreshed only by user actions (unlock, an approved grant or signature),
 // never by site-driven calls (review finding: eth_accounts kept the seed decrypted).
-async function walletKey(sess) {
-  if (!unlocked || Date.now() > unlocked.until) { unlocked = null; return null; }
-  return networkKey(unlocked.seed, sess.netKey);
-}
+async function walletKey(sess) { return isUnlocked() ? networkKey(unlocked.seed, sess.netKey) : null; }
 const touchWallet = () => { if (unlocked) unlocked.until = Date.now() + LOCK_MS; };
 async function wallet(sess, m, ask) {
   if (m.method === 'eth_chainId') return { result: '0x' + sess.profile.chainId.toString(16) };
+  const ep = epochs();
   const key = await walletKey(sess);
+  let err = changed(sess, ep); if (err) return err;
   if (!key) return E(4100, 'wallet locked');
   const address = addressOf(key);
-  if (m.method === 'eth_accounts') return { result: sess.approved ? [address] : [] };
+  if (m.method === 'eth_accounts') return { result: sess.approved === address && !(await signEligible(sess, ep)) ? [address] : [] };
+  if ((err = await signEligible(sess, ep))) return err;
   if (m.method === 'eth_requestAccounts') {
-    if (!sess.approved) { const ok = await ask({ type: 'confirmAccounts', site: sess.site, address, network: sess.profile.name }); if (!ok) return E(4001, 'user rejected'); sess.approved = true; touchWallet(); }
+    if (sess.approved !== address) {
+      if ((err = await approval(sess, ask, { type: 'confirmAccounts', site: sess.site, address, network: sess.profile.name }))) return err;
+      if ((err = await signEligible(sess, ep))) return err;
+      sess.approved = address; touchWallet();
+    }
     return { result: [address] };
   }
-  // eth_sendTransaction: build, show the exact bytes and hash bound to the network, sign only after approval, submit (WalletSubmit).
-  if (!sess.approved) return E(4100, 'unauthorized');
+  // eth_sendTransaction: build, show the unsigned bytes and signing hash bound to the network,
+  // sign exactly those bytes only after approval and the checks under ProfileMutex, submit (WalletSubmit).
+  if (sess.approved !== address) return E(4100, 'unauthorized');
   const o = m.params[0]; if (o.from && o.from.toLowerCase() !== address.toLowerCase()) return E(4100, 'from is not the granted account');
+  const step = async (p) => { const v = await p; const c = changed(sess, ep); if (c) throw { reply: c }; return v; };
   try {
-    const nonce = o.nonce ? BigInt(o.nonce) : BigInt(await sess.rpc('eth_getTransactionCount', [address, 'pending']));
-    const base = BigInt((await sess.rpc('eth_getBlockByNumber', ['latest', false])).baseFeePerGas);
+    const nonce = o.nonce ? BigInt(o.nonce) : BigInt(await step(sess.rpc('eth_getTransactionCount', [address, 'pending'])));
+    const base = BigInt((await step(sess.rpc('eth_getBlockByNumber', ['latest', false]))).baseFeePerGas);
     const data = o.data || '0x', value = o.value ? BigInt(o.value) : 0n;
-    const gas = o.gas ? BigInt(o.gas) : BigInt(await sess.rpc('eth_estimateGas', [{ from: address, to: o.to, data, value: '0x' + value.toString(16) }]));
+    const gas = o.gas ? BigInt(o.gas) : BigInt(await step(sess.rpc('eth_estimateGas', [{ from: address, to: o.to, data, value: '0x' + value.toString(16) }])));
     const maxPriority = o.maxPriorityFeePerGas ? BigInt(o.maxPriorityFeePerGas) : 1000000000n;
     const tx = { chainId: sess.profile.chainId, nonce, maxPriority, maxFee: o.maxFeePerGas ? BigInt(o.maxFeePerGas) : base * 2n + maxPriority, gas, to: o.to, value, data };
-    const signed = signTx(key, tx);
+    const ut = unsignedTx(tx);
     // Every committed field is shown, with the worst-case cost gas·maxFee + value (review finding: fees were hidden).
-    const ok = await ask({ type: 'confirmTx', site: sess.site, network: sess.profile.name, chainId: tx.chainId, from: address, txHash: signed.hash, raw: signed.raw, to: o.to, value: value.toString(), data, gas: gas.toString(), nonce: nonce.toString(),
-      maxFeePerGas: tx.maxFee.toString(), maxPriorityFeePerGas: tx.maxPriority.toString(), maxCost: (gas * tx.maxFee + value).toString() });
-    if (!ok) return E(4001, 'user rejected');
-    touchWallet();
-    return { result: await sess.rpc('eth_sendRawTransaction', [signed.raw]) };
-  } catch (e) { return transportError(e); }
+    if ((err = await approval(sess, ask, { type: 'confirmTx', site: sess.site, network: sess.profile.name, chainId: tx.chainId, from: address, payload: toHex(ut.payload), signingHash: toHex(ut.signingHash), to: o.to, value: value.toString(), data, gas: gas.toString(), nonce: nonce.toString(),
+      maxFeePerGas: tx.maxFee.toString(), maxPriorityFeePerGas: tx.maxPriority.toString(), maxCost: (gas * tx.maxFee + value).toString() }))) return err;
+    return await profileLocked(async () => {
+      if ((err = await signEligible(sess, ep))) return err;
+      if ((err = await identity(sess))) return err;
+      if ((err = await signEligible(sess, ep))) return err;
+      const k = await walletKey(sess);
+      if ((err = changed(sess, ep))) return err;
+      if (!k || addressOf(k) !== address) return E(4100, 'wallet changed');
+      const signed = signUnsigned(k, ut);
+      touchWallet();
+      return { result: await sess.rpc('eth_sendRawTransaction', [signed.raw]) };
+    });
+  } catch (e) { return e && e.reply ? e.reply : transportError(e); }
 }
 
 // ---------------- bridge port: one per viewer tab session ----------------
@@ -225,7 +318,23 @@ chrome.runtime.onConnect.addListener((port) => {
   let asks = 0; const waiting = new Map(); let alive = true;
   const post = (m) => { if (alive) port.postMessage(m); };
   post({ hello: genId }); // D103 section 5: the viewer tears frames down if the worker generation changes
-  const ask = (q) => new Promise((resolve) => { const id = ++asks; waiting.set(id, resolve); post({ ask: id, q }); });
+  // ask(q) resolves true only on an explicit approval; dismiss() withdraws the dialog (A06 cancellation).
+  const ask = (q) => {
+    const id = ++asks; let resolve; const p = new Promise((r) => { resolve = r; }); waiting.set(id, resolve); post({ ask: id, q });
+    p.dismiss = () => { if (waiting.delete(id)) { post({ dismiss: id }); resolve(false); } };
+    return p;
+  };
+  const end = () => {
+    alive = false; sess.closed = true; clearInterval(tick); cancelApprovals((s) => s === sess, 4900, 'disconnected');
+    for (const r of waiting.values()) r(false); waiting.clear(); sessions.delete(sid); removeDnr(sess.tabId).catch(() => {});
+  };
+  // A changed identity or profile tears the frame down and cancels the session's requests (4901);
+  // their replies are flushed before the port closes.
+  sess.revoke = (code, message) => {
+    if (!alive || sess.closed) return; sess.closed = true; post({ revoked: { code, message } }); cancelApprovals((s) => s === sess, code, message);
+    setTimeout(() => { if (alive) { end(); port.disconnect(); } }, 0);
+  };
+  const tick = setInterval(() => { if (!sess.checking) { sess.checking = true; identity(sess).finally(() => { sess.checking = false; }); } isUnlocked(); }, IDENTITY_CHECK_MS);
   port.onMessage.addListener((msg) => {
     if (msg && msg.answer !== undefined) { const r = waiting.get(msg.answer); if (r) { waiting.delete(msg.answer); r(msg.ok === true); } return; }
     const arrivalMs = Math.floor(performance.now()); // stamped on receipt, before any check (D97)
@@ -237,7 +346,7 @@ chrome.runtime.onConnect.addListener((port) => {
     route(sess, c, ctl).then((r) => { if (!r.suppressed) post({ seq: msg.seq, frame: msg.frame, reply: { id: c.id, ...r } }); },
       () => post({ seq: msg.seq, frame: msg.frame, reply: { id: c.id, error: { code: -32603, message: 'internal' } } }));
   });
-  port.onDisconnect.addListener(() => { alive = false; for (const r of waiting.values()) r(false); sessions.delete(sid); removeDnr(sess.tabId).catch(() => {}); });
+  port.onDisconnect.addListener(() => { if (alive) end(); });
 });
 
 // ---------------- messages from extension pages ----------------
@@ -246,18 +355,22 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   (async () => {
     switch (msg.type) {
       case 'profiles.list': return { ok: true, profiles: await profiles() };
-      case 'profiles.add': { const p = validateProfile(msg.profile); const list = (await profiles()).filter((x) => x.name !== p.name);
-        if (list.some((x) => x.chainId === p.chainId && x.genesisHash !== p.genesisHash)) p.conflict = true;
-        list.push(p); await store.set({ profiles: list }); return { ok: true, profile: p }; }
-      case 'profiles.remove': await store.set({ profiles: (await profiles()).filter((x) => x.name !== msg.name) }); return { ok: true };
+      case 'profiles.add': return profileLocked(async () => {
+        const p = validateProfile(msg.profile); const list = (await storedProfiles()).filter((x) => x.name !== p.name);
+        list.push(p); try { await store.set({ profiles: list }); } finally { await profilesChanged(); }
+        return { ok: true, profile: (await profiles()).find((x) => x.name === p.name) }; });
+      case 'profiles.remove': return profileLocked(async () => {
+        try { await store.set({ profiles: (await storedProfiles()).filter((x) => x.name !== msg.name) }); } finally { await profilesChanged(); }
+        return { ok: true }; });
       case 'open': return await openSite({ ...msg, tabId: sender.tab ? sender.tab.id : undefined });
       case 'session.storage': { const s = sessions.get(msg.sessionId); if (!s || !sender.tab || sender.tab.id !== s.tabId) return { ok: false }; await booted; const snap = await records.load(s.netKey, s.site); return { ok: true, storage: snap.dict, storageError: snap.error || null }; }
       case 'wallet.create': { const seed = msg.seedHex ? fromHex(msg.seedHex) : crypto.getRandomValues(new Uint8Array(32)); if (seed.length !== 32) throw new Error('seed');
-        await store.set({ wallet: await encryptSeed(seed, msg.password) }); unlocked = { seed, until: Date.now() + LOCK_MS }; return { ok: true }; }
-      case 'wallet.unlock': { const w = (await store.get('wallet')).wallet; if (!w) return { ok: false, error: 'no wallet' }; unlocked = { seed: await decryptSeed(w, msg.password), until: Date.now() + LOCK_MS }; return { ok: true }; }
-      case 'wallet.lock': unlocked = null; return { ok: true };
-      case 'wallet.status': return { ok: true, exists: !!(await store.get('wallet')).wallet, unlocked: !!unlocked && Date.now() <= unlocked.until };
-      case 'wallet.address': { const p = (await profiles()).find((x) => x.name === msg.name); if (!p || !unlocked) return { ok: false }; return { ok: true, address: addressOf(await networkKey(unlocked.seed, p.netKey)) }; }
+        lockWallet('wallet replaced'); await store.set({ wallet: await encryptSeed(seed, msg.password) }); walletChanged('wallet replaced'); unlocked = { seed, until: Date.now() + LOCK_MS }; return { ok: true }; }
+      case 'wallet.unlock': { const w = (await store.get('wallet')).wallet; if (!w) return { ok: false, error: 'no wallet' }; const seed = await decryptSeed(w, msg.password);
+        walletChanged('wallet unlocked again'); unlocked = { seed, until: Date.now() + LOCK_MS }; return { ok: true }; }
+      case 'wallet.lock': lockWallet('wallet locked'); return { ok: true };
+      case 'wallet.status': return { ok: true, exists: !!(await store.get('wallet')).wallet, unlocked: isUnlocked() };
+      case 'wallet.address': { const p = (await profiles()).find((x) => x.name === msg.name); if (!p || p.invalid || !isUnlocked()) return { ok: false }; const seed = unlocked.seed; return { ok: true, address: addressOf(await networkKey(seed, p.netKey)) }; }
       default: return { ok: false, error: 'unknown message' };
     }
   })().then(reply, (e) => reply({ ok: false, error: { code: e.code || -32603, message: String(e.message || e) } }));
