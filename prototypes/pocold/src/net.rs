@@ -1,13 +1,58 @@
 //! Peer transport (VA-spec v1, development/VA-SPEC.md): TCP on loopback, frames
 //! [u32 BE length][RLP([type, ...fields])], length <= MAX_FRAME. Malformed frames
 //! or a wrong network identity close the connection; they never touch block state.
+//!
+//! Resource bounds (A05, local and not consensus; `Limits`):
+//! - at most `peers_max` connections (inbound and outbound together), of which at most
+//!   `handshaking_max` have not yet delivered their Hello; excess connections are closed
+//!   on accept, before any thread is spawned;
+//! - the first frame must be a Hello and must arrive within `hello_deadline`; a frame
+//!   whose length has arrived must complete within `frame_deadline`; an established peer
+//!   silent for `idle_deadline` is closed;
+//! - every peer has a writer thread and an outbound queue of at most `queue_bytes_max`;
+//!   the consensus thread only enqueues. Gossip to a full queue drops that peer (a peer
+//!   that stops reading never blocks consensus); range responses stop at half the queue;
+//! - inbound frames wait in a bounded event queue (backpressure stops the reader), so
+//!   frame memory is at most (peers_max + NET_EVENT_QUEUE) · MAX_FRAME.
+use std::collections::VecDeque;
 use std::io::{Read,Write};
 use std::net::{TcpListener,TcpStream,SocketAddr};
-use std::sync::{Arc,Mutex,mpsc::Sender};
-use std::time::Duration;
+use std::sync::{Arc,Condvar,Mutex,atomic::{AtomicBool,AtomicUsize,Ordering}};
+use std::sync::mpsc::SyncSender;
+use std::time::{Duration,Instant};
 use crate::rlp;
 
-pub const MAX_FRAME:usize=8*1024*1024;
+/// Largest frame. A Block message (header <= 3067 B plus a body <= BODY_MAX) fits for
+/// BODY_MAX <= 196608; R15 checks the profile's message sizes against this at admission.
+pub const MAX_FRAME:usize=256*1024;
+/// Inbound messages waiting for the consensus thread, per listener or dialer.
+pub const NET_EVENT_QUEUE:usize=64;
+
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct Limits{
+    pub peers_max:usize,pub handshaking_max:usize,
+    pub hello_deadline:Duration,pub frame_deadline:Duration,pub idle_deadline:Duration,
+    pub queue_bytes_max:usize,pub write_deadline:Duration,
+}
+impl Default for Limits{
+    fn default()->Self{Self{peers_max:32,handshaking_max:8,hello_deadline:Duration::from_secs(5),frame_deadline:Duration::from_secs(30),
+        idle_deadline:Duration::from_secs(300),queue_bytes_max:2*1024*1024,write_deadline:Duration::from_secs(10)}}
+}
+/// Shared connection accounting of one node.
+#[derive(Debug,Default)]
+pub struct Counters{pub live:AtomicUsize,pub handshaking:AtomicUsize,pub refused:AtomicUsize,pub dropped_slow:AtomicUsize}
+#[derive(Clone,Debug)]
+pub struct Net{pub limits:Limits,pub counters:Arc<Counters>}
+impl Net{
+    pub fn new(limits:Limits)->Self{Self{limits,counters:Arc::new(Counters::default())}}
+    /// Reserves a connection slot (and a handshake slot), or refuses.
+    fn admit(&self)->bool{
+        let c=&self.counters;
+        if c.live.fetch_add(1,Ordering::SeqCst)>=self.limits.peers_max{c.live.fetch_sub(1,Ordering::SeqCst);c.refused.fetch_add(1,Ordering::SeqCst);return false}
+        if c.handshaking.fetch_add(1,Ordering::SeqCst)>=self.limits.handshaking_max{c.handshaking.fetch_sub(1,Ordering::SeqCst);c.live.fetch_sub(1,Ordering::SeqCst);c.refused.fetch_add(1,Ordering::SeqCst);return false}
+        true
+    }
+}
 
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub enum Msg{
@@ -58,51 +103,109 @@ impl Msg{
 pub type PeerId=u64;
 #[derive(Debug)]
 pub enum NetEvent{Connected(PeerId,Peer),Message(PeerId,Msg),Closed(PeerId)}
-#[derive(Clone,Debug)]
-pub struct Peer{pub id:PeerId,stream:Arc<Mutex<TcpStream>>,pub addr:String,pub outbound:bool}
+
+/// Outbound frames of one peer: bytes queued, closed flag; the writer thread drains it.
+struct Outbox{q:Mutex<(VecDeque<Vec<u8>>,usize)>,cv:Condvar,closed:AtomicBool,max:usize}
+#[derive(Clone)]
+pub struct Peer{pub id:PeerId,pub addr:String,pub outbound:bool,out:Arc<Outbox>,sock:Arc<TcpStream>,counters:Arc<Counters>}
+impl std::fmt::Debug for Peer{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{write!(f,"Peer({} {})",self.id,self.addr)}}
 impl Peer{
-    pub fn send(&self,m:&Msg)->bool{
-        let b=m.encode();if b.len()>MAX_FRAME{return false}
-        let mut s=match self.stream.lock(){Ok(s)=>s,Err(_)=>return false};
-        s.write_all(&(b.len() as u32).to_be_bytes()).and_then(|_|s.write_all(&b)).is_ok()
+    fn enqueue(&self,m:&Msg,limit:usize)->Result<(),bool>{
+        if self.out.closed.load(Ordering::SeqCst){return Err(false)}
+        let b=m.encode();if b.len()>MAX_FRAME{return Err(false)}
+        let mut q=match self.out.q.lock(){Ok(q)=>q,Err(_)=>return Err(false)};
+        if q.1+b.len()+4>limit{return Err(true)}
+        q.1+=b.len()+4;let mut f=(b.len() as u32).to_be_bytes().to_vec();f.extend(b);q.0.push_back(f);drop(q);self.out.cv.notify_one();Ok(())
     }
-    pub fn close(&self){if let Ok(s)=self.stream.lock(){let _=s.shutdown(std::net::Shutdown::Both);}}
+    /// Gossip: never blocks. A peer whose queue is full stops reading; it is dropped.
+    pub fn send(&self,m:&Msg)->bool{
+        match self.enqueue(m,self.out.max){Ok(())=>true,Err(full)=>{if full{self.counters.dropped_slow.fetch_add(1,Ordering::SeqCst);self.close();}false}}
+    }
+    /// A response that may be cut short (range sync): false once half the queue is in use;
+    /// the peer is kept and asks again.
+    pub fn offer(&self,m:&Msg)->bool{self.enqueue(m,self.out.max/2).is_ok()}
+    pub fn queued_bytes(&self)->usize{self.out.q.lock().map(|q|q.1).unwrap_or(0)}
+    pub fn close(&self){self.out.closed.store(true,Ordering::SeqCst);self.out.cv.notify_all();let _=self.sock.shutdown(std::net::Shutdown::Both);}
 }
 
 static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
-fn spawn_peer(stream:TcpStream,outbound:bool,events:Sender<NetEvent>){
-    let _=stream.set_nodelay(true);let addr=stream.peer_addr().map(|a|a.to_string()).unwrap_or_default();
-    let id=NEXT.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
-    let reader=match stream.try_clone(){Ok(r)=>r,Err(_)=>return};
-    let peer=Peer{id,stream:Arc::new(Mutex::new(stream)),addr,outbound};
-    if events.send(NetEvent::Connected(id,peer.clone())).is_err(){return}
-    std::thread::Builder::new().name(format!("peer-{id}")).spawn(move||{
-        let mut r=reader;
-        loop{
-            let mut len=[0u8;4];if r.read_exact(&mut len).is_err(){break}
-            let n=u32::from_be_bytes(len) as usize;if n==0||n>MAX_FRAME{break}
-            let mut buf=vec![0u8;n];if r.read_exact(&mut buf).is_err(){break}
-            match Msg::decode(&buf){Ok(m)=>{if events.send(NetEvent::Message(id,m)).is_err(){break}}Err(_)=>break}
-        }
-        peer.close();let _=events.send(NetEvent::Closed(id));
-    }).expect("spawn peer");
+/// Reads exactly `buf` before `deadline`; false on EOF, error or deadline.
+fn read_by(r:&mut TcpStream,buf:&mut [u8],deadline:Instant)->bool{
+    let mut got=0;
+    while got<buf.len(){
+        let left=deadline.saturating_duration_since(Instant::now());if left.is_zero(){return false}
+        if r.set_read_timeout(Some(left.max(Duration::from_millis(1)))).is_err(){return false}
+        match r.read(&mut buf[got..]){Ok(0)=>return false,Ok(n)=>got+=n,Err(e) if e.kind()==std::io::ErrorKind::Interrupted=>{},Err(_)=>return false}
+    }
+    true
 }
-/// Accepts inbound peers on `listener` (loopback only).
-pub fn listen(listener:TcpListener,events:Sender<NetEvent>){
+/// Starts reader and writer threads for an admitted connection (slot already reserved).
+fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net){
+    let release=|net:&Net,handshaking:bool|{net.counters.live.fetch_sub(1,Ordering::SeqCst);if handshaking{net.counters.handshaking.fetch_sub(1,Ordering::SeqCst);}};
+    let _=stream.set_nodelay(true);let addr=stream.peer_addr().map(|a|a.to_string()).unwrap_or_default();
+    let id=NEXT.fetch_add(1,Ordering::SeqCst);
+    let (Ok(reader),Ok(writer))=(stream.try_clone(),stream.try_clone()) else{release(&net,true);return};
+    let out=Arc::new(Outbox{q:Mutex::new((VecDeque::new(),0)),cv:Condvar::new(),closed:AtomicBool::new(false),max:net.limits.queue_bytes_max});
+    let peer=Peer{id,addr,outbound,out:out.clone(),sock:Arc::new(stream),counters:net.counters.clone()};
+    let write_deadline=net.limits.write_deadline;
+    let wpeer=peer.clone();
+    if std::thread::Builder::new().name(format!("peer-{id}-w")).spawn(move||{
+        let mut w=writer;let _=w.set_write_timeout(Some(write_deadline));
+        loop{
+            let frame={let Ok(mut q)=out.q.lock() else{break};
+                loop{if out.closed.load(Ordering::SeqCst){return}if let Some(f)=q.0.pop_front(){q.1-=f.len();break f}
+                    q=match out.cv.wait(q){Ok(q)=>q,Err(_)=>return};}};
+            if let Err(e)=w.write_all(&frame){
+                // A write that cannot finish within write_deadline: the peer stopped reading.
+                if matches!(e.kind(),std::io::ErrorKind::WouldBlock|std::io::ErrorKind::TimedOut){wpeer.counters.dropped_slow.fetch_add(1,Ordering::SeqCst);}
+                wpeer.close();return
+            }
+        }
+    }).is_err(){release(&net,true);return}
+    if events.send(NetEvent::Connected(id,peer.clone())).is_err(){peer.close();release(&net,true);return}
+    let rpeer=peer.clone();let rnet=net.clone();
+    let spawned=std::thread::Builder::new().name(format!("peer-{id}")).spawn(move||{let net=rnet;
+        let mut r=reader;let l=net.limits.clone();let mut hello=false;let mut last=Instant::now();let started=Instant::now();
+        loop{
+            let wait=if hello{last+l.idle_deadline}else{started+l.hello_deadline};
+            let mut len=[0u8;4];if !read_by(&mut r,&mut len,wait){break}
+            let n=u32::from_be_bytes(len) as usize;if n==0||n>MAX_FRAME{break}
+            // Before the Hello the whole handshake frame must also meet the Hello deadline.
+            let frame_by=Instant::now()+l.frame_deadline;let frame_by=if hello{frame_by}else{frame_by.min(wait)};
+            let mut buf=vec![0u8;n];if !read_by(&mut r,&mut buf,frame_by){break}
+            let Ok(m)=Msg::decode(&buf) else{break};
+            if !hello{
+                // Nothing but a Hello is accepted before the handshake.
+                if !matches!(m,Msg::Hello{..}){break}
+                hello=true;net.counters.handshaking.fetch_sub(1,Ordering::SeqCst);
+            }
+            last=Instant::now();
+            if events.send(NetEvent::Message(id,m)).is_err(){break}
+        }
+        rpeer.close();release(&net,!hello);let _=events.send(NetEvent::Closed(id));
+    });
+    if spawned.is_err(){peer.close();release(&net,true);}
+}
+/// Accepts inbound peers on `listener` (loopback only), within the connection limits.
+pub fn listen(listener:TcpListener,events:SyncSender<NetEvent>,net:Net){
     std::thread::Builder::new().name("p2p-listen".into()).spawn(move||{
-        for s in listener.incoming(){match s{Ok(s)=>{if s.peer_addr().map(|a|a.ip().is_loopback()).unwrap_or(false){spawn_peer(s,false,events.clone())}}Err(_)=>continue}}
+        for s in listener.incoming(){
+            let Ok(s)=s else{continue};
+            if !s.peer_addr().map(|a|a.ip().is_loopback()).unwrap_or(false){continue}
+            if net.admit(){spawn_peer(s,false,events.clone(),net.clone())}else{let _=s.shutdown(std::net::Shutdown::Both);}
+        }
     }).expect("spawn listener");
 }
 /// Keeps an outbound connection to `addr`, reconnecting after loss. The node
 /// maintains `connected` from Connected/Closed events (outbound peer addresses).
-pub fn dial(addr:SocketAddr,events:Sender<NetEvent>,connected:Arc<Mutex<std::collections::HashSet<String>>>){
+pub fn dial(addr:SocketAddr,events:SyncSender<NetEvent>,connected:Arc<Mutex<std::collections::HashSet<String>>>,net:Net){
     std::thread::Builder::new().name(format!("dial-{addr}")).spawn(move||{
         loop{
             let live=connected.lock().map(|s|s.contains(&addr.to_string())).unwrap_or(false);
-            if !live{
-                if let Ok(s)=TcpStream::connect_timeout(&addr,Duration::from_millis(500)){
-                    if let Ok(mut set)=connected.lock(){set.insert(addr.to_string());}
-                    spawn_peer(s,true,events.clone());
+            if !live&&net.admit(){
+                match TcpStream::connect_timeout(&addr,Duration::from_millis(500)){
+                    Ok(s)=>{if let Ok(mut set)=connected.lock(){set.insert(addr.to_string());}spawn_peer(s,true,events.clone(),net.clone());}
+                    Err(_)=>{net.counters.live.fetch_sub(1,Ordering::SeqCst);net.counters.handshaking.fetch_sub(1,Ordering::SeqCst);}
                 }
             }
             std::thread::sleep(Duration::from_millis(300));

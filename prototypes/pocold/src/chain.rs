@@ -6,6 +6,9 @@ use pocol_lp4_execution::{admission::{Admitted,NodeLocal},apply::{self,BlockInpu
 use revm::{InMemoryDB,primitives::{Address,B256,U256}};
 use crate::types::*;
 
+/// Bound of the invalid-block cache (A05). A forgotten entry is only re-validated.
+pub const INVALID_MAX:usize=4096;
+
 /// Immutable chain configuration: cfg = {chainId, genesisHash, ForkSchedule, CP, M_0}.
 /// Constructible only from a ParamGate admission (A02): nothing boots an unadmitted profile.
 pub struct Spec{admitted:Admitted}
@@ -98,6 +101,8 @@ pub struct Chain{
     pub rebuilds:u64,
     /// Invalid committed contents (blockReject) never re-validated.
     pub invalid:HashMap<[u8;32],String>,
+    /// Insertion order of `invalid`; a cache only (never a validity input), at most INVALID_MAX.
+    invalid_order:std::collections::VecDeque<[u8;32]>,
     /// tid -> (proposer, parent, h) for equivocation detection (evidence type 1).
     pub seen_templates:BTreeMap<(u64,[u8;32]),Vec<(Vec<u8>,Vec<u8>)>>,
 }
@@ -113,7 +118,7 @@ impl Chain{
             target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis().state().clone(),is_final:false,result:None,
             receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![]};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
-        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist:32,rebuilds:0,invalid:HashMap::new(),seen_templates:BTreeMap::new()}
+        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist:32,rebuilds:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new()}
     }
     pub fn head(&self)->&Entry{&self.blocks[&self.head]}
     pub fn get(&self,h:&[u8;32])->Option<&Entry>{self.blocks.get(h)}
@@ -358,7 +363,10 @@ impl Chain{
         if better{self.head=hash;self.rebuild_canonical();}
         better
     }
-    pub fn mark_invalid(&mut self,hash:[u8;32],why:String){self.invalid.insert(hash,why);}
+    pub fn mark_invalid(&mut self,hash:[u8;32],why:String){
+        if self.invalid.insert(hash,why).is_none(){self.invalid_order.push_back(hash);}
+        while self.invalid_order.len()>INVALID_MAX{if let Some(old)=self.invalid_order.pop_front(){self.invalid.remove(&old);}}
+    }
     /// R21 retention: drop states of blocks at height <= head-K_hist (genesis kept).
     pub fn retain(&mut self){
         let cut=self.head().height.saturating_sub(self.k_hist);

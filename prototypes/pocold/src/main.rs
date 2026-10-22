@@ -60,7 +60,7 @@ fn run(args:&[String])->Result<(),String>{
     let cfg=node::Config{dir:PathBuf::from(arg(args,"--data").ok_or("--data")?),name,miner,
         listen:arg(args,"--listen").map(|s|parse(&s)).transpose()?,peers:args_all(args,"--peer").iter().map(|s|parse(s)).collect::<Result<_,_>>()?,
         rpc:arg(args,"--rpc").map(|s|parse(&s)).transpose()?,
-        stop_at:arg(args,"--stop-at").and_then(|s|s.parse().ok()),log:args.iter().any(|a|a=="--log")};
+        stop_at:arg(args,"--stop-at").and_then(|s|s.parse().ok()),log:args.iter().any(|a|a=="--log"),limits:Default::default()};
     let mut n=node::Node::open(cfg,spec)?;
     n.log(&format!("opened: head h={} records={}",n.chain.head().height,n.journal_records()));
     n.start_network()?;n.run();
@@ -68,6 +68,6 @@ fn run(args:&[String])->Result<(),String>{
 }
 fn status(args:&[String])->Result<(),String>{
     let net=PathBuf::from(arg(args,"--network").ok_or("--network")?);let spec=load_spec(&net,&local(args))?;
-    let cfg=node::Config{dir:PathBuf::from(arg(args,"--data").ok_or("--data")?),name:"status".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false};
+    let cfg=node::Config{dir:PathBuf::from(arg(args,"--data").ok_or("--data")?),name:"status".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()};
     let n=node::Node::open(cfg,spec)?;println!("{}",n.status_json());Ok(())
 }

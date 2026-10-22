@@ -3,8 +3,8 @@
 //! an immutable head snapshot. RPC never affects validity (consensus §13).
 use std::io::{Read,Write};
 use std::net::{SocketAddr,TcpListener,TcpStream};
-use std::sync::mpsc::{self,Sender};
-use std::time::Duration;
+use std::sync::{Arc,Mutex,atomic::{AtomicUsize,Ordering},mpsc::{self,SyncSender}};
+use std::time::{Duration,Instant};
 use serde_json::{json,Value};
 use revm::primitives::{Address,B256,Bytes,TxEnv,TxKind,U256,keccak256,ExecutionResult};
 use pocol_lp4_execution::{native::{self,NativeBlockContext},wire,apply};
@@ -14,18 +14,63 @@ pub const MAX_BODY:usize=1024*1024;
 /// ORIGIN_DENY (governance.md): local mining interfaces are never reachable from a site.
 pub const ORIGIN_DENY:[&str;2]=["pocol_submitShare","pocol_getTemplate"];
 
-pub fn serve(addr:SocketAddr,node:Sender<Event>)->Result<(),String>{
+/// A05 RPC bounds (local; distinct from the P2P limits). RPC_CONN_MAX and
+/// REQ_READ_DEADLINE are governance.md RpcGuard values.
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct Limits{
+    /// Concurrent connections. At the cap, the oldest connection still reading its request
+    /// for at least `evict_after` is closed for a new one; otherwise the new one gets 503.
+    pub conn_max:usize,pub evict_after:Duration,
+    /// Whole request (headers and body), one response write, and the node's answer.
+    pub read_deadline:Duration,pub write_deadline:Duration,pub work_deadline:Duration,
+}
+impl Default for Limits{
+    fn default()->Self{Self{conn_max:32,evict_after:Duration::from_secs(1),read_deadline:Duration::from_secs(10),write_deadline:Duration::from_secs(10),work_deadline:Duration::from_secs(30)}}
+}
+struct Slot{id:u64,started:Instant,reading:bool,sock:TcpStream}
+type Slots=Arc<Mutex<Vec<Slot>>>;
+/// Connection counters, for status and tests.
+#[derive(Debug,Default)]
+pub struct RpcCounters{pub refused:AtomicUsize,pub evicted:AtomicUsize}
+pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0),evicted:AtomicUsize::new(0)};
+
+pub fn serve(addr:SocketAddr,node:SyncSender<Event>,limits:Limits)->Result<(),String>{
     if !addr.ip().is_loopback(){return Err("RPC binds loopback only".into())}
     let l=TcpListener::bind(addr).map_err(|e|format!("rpc bind {addr}: {e}"))?;
+    let slots:Slots=Arc::new(Mutex::new(Vec::new()));
     std::thread::Builder::new().name("rpc".into()).spawn(move||{
-        for s in l.incoming(){let Ok(s)=s else{continue};let n=node.clone();std::thread::spawn(move||{let _=conn(s,n);});}
+        let mut next=0u64;
+        for s in l.incoming(){
+            let Ok(s)=s else{continue};next+=1;let id=next;
+            let admitted={
+                let Ok(mut v)=slots.lock() else{continue};
+                if v.len()>=limits.conn_max{
+                    // Slow or idle request readers yield to new clients; working requests do not.
+                    if let Some(i)=v.iter().enumerate().filter(|(_,x)|x.reading&&x.started.elapsed()>=limits.evict_after).min_by_key(|(_,x)|x.started).map(|(i,_)|i){
+                        let x=v.remove(i);let _=x.sock.shutdown(std::net::Shutdown::Both);COUNTERS.evicted.fetch_add(1,Ordering::SeqCst);
+                    }
+                }
+                match s.try_clone(){Ok(c) if v.len()<limits.conn_max=>{v.push(Slot{id,started:Instant::now(),reading:true,sock:c});true}_=>false}
+            };
+            if !admitted{COUNTERS.refused.fetch_add(1,Ordering::SeqCst);let mut s=s;let _=s.set_write_timeout(Some(Duration::from_millis(100)));let _=respond(&mut s,503,"{}");continue}
+            let (n,lim,sl)=(node.clone(),limits.clone(),slots.clone());
+            if std::thread::Builder::new().name(format!("rpc-{id}")).spawn(move||{let _=conn(s,n,&lim,id,&sl);if let Ok(mut v)=sl.lock(){v.retain(|x|x.id!=id);}}).is_err(){
+                if let Ok(mut v)=slots.lock(){v.retain(|x|x.id!=id);}
+            }
+        }
     }).map_err(|e|e.to_string())?;
     Ok(())
 }
-fn conn(mut s:TcpStream,node:Sender<Event>)->std::io::Result<()>{
-    s.set_read_timeout(Some(Duration::from_secs(10)))?;
+/// Reads into `buf` before `deadline`; Ok(0) at EOF.
+fn read_until(s:&mut TcpStream,tmp:&mut [u8],deadline:Instant)->std::io::Result<usize>{
+    let left=deadline.saturating_duration_since(Instant::now());
+    if left.is_zero(){return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"request deadline"))}
+    s.set_read_timeout(Some(left.max(Duration::from_millis(1))))?;s.read(tmp)
+}
+fn conn(mut s:TcpStream,node:SyncSender<Event>,l:&Limits,id:u64,slots:&Slots)->std::io::Result<()>{
+    let deadline=Instant::now()+l.read_deadline;s.set_write_timeout(Some(l.write_deadline))?;
     let mut buf=Vec::new();let mut tmp=[0u8;8192];let head_end;
-    loop{let n=s.read(&mut tmp)?;if n==0{return Ok(())}buf.extend_from_slice(&tmp[..n]);
+    loop{let n=read_until(&mut s,&mut tmp,deadline)?;if n==0{return Ok(())}buf.extend_from_slice(&tmp[..n]);
         if let Some(i)=buf.windows(4).position(|w|w==b"\r\n\r\n"){head_end=i+4;break}if buf.len()>16384{return respond(&mut s,431,"{}")}}
     let head=String::from_utf8_lossy(&buf[..head_end]).to_string();
     let mut lines=head.split("\r\n");let first=lines.next().unwrap_or("");
@@ -35,14 +80,14 @@ fn conn(mut s:TcpStream,node:Sender<Event>)->std::io::Result<()>{
     if first.starts_with("OPTIONS"){return respond(&mut s,204,"")}
     if !first.starts_with("POST"){return respond(&mut s,405,"{}")}
     if len>MAX_BODY{return respond(&mut s,413,"{}")}
-    while buf.len()<head_end+len{let n=s.read(&mut tmp)?;if n==0{break}buf.extend_from_slice(&tmp[..n]);}
+    while buf.len()<head_end+len{let n=read_until(&mut s,&mut tmp,deadline)?;if n==0{break}buf.extend_from_slice(&tmp[..n]);}
     let body=buf[head_end..(head_end+len).min(buf.len())].to_vec();
-    if origin.is_some(){
-        if let Ok(v)=serde_json::from_slice::<Value>(&body){ if ORIGIN_DENY.contains(&v["method"].as_str().unwrap_or("")){
-            return respond(&mut s,200,&json!({"jsonrpc":"2.0","id":v["id"],"error":{"code":-32601,"message":"method not available to sites"}}).to_string()) } }
-    }
-    let (tx,rx)=mpsc::channel();if node.send(Event::Rpc(body,tx)).is_err(){return respond(&mut s,503,"{}")}
-    match rx.recv_timeout(Duration::from_secs(30)){Ok(r)=>respond(&mut s,200,&r),Err(_)=>respond(&mut s,504,"{}")}
+    // Complete request: no longer evictable.
+    if let Ok(mut v)=slots.lock(){if let Some(x)=v.iter_mut().find(|x|x.id==id){x.reading=false;}}
+    // A10: with an Origin header ORIGIN_DENY applies to the request and to every batch member,
+    // inside the consensus thread before any member executes.
+    let (tx,rx)=mpsc::channel();if node.send(Event::Rpc(body,tx,origin.is_some())).is_err(){return respond(&mut s,503,"{}")}
+    match rx.recv_timeout(l.work_deadline){Ok(r)=>respond(&mut s,200,&r),Err(_)=>respond(&mut s,504,"{}")}
 }
 fn respond(s:&mut TcpStream,code:u16,body:&str)->std::io::Result<()>{
     let reason=match code{200=>"OK",204=>"No Content",405=>"Method Not Allowed",413=>"Payload Too Large",431=>"Request Header Fields Too Large",503=>"Service Unavailable",_=>"Error"};
@@ -56,15 +101,24 @@ fn parse_u64(v:&Value)->Option<u64>{v.as_str().and_then(|s|u64::from_str_radix(s
 fn parse_addr(v:&Value)->Option<Address>{v.as_str()?.parse().ok()}
 fn parse_u256(v:&Value)->Option<U256>{v.as_str().and_then(|s|U256::from_str_radix(s.trim_start_matches("0x"),16).ok())}
 
-pub fn handle(n:&mut Node,body:&[u8])->String{
+pub fn handle(n:&mut Node,body:&[u8])->String{handle_with(n,body,false)}
+/// `site`: the request carried an Origin header. ORIGIN_DENY is decided for the request
+/// and for every batch member before any member executes; a denied member is answered
+/// -32601 and never reaches its method; malformed members are -32600 (A10).
+pub fn handle_with(n:&mut Node,body:&[u8],site:bool)->String{
     let v:Value=match serde_json::from_slice(body){Ok(v)=>v,Err(_)=>return err(&Value::Null,-32700,"parse error").to_string()};
+    let denied=|i:&Value|site&&i.get("method").and_then(|m|m.as_str()).map_or(false,|m|ORIGIN_DENY.contains(&m));
+    let site_err=|i:&Value|err(&i.get("id").cloned().unwrap_or(Value::Null),-32601,"method not available to sites");
     if let Value::Array(items)=&v{
         if items.is_empty()||items.len()>20{return err(&Value::Null,-32600,"batch").to_string()}
-        return Value::Array(items.iter().map(|i|one(n,i)).collect()).to_string();
+        let deny:Vec<bool>=items.iter().map(|i|denied(i)).collect();
+        return Value::Array(items.iter().zip(deny).map(|(i,d)|if d{site_err(i)}else{one(n,i)}).collect()).to_string();
     }
+    if denied(&v){return site_err(&v).to_string()}
     one(n,&v).to_string()
 }
 fn one(n:&mut Node,v:&Value)->Value{
+    if !v.is_object(){return err(&Value::Null,-32600,"invalid request")}
     let id=v["id"].clone();let p=v["params"].as_array().cloned().unwrap_or_default();
     let m=match v["method"].as_str(){Some(m)=>m,None=>return err(&id,-32600,"invalid request")};
     match call(n,m,&p){Ok(r)=>json!({"jsonrpc":"2.0","id":id,"result":r}),Err((c,msg))=>err(&id,c,&msg)}

@@ -243,7 +243,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let keys:HashMap<Address,Key>=d.miners.iter().map(|m|(m.id,Key::from_secret(&m.key.secret()).unwrap())).collect();
     let spec=admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-ev-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
-    let mut node=Node::open(Config{dir,name:"t".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false},spec).unwrap();
+    let mut node=Node::open(Config{dir,name:"t".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},spec).unwrap();
     node.handle(Event::Tick);
     let net2=Net{chain:Chain::new(admitted(&c)),keys};
     let g=net2.chain.head;let p=net2.chain.get(&g).unwrap().clone();let ctx=net2.chain.child_ctx(&p,0).unwrap();
@@ -266,7 +266,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
     let spec=|| admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-replay-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
-    let conf=||Config{dir:dir.clone(),name:"r".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false};
+    let conf=||Config{dir:dir.clone(),name:"r".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()};
     let mut n=net();let mut hashes=vec![n.chain.head];
     let mut node=Node::open(conf(),spec()).unwrap();
     for _ in 0..70{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);node.import(b,None).unwrap();hashes.push(n.chain.head);}
@@ -289,7 +289,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
     let spec=admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-copy-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
-    let mut node=Node::open(Config{dir:dir.clone(),name:"c".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false},spec).unwrap();
+    let mut node=Node::open(Config{dir:dir.clone(),name:"c".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},spec).unwrap();
     let n=net();let g=n.chain.head;let good=fallback(&n,g,0);
     let junk=Block{header:good.header.clone(),body:Body{txs:vec![vec![0xc0;40]],evidence:vec![]}};
     assert!(matches!(node.import(junk,None),Err(Reject::Envelope(_))),"mismatched body is an envelope rejection");
@@ -304,7 +304,7 @@ fn a01_node(tag:&str)->(pocold::node::Node,std::path::PathBuf){
     let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
     let spec=admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-a01-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
-    (Node::open(Config{dir:dir.clone(),name:"a01".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false},spec).unwrap(),dir)
+    (Node::open(Config{dir:dir.clone(),name:"a01".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},spec).unwrap(),dir)
 }
 #[test] fn a01_malformed_or_unbound_bodies_reject_only_the_copy(){
     let n=net();let g=n.chain.head;let good=fallback(&n,g,0);
@@ -366,4 +366,63 @@ fn a01_node(tag:&str)->(pocold::node::Node,std::path::PathBuf){
     let head=n.chain.head;let blk=signed(&n,head,Body{txs:vec![tx],evidence:vec![]},0);
     let (e,_)=n.chain.validate(&blk,None,0).unwrap();let it=rlp::decode(&e.receipts[0][1..]).unwrap();
     assert_eq!(it.list().unwrap()[0].bytes().unwrap(),&[1u8]);assert_eq!(e.cum_log_bytes,32768);
+}
+
+// ---------------- audit A11 regressions: detached transactions return to the pool ----------------
+fn a11_node(tag:&str)->(pocold::node::Node,std::path::PathBuf){
+    use pocold::node::{Config,Node};
+    let dir=std::env::temp_dir().join(format!("pocold-a11-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    (Node::open(Config{dir:dir.clone(),name:"a11".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},admitted(&cfg(&["a","b","c"]))).unwrap(),dir)
+}
+fn pay(key:&Key,nonce:u64,value:u64)->Vec<u8>{Tx{chain_id:777910,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:21000,to:Some(devnet::account_key("bob").address()),value:U256::from(value),data:Default::default()}.sign_1559(key)}
+fn pool(n:&pocold::node::Node)->Vec<Vec<u8>>{n.pool.txs.iter().map(|(_,r)|r.clone()).collect()}
+/// Builds `count` fallback blocks on `parent` in harness `h` (importing them there) and returns them.
+fn branch(h:&mut Net,parent:[u8;32],count:usize,bodies:&[Body])->Vec<Block>{
+    let mut out=vec![];let mut p=parent;
+    for i in 0..count{let b=match bodies.get(i){Some(body) if !body.txs.is_empty()=>signed(h,p,body.clone(),0),_=>fallback(h,p,0)};import(h,&b);p=b.hash();out.push(b);}
+    out
+}
+#[test] fn a11_reorg_restores_detached_transactions_without_resubmission(){
+    let alice=devnet::account_key("alice");let t0=pay(&alice,0,7);
+    let (mut node,dir)=a11_node("restore");let mut h=net();let g=h.chain.head;
+    node.submit_tx(t0.clone(),false).unwrap();assert_eq!(pool(&node),vec![t0.clone()]);
+    // submit -> mine: the block carrying t0 becomes head and t0 leaves the pool.
+    let old=branch(&mut h,g,1,&[Body{txs:vec![t0.clone()],evidence:vec![]}]);
+    assert!(node.import(old[0].clone(),None).unwrap());assert!(pool(&node).is_empty());
+    // A heavier competing branch without t0: t0 is detached and returns, still valid.
+    let mut h2=net();let new=branch(&mut h2,g,2,&[]);
+    for b in &new{node.import(b.clone(),None).unwrap();}
+    assert_eq!(node.chain.head,new[1].hash(),"reorganized to the heavier branch");
+    assert_eq!(pool(&node),vec![t0],"the detached transaction is back in the pool");
+    let _=std::fs::remove_dir_all(&dir);
+}
+#[test] fn a11_excludes_included_and_conflicting_transactions_and_keeps_order(){
+    let alice=devnet::account_key("alice");let bob=devnet::account_key("bob");
+    let (t0,t1,t2)=(pay(&alice,0,1),pay(&alice,1,2),pay(&bob,0,3));
+    let conflict=pay(&alice,0,99);// same nonce as t0, different transaction
+    // Old branch: two blocks [t0], [t1] plus t2 waiting in the pool.
+    let (mut node,dir)=a11_node("order");let mut h=net();let g=h.chain.head;
+    let old=branch(&mut h,g,2,&[Body{txs:vec![t0.clone()],evidence:vec![]},Body{txs:vec![t1.clone()],evidence:vec![]}]);
+    for b in &old{node.import(b.clone(),None).unwrap();}
+    node.submit_tx(t2.clone(),false).unwrap();node.submit_tx(t2.clone(),false).unwrap();assert_eq!(pool(&node),vec![t2.clone()],"duplicates are kept once");
+    // Multiple detached blocks, oldest first, then the previous pool.
+    let mut h2=net();let new=branch(&mut h2,g,3,&[]);
+    for b in &new{node.import(b.clone(),None).unwrap();}
+    assert_eq!(node.chain.head,new[2].hash());assert_eq!(pool(&node),vec![t0.clone(),t1.clone(),t2.clone()]);
+    // The new canonical branch includes a different transaction with alice's nonce 0: every
+    // detached transaction is revalidated on the new head.
+    let (mut node,dir2)=a11_node("conflict");let mut h=net();let g=h.chain.head;
+    let old=branch(&mut h,g,2,&[Body{txs:vec![t0.clone()],evidence:vec![]},Body{txs:vec![t1.clone()],evidence:vec![]}]);
+    for b in &old{node.import(b.clone(),None).unwrap();}
+    let mut h2=net();let new=branch(&mut h2,g,3,&[Body{txs:vec![conflict.clone()],evidence:vec![]},Body::default(),Body::default()]);
+    for b in &new{node.import(b.clone(),None).unwrap();}
+    assert_eq!(node.chain.head,new[2].hash());
+    assert_eq!(pool(&node),vec![t1.clone()],"t0 conflicts with the included nonce 0 and is dropped; t1 (nonce 1) is valid again");
+    // A branch that includes t0 itself: t0 is not restored (already canonical).
+    let (mut node,dir3)=a11_node("included");let mut h=net();let g=h.chain.head;
+    let old=branch(&mut h,g,1,&[Body{txs:vec![t0.clone()],evidence:vec![]}]);node.import(old[0].clone(),None).unwrap();
+    let mut h2=net();let new=branch(&mut h2,g,2,&[Body::default(),Body{txs:vec![t0.clone()],evidence:vec![]}]);
+    for b in &new{node.import(b.clone(),None).unwrap();}
+    assert_eq!(node.chain.head,new[1].hash());assert!(pool(&node).is_empty(),"included on the new branch: not restored");
+    for d in [dir,dir2,dir3]{let _=std::fs::remove_dir_all(&d);}
 }

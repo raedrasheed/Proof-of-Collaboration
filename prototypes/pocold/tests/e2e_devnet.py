@@ -47,7 +47,7 @@ def main():
         checks.append((name, bool(cond), detail)); print(("PASS " if cond else "FAIL ") + name + (f" — {detail}" if detail else ""), flush=True)
         if not cond: raise AssertionError(name)
     try:
-        dn.init(work, "a,b,c", ["--t-blk", "1", "--tau", "20", "--c", "8", "--d-att", "25", "--fb-wait", "3", "--work-bits", "15"])
+        dn.init(work, "a,b,c", ["--t-blk", "2", "--tau", "20", "--c", "8", "--d-att", "41", "--fb-wait", "3", "--work-bits", "15"])
         info = json.load(open(os.path.join(work, "net", "devnet.json")))
         dn.start(work, log=True, only=["a", "b"])
         wait(lambda: h(0, work) >= 15 and h(1, work) >= 15, 120, "a,b reach 15")
