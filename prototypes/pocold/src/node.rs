@@ -43,10 +43,13 @@ pub const REORG_RESTORE_MAX:usize=1024;
 /// Receipt times kept for production (only recent parents matter).
 pub const RECEIVED_MAX:usize=1024;
 
-/// Rpc: request body, reply channel, and whether it carried an Origin header (a site).
-/// Rpc: body, reply, Origin present, and the instant after which nobody waits for the answer.
-/// Wake: a light RPC request is waiting in the light lane.
-pub enum Event{Net(NetEvent),Miner(MinerEvent),Rpc(Vec<u8>,Sender<String>,bool,std::time::Instant),Tick,Wake}
+/// Rpc: a request for the consensus thread (rpc::Request).
+/// Wake: light RPC requests are waiting in the light lane (at most one Wake is pending).
+pub enum Event{Net(NetEvent),Miner(MinerEvent),Rpc(crate::rpc::Request),Tick,Wake}
+/// Light requests run before each event the consensus thread takes (and between batch
+/// members): at most LIGHT_TURN, so a light flood delays any other event by at most LIGHT_TURN
+/// light executions; a lane left non-empty wakes the node again.
+pub const LIGHT_TURN:usize=8;
 
 pub fn now_ms()->u128{SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()}
 pub fn now_s()->u64{(now_ms()/1000) as u64}
@@ -80,7 +83,7 @@ pub struct Node{
     rx:Receiver<Event>,
     /// RPC light lane (network.md classification table): drained before every main event and
     /// between heavy batch members, so a light request never waits behind a queue of heavy work.
-    light_tx:SyncSender<Event>,light_rx:Receiver<Event>,draining:bool,
+    light:crate::rpc::LightLane,light_rx:Receiver<Event>,draining:bool,
     /// At most one timer Tick waits in the event queue: a tick that takes longer than the timer
     /// period must not fill the queue ahead of blocks, peers and RPC (round 2).
     tick_pending:Arc<std::sync::atomic::AtomicBool>,
@@ -140,11 +143,11 @@ impl Node{
         }
         chain.retain();
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
-        let (light_tx,light_rx)=mpsc::sync_channel(cfg.limits.rpc.conn_max.max(1));
+        let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.conn_max);
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
         let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());
         let net=net::Net::new(cfg.limits.net.clone());
-        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_heights:HashMap::new(),sync_mark:(0,0),sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light_tx,light_rx,draining:false,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
+        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_heights:HashMap::new(),sync_mark:(0,0),sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
             pool:Pool{txs:vec![],pending_state:head_state,bytes:0,meter},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;
@@ -160,7 +163,7 @@ impl Node{
             net::listen(l,ntx,self.net.clone());}
         for a in self.cfg.peers.clone(){let tx=self.tx.clone();let (ntx,nrx)=mpsc::sync_channel(net::NET_EVENT_QUEUE);crate::threads::spawn(format!("dial-fwd-{a}"),crate::threads::IO_STACK,move||{for e in nrx{if tx.send(Event::Net(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
             net::dial(a,ntx,self.outbound.clone(),self.net.clone());}
-        if let Some(a)=self.cfg.rpc{crate::rpc::serve(a,self.tx.clone(),self.light_tx.clone(),self.cfg.limits.rpc.clone())?;}
+        if let Some(a)=self.cfg.rpc{crate::rpc::serve(a,self.tx.clone(),self.light.clone(),self.cfg.limits.rpc.clone())?;}
         let (t,pending)=(self.tx.clone(),self.tick_pending.clone());
         crate::threads::spawn("tick",crate::threads::IO_STACK,move||loop{std::thread::sleep(Duration::from_millis(50));
             if !pending.swap(true,std::sync::atomic::Ordering::SeqCst)&&t.send(Event::Tick).is_err(){break}}).map_err(|e|format!("spawn: {e}"))?;
@@ -171,27 +174,30 @@ impl Node{
         self.restart_production();
         while !self.stopped{
             let ev=match self.rx.recv_timeout(Duration::from_millis(200)){Ok(e)=>e,Err(mpsc::RecvTimeoutError::Timeout)=>Event::Tick,Err(_)=>break};
+            if matches!(ev,Event::Wake){self.light.wake.store(false,std::sync::atomic::Ordering::SeqCst);}
             self.drain_light();self.handle(ev);
         }
         if let Some(p)=&self.prod{if let Some(m)=&p.miner{m.stop();}}
     }
-    /// Runs up to conn_max waiting light requests (each connection has at most one), never
-    /// nested inside a light request.
+    /// Runs up to LIGHT_TURN waiting light requests, never nested inside a light request. A
+    /// full turn may leave requests behind: the node wakes itself for them.
     pub fn drain_light(&mut self){
         if self.draining{return}
-        self.draining=true;
-        for _ in 0..self.cfg.limits.rpc.conn_max.max(1){match self.light_rx.try_recv(){Ok(ev)=>self.handle(ev),Err(_)=>break}}
+        self.draining=true;let mut ran=0;
+        while ran<LIGHT_TURN{match self.light_rx.try_recv(){Ok(ev)=>{self.handle(ev);ran+=1}Err(_)=>break}}
         self.draining=false;
+        if ran==LIGHT_TURN{self.light.wake(&self.tx);}
     }
     pub fn handle(&mut self,ev:Event){
         match ev{
             Event::Tick=>{self.tick_pending.store(false,std::sync::atomic::Ordering::SeqCst);self.tick()}
             Event::Wake=>{}
             Event::Miner(m)=>self.on_miner(m),
-            Event::Rpc(body,reply,site,deadline)=>{
-                // A05/RPC work deadline: a request whose caller already got 504 is not run.
-                if std::time::Instant::now()>=deadline{crate::rpc::COUNTERS.expired.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
-                else{let r=crate::rpc::handle_until(self,&body,site,Some(deadline));let _=reply.send(r);}
+            Event::Rpc(q)=>{
+                // A05/RPC work deadline: a request whose caller already got 504 is not run. Its
+                // body and queue place are freed when `q` drops here.
+                if std::time::Instant::now()>=q.deadline{crate::rpc::COUNTERS.expired.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
+                else{let r=crate::rpc::handle_until(self,&q.body,q.site,Some(q.deadline));let _=q.reply.send(r);}
             }
             Event::Net(NetEvent::Connected(id,peer))=>{let hello=self.hello();peer.send(&hello);self.peers.insert(id,peer);}
             Event::Net(NetEvent::Closed(id))=>{self.peer_heights.remove(&id);if let Some(p)=self.peers.remove(&id){if p.outbound{if let Ok(mut s)=self.outbound.lock(){s.remove(&p.addr);}}}}
@@ -401,6 +407,8 @@ impl Node{
         let ctx=match self.chain.child_ctx(&p,header.a){Ok(c)=>c,Err(_)=>return};
         let tid=template_id(&header.ut_raw);
         self.log(&format!("lock h={} a={} {} tid={}",header.h,header.a,if fallback{"FB"}else{"PROP"},&hex(&tid)[..12]));
+        // The previous miner is stopped and joined before the next starts: one miner thread at a time.
+        if let Some(pr)=&mut self.prod{pr.miner=None;}
         let miner=self.cfg.miner.as_ref().and_then(|k|chain::assignment_range(&ctx,k.address())).map(|(s,e)|
             miner::start(tid,s,e,ctx.target,ctx.t_share,usize::from(self.chain.spec.cp().S_max),self.miner_tx.clone()));
         if let Some(pr)=&mut self.prod{pr.mode=Mode::Locked(Box::new(Locked{header,body,tid,ctx,fallback}));pr.miner=miner;}

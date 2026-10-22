@@ -151,7 +151,8 @@ mod alloc_meter{
 /// large identity-precompile output held as return data. Each runs on its own engine copy.
 #[test] fn execution_model_bounds_measured_adversarial_peaks(){
     use revm::{InMemoryDB,primitives::{AccountInfo,Address,Bytecode,Bytes,TxEnv,TxKind,U256 as RU}};
-    let gas=memory::execution_gas(8_000_000);assert_eq!(gas,30_000_000);let bound=memory::execution(gas).unwrap();
+    let gas=memory::execution_gas(8_000_000);assert_eq!(gas,30_000_000);let bound=memory::execution(gas,24_577).unwrap();
+    assert!(std::mem::size_of::<revm::CallFrame>().max(std::mem::size_of::<revm::CreateFrame>()) as u128<=memory::FRAME_BYTES);
     let p1=|x:u8|vec![0x60,x];let p2=|x:u16|{let b=x.to_be_bytes();vec![0x61,b[0],b[1]]};let p4=|x:u32|{let b=x.to_be_bytes();vec![0x63,b[0],b[1],b[2],b[3]]};
     let cat=|v:Vec<Vec<u8>>|v.concat();
     let w=memory::words(gas-60_000) as u32;

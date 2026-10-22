@@ -29,9 +29,11 @@ const _:()=assert!(crate::rpc::CALL_GAS_MAX<=pocol_lp4_execution::apply::PER_CAL
 /// Threads alive at once, every one created by `threads::spawn` with its reservation: per
 /// inbound peer a reader and a writer (`net::spawn_peer`: the reader joins the writer and
 /// releases the slot as its last action); per configured peer a dialer, an event forwarder,
-/// a reader and a writer; conn_max RPC connection threads (each releases its slot as its last
-/// action); the miner (joined when replaced), the miner and listener forwarders, the timer,
-/// the P2P listener and the RPC acceptor (6). Plus the consensus and main threads.
+/// a reader and a writer; conn_max RPC connection threads; the miner (joined before it is
+/// replaced), the miner and listener forwarders, the timer, the P2P listener and the RPC
+/// acceptor (6). Plus the consensus and main threads. Exiting threads are counted: the RPC
+/// acceptor, the P2P listener and each dialer join a finished thread before its place is used
+/// again (threads::reap), and a reader joins its writer.
 pub fn io_threads(peers_max:usize,dials:usize,conn_max:usize)->Option<u128>{add(&[mul(2,peers_max as u128)?,mul(4,dials as u128)?,conn_max as u128,6])}
 /// Smallest valid transaction encoding (a signed legacy transfer exceeds it).
 pub const MIN_TX_BYTES:u128=85;
@@ -104,18 +106,24 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let peers=mul(l.peers_max as u128+dials as u128,add(&[l.queue_bytes_max as u128,2*frame,4096])?)?;
     let events=add(&[mul(node::EVENT_QUEUE as u128,frame+256)?,mul((1+dials) as u128,mul(net::NET_EVENT_QUEUE as u128,frame+256)?)?])?;
     let queues=add(&[pool,orphans,future,templates,seen,caches,peers,events])?;
-    // RPC: per connection a request (<= REQ_BUF, headers alone <= HEAD_MAX) and a response (a batch is
-    // <= BATCH_RESP_MAX plus one error item per member); the consensus thread builds one
-    // response at a time: the batch so far plus one member (its JSON tree and string, a log
-    // result stopping at RESP_MAX), counted as 4 x RESP_MAX.
-    let r=&limits.rpc;use crate::rpc::{REQ_BUF,HEAD_MAX,RESP_MAX,BATCH_RESP_MAX,BATCH_MAX};
-    let rpc=add(&[mul(r.conn_max as u128,(REQ_BUF+HEAD_MAX+BATCH_RESP_MAX+BATCH_MAX*256) as u128)?,(BATCH_RESP_MAX+4*RESP_MAX) as u128])?;
+    // RPC (rpc::conn): per connection its header buffer (HEAD_MAX+READ_CHUNK, and a lossy copy of
+    // the headers as large), a body of exactly Content-Length <= REQ_BUF bytes, and a response (a
+    // batch is <= BATCH_RESP_MAX plus one error item per member). A heavy body can outlive its
+    // connection in the main queue: at most queued_max of them (rpc::Held). The light lane holds
+    // <= conn_max bodies of <= LIGHT_BODY_MAX. The consensus thread handles one request at a
+    // time: its parse tree (rpc::parse_bytes_max, enforced by JSON_VALUES_MAX) and the response
+    // being built: the batch so far plus one member (its JSON tree and string, a log result
+    // stopping at RESP_MAX), counted as 4 x RESP_MAX.
+    let r=&limits.rpc;use crate::rpc::{REQ_BUF,HEAD_MAX,READ_CHUNK,RESP_MAX,BATCH_RESP_MAX,BATCH_MAX,LIGHT_BODY_MAX};
+    let per_conn=(2*(HEAD_MAX+READ_CHUNK)+REQ_BUF+BATCH_RESP_MAX+BATCH_MAX*256) as u128;
+    let rpc=add(&[mul(r.conn_max as u128,per_conn)?,mul(crate::rpc::queued_max(r) as u128,REQ_BUF as u128+256)?,mul(r.conn_max as u128,LIGHT_BODY_MAX as u128+256)?,
+        crate::rpc::parse_bytes_max(REQ_BUF),(BATCH_RESP_MAX+4*RESP_MAX) as u128])?;
     // Threads: reserved stacks (an upper bound on their resident stack) and per-thread heap.
     use crate::threads::{IO_STACK,CONSENSUS_STACK};
     let io=io_threads(l.peers_max,dials,r.conn_max)?;
     let threads=add(&[mul(io,IO_STACK as u128+THREAD_HEAP)?,CONSENSUS_STACK as u128,MAIN_STACK_RESIDENT,2*THREAD_HEAP,STACK_CACHE])?;
     // EVM execution buffers, journal, transient storage and loaded state (A13 obligation 4).
-    let execution=mul(EXECUTIONS,memory::execution(memory::execution_gas(cp.GAS_LIMIT))?)?;
+    let execution=mul(EXECUTIONS,memory::execution(memory::execution_gas(cp.GAS_LIMIT),u128::from(cp.B_code_max))?)?;
     let total=add(&[mul(snapshots,snapshot_bytes)?,code,history,side_blocks,queues,rpc,threads,execution])?;
     let _=size_of::<Header>()+size_of::<Body>();
     Some(Bound{snapshots,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,execution,total})

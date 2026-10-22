@@ -128,7 +128,9 @@ impl Peer{
     /// the peer is kept and asks again.
     pub fn offer(&self,m:&Msg)->bool{self.enqueue(m,self.out.max/2).is_ok()}
     pub fn queued_bytes(&self)->usize{self.out.q.lock().map(|q|q.1).unwrap_or(0)}
-    pub fn close(&self){self.out.closed.store(true,Ordering::SeqCst);self.out.cv.notify_all();let _=self.sock.shutdown(std::net::Shutdown::Both);}
+    /// The flag is set under the queue lock: the writer tests it under that lock before waiting,
+    /// so a close between its test and its wait cannot lose the wakeup (the reader joins the writer).
+    pub fn close(&self){{let _q=self.out.q.lock();self.out.closed.store(true,Ordering::SeqCst);}self.out.cv.notify_all();let _=self.sock.shutdown(std::net::Shutdown::Both);}
 }
 
 static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
@@ -143,11 +145,13 @@ fn read_by(r:&mut TcpStream,buf:&mut [u8],deadline:Instant)->bool{
     true
 }
 /// Starts reader and writer threads for an admitted connection (inbound: slot already reserved).
-/// Returns whether the connection was handed to the node; every later end sends Closed.
+/// Returns whether the connection was handed to the node (every later end sends Closed), and
+/// the reader's handle.
 /// A13 thread inventory: the reader joins the writer, then delivers Closed, and only then
-/// releases the slot as its last action, so a released slot never has a thread behind it that
-/// can still block (a full event queue keeps the slot taken instead).
-fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net)->bool{
+/// releases the slot, so a released slot never has a thread behind it that can still block (a
+/// full event queue keeps the slot taken instead). The listener and the dialer join the reader
+/// before its place is used again, so exiting readers are counted too.
+fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net)->(bool,Option<std::thread::JoinHandle<()>>){
     let release=move|net:&Net,handshaking:bool|{
         if outbound{net.counters.outbound.fetch_sub(1,Ordering::SeqCst);}
         else{net.counters.live.fetch_sub(1,Ordering::SeqCst);if handshaking{net.counters.handshaking.fetch_sub(1,Ordering::SeqCst);}}
@@ -155,7 +159,7 @@ fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net
     if outbound{net.counters.outbound.fetch_add(1,Ordering::SeqCst);}
     let _=stream.set_nodelay(true);let addr=stream.peer_addr().map(|a|a.to_string()).unwrap_or_default();
     let id=NEXT.fetch_add(1,Ordering::SeqCst);
-    let (Ok(reader),Ok(writer))=(stream.try_clone(),stream.try_clone()) else{release(&net,true);return false};
+    let (Ok(reader),Ok(writer))=(stream.try_clone(),stream.try_clone()) else{release(&net,true);return (false,None)};
     let out=Arc::new(Outbox{q:Mutex::new((VecDeque::new(),0)),cv:Condvar::new(),closed:AtomicBool::new(false),max:net.limits.queue_bytes_max});
     let peer=Peer{id,addr,outbound,out:out.clone(),sock:Arc::new(stream),counters:net.counters.clone()};
     let write_deadline=net.limits.write_deadline;
@@ -173,8 +177,8 @@ fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net
             }
         }
     });
-    let Ok(writer)=writer else{release(&net,true);return false};
-    if events.send(NetEvent::Connected(id,peer.clone())).is_err(){peer.close();let _=writer.join();release(&net,true);return false}
+    let Ok(writer)=writer else{release(&net,true);return (false,None)};
+    if events.send(NetEvent::Connected(id,peer.clone())).is_err(){peer.close();let _=writer.join();release(&net,true);return (false,None)}
     let writer=Arc::new(Mutex::new(Some(writer)));let rwriter=writer.clone();
     let join=|w:&Mutex<Option<std::thread::JoinHandle<()>>>|{if let Some(h)=w.lock().ok().and_then(|mut g|g.take()){let _=h.join();}};
     let rpeer=peer.clone();let rnet=net.clone();
@@ -200,16 +204,19 @@ fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net
         rpeer.close();join(&rwriter);let _=events.send(NetEvent::Closed(id));release(&net,!hello);
     });
     // The node already knows this peer: it must also learn that it is gone.
-    if spawned.is_err(){peer.close();join(&writer);let _=events.send(NetEvent::Closed(id));release(&net,true);}
-    true
+    match spawned{Ok(h)=>(true,Some(h)),Err(_)=>{peer.close();join(&writer);let _=events.send(NetEvent::Closed(id));release(&net,true);(true,None)}}
 }
 /// Accepts inbound peers on `listener` (loopback only), within the connection limits.
 pub fn listen(listener:TcpListener,events:SyncSender<NetEvent>,net:Net){
     crate::threads::spawn("p2p-listen",crate::threads::IO_STACK,move||{
+        let mut readers=Vec::new();
         for s in listener.incoming(){
             let Ok(s)=s else{continue};
             if !s.peer_addr().map(|a|a.ip().is_loopback()).unwrap_or(false){continue}
-            if net.admit(){spawn_peer(s,false,events.clone(),net.clone());}else{let _=s.shutdown(std::net::Shutdown::Both);}
+            // A reader that released its slot but is not yet joined still counts.
+            crate::threads::reap(&mut readers);
+            let room=readers.len()<net.limits.peers_max;if !room{net.counters.refused.fetch_add(1,Ordering::SeqCst);}
+            if room&&net.admit(){if let (_,Some(h))=spawn_peer(s,false,events.clone(),net.clone()){readers.push(h);}}else{let _=s.shutdown(std::net::Shutdown::Both);}
         }
     }).expect("spawn listener");
 }
@@ -217,13 +224,17 @@ pub fn listen(listener:TcpListener,events:SyncSender<NetEvent>,net:Net){
 /// maintains `connected` from Connected/Closed events (outbound peer addresses).
 pub fn dial(addr:SocketAddr,events:SyncSender<NetEvent>,connected:Arc<Mutex<std::collections::HashSet<String>>>,net:Net){
     crate::threads::spawn(format!("dial-{addr}"),crate::threads::IO_STACK,move||{
+        let mut reader:Option<std::thread::JoinHandle<()>>=None;
         loop{
             let live=connected.lock().map(|s|s.contains(&addr.to_string())).unwrap_or(false);
             if !live{
+                // The node has seen Closed, which the previous reader sends just before it ends.
+                if let Some(h)=reader.take(){let _=h.join();}
                 if let Ok(s)=TcpStream::connect_timeout(&addr,Duration::from_millis(500)){
                     if let Ok(mut set)=connected.lock(){set.insert(addr.to_string());}
                     // Not handed to the node (no Closed will follow): dial again later.
-                    if !spawn_peer(s,true,events.clone(),net.clone()){if let Ok(mut set)=connected.lock(){set.remove(&addr.to_string());}}
+                    let (handed,h)=spawn_peer(s,true,events.clone(),net.clone());reader=h;
+                    if !handed{if let Ok(mut set)=connected.lock(){set.remove(&addr.to_string());}}
                 }
             }
             std::thread::sleep(Duration::from_millis(300));

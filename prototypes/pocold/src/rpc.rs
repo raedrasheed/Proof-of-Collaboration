@@ -3,7 +3,7 @@
 //! an immutable head snapshot. RPC never affects validity (consensus §13).
 use std::io::{Read,Write};
 use std::net::{SocketAddr,TcpListener,TcpStream};
-use std::sync::{Arc,atomic::{AtomicUsize,Ordering},mpsc::{self,SyncSender}};
+use std::sync::{Arc,atomic::{AtomicBool,AtomicUsize,Ordering},mpsc::{self,Sender,SyncSender}};
 use std::time::{Duration,Instant};
 use serde_json::{json,Value};
 use revm::primitives::{Address,B256,Bytes,TxEnv,TxKind,U256,keccak256,ExecutionResult};
@@ -13,6 +13,13 @@ use crate::{node::{Event,Node},types::*,chain::{self,Entry}};
 /// RpcGuard REQ_BUF (network.md:221/229): request line, headers and body together; headers alone
 /// stop at HEAD_MAX.
 pub const REQ_BUF:usize=1024*1024;pub const HEAD_MAX:usize=16384;
+/// One socket read. The header buffer is allocated once at HEAD_MAX+READ_CHUNK; the body gets a
+/// buffer of exactly Content-Length bytes and its reads stop there (A13 rpc term).
+pub const READ_CHUNK:usize=8192;
+/// JSON values in one request (members, parameters and keys together). Counted on the raw body
+/// before parsing, so a request's parse tree stays within `parse_bytes_max` (A13; local limit,
+/// D-A13-RPC). A larger request is -32600 without being parsed.
+pub const JSON_VALUES_MAX:usize=4096;
 /// RpcGuard RESP_MAX and LOGS_SCAN_BYTES (governance.md): a larger response is replaced
 /// by -32008; eth_getLogs stops after scanning this many log data bytes, or once its result
 /// would exceed RESP_MAX or LOGS_COUNT_MAX logs: -32020 {reason, fromBlock, lastCompleteBlock,
@@ -43,9 +50,42 @@ impl Default for Limits{
 /// Connection and work counters, for status and tests: connections refused at the cap,
 /// connection threads alive, requests skipped because their work deadline had passed before
 /// the consensus thread reached them, and batch members not run for the same reason.
+/// Also: heavy requests refused because QUEUED_MAX bodies were already waiting, and requests
+/// refused by JSON_VALUES_MAX.
 #[derive(Debug,Default)]
-pub struct RpcCounters{pub refused:AtomicUsize,pub active:AtomicUsize,pub expired:AtomicUsize,pub expired_members:AtomicUsize}
-pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0),active:AtomicUsize::new(0),expired:AtomicUsize::new(0),expired_members:AtomicUsize::new(0)};
+pub struct RpcCounters{pub refused:AtomicUsize,pub active:AtomicUsize,pub expired:AtomicUsize,pub expired_members:AtomicUsize,pub queue_full:AtomicUsize,pub too_complex:AtomicUsize}
+pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0),active:AtomicUsize::new(0),expired:AtomicUsize::new(0),expired_members:AtomicUsize::new(0),
+    queue_full:AtomicUsize::new(0),too_complex:AtomicUsize::new(0)};
+
+/// Heavy request bodies waiting in the main queue, per server: the body of a request whose
+/// connection already answered 504 stays there until the node dequeues it, so the connection
+/// cap alone does not bound them (A13 rpc term). A further heavy request is 503.
+pub fn queued_max(l:&Limits)->usize{2*l.conn_max.max(1)}
+/// One queued heavy body; dropping it (when the node has handled or skipped the request)
+/// frees its place.
+pub struct Held(Arc<AtomicUsize>);
+impl Drop for Held{fn drop(&mut self){self.0.fetch_sub(1,Ordering::SeqCst);}}
+fn hold(c:&Arc<AtomicUsize>,max:usize)->Option<Held>{
+    if c.fetch_add(1,Ordering::SeqCst)>=max{c.fetch_sub(1,Ordering::SeqCst);return None}
+    Some(Held(c.clone()))
+}
+/// A request for the consensus thread: body, reply, whether it carried an Origin header (a
+/// site), the instant after which nobody waits for the answer, and its queue place (heavy only;
+/// the light lane is bounded by its own capacity).
+pub struct Request{pub body:Vec<u8>,pub reply:Sender<String>,pub site:bool,pub deadline:Instant,pub held:Option<Held>}
+
+/// The light lane: conn_max places and a wake flag, so the main queue holds at most one Wake
+/// for it at a time, whatever the light request rate.
+#[derive(Clone)]
+pub struct LightLane{pub tx:SyncSender<Event>,pub wake:Arc<AtomicBool>}
+impl LightLane{
+    pub fn new(cap:usize)->(Self,mpsc::Receiver<Event>){let (tx,rx)=mpsc::sync_channel(cap.max(1));(Self{tx,wake:Arc::new(AtomicBool::new(false))},rx)}
+    /// Asks the node to drain the lane unless a Wake is already pending. A full main queue
+    /// needs none: the node drains the lane before every event it takes.
+    pub fn wake(&self,node:&SyncSender<Event>){
+        if !self.wake.swap(true,Ordering::SeqCst)&&node.try_send(Event::Wake).is_err(){self.wake.store(false,Ordering::SeqCst);}
+    }
+}
 
 /// Methods the network.md classification table makes light unconditionally (worst encoded
 /// response <= LIGHT_RESP_MAX). Conditional entries (pocol_getHeaders by count, eth_getBlockBy*
@@ -63,23 +103,25 @@ pub fn is_light(body:&[u8])->bool{
     if body.len()>LIGHT_BODY_MAX||body.iter().find(|b|!b.is_ascii_whitespace())!=Some(&b'{'){return false}
     matches!(serde_json::from_slice::<Probe>(body),Ok(Probe{method:Some(m)}) if LIGHT_METHODS.contains(&m.as_ref()))
 }
-pub fn serve(addr:SocketAddr,node:SyncSender<Event>,light:SyncSender<Event>,limits:Limits)->Result<(),String>{
+/// Connection threads are joined by the acceptor before their slot is reused, so at most
+/// conn_max connection threads exist, exiting ones included (A13 thread inventory).
+pub fn serve(addr:SocketAddr,node:SyncSender<Event>,light:LightLane,limits:Limits)->Result<(),String>{
     if !addr.ip().is_loopback(){return Err("RPC binds loopback only".into())}
     let l=TcpListener::bind(addr).map_err(|e|format!("rpc bind {addr}: {e}"))?;
-    let live=Arc::new(AtomicUsize::new(0));
+    let queued=Arc::new(AtomicUsize::new(0));
     crate::threads::spawn("rpc",crate::threads::IO_STACK,move||{
-        let mut next=0u64;
+        let mut next=0u64;let mut conns:Vec<std::thread::JoinHandle<()>>=Vec::new();
         for s in l.incoming(){
             let Ok(mut s)=s else{continue};next+=1;let id=next;
-            if live.fetch_add(1,Ordering::SeqCst)>=limits.conn_max{
-                live.fetch_sub(1,Ordering::SeqCst);COUNTERS.refused.fetch_add(1,Ordering::SeqCst);
+            crate::threads::reap(&mut conns);
+            if conns.len()>=limits.conn_max{
+                COUNTERS.refused.fetch_add(1,Ordering::SeqCst);
                 let _=s.set_write_timeout(Some(Duration::from_millis(100)));let _=respond(&mut s,503,"{}");continue
             }
-            let (n,lt,lim,lv)=(node.clone(),light.clone(),limits.clone(),live.clone());
-            // The slot is released as the thread's last action; nothing after it can block.
+            let (n,lt,lim,q)=(node.clone(),light.clone(),limits.clone(),queued.clone());
             COUNTERS.active.fetch_add(1,Ordering::SeqCst);
-            if crate::threads::spawn(format!("rpc-{id}"),crate::threads::IO_STACK,move||{let _=conn(s,n,lt,&lim);COUNTERS.active.fetch_sub(1,Ordering::SeqCst);lv.fetch_sub(1,Ordering::SeqCst);}).is_err(){
-                COUNTERS.active.fetch_sub(1,Ordering::SeqCst);live.fetch_sub(1,Ordering::SeqCst);
+            match crate::threads::spawn(format!("rpc-{id}"),crate::threads::IO_STACK,move||{let _=conn(s,n,lt,&lim,&q);COUNTERS.active.fetch_sub(1,Ordering::SeqCst);}){
+                Ok(h)=>conns.push(h),Err(_)=>{COUNTERS.active.fetch_sub(1,Ordering::SeqCst);}
             }
         }
     }).map_err(|e|e.to_string())?;
@@ -91,21 +133,26 @@ fn read_until(s:&mut TcpStream,tmp:&mut [u8],deadline:Instant)->std::io::Result<
     if left.is_zero(){return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"request deadline"))}
     s.set_read_timeout(Some(left.max(Duration::from_millis(1))))?;s.read(tmp)
 }
-fn conn(mut s:TcpStream,node:SyncSender<Event>,light:SyncSender<Event>,l:&Limits)->std::io::Result<()>{
+fn conn(mut s:TcpStream,node:SyncSender<Event>,light:LightLane,l:&Limits,queued:&Arc<AtomicUsize>)->std::io::Result<()>{
     let deadline=Instant::now()+l.read_deadline;s.set_write_timeout(Some(l.write_deadline))?;
-    let mut buf=Vec::new();let mut tmp=[0u8;8192];let head_end;
+    // Request memory (A13 rpc term): this header buffer, never reallocated (it stops past
+    // HEAD_MAX, at most one read later), then a body buffer of exactly Content-Length bytes.
+    let mut buf=Vec::with_capacity(HEAD_MAX+READ_CHUNK);let mut tmp=[0u8;READ_CHUNK];let head_end;
     loop{let n=read_until(&mut s,&mut tmp,deadline)?;if n==0{return Ok(())}buf.extend_from_slice(&tmp[..n]);
         if let Some(i)=buf.windows(4).position(|w|w==b"\r\n\r\n"){head_end=i+4;break}if buf.len()>HEAD_MAX{return respond(&mut s,431,"{}")}}
-    let head=String::from_utf8_lossy(&buf[..head_end]).to_string();
-    let mut lines=head.split("\r\n");let first=lines.next().unwrap_or("");
-    let mut len=0usize;let mut origin=None;
-    for l in lines{let mut kv=l.splitn(2,':');let k=kv.next().unwrap_or("").trim().to_ascii_lowercase();let v=kv.next().unwrap_or("").trim().to_string();
-        if k=="content-length"{len=v.parse().unwrap_or(usize::MAX)}if k=="origin"{origin=Some(v)}}
-    if first.starts_with("OPTIONS"){return respond(&mut s,204,"")}
-    if !first.starts_with("POST"){return respond(&mut s,405,"{}")}
+    let (method,len,site)={
+        let head=String::from_utf8_lossy(&buf[..head_end]);
+        let mut lines=head.split("\r\n");let first=lines.next().unwrap_or("");
+        let mut len=0usize;let mut site=false;
+        for l in lines{let mut kv=l.splitn(2,':');let k=kv.next().unwrap_or("").trim().to_ascii_lowercase();
+            if k=="content-length"{len=kv.next().unwrap_or("").trim().parse().unwrap_or(usize::MAX)}if k=="origin"{site=true}}
+        (if first.starts_with("OPTIONS"){0}else if first.starts_with("POST"){1}else{2},len,site)
+    };
+    if method==0{return respond(&mut s,204,"")}
+    if method==2{return respond(&mut s,405,"{}")}
     if len>REQ_BUF.saturating_sub(head_end){return respond(&mut s,413,"{}")}
-    while buf.len()<head_end+len{let n=read_until(&mut s,&mut tmp,deadline)?;if n==0{break}buf.extend_from_slice(&tmp[..n]);}
-    let body=buf[head_end..(head_end+len).min(buf.len())].to_vec();
+    let mut body=Vec::with_capacity(len);body.extend_from_slice(&buf[head_end..buf.len().min(head_end+len)]);drop(buf);
+    while body.len()<len{let want=(len-body.len()).min(READ_CHUNK);let n=read_until(&mut s,&mut tmp[..want],deadline)?;if n==0{break}body.extend_from_slice(&tmp[..n]);}
     // A10: with an Origin header ORIGIN_DENY applies to the request and to every batch member,
     // inside the consensus thread before any member executes.
     // The work deadline runs from here; the node skips the request, or stops a batch between
@@ -114,10 +161,13 @@ fn conn(mut s:TcpStream,node:SyncSender<Event>,light:SyncSender<Event>,l:&Limits
     let (tx,rx)=mpsc::channel();
     if is_light(&body){
         // The lane holds one request per connection; a full lane (expired requests not yet
-        // skipped) is 503. The wake is best effort: a busy node drains the lane between events.
-        if light.try_send(Event::Rpc(body,tx,origin.is_some(),work_by)).is_err(){return respond(&mut s,503,"{}")}
-        let _=node.try_send(Event::Wake);
-    }else if node.send(Event::Rpc(body,tx,origin.is_some(),work_by)).is_err(){return respond(&mut s,503,"{}")}
+        // skipped) is 503.
+        if light.tx.try_send(Event::Rpc(Request{body,reply:tx,site,deadline:work_by,held:None})).is_err(){return respond(&mut s,503,"{}")}
+        light.wake(&node);
+    }else{
+        let Some(held)=hold(queued,queued_max(l)) else{COUNTERS.queue_full.fetch_add(1,Ordering::SeqCst);return respond(&mut s,503,"{}")};
+        if node.send(Event::Rpc(Request{body,reply:tx,site,deadline:work_by,held:Some(held)})).is_err(){return respond(&mut s,503,"{}")}
+    }
     match rx.recv_timeout(work_by.saturating_duration_since(Instant::now())){Ok(r)=>respond(&mut s,200,&r),Err(_)=>respond(&mut s,504,"{}")}
 }
 fn respond(s:&mut TcpStream,code:u16,body:&str)->std::io::Result<()>{
@@ -143,6 +193,7 @@ pub fn handle_with(n:&mut Node,body:&[u8],site:bool)->String{handle_until(n,body
 /// As `handle_with`; batch members are not started after `deadline`: each is answered
 /// -32020 {deadline} without running (network.md:235, 363).
 pub fn handle_until(n:&mut Node,body:&[u8],site:bool,deadline:Option<Instant>)->String{
+    if json_values(body)>JSON_VALUES_MAX{COUNTERS.too_complex.fetch_add(1,Ordering::SeqCst);return err(&Value::Null,-32600,"request has too many JSON values").to_string()}
     let v:Value=match serde_json::from_slice(body){Ok(v)=>v,Err(_)=>return err(&Value::Null,-32700,"parse error").to_string()};
     let denied=|i:&Value|site&&i.get("method").and_then(|m|m.as_str()).map_or(false,|m|ORIGIN_DENY.contains(&m));
     let site_err=|i:&Value|err(&i.get("id").cloned().unwrap_or(Value::Null),-32601,"method not available to sites");
@@ -160,6 +211,23 @@ pub fn handle_until(n:&mut Node,body:&[u8],site:bool,deadline:Option<Instant>)->
     if denied(&v){return site_err(&v).to_string()}
     let id=id_of(&v);capped(one(n,&v),&id)
 }
+/// An upper bound on the JSON values serde_json can build from `body`, counted without
+/// allocating: every value is the top-level one, or a member of a container that is its first
+/// member or follows a comma, so values <= 1 + containers + commas outside strings (an object
+/// member's key counts again: x2). A prefix serde_json accepts before an error has no more.
+pub fn json_values(body:&[u8])->usize{
+    let (mut n,mut in_str,mut esc)=(0usize,false,false);
+    for &b in body{
+        if in_str{if esc{esc=false}else if b==b'\\'{esc=true}else if b==b'"'{in_str=false}continue}
+        match b{b'"'=>in_str=true,b'{'|b'['|b','=>n+=1,_=>{}}
+    }
+    2*(n+1)
+}
+/// The parse tree of a request within JSON_VALUES_MAX (A13 rpc term), serde_json 1.0 with
+/// BTreeMap objects: per value one 32-byte slot in a Vec grown by doubling (<= 2 slots) and at
+/// most one B-tree node (<= 1 KiB: 11 keys and values plus edges); array buffers of at least 4
+/// slots; strings and the escape scratch buffer <= 3 x the body; decoded parameters <= the body.
+pub fn parse_bytes_max(body_max:usize)->u128{(JSON_VALUES_MAX as u128)*(64+1024+128)+4*(body_max as u128)}
 /// Batch members run and are serialized one at a time, so a batch holds at most `limit` bytes
 /// of answers plus the member being built (A13). The member that makes the delivered bytes
 /// exceed `limit`, and every later one, is answered -32020 {batchBytes} without running.

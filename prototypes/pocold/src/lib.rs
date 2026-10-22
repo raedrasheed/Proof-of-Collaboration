@@ -23,6 +23,12 @@ pub mod threads{
     pub const CONSENSUS_STACK:usize=16<<20;
     pub fn spawn<F,T>(name:impl Into<String>,stack:usize,f:F)->std::io::Result<std::thread::JoinHandle<T>>
     where F:FnOnce()->T+Send+'static,T:Send+'static{std::thread::Builder::new().name(name.into()).stack_size(stack).spawn(f)}
+    /// Joins the finished threads among `hs` and drops their handles. A thread whose function
+    /// has returned only has to exit, so the join is prompt; a caller that counts `hs` after
+    /// this counts running and exiting threads together (A13 thread inventory).
+    pub fn reap(hs:&mut Vec<std::thread::JoinHandle<()>>){
+        let mut i=0;while i<hs.len(){if hs[i].is_finished(){let _=hs.swap_remove(i).join();}else{i+=1}}
+    }
 }
 pub mod types;pub mod chain;pub mod store;pub mod miner;pub mod net;pub mod node;pub mod rpc;pub mod resources;
 

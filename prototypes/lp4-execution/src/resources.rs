@@ -97,7 +97,9 @@ pub mod memory{
     /// apply::PER_CALL_GAS, a transaction at GAS_LIMIT, pocold's eth_call/eth_estimateGas at
     /// the same 30M (pocold::rpc::CALL_GAS_MAX).
     pub fn execution_gas(gas_limit:u64)->u128{u128::from(gas_limit.max(crate::apply::PER_CALL_GAS))}
-    /// Call frames alive at once (revm `CALL_STACK_LIMIT` + the top frame) and their sizes.
+    /// Call frames alive at once (revm `CALL_STACK_LIMIT` + the top frame) and their sizes: each
+    /// frame is a boxed CallFrame/CreateFrame (<= FRAME_BYTES, checked by a test) with a stack
+    /// preallocated at STACK_LIMIT words.
     pub const FRAMES:u128=revm::CALL_STACK_LIMIT as u128+1;
     pub const FRAME_BYTES:u128=4096;
     pub const STACK_BYTES:u128=(revm::interpreter::STACK_LIMIT*32) as u128;
@@ -108,37 +110,96 @@ pub mod memory{
     pub const LOG_ENTRY:u128=std::mem::size_of::<revm::primitives::Log>() as u128;
     /// Process-lifetime precompile tables (the KZG trusted setup, loaded once).
     pub const PRECOMPILE_STATIC:u128=8<<20;
+    /// Largest init code (EIP-3860: twice MAX_CODE_SIZE; LP4 leaves revm's limit unset while
+    /// code runs, code_caps.rs sets it only around the deposit check).
+    pub const INITCODE_MAX:u128=revm::primitives::MAX_INITCODE_SIZE as u128;
+    /// Accounts loaded whatever the code does: sender, recipient, coinbase, the precompiles and
+    /// system contracts touched, and one unpaid load by the top frame.
+    pub const FIXED_ACCOUNTS:u128=33;
     /// Memory words purchasable with `g` gas in one frame: the largest w with 3w + w²/512 <= g.
     pub fn words(g:u128)->u128{let (mut lo,mut hi)=(0u128,1u128<<40);while lo<hi{let m=(lo+hi+1)/2;if 3*m+m*m/512<=g{lo=m}else{hi=m-1}}lo}
-    /// A13 obligation 4: heap of one EVM execution (revm 19.7, CANCUN) consuming at most `gas`.
-    /// Every term is paid for in gas (yellow paper / EIP-2929/1153/3860 costs):
-    /// - memory: at most 2·FRAMES regions are paid for at once (active frames and one returned
-    ///   child per frame whose output is held); their words cost 3w + w²/512 each, from disjoint
-    ///   gas, so by convexity their total is at most 2·FRAMES·words(gas/(2·FRAMES)) = W. The
-    ///   shared buffer keeps at most twice its peak (Vec growth), each frame's input is a range
-    ///   of its caller's memory, and each frame holds one return buffer (a returned child's
-    ///   memory or a precompile output no larger than the caller's memory, +64 B): 128·W bytes;
-    /// - stacks and frames: FRAMES × (STACK_LIMIT words + a 4 KiB frame);
-    /// - journal: every entry-producing operation costs >= 100 gas and adds <= 2 entries, plus
-    ///   two per frame; Vec growth doubles;
-    /// - transient storage (TSTORE >= 100 gas per key) and loaded state (a cold account >= 2400,
-    ///   a cold slot >= 1900 including access lists; +32 fixed accounts), each table at most
-    ///   twice its final size while it rehashes, the loaded state also cached by the engine DB;
-    /// - logs: data <= gas/8 bytes, <= gas/375 entries and topics; created code <= gas/200
-    ///   bytes (code deposit) with its analysis, <= gas/32000 creations;
-    /// - precompile working memory <= 8 × the largest single-frame memory, plus the static tables.
-    pub fn execution(gas:u128)->Option<u128>{
-        let n=2*FRAMES;let w=n.checked_mul(words(gas/n))?;
-        let buffers=w.checked_mul(128)?.checked_add(FRAMES*64)?;
-        let frames=FRAMES.checked_mul(STACK_BYTES+FRAME_BYTES)?;
-        let journal=(gas/50+2*FRAMES).checked_mul(JOURNAL_ENTRY)?.checked_mul(2)?.checked_add(FRAMES*24)?;
-        let transient=tables(gas/100,1,TRANSIENT_ENTRY)?.checked_mul(2)?;
-        let accounts=gas/2400+32;let slots=gas/1900;
-        let state=tables(accounts,1,STATE_ACCOUNT)?.checked_add(tables(slots,accounts.min(slots),STATE_SLOT)?)?.checked_add(tables(accounts,1,ACCOUNT_ENTRY)?)?
-            .checked_add(tables(slots,accounts.min(slots),SLOT_ENTRY)?)?.checked_mul(2)?;
-        let logs=(gas/8).checked_add((gas/375).checked_mul(LOG_ENTRY*2+32)?)?;
-        let code=code_bytes(gas/200,gas/32000+1)?;
+    /// Bytes of one hashbrown entry of `e` bytes at the table's worst: fewer than 16/7 buckets
+    /// per entry (load factor 7/8, power-of-two growth), each its entry and a control byte, and
+    /// the old table alive beside the new one while it grows (x2). Rounded up.
+    pub fn entry_bytes(e:u128)->u128{(32*(e+1)).div_ceil(7)}
+    /// A table's own share beyond its entries (6 buckets, the control tail, alignment), x2.
+    pub fn table_bytes(e:u128)->u128{2*(6*(e+1)+32)}
+    /// Vec growth: a Vec's capacity is at most twice its length, and while it reallocates the old
+    /// buffer is alive beside the new one, so a Vec is counted at three times its length.
+    pub const VEC:u128=3;
+    /// A class of operations whose heap outlives the operation within one execution: `bytes`
+    /// per operation (growth peaks included) and the least gas one such operation costs.
+    #[derive(Debug,Clone,Copy,PartialEq,Eq)]
+    pub struct Class{pub name:&'static str,pub bytes:u128,pub gas:u128}
+    /// Journal of one operation: at most 2 entries in a growing Vec; a frame's own journal Vec
+    /// (revm pushes one per checkpoint and keeps it after a commit; a revert truncates it), its
+    /// first allocation 4 entries, and its slot in the outer Vec.
+    const OP_JOURNAL:u128=2*VEC*JOURNAL_ENTRY;
+    const FRAME_JOURNAL:u128=VEC*24+4*JOURNAL_ENTRY;
+    /// Every operation that leaves heap behind for the rest of the execution, at its cheapest.
+    /// revm 19.7 inserts an account or slot into the journaled state and the engine database
+    /// before it charges the cold cost (revm-interpreter host.rs sload/balance/extcode*,
+    /// contract.rs call loading; journaled_state.rs: a revert only marks the entry cold). A
+    /// frame that then runs out of gas keeps that one unpaid entry and cannot load another; the
+    /// frame costs at least a warm CALL (100 gas). Paid loads (cold 2600/2100, access lists
+    /// 2400/1900) add the same entries for more gas, so these classes cover them.
+    pub fn classes()->[Class;10]{[
+        Class{name:"account loaded unpaid",bytes:entry_bytes(STATE_ACCOUNT)+entry_bytes(ACCOUNT_ENTRY)+table_bytes(STATE_SLOT)+table_bytes(SLOT_ENTRY)+OP_JOURNAL+FRAME_JOURNAL,gas:100},
+        Class{name:"slot loaded unpaid",bytes:entry_bytes(STATE_SLOT)+entry_bytes(SLOT_ENTRY)+OP_JOURNAL+FRAME_JOURNAL,gas:100},
+        Class{name:"transient slot (TSTORE)",bytes:entry_bytes(TRANSIENT_ENTRY)+OP_JOURNAL,gas:100},
+        Class{name:"journaled write (SSTORE, transfer, nonce)",bytes:OP_JOURNAL,gas:100},
+        Class{name:"committed empty frame (warm CALL)",bytes:FRAME_JOURNAL,gas:100},
+        // LOG: 375 gas per log and per topic, 8 per data byte; logs form one growing Vec; a
+        // log's topics and data are exact allocations (a topic 32 B / 375 < 1 B / 8).
+        Class{name:"log",bytes:VEC*LOG_ENTRY,gas:375},
+        Class{name:"log data and topics",bytes:1,gas:8},
+        // Code deposit: 200 gas per byte; the deposited code, its padding and jump table.
+        Class{name:"created code",bytes:9+1,gas:1600},
+        Class{name:"creation",bytes:entry_bytes(STATE_ACCOUNT)+entry_bytes(ACCOUNT_ENTRY)+entry_bytes(CODE_ENTRY)+table_bytes(STATE_SLOT)+table_bytes(SLOT_ENTRY)+97+OP_JOURNAL+FRAME_JOURNAL,gas:32000},
+        // modexp returns mod_len bytes for at least max(200, ceil(mod_len/8)^2/3) gas (EIP-2565),
+        // at most 192 B per 200 gas; held as return data. Other precompile outputs are <= 64 B.
+        Class{name:"modexp output",bytes:192,gas:200},
+    ]}
+    /// Heap the classes can add with `gas`: the largest rate times the gas (rounded up). Mixing
+    /// classes adds no more, since every class is linear in its own gas.
+    pub fn class_heap(gas:u128)->Option<u128>{
+        let mut m=0u128;for c in classes(){m=m.max(gas.checked_mul(c.bytes)?.div_ceil(c.gas));}Some(m)
+    }
+    /// Memory bought with `g` gas, held at once (A13 obligation 4). At most N = 2·FRAMES regions
+    /// are paid for at once (the active frames' memory and one returned child per frame whose
+    /// output is held), from disjoint gas, at 3w + ⌊w²/512⌋ ≥ 3w + w²/512 − 1 each; by
+    /// convexity their words total at most N·(words(g/N + 2) + 1) = W. Bytes: the shared buffer
+    /// (VEC × its length), the frames' inputs (copies of ranges of their callers' memory) and
+    /// the returned outputs held (copies of the children's memory): (3 + 1 + 1) × 32 × W.
+    pub fn memory_heap(g:u128)->Option<u128>{
+        let n=2*FRAMES;n.checked_mul(words(g/n+2)+1)?.checked_mul((VEC+2)*32)
+    }
+    /// The parts that do not depend on how the gas is spent: frames and their stacks, each
+    /// frame's analysed code (revm analyses raw code per frame: a padded copy and a jump table,
+    /// one frame also holding the raw copy while it analyses), the call-stack and shared-memory
+    /// preallocations, small precompile outputs, the fixed accounts, the BLOCKHASH entries the
+    /// engine database caches (revm asks it only for the last 256 numbers), precompile working
+    /// memory (<= 8 × the largest single-frame memory) and the static precompile tables.
+    pub fn fixed_heap(gas:u128,code_max:u128)->Option<u128>{
+        let code=code_max.max(INITCODE_MAX);let per_code=code.checked_add(code/8+33+64)?;
+        let frames=FRAMES.checked_mul(STACK_BYTES+FRAME_BYTES+per_code+64+16)?.checked_add(code)?;
+        let pre=(FRAMES*16).checked_add(4096)?.checked_add(1025*std::mem::size_of::<revm::Frame>() as u128)?
+            .checked_add(ANCESTORS*entry_bytes(HASH_ENTRY)+table_bytes(HASH_ENTRY))?;
+        let accounts=FIXED_ACCOUNTS.checked_mul(classes()[0].bytes)?;
         let precompile=words(gas).checked_mul(32*8)?.checked_add(PRECOMPILE_STATIC)?;
-        buffers.checked_add(frames)?.checked_add(journal)?.checked_add(transient)?.checked_add(state)?.checked_add(logs)?.checked_add(code)?.checked_add(precompile)
+        frames.checked_add(pre)?.checked_add(accounts)?.checked_add(precompile)
+    }
+    /// Upper bound on the heap of one EVM execution (revm 19.7, CANCUN) consuming at most `gas`
+    /// with code at most `code_max` bytes: the gas is split between memory (g) and the classes
+    /// (gas − g). memory_heap is increasing and class_heap is linear, so on each step
+    /// [g_k, g_k+1] of a grid the sum is at most memory_heap(g_k+1) + class_heap(gas − g_k); the
+    /// bound is the largest of these plus fixed_heap.
+    pub fn execution(gas:u128,code_max:u128)->Option<u128>{
+        const STEPS:u128=4096;let mut worst=0u128;
+        for k in 0..STEPS{
+            let (lo,hi)=(gas*k/STEPS,gas*(k+1)/STEPS);
+            worst=worst.max(memory_heap(hi)?.checked_add(class_heap(gas-lo)?)?);
+        }
+        worst.checked_add(fixed_heap(gas,code_max)?)
     }
 }
