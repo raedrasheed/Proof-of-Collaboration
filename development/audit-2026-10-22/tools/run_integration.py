@@ -5,7 +5,9 @@ per-suite exit status, counts and timing to development/audit-2026-10-22/evidenc
 full logs to the directory given by --logs (default: a temporary directory; logs are not committed).
 
 usage: python3 development/audit-2026-10-22/tools/run_integration.py [--logs DIR] [--only a,b] [--skip a,b]
-lp1-node's store_journal is reported separately: it is Windows-only (UnsupportedPlatform elsewhere)."""
+lp1-node's store_journal tests run and fail on Linux (UnsupportedPlatform: the journal is Windows-only).
+That outcome is recorded as it is (exit code and failed count, suite pass=false); whether every failure is
+that expected platform limitation is classified separately and never turns a failure into a pass."""
 import importlib.util, json, os, re, subprocess, sys, tempfile, time
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 spec = importlib.util.spec_from_file_location("run_lp10", os.path.join(ROOT, "prototypes", "lp10", "run_lp10.py"))
@@ -33,18 +35,25 @@ def main():
         except subprocess.TimeoutExpired as e: code, out = -1, (e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")) + "\nTIMEOUT"
         open(os.path.join(logs, f"{name}.log"), "w").write(out)
         s = {"suite": name, "cmd": " ".join(cmd), "exit": code, "seconds": round(time.time() - t, 1), "summary": lp10.summarize(name, out)}
+        s["pass"] = code == 0
         if name == "lp1-node-tests":
-            # Separate the platform-blocked binary from the rest.
-            blocks = re.split(r"\n\s+Running ", out); blocked = [b for b in blocks if b.startswith("tests/store_journal.rs")]
-            s["blockedByPlatform"] = {"binary": "tests/store_journal.rs", "unsupportedPlatform": out.count("UnsupportedPlatform(") , "result": re.findall(r"test result: \w+\. \d+ passed; \d+ failed", blocked[0])[0] if blocked else None}
+            # The actual outcome stays as it is. Classified separately: did every failure come from the
+            # Windows-only journal binary failing with UnsupportedPlatform (the expected limitation)?
+            blocks = re.split(r"\n\s+Running ", out); journal = [b for b in blocks if b.startswith("tests/store_journal.rs")]
+            jr = re.findall(r"test result: \w+\. (\d+) passed; (\d+) failed", journal[0]) if journal else []
             others = [b for b in blocks if not b.startswith("tests/store_journal.rs")]
             rs = [m for b in others for m in re.findall(r"test result: (\w+)\. (\d+) passed; (\d+) failed", b)]
-            s["summaryExcludingBlocked"] = {"passed": sum(int(x[1]) for x in rs), "failed": sum(int(x[2]) for x in rs)}
-            s["pass"] = s["summaryExcludingBlocked"]["failed"] == 0 and len(rs) > 0
-        else: s["pass"] = code == 0
+            s["executedAndFailed"] = {"binary": "tests/store_journal.rs", "executed": bool(jr), "passed": int(jr[0][0]) if jr else None, "failed": int(jr[0][1]) if jr else None,
+                                      "unsupportedPlatformErrors": journal[0].count("UnsupportedPlatform(") if journal else 0}
+            s["otherBinaries"] = {"passed": sum(int(x[1]) for x in rs), "failed": sum(int(x[2]) for x in rs)}
+            s["onlyExpectedPlatformLimitation"] = (code != 0 and bool(jr) and int(jr[0][1]) > 0 and s["otherBinaries"]["failed"] == 0 and len(rs) > 0
+                                                   and s["executedAndFailed"]["unsupportedPlatformErrors"] >= int(jr[0][1]))
+            s["platformNote"] = "store_journal uses the Windows-only atomic journal; on this host its tests execute and fail with UnsupportedPlatform, identically on the audited 090eae4. Windows verification is required to pass them."
         ev["suites"].append(s); ok_all &= s["pass"]
-        print(f"   exit={code} {s['seconds']}s {json.dumps(s.get('summaryExcludingBlocked', s['summary']))[:300]}", flush=True)
+        print(f"   exit={code} pass={s['pass']} {s['seconds']}s {json.dumps(s.get('executedAndFailed', s['summary']))[:300]}", flush=True)
     ev["result"] = "PASS" if ok_all else "FAIL"; ev["finished"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    failing = [s for s in ev["suites"] if not s["pass"]]
+    ev["failuresOnlyExpectedPlatformLimitation"] = bool(failing) and all(s.get("onlyExpectedPlatformLimitation") for s in failing)
     out = os.path.join(ROOT, "development", "audit-2026-10-22", "evidence", "integration.json")
     prev = json.load(open(out)) if os.path.exists(out) else {"runs": []}
     prev["runs"].append(ev); json.dump(prev, open(out, "w"), indent=1)

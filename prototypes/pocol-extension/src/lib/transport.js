@@ -19,14 +19,18 @@ export const RECV_LIMIT = Object.freeze(new Map([
 export const SITE_POOL = 32 * MiB, TRUST_POOL = 2 * MiB, CONTENT_POOL = 8 * 68 * KiB, SESSION_RECV_MAX = 10 * MiB, RECV_INFLIGHT_MAX = 48, RESERVE_WAIT_MS = 2000;
 export const RESP_DEPTH_MAX = 16, ERR_MESSAGE_MAX = 256, ERR_DATA_MAX = 4096;
 
-/** Byte pool with FIFO reservation; reserve resolves false after waitMs (busy). */
+/** Byte pool with FIFO reservation; reserve resolves true (granted), false after waitMs (busy),
+ *  or 'aborted' when `signal` aborts while the job waits (it then leaves the queue unserved). */
 export class Pool {
   constructor(bytes, inflight = Infinity) { this.free = bytes; this.cap = bytes; this.slots = inflight; this.q = []; Pool.all.push(this); }
   static all = [];
-  reserve(n, waitMs = RESERVE_WAIT_MS, shared = null) {
+  reserve(n, waitMs = RESERVE_WAIT_MS, shared = null, signal = null) {
     return new Promise((resolve) => {
-      const job = { n, shared, resolve, timer: null };
-      job.timer = setTimeout(() => { const i = this.q.indexOf(job); if (i >= 0) { this.q.splice(i, 1); resolve(false); this.pump(); } }, waitMs);
+      if (signal && signal.aborted) { resolve('aborted'); return; }
+      const job = { n, shared, resolve, timer: null, signal, onAbort: null };
+      const drop = (v) => { const i = this.q.indexOf(job); if (i >= 0) { this.q.splice(i, 1); clearTimeout(job.timer); if (signal) signal.removeEventListener('abort', job.onAbort); resolve(v); this.pump(); } };
+      job.timer = setTimeout(() => drop(false), waitMs);
+      if (signal) { job.onAbort = () => drop('aborted'); signal.addEventListener('abort', job.onAbort, { once: true }); }
       this.q.push(job); this.pump();
     });
   }
@@ -34,7 +38,8 @@ export class Pool {
     while (this.q.length) {
       const j = this.q[0]; const sh = j.shared;
       if (j.n > this.free || this.slots < 1 || (sh && (sh.slots < 1 || j.n > sh.free))) return; // FIFO: the head blocks the rest
-      this.q.shift(); clearTimeout(j.timer); this.free -= j.n; this.slots--; if (sh) { sh.free -= j.n; sh.slots--; } j.resolve(true);
+      this.q.shift(); clearTimeout(j.timer); if (j.signal) j.signal.removeEventListener('abort', j.onAbort);
+      this.free -= j.n; this.slots--; if (sh) { sh.free -= j.n; sh.slots--; } j.resolve(true);
     }
   }
   release(n, shared = null) { this.free += n; this.slots++; if (shared) { shared.free += n; shared.slots++; for (const p of Pool.all) p.pump(); } else this.pump(); }
@@ -46,13 +51,17 @@ const fail = (reason) => Object.assign(new Error(reason), { transport: reason })
 const clip = (s, n) => (typeof s === 'string' ? s.slice(0, n) : '');
 
 /**
- * request(endpoint, method, params, {pool, session, deadline, fetchImpl}) -> result
+ * request(endpoint, method, params, {pool, session, deadline, fetchImpl, signal, beforeSend, onState}) -> result
  * Throws {rpc:{code,message,data?}} for a remote error object, {transport: reason}
- * for transport/recvLimit/recvParse/recvDepth/busy/unsupported.
+ * for transport/recvLimit/recvParse/recvDepth/busy/unsupported/cancelled.
+ * Submission stages (A06 round 2): onState('queued') before the reservation, onState('initiated')
+ * immediately before fetch. `signal` aborts the request while it is queued; `beforeSend` runs
+ * synchronously after the reservation and immediately before fetch (no await in between) and
+ * cancels the request by returning a truthy value. Once initiated, nothing cancels it.
  */
 export async function request(endpoint, method, params, opts) {
   const limit = RECV_LIMIT.get(method); if (limit === undefined) throw fail('unsupported');
-  const { pool, session = null, deadline = 10000, id = 1, fetchImpl = fetch } = opts;
+  const { pool, session = null, deadline = 10000, id = 1, fetchImpl = fetch, signal = null, beforeSend = null, onState = null } = opts;
   const shared = opts.shared === undefined ? null : opts.shared;
   // A09: one ticket covers the session budget and the pool budget. The session share is taken
   // synchronously (no await between the check and the add), so concurrent requests can never
@@ -62,8 +71,13 @@ export async function request(endpoint, method, params, opts) {
   const release = () => { if (released) return; released = true; if (pooled) pool.release(limit, shared); if (session) session.recv -= limit; };
   let ctl = null, timer = null;
   try {
-    if (!(await pool.reserve(limit, RESERVE_WAIT_MS, shared))) throw fail('busy');
+    if (onState) onState('queued');
+    const got = await pool.reserve(limit, RESERVE_WAIT_MS, shared, signal);
+    if (got === 'aborted') throw fail('cancelled');
+    if (!got) throw fail('busy');
     pooled = true;
+    if ((signal && signal.aborted) || (beforeSend && beforeSend())) throw fail('cancelled');
+    if (onState) onState('initiated');
     ctl = new AbortController(); timer = setTimeout(() => ctl.abort(), deadline);
     let res;
     try { res = await fetchImpl(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }), signal: ctl.signal, credentials: 'omit', cache: 'no-store', redirect: 'error' }); }

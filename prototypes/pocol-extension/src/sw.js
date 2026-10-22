@@ -54,7 +54,7 @@ const pools = { site: new http.Pool(http.SITE_POOL), trust: new http.Pool(http.T
 let reqId = 0;
 /** rpc for one pool; session (optional) carries the per-session SESSION_RECV_MAX account. */
 function rpcFor(profile, pool, session = null, shared = http.inflight) {
-  return (method, params, timeoutMs = RPC_TIMEOUT_MS) => http.request(profile.endpoint, method, params, { pool, session, deadline: timeoutMs, id: ++reqId, shared: pool === pools.trust ? null : shared });
+  return (method, params, timeoutMs = RPC_TIMEOUT_MS, stages = {}) => http.request(profile.endpoint, method, params, { ...stages, pool, session, deadline: timeoutMs, id: ++reqId, shared: pool === pools.trust ? null : shared });
 }
 const contentRpc = (profile) => { const c = rpcFor(profile, pools.content), s = rpcFor(profile, pools.site); return (m, p) => (m === 'eth_getCode' ? c(m, p) : s(m, p)); };
 /** netKey check against the endpoint: chainId and genesisHash must equal the profile. */
@@ -115,6 +115,9 @@ async function identity(sess) {
   try { await checkNetwork(sess.profile, rpcFor(sess.profile, pools.trust)); return null; }
   catch (e) { if (e.code === 4901) { sess.revoke(4901, e.message); return E(4901, e.message); } return transportError(e); }
 }
+/** A profile change begins (under ProfileMutex, before its storage write): requests in flight
+ *  can no longer rely on the old profile set, so approvals and queued submissions end (4901). */
+function profilesChanging() { eligibilityEpoch++; cancelApprovals(() => true, 4901, 'network profiles changing'); }
 /** After a profile change (under ProfileMutex): sessions whose profile was removed, changed or
  *  invalidated end with 4901; a session whose profile became conflicting stays read-only. */
 async function profilesChanged() {
@@ -307,7 +310,7 @@ async function wallet(sess, m, ask) {
     // Every committed field is shown, with the worst-case cost gas·maxFee + value (review finding: fees were hidden).
     if ((err = await approval(sess, ask, { type: 'confirmTx', site: sess.site, network: sess.profile.name, chainId: tx.chainId, from: address, payload: toHex(ut.payload), signingHash: toHex(ut.signingHash), to: o.to, value: value.toString(), data, gas: gas.toString(), nonce: nonce.toString(),
       maxFeePerGas: tx.maxFee.toString(), maxPriorityFeePerGas: tx.maxPriority.toString(), maxCost: (gas * tx.maxFee + value).toString() }))) return err;
-    return await profileLocked(async () => {
+    const s = await profileLocked(async () => {
       if ((err = await signEligible(sess, ep))) return err;
       if ((err = await identity(sess))) return err;
       if ((err = await signEligible(sess, ep))) return err;
@@ -316,9 +319,40 @@ async function wallet(sess, m, ask) {
       if (!k || addressOf(k) !== address) return E(4100, 'wallet changed');
       const signed = signUnsigned(k, ut);
       touchWallet();
-      return { result: await sess.rpc('eth_sendRawTransaction', [signed.raw]) };
+      return { signed };
     });
+    // Submission runs outside ProfileMutex: a profile change requested meanwhile proceeds and
+    // cancels the submission if it has not been initiated yet.
+    return s.signed ? await submit(sess, ep, address, s.signed.raw) : s;
   } catch (e) { return e && e.reply ? e.reply : transportError(e); }
+}
+/** WalletSubmit (A06 round 2): signed -> queued for transport -> request initiated -> broadcast.
+ *  - Until the request is initiated, a wallet lock or change (4100), a profile change or
+ *    revocation (4901) or a disconnect (4900) cancels it: nothing is sent, and the error says so
+ *    ({submission: 'cancelled', before: 'signed'|'queued'}).
+ *  - After the transport reservation, eligibility is re-checked synchronously immediately before
+ *    the request starts (the wallet lock timeout has no event of its own).
+ *  - Once initiated, the transaction may reach the node and be broadcast: it is never reported as
+ *    cancelled. A transport failure then says {submission: 'initiated'} (outcome unknown); a
+ *    result is the broadcast transaction hash; a node error means the node did not accept it. */
+async function submit(sess, ep, address, raw) {
+  const sub = { state: 'signed', cancelled: null }; const abort = new AbortController();
+  const cancel = (r) => { if (!sub.cancelled && (sub.state === 'signed' || sub.state === 'queued')) { sub.cancelled = E(r.error.code, r.error.message, { ...(r.error.data || {}), submission: 'cancelled', before: sub.state }); abort.abort(); } return !!sub.cancelled; };
+  const hook = { sess, cancel: (code, message) => cancel(E(code, message)) };
+  const ineligible = () => changed(sess, ep) || (!isUnlocked() ? E(4100, 'wallet locked') : null) || (sess.approved !== address ? E(4100, 'unauthorized') : null);
+  const recheck = () => { const c = ineligible(); return c ? cancel(c) : !!sub.cancelled; };
+  approvals.add(hook);
+  try {
+    if (recheck()) return sub.cancelled;
+    const result = await sess.rpc('eth_sendRawTransaction', [raw], RPC_TIMEOUT_MS, { signal: abort.signal, beforeSend: recheck, onState: (st) => { sub.state = st; } });
+    sub.state = 'broadcast';
+    return { result };
+  } catch (e) {
+    if (sub.cancelled) return sub.cancelled;
+    if (e.rpc) return { error: e.rpc };
+    const t = transportError(e); t.error.data = { ...(t.error.data || {}), submission: sub.state === 'initiated' ? 'initiated' : 'notSent' };
+    return t;
+  } finally { approvals.delete(hook); }
 }
 
 // ---------------- bridge port: one per viewer tab session ----------------
@@ -370,10 +404,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     switch (msg.type) {
       case 'profiles.list': return { ok: true, profiles: await profiles() };
       case 'profiles.add': return profileLocked(async () => {
-        const p = validateProfile(msg.profile); const list = (await storedProfiles()).filter((x) => x.name !== p.name);
+        const p = validateProfile(msg.profile); profilesChanging(); const list = (await storedProfiles()).filter((x) => x.name !== p.name);
         list.push(p); try { await store.set({ profiles: list }); } finally { await profilesChanged(); }
         return { ok: true, profile: (await profiles()).find((x) => x.name === p.name) }; });
       case 'profiles.remove': return profileLocked(async () => {
+        profilesChanging();
         try { await store.set({ profiles: (await storedProfiles()).filter((x) => x.name !== msg.name) }); } finally { await profilesChanged(); }
         return { ok: true }; });
       case 'open': return await openSite({ ...msg, tabId: sender.tab ? sender.tab.id : undefined });

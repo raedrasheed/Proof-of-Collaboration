@@ -1,0 +1,72 @@
+# Audit repair (A01-A14, round 2) Windows verification of the repair scope:
+# - lp1-node with Rust 1.58.1, including the Windows-only store_journal binary;
+# - lp4-execution and pocold with Rust 1.99.1: journal v2, P2P and RPC sockets, the work deadline
+#   and light lane, admission scope, A13 bounds;
+# - the extension build and unit suite with Node 22.22.0, checksum-verified.
+# It does not run the real-Chrome or live-devnet suites.
+#
+# Manual dispatch only, like lp3-s1-windows-verify.yml:
+# - It is never triggered by push or pull_request.
+# - The commit input is required and must be a full 40-character SHA. The evidence (artifact
+#   audit-r2-windows-<sha>) is bound to it, and the run fails if the checkout is any other commit.
+# - GitHub dispatches a workflow only once its file is on the default branch, so this file must
+#   reach `main` before it can run. Merging is the owner's decision.
+# - No secrets are used. The token is read-only and not persisted, and actions are pinned to full
+#   commit SHAs (the same pins as lp3-s1-windows-verify.yml).
+name: Audit repair r2 Windows verification (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact 40-character commit SHA to test (required)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-r2-windows-verify
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Windows Server 2022 (Rust 1.58.1 / 1.99.1, Node 22.22.0)
+    runs-on: windows-2022
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - name: Validate the commit input
+        env:
+          COMMIT_INPUT: ${{ inputs.commit }}
+        run: |
+          if ($env:COMMIT_INPUT -cnotmatch '^[0-9a-f]{40}$') { throw 'commit must be a full 40-character lowercase hex SHA' }
+
+      - name: Check out the commit under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run the checks
+        id: verify
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}\audit-r2-evidence
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+        run: ./.github/scripts/audit-r2-windows-verify.ps1 -Evidence $env:EVIDENCE_DIR -ExpectedCommit $env:EXPECTED_COMMIT
+
+      - name: Upload logs and results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: audit-r2-windows-${{ inputs.commit }}
+          path: ${{ runner.temp }}\audit-r2-evidence
+          if-no-files-found: error
+          retention-days: 14

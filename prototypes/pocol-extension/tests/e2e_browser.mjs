@@ -387,6 +387,52 @@ async function main() {
     ok('A06 Chrome: the open dialog is withdrawn when the session is revoked', await pI.page.isHidden('#modal'));
     await pI.page.close();
 
+    // --- A06 round 2 in Chrome: submission states over a held transport queue ---
+    // Four sessions each hold an 8 MiB pocol_getLogs at the tap, so SITE_POOL (32 MiB) is full and the
+    // approved, signed transaction waits for its transport reservation (queued, not yet sent). The
+    // transaction is built and shown first (its reads use the same pool); the reads start while the
+    // dialog is open. The pending nonce on all three nodes shows whether anything reached any node.
+    await page.reload(); ({ fr, n } = await siteFrame(page));
+    const regrant2 = fr.evaluate(() => ethereum.request({ method: 'eth_requestAccounts' }));
+    await page.waitForSelector('#modal[data-kind=confirmAccounts]:not([hidden])'); await page.click('#approve'); await regrant2;
+    const extra = []; for (let i = 0; i < 3; i++) { const o = await openSite(b, 'devnet', S_A); extra.push({ ...o, fr: (await siteFrame(o.page)).fr }); }
+    const headBlk = await rpc(8540, 'eth_getBlockByNumber', ['latest', false]);
+    const txState = () => fr.evaluate(([from, to]) => ethereum.request({ method: 'eth_sendTransaction', params: [{ from, to, value: '0x1' }] }).then((h) => ({ ok: h }), (e) => ({ code: e.code, data: e.data })), [accts[0], s2]).catch(() => ({ detached: true }));
+    const holdQueue = async () => {
+      tap.holdMs.pocol_getLogs = 6000; const l0 = tapCount('pocol_getLogs');
+      for (const f of [fr, ...extra.map((x) => x.fr)]) f.evaluate((h) => ethereum.request({ method: 'eth_getLogs', params: [{ blockHash: h }] }), headBlk.hash).catch(() => {});
+      await wait(() => tapCount('pocol_getLogs') >= l0 + 4, 15000, 'four held reads');
+    };
+    const approveQueued = async () => { await modalTx(); await holdQueue(); const st = tapCount('pocol_status'); await page.click('#approve'); await wait(() => tapCount('pocol_status') > st, 15000, 'identity at signing'); await sleep(300); };
+    const drained = async () => { delete tap.holdMs.pocol_getLogs; await sleep(6500); };
+    const nonces = async () => JSON.stringify(await Promise.all([8540, 8541, 8542].map((p) => rpc(p, 'eth_getTransactionCount', [wAddr, 'pending']))));
+    const cancelledQ = (r, c) => r.code === c && r.data && r.data.submission === 'cancelled' && r.data.before === 'queued';
+    let sent0 = tapCount('eth_sendRawTransaction'), n0 = await nonces();
+    let pQ = txState(); await approveQueued(); await b.send({ type: 'wallet.lock' }); let rQ = await pQ; await drained();
+    ok('A06-R2 Chrome: wallet.lock while the signed transaction waits for transport -> 4100 {submission: cancelled, before: queued}; never sent, also after the queue drains',
+      cancelledQ(rQ, 4100) && tapCount('eth_sendRawTransaction') === sent0 && (await nonces()) === n0, JSON.stringify(rQ));
+    await b.send({ type: 'wallet.unlock', password: 'devnet-only' });
+    sent0 = tapCount('eth_sendRawTransaction'); n0 = await nonces();
+    pQ = txState(); await approveQueued(); await b.send({ type: 'profiles.add', profile: { ...profileBase, name: 'node-y', endpoint: 'http://127.0.0.1:8542', trustLevel: 'LN' } }); rQ = await pQ; await drained();
+    ok('A06-R2 Chrome: a profile change while queued -> 4901 cancelled before queued, never sent; the unchanged session stays',
+      cancelledQ(rQ, 4901) && tapCount('eth_sendRawTransaction') === sent0 && (await nonces()) === n0 && (await page.$('#stage iframe#site')) !== null, JSON.stringify(rQ));
+    // Initiated: the request has reached the tap (held there); a lock now cannot recall it.
+    sent0 = tapCount('eth_sendRawTransaction'); tap.holdMs.eth_sendRawTransaction = 3000;
+    pQ = txState(); await modalTx(); await page.click('#approve'); await wait(() => tapCount('eth_sendRawTransaction') > sent0, 15000, 'submission initiated');
+    await b.send({ type: 'wallet.lock' }); rQ = await pQ; delete tap.holdMs.eth_sendRawTransaction;
+    const rcI = typeof rQ.ok === 'string' ? await wait(() => rpc(8540, 'eth_getTransactionReceipt', [rQ.ok]), 90000, 'receipt') : null;
+    ok('A06-R2 Chrome: wallet.lock after the request was initiated is not reported as a cancellation; the transaction is broadcast and included', typeof rQ.ok === 'string' && rcI && rcI.status === '0x1', JSON.stringify(rQ));
+    await b.send({ type: 'wallet.unlock', password: 'devnet-only' });
+    // The session's own endpoint changes while queued: the session is revoked and nothing is sent to either endpoint.
+    sent0 = tapCount('eth_sendRawTransaction'); n0 = await nonces();
+    pQ = txState(); await approveQueued(); await b.send({ type: 'profiles.add', profile: { ...prof, endpoint: 'http://127.0.0.1:8541' } });
+    await page.waitForSelector('#stage .err', { timeout: 20000 }).catch(() => {}); const epText = await page.textContent('#stage'); await pQ; await drained();
+    ok('A06-R2 Chrome: the session profile endpoint changed while queued -> session revoked (4901); nothing reached the old or the new endpoint (pending nonce unchanged on every node)',
+      /4901/.test(epText) && tapCount('eth_sendRawTransaction') === sent0 && (await nonces()) === n0, epText);
+    await b.send({ type: 'profiles.add', profile: prof }); await b.send({ type: 'profiles.remove', name: 'node-y' });
+    for (const x of extra) await x.page.close();
+    await page.reload(); ({ fr, n } = await siteFrame(page));
+
     // --- netKey binding: another network's profile against this endpoint is refused ---
     await b.send({ type: 'profiles.add', profile: { ...prof, name: 'othernet', genesisPre: oHex, genesisHash: oInfo.genesisHash } });
     const pO = await openSite(b, 'othernet', S_A); await pO.page.waitForSelector('#stage .err', { timeout: 30000 });

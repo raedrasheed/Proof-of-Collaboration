@@ -38,13 +38,14 @@ export async function workerChecks(dist) {
     const log = installFetchMock({ ...fx.handlers,
       eth_chainId: () => wait('eth_chainId', () => '0x' + env.chainId.toString(16)), pocol_status: () => wait('pocol_status', () => ({ genesisHash: env.genesis })),
       eth_getTransactionCount: () => wait('eth_getTransactionCount', () => (env.nonce === undefined ? '0x0' : env.nonce)), eth_getBlockByNumber: () => wait('eth_getBlockByNumber', { number: '0x5', baseFeePerGas: '0x3b9aca00' }),
-      eth_estimateGas: () => wait('eth_estimateGas', '0x5208'), eth_sendRawTransaction: ([raw]) => wait('eth_sendRawTransaction', () => H.toHex(C.keccak(H.fromHex(raw)))) });
+      eth_estimateGas: () => wait('eth_estimateGas', '0x5208'), eth_sendRawTransaction: ([raw]) => wait('eth_sendRawTransaction', () => (env.sendFail ? { __raw: () => 'not json' } : H.toHex(C.keccak(H.fromHex(raw))))),
+      pocol_getLogs: () => wait('pocol_getLogs', []) });
     await loadWorker(dist, 'wt' + ++n);
     for (const p of [prof('p1', s1), ...extra]) { const r = await mock.send({ type: 'profiles.add', profile: p }); if (!r.ok) throw new Error('profile ' + JSON.stringify(r)); }
     if (wallet) await mock.send({ type: 'wallet.create', password: 'x', seedHex: '0x' + '42'.repeat(32) });
     const t0 = ticks.length; const op = await mock.send({ type: 'open', name: 'p1', site: fx.site, path: '/' });
     if (!op.ok) throw new Error('open ' + JSON.stringify(op));
-    const port = mock.connect('bridge:' + op.sessionId); const tick = ticks[t0];
+    const port = mock.connect('bridge:' + op.sessionId); const tick = ticks[t0]; const tickInfo = { t0, n: ticks.length };
     let seq = 0;
     const req = (method, params = []) => { const s = ++seq; port.post({ seq: s, frame: 1, text: JSON.stringify({ id: s, kind: 'wallet_req', payload: { method, params } }) }); return s; };
     const reply = async (s) => (await port.next((m) => m.seq === s)).reply;
@@ -54,7 +55,16 @@ export async function workerChecks(dist) {
     let address = null;
     if (grant) { const s = req('eth_requestAccounts'); answer(await ask('confirmAccounts'), true); const r = await reply(s); address = r.result && r.result[0]; }
     const tx = () => req('eth_sendTransaction', [{ to: '0x' + '22'.repeat(20), value: '0x1' }]);
-    return { env, gate, mock, port, req, reply, ask, answer, count, tick, tx, address, log, op, site: fx.site };
+    // A06 round 2 barrier: four sessions (this one and tabs 8-10) each hold an 8 MiB pocol_getLogs
+    // behind the gate, so SITE_POOL (32 MiB) is full and the next reservation waits in the queue.
+    const fill = async () => {
+      const release = gate('pocol_getLogs'); const ports = [port];
+      for (const tab of [8, 9, 10]) { const o = await mock.send({ type: 'open', name: 'p1', site: fx.site, path: '/' }, tab); ports.push(mock.connect('bridge:' + o.sessionId, tab)); }
+      ports.forEach((p, i) => p.post({ seq: 1000 + i, frame: 1, text: JSON.stringify({ id: 1000 + i, kind: 'rpc_read', payload: { method: 'eth_getLogs', params: [{ blockHash: '0x' + 'ab'.repeat(32) }] } }) }));
+      for (let i = 0; i < 100 && count('pocol_getLogs') < 4; i++) await sleep(10);
+      return release;
+    };
+    return { env, gate, mock, port, req, reply, ask, answer, count, tick, tickInfo, tx, address, log, op, site: fx.site, fill };
   }
   const code = (r) => (r && r.error ? r.error.code : 'ok');
   // A scenario that throws (e.g. waits for a reply that never comes) is a failure, not a crash.
@@ -146,7 +156,10 @@ export async function workerChecks(dist) {
     w.answer(a, true); await sleep(50); const pr = w.mock.send({ type: 'profiles.add', profile: prof('p1', s1, 'http://127.0.0.1:8600') }); await sleep(50);
     const changedEarly = (await Promise.race([pr.then(() => 'done'), sleep(50).then(() => 'waiting')])) === 'done';
     open(); const r = await w.reply(s); await pr;
-    ok('A06 a profile change waits for ProfileMutex while signing is in progress (signing completes first)', !changedEarly && typeof r.result === 'string' && w.count('eth_sendRawTransaction') === 1, JSON.stringify(r));
+    // Round 2: the change waits for signing (ProfileMutex), then cancels the submission that has not
+    // started yet (it would otherwise go to the old endpoint). Round 1 expected the transaction sent.
+    ok('A06 a profile change waits for ProfileMutex while signing, then cancels the not-yet-initiated submission (4901, nothing sent)',
+      !changedEarly && code(r) === 4901 && r.error.data && r.error.data.submission === 'cancelled' && w.count('eth_sendRawTransaction') === 0, JSON.stringify(r));
   });
   await scenario(async () => {
     const w = await world(); const open = w.gate('eth_getTransactionCount'); const s = w.tx(); await sleep(50);
@@ -214,6 +227,57 @@ export async function workerChecks(dist) {
     w.env.genesis = '0x' + '77'.repeat(32); w.tick.f(); await w.port.next((m) => m.revoked, 2000); await sleep(100);
     const during = tab(w.mock.rules()).length; await sleep(2300); const after = tab(w.mock.rules()).length;
     ok('A06 review: a revoked tab keeps its DNR rules while the frame is torn down, then they are removed', before === 2 && during === 2 && after === 0, `${before} -> ${during} -> ${after}`);
+  });
+  // ---- A06 round 2: submission states (signed -> queued -> initiated -> broadcast) ----
+  // Deterministic barrier: the site pool is held full by four gated 8 MiB reads, so an approved,
+  // signed transaction waits in the transport queue; the transition happens while it is queued.
+  // The transaction is built (its reads use the site pool) and shown first; the pool fills while
+  // the dialog is open; after approval, signing uses the trust pool and the submission queues.
+  const queued = async (w) => { const s = w.tx(); const a = await w.ask('confirmTx'); const release = await w.fill(); const st0 = w.count('pocol_status');
+    w.answer(a, true); for (let i = 0; i < 200 && w.count('pocol_status') === st0; i++) await sleep(5); await sleep(50); return [s, release]; };
+  const cancelled = (r, c, before) => code(r) === c && r.error.data && r.error.data.submission === 'cancelled' && r.error.data.before === before;
+  await scenario(async () => {
+    const w = await world(); const [s, release] = await queued(w);
+    const rp = w.reply(s); const pending = await Promise.race([rp.then(() => 'replied'), sleep(100).then(() => 'queued')]);
+    await w.mock.send({ type: 'wallet.lock' }); const r = await rp; release(); await sleep(150);
+    ok('A06-R2 the signed transaction waits in the transport queue while the pool is full (not yet sent)', pending === 'queued' && w.count('pocol_getLogs') === 4, `${pending} ${w.count('pocol_getLogs')}`);
+    ok('A06-R2 wallet.lock while queued -> 4100 {submission: cancelled, before: queued}; never sent, also after the pool frees', cancelled(r, 4100, 'queued') && w.count('eth_sendRawTransaction') === 0, JSON.stringify(r));
+  });
+  await scenario(async () => {
+    const w = await world(); const [s, release] = await queued(w);
+    await w.mock.send({ type: 'profiles.add', profile: prof('p1', s1, 'http://127.0.0.1:8600') }); const r = await w.reply(s); release(); await sleep(150);
+    const sentTo = w.log.filter((x) => x.method === 'eth_sendRawTransaction').map((x) => x.url);
+    ok('A06-R2 endpoint changed while queued -> 4901 cancelled before queued; nothing sent to the old or the new endpoint', cancelled(r, 4901, 'queued') && sentTo.length === 0 && w.port.port.disconnected, JSON.stringify([r, sentTo]));
+  });
+  await scenario(async () => {
+    const w = await world(); const [s, release] = await queued(w);
+    if (!w.tick) throw new Error(`no tick captured: ${JSON.stringify(w.tickInfo)}`);
+    w.env.genesis = '0x' + '77'.repeat(32); w.tick.f(); const r = await w.reply(s); release(); await sleep(150);
+    ok('A06-R2 identity revocation (30 s check) while queued -> 4901 cancelled before queued, nothing sent', cancelled(r, 4901, 'queued') && w.count('eth_sendRawTransaction') === 0, JSON.stringify(r));
+  });
+  await scenario(async () => {
+    const w = await world(); const [s, release] = await queued(w);
+    w.port.close(); release(); await sleep(150);
+    ok('A06-R2 viewer disconnected while queued -> the submission is cancelled, nothing sent', w.count('eth_sendRawTransaction') === 0, String(w.count('eth_sendRawTransaction')));
+  });
+  await scenario(async () => {
+    // The lock timeout has no event: only the synchronous re-check after the reservation sees it.
+    const w = await world(); const [s, release] = await queued(w);
+    const logs = w.count('pocol_getLogs'), early = w.port.inbox.some((m) => m.seq === s);
+    skew += 16 * 60 * 1000; release(); const r = await w.reply(s); skew = 0;
+    ok('A06-R2 lock timeout while queued is caught by the re-check after the reservation, immediately before the request -> 4100 cancelled, nothing sent',
+      cancelled(r, 4100, 'queued') && w.count('eth_sendRawTransaction') === 0, JSON.stringify({ r, logs, early }));
+  });
+  await scenario(async () => {
+    // Initiated: the request has started; a later lock does not (and cannot) cancel it.
+    const w = await world(); const hold = w.gate('eth_sendRawTransaction'); const st0 = w.count('pocol_status'); const s = w.tx(); w.answer(await w.ask('confirmTx'), true);
+    for (let i = 0; i < 200 && w.count('eth_sendRawTransaction') === 0; i++) await sleep(5);
+    await w.mock.send({ type: 'wallet.lock' }); hold(); const r = await w.reply(s);
+    ok('A06-R2 wallet.lock after the request was initiated -> not reported as cancelled; the broadcast hash is returned', w.count('eth_sendRawTransaction') === 1 && typeof r.result === 'string' && w.count('pocol_status') > st0, JSON.stringify(r));
+  });
+  await scenario(async () => {
+    const w = await world(); w.env.sendFail = true; const s = w.tx(); w.answer(await w.ask('confirmTx'), true); const r = await w.reply(s);
+    ok('A06-R2 a failure after initiation reports {submission: initiated} (outcome unknown), never cancelled', code(r) === -32603 && r.error.data.submission === 'initiated' && w.count('eth_sendRawTransaction') === 1, JSON.stringify(r));
   });
   globalThis.setInterval = realSI; globalThis.clearInterval = realCI; Date.now = realNow;
   // ---- A07 review: the gsVersion detail of a huge specVersion item is computed in linear time ----

@@ -22,6 +22,11 @@ relative to a literal reading of the M1 reference. None is approved.
 | D-A03-SYSUSER | [D-A03-SYSUSER.md](D-A03-SYSUSER.md) | what the user-context SYS allowance counts (halts) | **PROPOSED**, not approved | recommended alternative (a) implemented provisionally; vacuous for the v1 programs |
 | LOG-CAP-AGGREGATE | [LOG-CAP-AGGREGATE.md](LOG-CAP-AGGREGATE.md) | the scope of LOG_CAP (halts) | **PROPOSED**, not approved | recommended alternative (chain) implemented provisionally |
 
+Approval note: `development/OWNER-STANDING-AUTHORIZATION.md` approves recommended options for project
+decisions. The owner's round-2 instruction asks that consensus changes be presented as explicit
+proposals and not treated as approved because their implementation tests pass. These proposals
+therefore stay PROPOSED until the owner decides each one.
+
 "Implemented provisionally" means the branch carries the recommended alternative so that the other
 repairs can be tested. It is not a decision. If the owner picks another alternative, the code and
 its tests change, and blocks produced on a devnet under the provisional rule may become invalid under
