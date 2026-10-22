@@ -10,7 +10,9 @@ use revm::primitives::{Address,B256,Bytes,TxEnv,TxKind,U256,keccak256,ExecutionR
 use pocol_lp4_execution::{native::{self,NativeBlockContext},wire,apply};
 use crate::{node::{Event,Node},types::*,chain::{self,Entry}};
 
-pub const MAX_BODY:usize=1024*1024;
+/// RpcGuard REQ_BUF (network.md:221/229): request line, headers and body together; headers alone
+/// stop at HEAD_MAX.
+pub const REQ_BUF:usize=1024*1024;pub const HEAD_MAX:usize=16384;
 /// RpcGuard RESP_MAX and LOGS_SCAN_BYTES (governance.md): a larger response is replaced
 /// by -32008; eth_getLogs stops after scanning this many log data bytes, or once its result
 /// would exceed RESP_MAX or LOGS_COUNT_MAX logs: -32020 {reason, fromBlock, lastCompleteBlock,
@@ -20,6 +22,9 @@ pub const RESP_MAX:usize=8*1024*1024;pub const LOGS_SCAN_BYTES:usize=32*1024*102
 /// exceed BATCH_RESP_MAX, and every later one, is answered -32020 {batchBytes} without running.
 pub const BATCH_MAX:usize=20;pub const BATCH_RESP_MAX:usize=16*1024*1024;
 /// ORIGIN_DENY (governance.md): local mining interfaces are never reachable from a site.
+/// eth_call/eth_estimateGas gas cap. It must not exceed the largest per-execution gas of the
+/// A13 execution model (`memory::execution_gas`), checked at compile time in resources.rs.
+pub const CALL_GAS_MAX:u64=30_000_000;
 pub const ORIGIN_DENY:[&str;2]=["pocol_submitShare","pocol_getTemplate"];
 
 /// A05 RPC bounds (local; distinct from the P2P limits). RPC_CONN_MAX and
@@ -35,16 +40,34 @@ pub struct Limits{
 impl Default for Limits{
     fn default()->Self{Self{conn_max:32,read_deadline:Duration::from_secs(10),write_deadline:Duration::from_secs(10),work_deadline:Duration::from_secs(30)}}
 }
-/// Connection counters, for status and tests.
+/// Connection and work counters, for status and tests: connections refused at the cap,
+/// connection threads alive, requests skipped because their work deadline had passed before
+/// the consensus thread reached them, and batch members not run for the same reason.
 #[derive(Debug,Default)]
-pub struct RpcCounters{pub refused:AtomicUsize}
-pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0)};
+pub struct RpcCounters{pub refused:AtomicUsize,pub active:AtomicUsize,pub expired:AtomicUsize,pub expired_members:AtomicUsize}
+pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0),active:AtomicUsize::new(0),expired:AtomicUsize::new(0),expired_members:AtomicUsize::new(0)};
 
-pub fn serve(addr:SocketAddr,node:SyncSender<Event>,limits:Limits)->Result<(),String>{
+/// Methods the network.md classification table makes light unconditionally (worst encoded
+/// response <= LIGHT_RESP_MAX). Conditional entries (pocol_getHeaders by count, eth_getBlockBy*
+/// by the full flag), unlisted methods and batches are scheduled as heavy.
+pub const LIGHT_METHODS:&[&str]=&["eth_chainId","net_version","web3_clientVersion","eth_blockNumber","eth_gasPrice","eth_maxPriorityFeePerGas","eth_getBalance",
+    "eth_getStorageAt","eth_getTransactionCount","eth_sendRawTransaction","pocol_getTiming","pocol_getTarget","pocol_getCaps","pocol_syncStatus","pocol_getPot",
+    "pocol_getSettlement","pocol_getBurnTotals","pocol_getEscrow","pocol_getRetention","pocol_getClosing","pocol_getRpcStats","pocol_submitShare","eth_getCode",
+    "eth_getTransactionByHash","eth_getTransactionReceipt","pocol_getParams","pocol_getAssignment","pocol_getMinerSet","pocol_getTemplate"];
+/// A light request is a single object of at most LIGHT_BODY_MAX bytes whose method is listed.
+/// The probe borrows the method name and skips every other field, so classification allocates
+/// nothing in proportion to the body (A13); any parse error (duplicate keys included) is heavy.
+pub const LIGHT_BODY_MAX:usize=4096;
+pub fn is_light(body:&[u8])->bool{
+    #[derive(serde::Deserialize)] struct Probe<'a>{#[serde(borrow,default)] method:Option<std::borrow::Cow<'a,str>>}
+    if body.len()>LIGHT_BODY_MAX||body.iter().find(|b|!b.is_ascii_whitespace())!=Some(&b'{'){return false}
+    matches!(serde_json::from_slice::<Probe>(body),Ok(Probe{method:Some(m)}) if LIGHT_METHODS.contains(&m.as_ref()))
+}
+pub fn serve(addr:SocketAddr,node:SyncSender<Event>,light:SyncSender<Event>,limits:Limits)->Result<(),String>{
     if !addr.ip().is_loopback(){return Err("RPC binds loopback only".into())}
     let l=TcpListener::bind(addr).map_err(|e|format!("rpc bind {addr}: {e}"))?;
     let live=Arc::new(AtomicUsize::new(0));
-    std::thread::Builder::new().name("rpc".into()).spawn(move||{
+    crate::threads::spawn("rpc",crate::threads::IO_STACK,move||{
         let mut next=0u64;
         for s in l.incoming(){
             let Ok(mut s)=s else{continue};next+=1;let id=next;
@@ -52,9 +75,11 @@ pub fn serve(addr:SocketAddr,node:SyncSender<Event>,limits:Limits)->Result<(),St
                 live.fetch_sub(1,Ordering::SeqCst);COUNTERS.refused.fetch_add(1,Ordering::SeqCst);
                 let _=s.set_write_timeout(Some(Duration::from_millis(100)));let _=respond(&mut s,503,"{}");continue
             }
-            let (n,lim,lv)=(node.clone(),limits.clone(),live.clone());
-            if std::thread::Builder::new().name(format!("rpc-{id}")).spawn(move||{let _=conn(s,n,&lim);lv.fetch_sub(1,Ordering::SeqCst);}).is_err(){
-                live.fetch_sub(1,Ordering::SeqCst);
+            let (n,lt,lim,lv)=(node.clone(),light.clone(),limits.clone(),live.clone());
+            // The slot is released as the thread's last action; nothing after it can block.
+            COUNTERS.active.fetch_add(1,Ordering::SeqCst);
+            if crate::threads::spawn(format!("rpc-{id}"),crate::threads::IO_STACK,move||{let _=conn(s,n,lt,&lim);COUNTERS.active.fetch_sub(1,Ordering::SeqCst);lv.fetch_sub(1,Ordering::SeqCst);}).is_err(){
+                COUNTERS.active.fetch_sub(1,Ordering::SeqCst);live.fetch_sub(1,Ordering::SeqCst);
             }
         }
     }).map_err(|e|e.to_string())?;
@@ -66,11 +91,11 @@ fn read_until(s:&mut TcpStream,tmp:&mut [u8],deadline:Instant)->std::io::Result<
     if left.is_zero(){return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"request deadline"))}
     s.set_read_timeout(Some(left.max(Duration::from_millis(1))))?;s.read(tmp)
 }
-fn conn(mut s:TcpStream,node:SyncSender<Event>,l:&Limits)->std::io::Result<()>{
+fn conn(mut s:TcpStream,node:SyncSender<Event>,light:SyncSender<Event>,l:&Limits)->std::io::Result<()>{
     let deadline=Instant::now()+l.read_deadline;s.set_write_timeout(Some(l.write_deadline))?;
     let mut buf=Vec::new();let mut tmp=[0u8;8192];let head_end;
     loop{let n=read_until(&mut s,&mut tmp,deadline)?;if n==0{return Ok(())}buf.extend_from_slice(&tmp[..n]);
-        if let Some(i)=buf.windows(4).position(|w|w==b"\r\n\r\n"){head_end=i+4;break}if buf.len()>16384{return respond(&mut s,431,"{}")}}
+        if let Some(i)=buf.windows(4).position(|w|w==b"\r\n\r\n"){head_end=i+4;break}if buf.len()>HEAD_MAX{return respond(&mut s,431,"{}")}}
     let head=String::from_utf8_lossy(&buf[..head_end]).to_string();
     let mut lines=head.split("\r\n");let first=lines.next().unwrap_or("");
     let mut len=0usize;let mut origin=None;
@@ -78,13 +103,22 @@ fn conn(mut s:TcpStream,node:SyncSender<Event>,l:&Limits)->std::io::Result<()>{
         if k=="content-length"{len=v.parse().unwrap_or(usize::MAX)}if k=="origin"{origin=Some(v)}}
     if first.starts_with("OPTIONS"){return respond(&mut s,204,"")}
     if !first.starts_with("POST"){return respond(&mut s,405,"{}")}
-    if len>MAX_BODY{return respond(&mut s,413,"{}")}
+    if len>REQ_BUF.saturating_sub(head_end){return respond(&mut s,413,"{}")}
     while buf.len()<head_end+len{let n=read_until(&mut s,&mut tmp,deadline)?;if n==0{break}buf.extend_from_slice(&tmp[..n]);}
     let body=buf[head_end..(head_end+len).min(buf.len())].to_vec();
     // A10: with an Origin header ORIGIN_DENY applies to the request and to every batch member,
     // inside the consensus thread before any member executes.
-    let (tx,rx)=mpsc::channel();if node.send(Event::Rpc(body,tx,origin.is_some())).is_err(){return respond(&mut s,503,"{}")}
-    match rx.recv_timeout(l.work_deadline){Ok(r)=>respond(&mut s,200,&r),Err(_)=>respond(&mut s,504,"{}")}
+    // The work deadline runs from here; the node skips the request, or stops a batch between
+    // members, once it has passed (nobody waits for that answer any more).
+    let work_by=Instant::now()+l.work_deadline;
+    let (tx,rx)=mpsc::channel();
+    if is_light(&body){
+        // The lane holds one request per connection; a full lane (expired requests not yet
+        // skipped) is 503. The wake is best effort: a busy node drains the lane between events.
+        if light.try_send(Event::Rpc(body,tx,origin.is_some(),work_by)).is_err(){return respond(&mut s,503,"{}")}
+        let _=node.try_send(Event::Wake);
+    }else if node.send(Event::Rpc(body,tx,origin.is_some(),work_by)).is_err(){return respond(&mut s,503,"{}")}
+    match rx.recv_timeout(work_by.saturating_duration_since(Instant::now())){Ok(r)=>respond(&mut s,200,&r),Err(_)=>respond(&mut s,504,"{}")}
 }
 fn respond(s:&mut TcpStream,code:u16,body:&str)->std::io::Result<()>{
     let reason=match code{200=>"OK",204=>"No Content",405=>"Method Not Allowed",413=>"Payload Too Large",431=>"Request Header Fields Too Large",503=>"Service Unavailable",_=>"Error"};
@@ -98,21 +132,30 @@ fn parse_u64(v:&Value)->Option<u64>{v.as_str().and_then(|s|u64::from_str_radix(s
 fn parse_addr(v:&Value)->Option<Address>{v.as_str()?.parse().ok()}
 fn parse_u256(v:&Value)->Option<U256>{v.as_str().and_then(|s|U256::from_str_radix(s.trim_start_matches("0x"),16).ok())}
 
-pub fn handle(n:&mut Node,body:&[u8])->String{handle_with(n,body,false)}
+pub fn handle(n:&mut Node,body:&[u8])->String{handle_until(n,body,false,None)}
 /// One response, or -32008 with the request's id when it exceeds RESP_MAX.
 fn capped(v:Value,id:&Value)->String{let s=v.to_string();if s.len()<=RESP_MAX{s}else{err(id,-32008,"response too large").to_string()}}
 fn id_of(v:&Value)->Value{v.get("id").cloned().unwrap_or(Value::Null)}
 /// `site`: the request carried an Origin header. ORIGIN_DENY is decided for the request
 /// and for every batch member before any member executes; a denied member is answered
 /// -32601 and never reaches its method; malformed members are -32600 (A10).
-pub fn handle_with(n:&mut Node,body:&[u8],site:bool)->String{
+pub fn handle_with(n:&mut Node,body:&[u8],site:bool)->String{handle_until(n,body,site,None)}
+/// As `handle_with`; batch members are not started after `deadline`: each is answered
+/// -32020 {deadline} without running (network.md:235, 363).
+pub fn handle_until(n:&mut Node,body:&[u8],site:bool,deadline:Option<Instant>)->String{
     let v:Value=match serde_json::from_slice(body){Ok(v)=>v,Err(_)=>return err(&Value::Null,-32700,"parse error").to_string()};
     let denied=|i:&Value|site&&i.get("method").and_then(|m|m.as_str()).map_or(false,|m|ORIGIN_DENY.contains(&m));
     let site_err=|i:&Value|err(&i.get("id").cloned().unwrap_or(Value::Null),-32601,"method not available to sites");
     if let Value::Array(items)=&v{
         if items.is_empty()||items.len()>BATCH_MAX{return err(&Value::Null,-32600,"batch").to_string()}
         let deny:Vec<bool>=items.iter().map(|i|denied(i)).collect();
-        return batch(items,BATCH_RESP_MAX,|k,i|if deny[k]{site_err(i).to_string()}else{capped(one(n,i),&id_of(i))});
+        // Light requests waiting in their lane run between members.
+        return batch(items,BATCH_RESP_MAX,|k,i|{
+            if k>0{n.drain_light()}
+            if deny[k]{site_err(i).to_string()}
+            else if deadline.is_some_and(|d|Instant::now()>=d){COUNTERS.expired_members.fetch_add(1,Ordering::SeqCst);item_err(i,-32020,"work deadline","deadline")}
+            else{capped(one(n,i),&id_of(i))}
+        });
     }
     if denied(&v){return site_err(&v).to_string()}
     let id=id_of(&v);capped(one(n,&v),&id)
@@ -127,12 +170,16 @@ fn batch(items:&[Value],limit:usize,mut run:impl FnMut(usize,&Value)->String)->S
     for (k,i) in items.iter().enumerate(){
         let mut s=if over{String::new()}else{run(k,i)};
         if over||out.len()+1+s.len()+1>limit{
-            over=true;let id=id_of(i);let id=if id.to_string().len()<=128{id}else{Value::Null};
-            s=json!({"jsonrpc":"2.0","id":id,"error":{"code":-32020,"message":"batch response limit","data":{"reason":"batchBytes"}}}).to_string();
+            over=true;s=item_err(i,-32020,"batch response limit","batchBytes");
         }
         if k>0{out.push(',');}out.push_str(&s);
     }
     out.push(']');out
+}
+/// An error item that echoes the request id only while it stays within ERR_ITEM_MAX (256 B).
+fn item_err(i:&Value,code:i64,m:&str,reason:&str)->String{
+    let id=id_of(i);let id=if id.to_string().len()<=128{id}else{Value::Null};
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":m,"data":{"reason":reason}}}).to_string()
 }
 fn one(n:&mut Node,v:&Value)->Value{
     if !v.is_object(){return err(&Value::Null,-32600,"invalid request")}
@@ -239,9 +286,9 @@ fn simulate(n:&Node,o:&Value,tag:&Value,gas:Option<u64>)->Result<ExecutionResult
     let to=o["to"].as_str().and_then(|s|s.parse::<Address>().ok());
     let data=o.get("data").or_else(||o.get("input")).and_then(|x|x.as_str()).map(|s|unhex(s)).transpose().map_err(|_|bad("data"))?.unwrap_or_default();
     let tx=TxEnv{caller:o["from"].as_str().and_then(|s|s.parse().ok()).unwrap_or(Address::ZERO),transact_to:to.map(TxKind::Call).unwrap_or(TxKind::Create),
-        gas_limit:gas.or_else(||parse_u64(&o["gas"])).unwrap_or(30_000_000).min(30_000_000),gas_price:U256::ZERO,value:parse_u256(&o["value"]).unwrap_or_default(),
+        gas_limit:gas.or_else(||parse_u64(&o["gas"])).unwrap_or(CALL_GAS_MAX).min(CALL_GAS_MAX),gas_price:U256::ZERO,value:parse_u256(&o["value"]).unwrap_or_default(),
         data:Bytes::from(data),nonce:None,chain_id:Some(n.chain.spec.chain_id()),..Default::default()};
-    let ctx=NativeBlockContext{height:U256::from(e.height+1),timestamp:U256::from(e.ts+1),gas_limit:U256::from(cp.GAS_LIMIT.max(30_000_000)),base_fee:U256::ZERO,prevrandao:B256::ZERO};
+    let ctx=NativeBlockContext{height:U256::from(e.height+1),timestamp:U256::from(e.ts+1),gas_limit:U256::from(cp.GAS_LIMIT.max(CALL_GAS_MAX)),base_fee:U256::ZERO,prevrandao:B256::ZERO};
     let mut st=e.state.clone();
     // eth_call simulation: fund the caller for value transfers, never committed.
     if let Some(a)=st.accounts.get_mut(&tx.caller){a.info.balance=a.info.balance.max(tx.value);}

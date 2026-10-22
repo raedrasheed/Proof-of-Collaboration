@@ -1548,6 +1548,7 @@ dependencies = [
  "k256",
  "pocol-lp4-execution",
  "revm",
+ "serde",
  "serde_json",
  "sha2 0.9.9",
  "sha3 0.9.1",

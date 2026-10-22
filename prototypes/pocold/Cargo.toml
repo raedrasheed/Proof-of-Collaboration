@@ -10,6 +10,8 @@ description = "PoCol local development node: consensus, mining, persistence, P2P
 pocol-lp4-execution = { path = "../lp4-execution" }
 revm = { version = "=19.7.0", features = ["serde"] }
 serde_json = "=1.0.145"
+# Borrowed probe that classifies an RPC request as light without building a JSON tree (A05/A13, round 2); already in the lock through revm.
+serde = { version = "=1.0.229", features = ["derive"] }
 sha2 = "=0.9.9"
 sha3 = "=0.9.1"
 # k256 (as in lp4-execution) replaces the unmaintained libsecp256k1 0.5.0 behind the shared hashes.rs (secp_backend, audit 2026-10-22).

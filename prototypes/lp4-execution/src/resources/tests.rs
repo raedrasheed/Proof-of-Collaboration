@@ -98,8 +98,8 @@ fn gas_scenario(c:&DevnetConfig,evidence_at:&dyn Fn(u64,&[Address])->Vec<Evidenc
 /// so parallel tests do not disturb it).
 mod alloc_meter{
     use std::alloc::{GlobalAlloc,Layout,System};use std::cell::Cell;
-    thread_local!{static ON:Cell<bool>=const{Cell::new(false)};static BYTES:Cell<isize>=const{Cell::new(0)};}
-    fn add(d:isize){let _=ON.try_with(|on|if on.get(){let _=BYTES.try_with(|b|b.set(b.get()+d));});}
+    thread_local!{static ON:Cell<bool>=const{Cell::new(false)};static BYTES:Cell<isize>=const{Cell::new(0)};static PEAK:Cell<isize>=const{Cell::new(0)};}
+    fn add(d:isize){let _=ON.try_with(|on|if on.get(){let _=BYTES.try_with(|b|{b.set(b.get()+d);let _=PEAK.try_with(|p|p.set(p.get().max(b.get())));});});}
     pub struct Meter;
     unsafe impl GlobalAlloc for Meter{
         unsafe fn alloc(&self,l:Layout)->*mut u8{let p=unsafe{System.alloc(l)};if !p.is_null(){add(l.size() as isize)}p}
@@ -109,6 +109,8 @@ mod alloc_meter{
     #[global_allocator] static A:Meter=Meter;
     /// Net heap bytes `f` leaves allocated (what it returns keeps alive).
     pub fn measure<T>(f:impl FnOnce()->T)->(T,isize){ON.with(|o|o.set(true));BYTES.with(|b|b.set(0));let r=f();let n=BYTES.with(|b|b.get());ON.with(|o|o.set(false));(r,n)}
+    /// Highest heap bytes alive at any moment while `f` runs (relative to its start).
+    pub fn peak<T>(f:impl FnOnce()->T)->(T,isize){ON.with(|o|o.set(true));BYTES.with(|b|b.set(0));PEAK.with(|p|p.set(0));let r=f();let n=PEAK.with(|p|p.get());ON.with(|o|o.set(false));(r,n)}
 }
 /// A13: the snapshot model bounds the bytes a real clone allocates, for spread slots,
 /// concentrated slots at power-of-two boundaries, grown-then-cleared tables (normalized)
@@ -141,4 +143,37 @@ mod alloc_meter{
     // A state from real execution (genesis plus blocks).
     let net=devnet::build(&network_like(16,60,80)).unwrap();check(net.genesis.state(),"genesis");
     println!("MEMORY-MODEL {}",serde_json::json!({"accountEntry":memory::ACCOUNT_ENTRY,"slotEntry":memory::SLOT_ENTRY,"codeEntry":memory::CODE_ENTRY,"db":memory::DB}));
+}
+
+/// A13 obligation 4: the execution model bounds the peak heap of adversarial executions at the
+/// largest per-execution gas (30M): TSTORE, cold SLOAD and LOG floods, the largest single-frame
+/// memory returned whole, memory-carrying recursion to the depth the 63/64 rule allows, and a
+/// large identity-precompile output held as return data. Each runs on its own engine copy.
+#[test] fn execution_model_bounds_measured_adversarial_peaks(){
+    use revm::{InMemoryDB,primitives::{AccountInfo,Address,Bytecode,Bytes,TxEnv,TxKind,U256 as RU}};
+    let gas=memory::execution_gas(8_000_000);assert_eq!(gas,30_000_000);let bound=memory::execution(gas).unwrap();
+    let p1=|x:u8|vec![0x60,x];let p2=|x:u16|{let b=x.to_be_bytes();vec![0x61,b[0],b[1]]};let p4=|x:u32|{let b=x.to_be_bytes();vec![0x63,b[0],b[1],b[2],b[3]]};
+    let cat=|v:Vec<Vec<u8>>|v.concat();
+    let w=memory::words(gas-60_000) as u32;
+    let programs:Vec<(&str,Vec<u8>)>=vec![
+        ("tstore flood",cat(vec![p1(1),vec![0x5b],p1(1),vec![0x81,0x5d],p1(1),vec![0x01],p1(2),vec![0x56]])),
+        ("cold sload flood",cat(vec![p1(1),vec![0x5b,0x80,0x54,0x50],p1(1),vec![0x01],p1(2),vec![0x56]])),
+        ("log flood",cat(vec![vec![0x5b],p1(32),p1(0),vec![0xa0],p1(0),vec![0x56]])),
+        ("largest memory returned",cat(vec![p1(1),p4((w-1)*32),vec![0x52],p4(w*32),p1(0),vec![0xf3]])),
+        ("recursion with memory 1 KiB",cat(vec![p1(1),p2(32*32-32),vec![0x52],p1(0),p1(0),p2(32*32),p1(0),p1(0),vec![0x30,0x5a,0xf1,0x50],p2(32*32),p1(0),vec![0xf3]])),
+        ("recursion with memory 16 KiB",cat(vec![p1(1),p2(512*32-32),vec![0x52],p1(0),p1(0),p2(512*32),p1(0),p1(0),vec![0x30,0x5a,0xf1,0x50],p2(512*32),p1(0),vec![0xf3]])),
+        ("identity output held",cat(vec![p1(1),p4(((w/2)-1)*32),vec![0x52],p1(0),p1(0),p4((w/2)*32),p1(0),p1(0),p1(4),vec![0x5a,0xf1,0x50,0x3d],p1(0),vec![0xf3]])),
+    ];
+    let caller=Address::with_last_byte(0xca);let target=Address::with_last_byte(0xee);let mut out=Vec::new();
+    for (label,code) in programs{
+        let mut db=InMemoryDB::default();db.insert_account_info(caller,AccountInfo{balance:RU::from(10u64).pow(RU::from(24u64)),..Default::default()});
+        let c=Bytecode::new_raw(Bytes::from(code));db.insert_account_info(target,AccountInfo{code_hash:c.hash_slow(),code:Some(c),..Default::default()});
+        let (_,clone)=alloc_meter::measure(||db.clone());
+        let tx=TxEnv{caller,transact_to:TxKind::Call(target),gas_limit:gas as u64,gas_price:RU::ZERO,value:RU::ZERO,data:Bytes::new(),nonce:None,chain_id:None,..Default::default()};
+        let (r,peak)=alloc_meter::peak(||crate::native::execute(&db,tx).expect(label));
+        let used=r.result.gas_used();
+        assert!(peak>0&&(peak as u128)<=bound+(clone.max(0) as u128),"{label}: peak {peak} B > model {bound} B");
+        out.push(serde_json::json!({"case":label,"gasUsed":used,"peakBytes":peak,"success":r.result.is_success()}));
+    }
+    println!("EXECUTION-MODEL {}",serde_json::json!({"gas":gas as u64,"boundBytes":bound as u64,"cases":out}));
 }

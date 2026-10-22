@@ -8,16 +8,24 @@ fn arg(args:&[String],k:&str)->Option<String>{args.iter().position(|a|a==k).and_
 fn args_all(args:&[String],k:&str)->Vec<String>{args.windows(2).filter(|w|w[0]==k).map(|w|w[1].clone()).collect()}
 fn num<T:std::str::FromStr>(args:&[String],k:&str,d:T)->T{arg(args,k).and_then(|v|v.parse().ok()).unwrap_or(d)}
 
+/// main only collects the arguments, then runs the command on the consensus thread, whose
+/// stack reservation is explicit (A13 thread inventory), and joins it.
 fn main(){
     let args:Vec<String>=std::env::args().collect();
+    let code=match pocold::threads::spawn("consensus",pocold::threads::CONSENSUS_STACK,move||command(&args)).map(|t|t.join()){
+        Ok(Ok(code))=>code,Ok(Err(_))=>101,Err(e)=>{eprintln!("error: spawn consensus thread: {e}");1}};
+    std::process::exit(code);
+}
+fn command(args:&[String])->i32{
     let cmd=args.get(1).map(|s|s.as_str()).unwrap_or("help");
     let r=match cmd{
-        "init-devnet"=>init(&args),
-        "run"=>run(&args),
-        "status"=>status(&args),
+        "init-devnet"=>init(args),
+        "run"=>run(args),
+        "status"=>status(args),
         _=>{eprintln!("usage:\n  pocold init-devnet --out DIR --miners a,b,c [--chain-id N] [--genesis-time S] [--t-blk S] [--tau S] [--d-att S] [--fb-wait S] [--c N] [--work-bits N] [--h-end N] [--h-close N] [--accounts x,y] [LOCAL]\n  pocold run --network DIR --data DIR --name N [--miner LABEL] [--listen ADDR] [--peer ADDR]... [--rpc ADDR] [--stop-at H] [--log] [LOCAL]\n  pocold status --network DIR --data DIR [LOCAL]\nLOCAL (ParamGate local timing, whole seconds; default single host): [--delta S] [--phi S] [--t-exec S] [--delta-rel S] [--gamma S]\nEvery profile is admitted by the full ParamGate (R1-R26) before boot; a rejection lists the violated rules (-32018).");Ok(())}
     };
-    if let Err(e)=r{eprintln!("error: {e}");std::process::exit(1);}
+    if let Err(e)=r{eprintln!("error: {e}");return 1}
+    0
 }
 /// Node-local ParamGate inputs: the single-host defaults with optional overrides.
 fn local(args:&[String])->NodeLocal{
@@ -47,7 +55,7 @@ fn init(args:&[String])->Result<(),String>{
         "accounts":cfg.accounts.iter().map(|(l,w)|serde_json::json!({"label":l,"address":format!("{:#x}",devnet::account_key(l).address()),"wei":w.to_string()})).collect::<Vec<_>>(),
         "calibration":{"hashesPerSecond":cfg.hash_rate,"class":"synthetic-fixture","note":"devnet difficulty chosen with --work-bits, not a measured hash rate"},
         "timing":timing.to_json(),
-        "admission":{"binding":types::hex(&admitted.report().binding),"notes":admitted.report().notes,"deferred":admitted.report().deferred}});
+        "admission":pocold::admission_json(&admitted)});
     std::fs::write(out.join("devnet.json"),serde_json::to_string_pretty(&info).unwrap()).map_err(|e|e.to_string())?;
     println!("{}",serde_json::to_string_pretty(&info).unwrap());Ok(())
 }
@@ -62,6 +70,9 @@ fn run(args:&[String])->Result<(),String>{
         rpc:arg(args,"--rpc").map(|s|parse(&s)).transpose()?,
         stop_at:arg(args,"--stop-at").and_then(|s|s.parse().ok()),log:args.iter().any(|a|a=="--log"),limits:Default::default()};
     let mut n=node::Node::open(cfg,spec)?;
+    if !n.chain.spec.admission().specification_compliant(){
+        eprintln!("pocold: {} admission, not specification compliance ({} conditions; see status \"admission\")",n.chain.spec.admission().scope().name(),n.chain.spec.admission().report().conditions.len());
+    }
     n.log(&format!("opened: head h={} records={}",n.chain.head().height,n.journal_records()));
     n.start_network()?;n.run();
     println!("{}",n.status_json());Ok(())

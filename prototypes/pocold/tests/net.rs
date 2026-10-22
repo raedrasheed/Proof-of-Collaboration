@@ -12,7 +12,17 @@ use revm::primitives::U256;
 static SERIAL:std::sync::Mutex<()>=std::sync::Mutex::new(());
 fn serial()->std::sync::MutexGuard<'static,()>{SERIAL.lock().unwrap_or_else(|e|e.into_inner())}
 fn free_port()->u16{TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()}
-fn spec()->Spec{Spec::new(devnet::build(&DevnetConfig::new(777940,1_700_000_000,&["a","b","c"])).unwrap().admit(&pocold::single_host_local()).unwrap().0)}
+/// One devnet per test binary: its genesis is now (with a genesis in the past every node's
+/// production attempts are overdue, and each tick builds a fallback template, so the nodes the
+/// earlier tests leave running would saturate the CPU), and its timing is measured once
+/// (R14/R19 are measured on this host and fail closed under CPU contention).
+fn spec()->Spec{
+    static GENESIS:std::sync::OnceLock<u64>=std::sync::OnceLock::new();
+    static TIMING:std::sync::OnceLock<pocol_lp4_execution::admission::Timing>=std::sync::OnceLock::new();
+    let n=devnet::build(&DevnetConfig::new(777940,*GENESIS.get_or_init(pocold::node::now_s),&["a","b","c"])).unwrap();
+    let t=TIMING.get_or_init(||pocol_lp4_execution::admission::measure(&n.spec_bytes,&n.alloc,1).unwrap());
+    Spec::new(pocol_lp4_execution::admission::admit(&n.request(&pocold::single_host_local(),Some(t))).unwrap_or_else(|e|panic!("{e}")))
+}
 struct Running{p2p:u16,rpc:u16,net:net::Net,chain_id:u64,genesis:[u8;32]}
 fn start(tag:&str,limits:Limits)->Running{start_with(tag,limits,vec![])}
 fn start_with(tag:&str,limits:Limits,peers:Vec<std::net::SocketAddr>)->Running{
@@ -163,4 +173,105 @@ fn small()->Limits{
     drop(first);
     assert!(accept(&target).is_some(),"outbound reconnects despite a full inbound set");
     assert!(wait_until(1000,||r.net.counters.outbound.load(Ordering::SeqCst)==1));drop(idle);
+}
+/// RpcGuard REQ_BUF (network.md:229): request line, headers and body together. A request that
+/// fills REQ_BUF exactly is served; one byte more is 413 without reaching the node.
+#[test] fn rpc_request_buffer_covers_headers_and_body(){let _g=serial();
+    let r=start("reqbuf",Limits::default());
+    let call=r#"{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}"#;
+    let head=|n:usize|format!("POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {n}\r\n\r\n");
+    let send=|extra:usize|->u16{
+        let n=pocold::rpc::REQ_BUF-head(1_000_000).len()+extra;assert_eq!(head(n).len(),head(1_000_000).len());
+        let mut body=call.to_string();body.push_str(&" ".repeat(n-call.len()));
+        let mut s=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let _=s.write_all(head(n).as_bytes());let _=s.write_all(body.as_bytes());
+        let mut out=String::new();let _=s.read_to_string(&mut out);out.get(9..12).and_then(|c|c.parse().ok()).unwrap_or(0)
+    };
+    assert_eq!(send(0),200,"headers + body == REQ_BUF is served");
+    assert_eq!(send(1),413,"one byte over REQ_BUF");
+}
+/// A13 thread inventory under a stalled consensus thread: heavy eth_calls (30M gas) keep it
+/// busy while peers fill the event queue and churn. Every reader joins its writer and delivers
+/// Closed before it releases its slot, so the threads alive never exceed two per peer slot plus
+/// the RPC connection in use (and this test's own threads).
+#[test] fn peer_threads_stay_within_the_inventory_while_consensus_is_stalled(){let _g=serial();
+    let r=start("inventory",small());let base=threads();let peers_max=6usize;
+    let stop=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let heavy={let (port,stop)=(r.rpc,stop.clone());std::thread::spawn(move||{let mut n=0;while !stop.load(Ordering::SeqCst){
+        let (code,_)=rpc(port,r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"data":"0x5b600056","gas":"0x1c9c380"},"latest"]}"#,false);if code==200{n+=1}}n})};
+    let churn:Vec<_>=(0..3).map(|i|{let (port,stop,h)=(r.p2p,stop.clone(),hello(&r,&format!("churn{i}")));std::thread::spawn(move||{let mut k=0;while !stop.load(Ordering::SeqCst){
+        if let Ok(mut s)=TcpStream::connect(("127.0.0.1",port)){let _=s.set_write_timeout(Some(Duration::from_millis(200)));let _=s.write_all(&h);
+            for _ in 0..100{if s.write_all(&frame(&Msg::GetRange{start:1,count:1})).is_err(){break}}k+=1;}
+    }k})}).collect();
+    let own=1+3;let t=Instant::now();let mut worst=0usize;
+    while t.elapsed()<Duration::from_secs(6){worst=worst.max(threads().saturating_sub(base+own));std::thread::sleep(Duration::from_millis(3));}
+    stop.store(true,Ordering::SeqCst);let calls=heavy.join().unwrap();let conns:usize=churn.into_iter().map(|h|h.join().unwrap()).sum();
+    assert!(calls>=2&&conns>=10,"the scenario ran: {calls} heavy calls, {conns} peer connections");
+    assert!(worst<=2*peers_max+1,"threads beyond the inventory: {worst} > {}",2*peers_max+1);
+    assert!(wait_until(5000,||live(&r)==0&&threads()<=base+2),"live={} threads {} vs {base}",live(&r),threads());
+    println!("INVENTORY {}",serde_json::json!({"worstExtraThreads":worst,"bound":2*peers_max+1,"heavyCalls":calls,"peerConnections":conns}));
+}
+
+// ---------------- round 2: the RPC work deadline, tested on its own ----------------
+const HEAVY:&str=r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"data":"0x5b600056","gas":"0x1c9c380"},"latest"]}"#;
+const LIGHT:&str=r#"{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}"#;
+fn timed(port:u16,body:&str)->(u16,Duration){let t=Instant::now();let (c,_)=rpc(port,body,false);(c,t.elapsed())}
+fn counter(c:&std::sync::atomic::AtomicUsize)->usize{c.load(Ordering::SeqCst)}
+/// While a 30M-gas eth_call holds the consensus thread, requests queued behind it get 504 at the
+/// work deadline (not when the work would end), are never run once it has passed, and release
+/// their connection threads; a batch stops starting members at the deadline.
+#[test] fn rpc_work_deadline_skips_expired_work_and_releases_resources(){let _g=serial();
+    let mut l=small();l.rpc.work_deadline=Duration::from_millis(400);let r=start("deadline",l);
+    let c=&pocold::rpc::COUNTERS;let (e0,m0)=(counter(&c.expired),counter(&c.expired_members));
+    // The heavy call alone (warm-up), without a deadline in the way: its duration on this host.
+    let mut wide=small();wide.rpc.work_deadline=Duration::from_secs(60);let w=start("deadline-wide",wide);
+    let (code,heavy)=timed(w.rpc,HEAVY);assert_eq!(code,200);assert!(heavy>Duration::from_millis(900),"the heavy call must outlast the deadline: {heavy:?}");
+    let base=threads();
+    // 250 ms: the heavy call has left the queue (behind at most one coalesced tick) and holds the
+    // consensus thread; light requests that arrive now wait for it (they are drained before the
+    // next event, never in the middle of one).
+    let h=std::thread::spawn({let p=r.rpc;move||timed(p,HEAVY)});std::thread::sleep(Duration::from_millis(250));
+    let quick:Vec<_>=(0..10).map(|_|{let p=r.rpc;std::thread::spawn(move||timed(p,LIGHT))}).collect();
+    let quick:Vec<(u16,Duration)>=quick.into_iter().map(|t|t.join().unwrap()).collect();
+    let (hc,ht)=h.join().unwrap();
+    assert_eq!(hc,504);assert!(ht<Duration::from_millis(900),"the caller is answered at the deadline, not after the work: {ht:?}");
+    for (code,t) in &quick{assert_eq!(*code,504);assert!(*t>=Duration::from_millis(350)&&*t<Duration::from_millis(900),"{t:?}");}
+    // Once the consensus thread is free, the expired requests are skipped, not run (no polling
+    // here: a poll that expired would be counted too).
+    std::thread::sleep(heavy+Duration::from_millis(500));
+    assert_eq!(counter(&c.expired)-e0,10,"each request whose deadline passed in the queue was skipped");
+    assert_eq!(rpc(r.rpc,LIGHT,false).0,200,"the node serves again");
+    // A heavy batch: the first member runs past the deadline; the 19 after it are not started.
+    let mut b=vec![HEAVY.to_string()];b.extend((0..19).map(|_|LIGHT.to_string()));let body=format!("[{}]",b.join(","));
+    let (code,t)=timed(r.rpc,&body);assert_eq!(code,504);assert!(t<Duration::from_millis(900),"{t:?}");
+    std::thread::sleep(heavy+Duration::from_millis(500));
+    assert_eq!(counter(&c.expired_members)-m0,19,"members after the deadline are not started");
+    // Resources: no connection thread is left behind.
+    assert!(wait_until(3000,||counter(&c.active)==0&&threads()<=base+2),"active={} threads {} vs {base}",counter(&c.active),threads());
+    println!("DEADLINE {}",serde_json::json!({"workDeadlineMs":400,"heavyMs":heavy.as_millis() as u64,"heavyAnsweredMs":ht.as_millis() as u64,
+        "queuedAnsweredMs":quick.iter().map(|q|q.1.as_millis() as u64).collect::<Vec<_>>(),"skipped":counter(&c.expired)-e0,"batchMembersNotRun":counter(&c.expired_members)-m0}));
+}
+/// Bounded adversarial load: 4 connections send 30M-gas eth_calls back to back, and 2 send
+/// 20-member heavy batches. Each request holds the consensus thread for at most one heavy member
+/// beyond the work deadline, and the queue is FIFO, so a legitimate request waits behind at most
+/// one request per adversarial connection. Every legitimate request is answered with its result.
+#[test] fn legitimate_requests_progress_under_bounded_heavy_load(){let _g=serial();
+    let mut l=small();l.rpc.work_deadline=Duration::from_millis(2500);let r=start("progress",l);
+    let (code,heavy)=timed(r.rpc,HEAVY);assert_eq!(code,200);
+    let stop=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let batch=format!("[{}]",vec![HEAVY;20].join(","));
+    let adv:Vec<_>=(0..6).map(|i|{let (p,stop,body)=(r.rpc,stop.clone(),if i<4{HEAVY.to_string()}else{batch.clone()});
+        std::thread::spawn(move||{let mut n=0;while !stop.load(Ordering::SeqCst){rpc(p,&body,false);n+=1}n})}).collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let t0=Instant::now();let mut legit=Vec::new();
+    while t0.elapsed()<Duration::from_secs(12){legit.push(timed(r.rpc,LIGHT));std::thread::sleep(Duration::from_millis(100));}
+    stop.store(true,Ordering::SeqCst);let rounds:usize=adv.into_iter().map(|h|h.join().unwrap()).sum();
+    let worst=legit.iter().map(|x|x.1).max().unwrap();
+    // FIFO: at most one request per adversarial connection ahead, each <= deadline + one heavy member.
+    let bound=Duration::from_millis(2500)+heavy*2;
+    let ok=legit.iter().filter(|x|x.0==200).count();
+    println!("PROGRESS {}",serde_json::json!({"heavyMs":heavy.as_millis() as u64,"legitRequests":legit.len(),"legitOk":ok,"worstMs":worst.as_millis() as u64,"adversaryRounds":rounds}));
+    assert!(legit.len()>=4&&rounds>=6,"the load ran: {} legit, {rounds} adversarial",legit.len());
+    assert_eq!(ok,legit.len(),"every legitimate request is answered: {legit:?}");
+    assert!(worst<=bound,"worst legitimate latency {worst:?} > {bound:?}");
 }

@@ -44,7 +44,9 @@ pub const REORG_RESTORE_MAX:usize=1024;
 pub const RECEIVED_MAX:usize=1024;
 
 /// Rpc: request body, reply channel, and whether it carried an Origin header (a site).
-pub enum Event{Net(NetEvent),Miner(MinerEvent),Rpc(Vec<u8>,Sender<String>,bool),Tick}
+/// Rpc: body, reply, Origin present, and the instant after which nobody waits for the answer.
+/// Wake: a light RPC request is waiting in the light lane.
+pub enum Event{Net(NetEvent),Miner(MinerEvent),Rpc(Vec<u8>,Sender<String>,bool,std::time::Instant),Tick,Wake}
 
 pub fn now_ms()->u128{SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()}
 pub fn now_s()->u64{(now_ms()/1000) as u64}
@@ -76,6 +78,12 @@ pub struct Node{
     outbound:Arc<Mutex<HashSet<String>>>,
     pub tx:SyncSender<Event>,
     rx:Receiver<Event>,
+    /// RPC light lane (network.md classification table): drained before every main event and
+    /// between heavy batch members, so a light request never waits behind a queue of heavy work.
+    light_tx:SyncSender<Event>,light_rx:Receiver<Event>,draining:bool,
+    /// At most one timer Tick waits in the event queue: a tick that takes longer than the timer
+    /// period must not fill the queue ahead of blocks, peers and RPC (round 2).
+    tick_pending:Arc<std::sync::atomic::AtomicBool>,
     miner_tx:Sender<MinerEvent>,
     prod:Option<Production>,
     orphans:HashMap<[u8;32],Vec<Block>>,
@@ -132,10 +140,11 @@ impl Node{
         }
         chain.retain();
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
-        let fwd=tx.clone();std::thread::spawn(move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}});
+        let (light_tx,light_rx)=mpsc::sync_channel(cfg.limits.rpc.conn_max.max(1));
+        let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
         let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());
         let net=net::Net::new(cfg.limits.net.clone());
-        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_heights:HashMap::new(),sync_mark:(0,0),sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,miner_tx,prod:None,
+        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_heights:HashMap::new(),sync_mark:(0,0),sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light_tx,light_rx,draining:false,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
             pool:Pool{txs:vec![],pending_state:head_state,bytes:0,meter},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;
@@ -147,12 +156,14 @@ impl Node{
 
     pub fn start_network(&mut self)->Result<(),String>{
         if let Some(a)=self.cfg.listen{let l=std::net::TcpListener::bind(a).map_err(|e|format!("listen {a}: {e}"))?;
-            let tx=self.tx.clone();let (ntx,nrx)=mpsc::sync_channel(net::NET_EVENT_QUEUE);std::thread::spawn(move||{for e in nrx{if tx.send(Event::Net(e)).is_err(){break}}});
+            let tx=self.tx.clone();let (ntx,nrx)=mpsc::sync_channel(net::NET_EVENT_QUEUE);crate::threads::spawn("listen-fwd",crate::threads::IO_STACK,move||{for e in nrx{if tx.send(Event::Net(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
             net::listen(l,ntx,self.net.clone());}
-        for a in self.cfg.peers.clone(){let tx=self.tx.clone();let (ntx,nrx)=mpsc::sync_channel(net::NET_EVENT_QUEUE);std::thread::spawn(move||{for e in nrx{if tx.send(Event::Net(e)).is_err(){break}}});
+        for a in self.cfg.peers.clone(){let tx=self.tx.clone();let (ntx,nrx)=mpsc::sync_channel(net::NET_EVENT_QUEUE);crate::threads::spawn(format!("dial-fwd-{a}"),crate::threads::IO_STACK,move||{for e in nrx{if tx.send(Event::Net(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
             net::dial(a,ntx,self.outbound.clone(),self.net.clone());}
-        if let Some(a)=self.cfg.rpc{crate::rpc::serve(a,self.tx.clone(),self.cfg.limits.rpc.clone())?;}
-        let t=self.tx.clone();std::thread::spawn(move||loop{std::thread::sleep(Duration::from_millis(50));if t.send(Event::Tick).is_err(){break}});
+        if let Some(a)=self.cfg.rpc{crate::rpc::serve(a,self.tx.clone(),self.light_tx.clone(),self.cfg.limits.rpc.clone())?;}
+        let (t,pending)=(self.tx.clone(),self.tick_pending.clone());
+        crate::threads::spawn("tick",crate::threads::IO_STACK,move||loop{std::thread::sleep(Duration::from_millis(50));
+            if !pending.swap(true,std::sync::atomic::Ordering::SeqCst)&&t.send(Event::Tick).is_err(){break}}).map_err(|e|format!("spawn: {e}"))?;
         Ok(())
     }
     /// Runs until stop_at or channel closure.
@@ -160,15 +171,28 @@ impl Node{
         self.restart_production();
         while !self.stopped{
             let ev=match self.rx.recv_timeout(Duration::from_millis(200)){Ok(e)=>e,Err(mpsc::RecvTimeoutError::Timeout)=>Event::Tick,Err(_)=>break};
-            self.handle(ev);
+            self.drain_light();self.handle(ev);
         }
         if let Some(p)=&self.prod{if let Some(m)=&p.miner{m.stop();}}
     }
+    /// Runs up to conn_max waiting light requests (each connection has at most one), never
+    /// nested inside a light request.
+    pub fn drain_light(&mut self){
+        if self.draining{return}
+        self.draining=true;
+        for _ in 0..self.cfg.limits.rpc.conn_max.max(1){match self.light_rx.try_recv(){Ok(ev)=>self.handle(ev),Err(_)=>break}}
+        self.draining=false;
+    }
     pub fn handle(&mut self,ev:Event){
         match ev{
-            Event::Tick=>self.tick(),
+            Event::Tick=>{self.tick_pending.store(false,std::sync::atomic::Ordering::SeqCst);self.tick()}
+            Event::Wake=>{}
             Event::Miner(m)=>self.on_miner(m),
-            Event::Rpc(body,reply,site)=>{let r=crate::rpc::handle_with(self,&body,site);let _=reply.send(r);}
+            Event::Rpc(body,reply,site,deadline)=>{
+                // A05/RPC work deadline: a request whose caller already got 504 is not run.
+                if std::time::Instant::now()>=deadline{crate::rpc::COUNTERS.expired.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
+                else{let r=crate::rpc::handle_until(self,&body,site,Some(deadline));let _=reply.send(r);}
+            }
             Event::Net(NetEvent::Connected(id,peer))=>{let hello=self.hello();peer.send(&hello);self.peers.insert(id,peer);}
             Event::Net(NetEvent::Closed(id))=>{self.peer_heights.remove(&id);if let Some(p)=self.peers.remove(&id){if p.outbound{if let Ok(mut s)=self.outbound.lock(){s.remove(&p.addr);}}}}
             Event::Net(NetEvent::Message(id,m))=>self.on_msg(id,m),
@@ -519,6 +543,9 @@ impl Node{
         serde_json::json!({"name":self.cfg.name,"chainId":self.chain.spec.chain_id(),"genesisHash":hex(&self.chain.spec.genesis_hash()),"head":{"height":h.height,"hash":hex(&h.hash),"ts":h.ts,"signed":h.signed,"final":h.is_final,"totalWork":format!("{:#x}",h.total_work)},
             "peers":self.peers.values().map(|p|p.addr.clone()).collect::<Vec<_>>(),"production":mode,"miner":self.cfg.miner.as_ref().map(|k|format!("{:#x}",k.address())),
             "pool":self.pool.txs.len(),"journalRecords":self.journal_records(),"blocksKnown":self.chain.blocks.len(),"invalidKnown":self.chain.invalid.len(),
+            "admission":crate::admission_json(self.chain.spec.admission()),
+            "a13":crate::resources::derive(self.chain.spec.cp(),self.chain.spec.local().k_hist,self.chain.spec.local().side_max,&self.cfg.limits,self.cfg.peers.len()).map(|b|serde_json::json!({
+                "boundBytes":b.total.to_string(),"budgetBytes":self.cfg.limits.mem_budget,"conditions":crate::resources::CONDITIONS.iter().map(|(id,d)|serde_json::json!({"id":id,"detail":d})).collect::<Vec<_>>()})),
             "stats":{"imported":self.stats.imported,"mined":self.stats.mined,"signedTemplates":self.stats.signed_templates,"fallbackTemplates":self.stats.fallback_templates,"sharesSeen":self.stats.shares_seen,"hashesInExhaustedRanges":self.stats.hashes,"reorgs":self.stats.reorgs}})
     }
     pub fn template_json(&self)->serde_json::Value{

@@ -144,6 +144,9 @@ fn read_by(r:&mut TcpStream,buf:&mut [u8],deadline:Instant)->bool{
 }
 /// Starts reader and writer threads for an admitted connection (inbound: slot already reserved).
 /// Returns whether the connection was handed to the node; every later end sends Closed.
+/// A13 thread inventory: the reader joins the writer, then delivers Closed, and only then
+/// releases the slot as its last action, so a released slot never has a thread behind it that
+/// can still block (a full event queue keeps the slot taken instead).
 fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net)->bool{
     let release=move|net:&Net,handshaking:bool|{
         if outbound{net.counters.outbound.fetch_sub(1,Ordering::SeqCst);}
@@ -157,7 +160,7 @@ fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net
     let peer=Peer{id,addr,outbound,out:out.clone(),sock:Arc::new(stream),counters:net.counters.clone()};
     let write_deadline=net.limits.write_deadline;
     let wpeer=peer.clone();
-    if std::thread::Builder::new().name(format!("peer-{id}-w")).spawn(move||{
+    let writer=crate::threads::spawn(format!("peer-{id}-w"),crate::threads::IO_STACK,move||{
         let mut w=writer;let _=w.set_write_timeout(Some(write_deadline));
         loop{
             let frame={let Ok(mut q)=out.q.lock() else{break};
@@ -169,11 +172,14 @@ fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net
                 wpeer.close();return
             }
         }
-    }).is_err(){release(&net,true);return false}
-    if events.send(NetEvent::Connected(id,peer.clone())).is_err(){peer.close();release(&net,true);return false}
+    });
+    let Ok(writer)=writer else{release(&net,true);return false};
+    if events.send(NetEvent::Connected(id,peer.clone())).is_err(){peer.close();let _=writer.join();release(&net,true);return false}
+    let writer=Arc::new(Mutex::new(Some(writer)));let rwriter=writer.clone();
+    let join=|w:&Mutex<Option<std::thread::JoinHandle<()>>>|{if let Some(h)=w.lock().ok().and_then(|mut g|g.take()){let _=h.join();}};
     let rpeer=peer.clone();let rnet=net.clone();
     let tev=events.clone();
-    let spawned=std::thread::Builder::new().name(format!("peer-{id}")).spawn(move||{let net=rnet;let events=tev;
+    let spawned=crate::threads::spawn(format!("peer-{id}"),crate::threads::IO_STACK,move||{let net=rnet;let events=tev;
         let mut r=reader;let l=net.limits.clone();let mut hello=false;let mut last=Instant::now();let started=Instant::now();
         loop{
             let wait=if hello{last+l.idle_deadline}else{started+l.hello_deadline};
@@ -191,15 +197,15 @@ fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net
             last=Instant::now();
             if events.send(NetEvent::Message(id,m)).is_err(){break}
         }
-        rpeer.close();release(&net,!hello);let _=events.send(NetEvent::Closed(id));
+        rpeer.close();join(&rwriter);let _=events.send(NetEvent::Closed(id));release(&net,!hello);
     });
     // The node already knows this peer: it must also learn that it is gone.
-    if spawned.is_err(){peer.close();release(&net,true);let _=events.send(NetEvent::Closed(id));}
+    if spawned.is_err(){peer.close();join(&writer);let _=events.send(NetEvent::Closed(id));release(&net,true);}
     true
 }
 /// Accepts inbound peers on `listener` (loopback only), within the connection limits.
 pub fn listen(listener:TcpListener,events:SyncSender<NetEvent>,net:Net){
-    std::thread::Builder::new().name("p2p-listen".into()).spawn(move||{
+    crate::threads::spawn("p2p-listen",crate::threads::IO_STACK,move||{
         for s in listener.incoming(){
             let Ok(s)=s else{continue};
             if !s.peer_addr().map(|a|a.ip().is_loopback()).unwrap_or(false){continue}
@@ -210,7 +216,7 @@ pub fn listen(listener:TcpListener,events:SyncSender<NetEvent>,net:Net){
 /// Keeps an outbound connection to `addr`, reconnecting after loss. The node
 /// maintains `connected` from Connected/Closed events (outbound peer addresses).
 pub fn dial(addr:SocketAddr,events:SyncSender<NetEvent>,connected:Arc<Mutex<std::collections::HashSet<String>>>,net:Net){
-    std::thread::Builder::new().name(format!("dial-{addr}")).spawn(move||{
+    crate::threads::spawn(format!("dial-{addr}"),crate::threads::IO_STACK,move||{
         loop{
             let live=connected.lock().map(|s|s.contains(&addr.to_string())).unwrap_or(false);
             if !live{

@@ -316,6 +316,81 @@ mod a03{
         assert!(o.state.accounts.capacity()<=2*o.state.accounts.len()+16,"accounts table shrunk after 1000 empty calls");
         assert_eq!(o.state.accounts.len(),f.parent.accounts.len(),"the empty call targets do not persist");
     }
+    /// Proposal vectors (development/audit-2026-10-22/proposals): the expected results of an
+    /// independent model, replayed against the implementation for the recommended alternative.
+    /// Agreement shows the code implements the recommendation; it is not an approval.
+    mod proposals{
+        use super::*;
+        fn vectors(json:&str)->serde_json::Value{serde_json::from_str(json).unwrap()}
+        fn tx_by(key:&crate::txsign::Key,nonce:u64,to:Address,d:Bytes,gas:u64,value:u64)->Vec<u8>{
+            Tx{chain_id:777900,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas,to:Some(to),value:U256::from(value),data:d}.sign_1559(key)
+        }
+        fn halt_name(h:&Halt)->&'static str{match h{Halt::LogBytes=>"LogBytes",Halt::LogCount=>"LogCount",Halt::LogCap=>"LogCap",Halt::DirtyKeys=>"DirtyKeys",Halt::DirtyAccounts=>"DirtyAccounts",_=>"other"}}
+        #[test] fn log_acct_01_vectors(){
+            let v=vectors(include_str!("../../../../development/audit-2026-10-22/proposals/vectors/log-acct-01.json"));let rec=v["recommended"].as_str().unwrap();
+            let f=fx(&cfg(),&[(addr(0x41),LOGN),(addr(0x42),LOG2)]);let mut n=0;
+            for s in v["scenarios"].as_array().unwrap(){
+                let txs:Vec<Vec<u8>>=s["txs"].as_array().unwrap().iter().enumerate().map(|(i,t)|{
+                    let (count,log)=match t.get("repeat"){Some(r)=>(r.as_u64().unwrap(),&t["log"]),None=>(t.as_array().unwrap().len() as u64,&t[0])};
+                    let (topics,d)=(log["topics"].as_u64().unwrap(),log["data"].as_u64().unwrap());
+                    if topics==2{assert_eq!(count,1);tx(i as u64,addr(0x42),data(0,d),2_000_000,0)}else{assert_eq!(topics,0);tx(i as u64,addr(0x41),data(count,d),2_000_000,0)}
+                }).collect();
+                let e=&s["expected"][rec];let o=apply(&f,&txs,0).unwrap_or_else(|x|panic!("{}: {x:?}",s["id"]));let r=receipts(&o);
+                for (i,t) in e["txs"].as_array().unwrap().iter().enumerate(){
+                    let got=o.halts.iter().find(|(k,_)|*k==i).map(|(_,h)|halt_name(h));
+                    assert_eq!(got,t["halt"].as_str(),"{} tx {i}",s["id"]);
+                    assert_eq!(r[i].2 as u64,t["logs"].as_u64().unwrap_or(0),"{} tx {i} logs",s["id"]);
+                }
+                assert_eq!(o.log_bytes,e["blockLogBytes"].as_u64().unwrap(),"{}",s["id"]);n+=1;
+            }
+            assert_eq!(n,10);
+        }
+        /// SPRAY with its payees at 0x3001.. instead of 0x1001.. (fresh accounts).
+        fn spray_b()->Vec<u8>{let mut c=SPRAY.to_vec();let i=c.windows(3).position(|w|w==[0x61,0x10,0x00]).unwrap();c[i+1]=0x30;c}
+        #[test] fn d_a03_dirty_vectors(){
+            let v=vectors(include_str!("../../../../development/audit-2026-10-22/proposals/vectors/d-a03-dirty.json"));let rec=v["recommended"].as_str().unwrap();
+            let mut c=cfg();c.gas_limit=120_000_000;let b=spray_b();let f=fx(&c,&[(addr(0x45),SPRAY),(addr(0x47),&b)]);
+            let (alice,bob)=(devnet::account_key("alice"),devnet::account_key("bob"));
+            for s in v["scenarios"].as_array().unwrap(){
+                let mut nonces=std::collections::HashMap::new();
+                let txs:Vec<Vec<u8>>=s["txs"].as_array().unwrap().iter().map(|t|{
+                    let key=if t["sender"]=="bob"{&bob}else{&alice};let k=nonces.entry(t["sender"].as_str().unwrap().to_string()).or_insert(0u64);let nonce=*k;*k+=1;
+                    let to=if t["contract"]=="sprayerB"{addr(0x47)}else{addr(0x45)};let n=t["newAccounts"].as_u64().unwrap();
+                    // About 36,600 gas per new payee (CALL with value to a new account).
+                    tx_by(key,nonce,to,Bytes::from(word(n).to_vec()),if n>1{110_000_000}else{5_000_000},n)
+                }).collect();
+                let e=&s["expected"][rec];let o=apply(&f,&txs,0);
+                if e["blockValid"]==false{
+                    // The halt's own nonce/fee residue does not fit: the block is invalid (builders skip it).
+                    let err=o.err().unwrap_or_else(||panic!("{}: expected an invalid block",s["id"]));
+                    assert!(format!("{err:?}").contains(&format!("DirtyAccounts({})",e["invalidAt"])),"{}: {err:?}",s["id"]);continue;
+                }
+                let o=o.unwrap_or_else(|x|panic!("{}: {x:?}",s["id"]));let r=receipts(&o);
+                for (i,t) in e["txs"].as_array().unwrap().iter().enumerate(){assert_eq!(u64::from(r[i].0),t["status"].as_u64().unwrap(),"{} tx {i}",s["id"]);}
+            }
+        }
+        /// C1–C3 with SLOT_CAP = the genesis user slots + the model's headroom; C4 (system storage past SYS_SLOT_MAX)
+        /// is `system::issuance_tests::actual_phase2_post_storage_cap_rejects_entire_candidate`.
+        #[test] fn d_a03_caps_vectors(){
+            let v=vectors(include_str!("../../../../development/audit-2026-10-22/proposals/vectors/d-a03-caps.json"));let rec=v["recommended"].as_str().unwrap();
+            let p=&v["profile"];let headroom=p["slot_cap"].as_u64().unwrap()-p["user_slots"].as_u64().unwrap();
+            let net=devnet::build(&cfg()).unwrap();let (slots,_)=crate::user_phase::live_counts(net.genesis.state());
+            let mut c=cfg();c.slot_cap=slots+headroom;let f=fx(&c,&[(addr(0x44),FILL)]);
+            for s in v["scenarios"].as_array().unwrap().iter().filter(|s|s["input"]["sys_writes"].as_u64().unwrap()<1000){
+                let e=&s["expected"][rec];let o=apply(&f,&[tx(0,addr(0x44),data(s["input"]["user_writes"].as_u64().unwrap(),0),2_000_000,0)],0);
+                assert_eq!(o.is_ok(),e["blockValid"]==true,"{}",s["id"]);let o=o.unwrap();
+                let got=if o.halts.iter().any(|(_,h)|*h==Halt::SlotCap){"halt SlotCap"}else{"ok"};assert_eq!(got,e["userTx"],"{}",s["id"]);
+            }
+        }
+        #[test] fn log_cap_aggregate_vectors(){
+            let v=vectors(include_str!("../../../../development/audit-2026-10-22/proposals/vectors/log-cap-aggregate.json"));let rec=v["recommended"].as_str().unwrap();
+            let f=fx(&cfg(),&[(addr(0x41),LOGN)]);
+            for s in v["scenarios"].as_array().unwrap(){
+                let charge=s["charge"].as_u64().unwrap();let o=apply(&f,&[tx(0,addr(0x41),data(1,charge-36),1_000_000,0)],s["cumulative"].as_u64().unwrap()).unwrap();
+                assert_eq!(o.halts.first().map(|(_,h)|halt_name(h)),s["expected"][rec]["halt"].as_str(),"{}",s["id"]);
+            }
+        }
+    }
     #[test] fn slot_and_account_caps_halt_the_transaction(){
         let net=devnet::build(&cfg()).unwrap();let (slots,accts)=crate::user_phase::live_counts(net.genesis.state());
         let mut c=cfg();c.slot_cap=slots+10;c.acct_cap=accts+2+5;// +2: the injected contracts

@@ -13,8 +13,26 @@ use crate::{chain::{self,Entry},header::Header,net,node::{self,Limits},types::{B
 /// clones of the parent (begin_attempt, lock), the pool's pending state and its execution
 /// copies, and the rolling rebuild (two). Counted generously: 10.
 pub const TRANSIENT_SNAPSHOTS:u128=10;
-/// Resident bytes assumed per thread stack (pages actually touched; open obligation).
-pub const STACK_RESIDENT:u128=64*1024;
+/// glibc keeps up to 40 MiB of exited threads' stacks for reuse (the nptl stack cache);
+/// counted on every platform.
+pub const STACK_CACHE:u128=40<<20;
+/// Heap of one thread outside its stack (std's Thread, its packet and name).
+pub const THREAD_HEAP:u128=4096;
+/// The main thread only collects the arguments, spawns the consensus thread and joins it
+/// (main.rs). Its stack is reserved by the platform (RLIMIT_STACK, the PE header), not by
+/// pocold, so it is counted at 1 MiB by that code structure (A13-DERIVATION §4, residual).
+pub const MAIN_STACK_RESIDENT:u128=1<<20;
+/// EVM executions alive at once: blocks, pool re-execution, eth_call/eth_estimateGas and the
+/// admission timing all run on the consensus thread, one at a time.
+pub const EXECUTIONS:u128=1;
+const _:()=assert!(crate::rpc::CALL_GAS_MAX<=pocol_lp4_execution::apply::PER_CALL_GAS,"eth_call gas exceeds the execution model");
+/// Threads alive at once, every one created by `threads::spawn` with its reservation: per
+/// inbound peer a reader and a writer (`net::spawn_peer`: the reader joins the writer and
+/// releases the slot as its last action); per configured peer a dialer, an event forwarder,
+/// a reader and a writer; conn_max RPC connection threads (each releases its slot as its last
+/// action); the miner (joined when replaced), the miner and listener forwarders, the timer,
+/// the P2P listener and the RPC acceptor (6). Plus the consensus and main threads.
+pub fn io_threads(peers_max:usize,dials:usize,conn_max:usize)->Option<u128>{add(&[mul(2,peers_max as u128)?,mul(4,dials as u128)?,conn_max as u128,6])}
 /// Smallest valid transaction encoding (a signed legacy transfer exceeds it).
 pub const MIN_TX_BYTES:u128=85;
 /// Receipt encoding without logs: status, cumulative gas, a 256-byte bloom, list headers.
@@ -25,10 +43,20 @@ pub const REASON_MAX:u128=chain::REASON_MAX as u128;
 /// Largest encoded header for S_max shares: fixed fields <= 768 bytes, 9 per share nonce.
 pub fn header_max(s_max:u16)->u128{768+9*u128::from(s_max)}
 
+/// What the bound does not establish (A13-DERIVATION §4). The total is the sum of requested
+/// heap bytes and reserved stacks under these conditions, not an unconditional bound on the
+/// resident memory of the process.
+pub const CONDITIONS:&[(&str,&str)]=&[
+    ("allocator-overhead","allocator per-allocation overhead and fragmentation are not modelled"),
+    ("transient-snapshot-inventory","TRANSIENT_SNAPSHOTS (10) and EXECUTIONS (1) are inventories by code inspection, not enforced by a counter"),
+    ("main-thread","the main thread's stack is reserved by the platform; counted at 1 MiB because it only spawns and joins"),
+    ("revm-representation","the execution term relies on revm 19.7 behaviour checked by source inspection (iterative frames, SharedMemory truncation, fixed stack capacity) and by measured adversarial peaks"),
+    ("cpu-and-timing","CPU costs (world-root rebuild, chain scans, pool re-execution, deep-fork rebuild) are not memory terms; worst-case timing is not bounded"),
+];
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct Bound{
     pub snapshots:u128,pub snapshot_bytes:u128,pub code:u128,pub history:u128,pub side_blocks:u128,
-    pub queues:u128,pub rpc:u128,pub threads:u128,pub total:u128,
+    pub queues:u128,pub rpc:u128,pub threads:u128,pub execution:u128,pub total:u128,
 }
 fn add(v:&[u128])->Option<u128>{v.iter().try_fold(0u128,|a,b|a.checked_add(*b))}
 fn mul(a:u128,b:u128)->Option<u128>{a.checked_mul(b)}
@@ -76,17 +104,21 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let peers=mul(l.peers_max as u128+dials as u128,add(&[l.queue_bytes_max as u128,2*frame,4096])?)?;
     let events=add(&[mul(node::EVENT_QUEUE as u128,frame+256)?,mul((1+dials) as u128,mul(net::NET_EVENT_QUEUE as u128,frame+256)?)?])?;
     let queues=add(&[pool,orphans,future,templates,seen,caches,peers,events])?;
-    // RPC: per connection a request (<= MAX_BODY + 16 KiB headers) and a response (a batch is
+    // RPC: per connection a request (<= REQ_BUF, headers alone <= HEAD_MAX) and a response (a batch is
     // <= BATCH_RESP_MAX plus one error item per member); the consensus thread builds one
     // response at a time: the batch so far plus one member (its JSON tree and string, a log
     // result stopping at RESP_MAX), counted as 4 x RESP_MAX.
-    let r=&limits.rpc;use crate::rpc::{MAX_BODY,RESP_MAX,BATCH_RESP_MAX,BATCH_MAX};
-    let rpc=add(&[mul(r.conn_max as u128,(MAX_BODY+16384+BATCH_RESP_MAX+BATCH_MAX*256) as u128)?,(BATCH_RESP_MAX+4*RESP_MAX) as u128])?;
-    // Per configured peer: dialer, event forwarder, reader and writer.
-    let threads=mul(add(&[2*l.peers_max as u128,4*dials as u128,r.conn_max as u128,8])?,STACK_RESIDENT)?;
-    let total=add(&[mul(snapshots,snapshot_bytes)?,code,history,side_blocks,queues,rpc,threads])?;
+    let r=&limits.rpc;use crate::rpc::{REQ_BUF,HEAD_MAX,RESP_MAX,BATCH_RESP_MAX,BATCH_MAX};
+    let rpc=add(&[mul(r.conn_max as u128,(REQ_BUF+HEAD_MAX+BATCH_RESP_MAX+BATCH_MAX*256) as u128)?,(BATCH_RESP_MAX+4*RESP_MAX) as u128])?;
+    // Threads: reserved stacks (an upper bound on their resident stack) and per-thread heap.
+    use crate::threads::{IO_STACK,CONSENSUS_STACK};
+    let io=io_threads(l.peers_max,dials,r.conn_max)?;
+    let threads=add(&[mul(io,IO_STACK as u128+THREAD_HEAP)?,CONSENSUS_STACK as u128,MAIN_STACK_RESIDENT,2*THREAD_HEAP,STACK_CACHE])?;
+    // EVM execution buffers, journal, transient storage and loaded state (A13 obligation 4).
+    let execution=mul(EXECUTIONS,memory::execution(memory::execution_gas(cp.GAS_LIMIT))?)?;
+    let total=add(&[mul(snapshots,snapshot_bytes)?,code,history,side_blocks,queues,rpc,threads,execution])?;
     let _=size_of::<Header>()+size_of::<Body>();
-    Some(Bound{snapshots,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,total})
+    Some(Bound{snapshots,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,execution,total})
 }
 /// Boot check: the bound must fit the node's memory budget.
 pub fn check(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:usize)->Result<Bound,String>{

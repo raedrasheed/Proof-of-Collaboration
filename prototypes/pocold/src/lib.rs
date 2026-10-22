@@ -13,6 +13,17 @@
 #[path="../../lp1-node/src/timing.rs"] #[allow(dead_code)] pub mod timing;
 pub mod site;
 pub mod secp_backend;
+/// A13 obligation 3 (enforced): every pocold thread is created here with an explicit stack
+/// reservation, and its resident stack cannot exceed that reservation (an overflow hits the
+/// guard page and aborts). The thread inventory is in `resources::threads`.
+pub mod threads{
+    /// Network, RPC connection, forwarding, timer and miner threads.
+    pub const IO_STACK:usize=256*1024;
+    /// The consensus thread: admission, journal replay, block execution, RPC methods.
+    pub const CONSENSUS_STACK:usize=16<<20;
+    pub fn spawn<F,T>(name:impl Into<String>,stack:usize,f:F)->std::io::Result<std::thread::JoinHandle<T>>
+    where F:FnOnce()->T+Send+'static,T:Send+'static{std::thread::Builder::new().name(name.into()).stack_size(stack).spawn(f)}
+}
 pub mod types;pub mod chain;pub mod store;pub mod miner;pub mod net;pub mod node;pub mod rpc;pub mod resources;
 
 use pocol_lp4_execution::{admission::{self,NodeLocal,Request},devnet,gate::FactClass,profile::{NodeKind,ProfileKind}};
@@ -20,13 +31,25 @@ use pocol_lp4_execution::{admission::{self,NodeLocal,Request},devnet,gate::FactC
 /// The node-local parameters of a single-host devnet node, with pocold's actual
 /// gossip frame limit (net::MAX_FRAME) for every message type and its RPC limits.
 pub fn single_host_local()->NodeLocal{NodeLocal{gossip:[net::MAX_FRAME as u32;6],rpc:rpc_facts(&rpc::Limits::default()),..NodeLocal::single_host()}}
-/// R26 facts: the RpcGuard values pocold implements are taken from its code (connection cap,
-/// request size, RESP_MAX, batch limits, log limits). The remaining RpcGuard fields (HEAVY/LIGHT
-/// response memory, scratch, pacing, rate buckets) are not implemented by pocold and keep their
-/// nominal values (open obligation, development/audit-2026-10-22/A13-DERIVATION.md).
-pub fn rpc_facts(l:&rpc::Limits)->pocol_lp4_execution::param_gate::RpcLimits{
-    pocol_lp4_execution::param_gate::RpcLimits{conn_max:l.conn_max as u64,req_buf:rpc::MAX_BODY as u64,resp_max:rpc::RESP_MAX as u64,batch_resp_max:rpc::BATCH_RESP_MAX as u64,
-        batch_max:rpc::BATCH_MAX as u64,logs_count_max:rpc::LOGS_COUNT_MAX as u64,logs_scan_bytes:rpc::LOGS_SCAN_BYTES as u64,..Default::default()}
+/// R26 facts (D-A02-SCOPE): only the RpcGuard limits pocold enforces, taken from its code and
+/// its running limits. The other RpcGuard mechanisms (HEAVY/LIGHT classes and their response
+/// memory, scratch, queues, pacing, rate buckets, send watchdog, timers) are not implemented,
+/// so their fields are absent, never nominal; admission reports them and can only be an
+/// experimental-devnet admission.
+pub const RPC_ENFORCED:[&str;7]=["conn_max","req_buf","resp_max","batch_resp_max","batch_max","logs_count_max","logs_scan_bytes"];
+pub fn rpc_facts(l:&rpc::Limits)->admission::RpcFacts{
+    let v=[l.conn_max,rpc::REQ_BUF,rpc::RESP_MAX,rpc::BATCH_RESP_MAX,rpc::BATCH_MAX,rpc::LOGS_COUNT_MAX,rpc::LOGS_SCAN_BYTES];
+    let present:Vec<(&str,u64)>=RPC_ENFORCED.iter().zip(v).map(|(k,x)|(*k,x as u64)).collect();
+    admission::RpcFacts::enforced(&present).expect("RPC_ENFORCED names RpcGuard fields")
+}
+
+/// The admission scope, waivers and conditions, for devnet.json and status (D-A02-SCOPE).
+pub fn admission_json(a:&admission::Admitted)->serde_json::Value{
+    let r=a.report();
+    serde_json::json!({"scope":r.scope.name(),"specificationCompliant":a.specification_compliant(),"binding":types::hex(&r.binding),
+        "waivers":r.waivers.iter().map(|w|serde_json::json!({"rule":w.rule,"absent":w.absent,"waived":w.waived,"checked":w.checked})).collect::<Vec<_>>(),
+        "conditions":r.conditions.iter().map(|c|serde_json::json!({"id":c.id,"rules":c.rules,"detail":c.detail})).collect::<Vec<_>>(),
+        "notes":r.notes,"deferred":r.deferred})
 }
 
 /// Loads a devnet's published files and runs the full ParamGate admission (A02): the
@@ -42,6 +65,6 @@ pub fn load_spec(dir:&std::path::Path,local:&NodeLocal)->Result<chain::Spec,Stri
     let info:serde_json::Value=std::fs::read_to_string(dir.join("devnet.json")).ok().and_then(|t|serde_json::from_str(&t).ok()).unwrap_or_default();
     let calibration=info["calibration"]["hashesPerSecond"].as_u64().map(|r|(r,FactClass::SyntheticFixture));
     let measured=admission::measure(&spec_bytes,&alloc,1);
-    let req=Request{spec_bytes:&spec_bytes,alloc:&alloc,forks:&[(1,0)],kind:ProfileKind::Simnet,node:NodeKind::Simnet,local,calibration,timing:measured.as_ref().ok()};
+    let req=Request{spec_bytes:&spec_bytes,alloc:&alloc,forks:&[(1,0)],kind:ProfileKind::Simnet,node:NodeKind::Simnet,local,calibration,timing:measured.as_ref().ok(),scope:admission::Scope::ExperimentalDevnet};
     admission::admit(&req).map(chain::Spec::new).map_err(|e|match &measured{Err(why)=>format!("{e}; timing: {why}"),Ok(_)=>e.to_string()})
 }

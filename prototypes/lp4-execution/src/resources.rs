@@ -92,4 +92,53 @@ pub mod memory{
     pub fn code_bytes(logical:u128,codes:u128)->Option<u128>{
         logical.checked_add(logical/8)?.checked_add(codes.checked_mul(33+64)?)
     }
+
+    /// Largest gas any single EVM execution can consume: a SYSTEM call is capped at
+    /// apply::PER_CALL_GAS, a transaction at GAS_LIMIT, pocold's eth_call/eth_estimateGas at
+    /// the same 30M (pocold::rpc::CALL_GAS_MAX).
+    pub fn execution_gas(gas_limit:u64)->u128{u128::from(gas_limit.max(crate::apply::PER_CALL_GAS))}
+    /// Call frames alive at once (revm `CALL_STACK_LIMIT` + the top frame) and their sizes.
+    pub const FRAMES:u128=revm::CALL_STACK_LIMIT as u128+1;
+    pub const FRAME_BYTES:u128=4096;
+    pub const STACK_BYTES:u128=(revm::interpreter::STACK_LIMIT*32) as u128;
+    pub const JOURNAL_ENTRY:u128=std::mem::size_of::<revm::JournalEntry>() as u128;
+    pub const TRANSIENT_ENTRY:u128=std::mem::size_of::<((Address,U256),U256)>() as u128;
+    pub const STATE_ACCOUNT:u128=std::mem::size_of::<(Address,revm::primitives::Account)>() as u128;
+    pub const STATE_SLOT:u128=std::mem::size_of::<(U256,revm::primitives::EvmStorageSlot)>() as u128;
+    pub const LOG_ENTRY:u128=std::mem::size_of::<revm::primitives::Log>() as u128;
+    /// Process-lifetime precompile tables (the KZG trusted setup, loaded once).
+    pub const PRECOMPILE_STATIC:u128=8<<20;
+    /// Memory words purchasable with `g` gas in one frame: the largest w with 3w + w²/512 <= g.
+    pub fn words(g:u128)->u128{let (mut lo,mut hi)=(0u128,1u128<<40);while lo<hi{let m=(lo+hi+1)/2;if 3*m+m*m/512<=g{lo=m}else{hi=m-1}}lo}
+    /// A13 obligation 4: heap of one EVM execution (revm 19.7, CANCUN) consuming at most `gas`.
+    /// Every term is paid for in gas (yellow paper / EIP-2929/1153/3860 costs):
+    /// - memory: at most 2·FRAMES regions are paid for at once (active frames and one returned
+    ///   child per frame whose output is held); their words cost 3w + w²/512 each, from disjoint
+    ///   gas, so by convexity their total is at most 2·FRAMES·words(gas/(2·FRAMES)) = W. The
+    ///   shared buffer keeps at most twice its peak (Vec growth), each frame's input is a range
+    ///   of its caller's memory, and each frame holds one return buffer (a returned child's
+    ///   memory or a precompile output no larger than the caller's memory, +64 B): 128·W bytes;
+    /// - stacks and frames: FRAMES × (STACK_LIMIT words + a 4 KiB frame);
+    /// - journal: every entry-producing operation costs >= 100 gas and adds <= 2 entries, plus
+    ///   two per frame; Vec growth doubles;
+    /// - transient storage (TSTORE >= 100 gas per key) and loaded state (a cold account >= 2400,
+    ///   a cold slot >= 1900 including access lists; +32 fixed accounts), each table at most
+    ///   twice its final size while it rehashes, the loaded state also cached by the engine DB;
+    /// - logs: data <= gas/8 bytes, <= gas/375 entries and topics; created code <= gas/200
+    ///   bytes (code deposit) with its analysis, <= gas/32000 creations;
+    /// - precompile working memory <= 8 × the largest single-frame memory, plus the static tables.
+    pub fn execution(gas:u128)->Option<u128>{
+        let n=2*FRAMES;let w=n.checked_mul(words(gas/n))?;
+        let buffers=w.checked_mul(128)?.checked_add(FRAMES*64)?;
+        let frames=FRAMES.checked_mul(STACK_BYTES+FRAME_BYTES)?;
+        let journal=(gas/50+2*FRAMES).checked_mul(JOURNAL_ENTRY)?.checked_mul(2)?.checked_add(FRAMES*24)?;
+        let transient=tables(gas/100,1,TRANSIENT_ENTRY)?.checked_mul(2)?;
+        let accounts=gas/2400+32;let slots=gas/1900;
+        let state=tables(accounts,1,STATE_ACCOUNT)?.checked_add(tables(slots,accounts.min(slots),STATE_SLOT)?)?.checked_add(tables(accounts,1,ACCOUNT_ENTRY)?)?
+            .checked_add(tables(slots,accounts.min(slots),SLOT_ENTRY)?)?.checked_mul(2)?;
+        let logs=(gas/8).checked_add((gas/375).checked_mul(LOG_ENTRY*2+32)?)?;
+        let code=code_bytes(gas/200,gas/32000+1)?;
+        let precompile=words(gas).checked_mul(32*8)?.checked_add(PRECOMPILE_STATIC)?;
+        buffers.checked_add(frames)?.checked_add(journal)?.checked_add(transient)?.checked_add(state)?.checked_add(logs)?.checked_add(code)?.checked_add(precompile)
+    }
 }

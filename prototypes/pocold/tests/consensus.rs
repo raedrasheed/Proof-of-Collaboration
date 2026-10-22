@@ -478,6 +478,11 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     let err=Node::open(conf(Limits::default()),admitted(&big)).err().expect("network-scale caps exceed the budget");assert!(err.contains("exceeds the node memory budget"),"{err}");
     let b=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),32,8,&Limits::default(),0).unwrap();
     assert!(b.total<=u128::from(pocold::node::MEM_BUDGET),"the devnet default fits: {b:?}");
+    // The record for A13-DERIVATION.md: side_max 8, default limits, two configured peers.
+    let d=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),32,8,&Limits::default(),2).unwrap();assert!(d.total<=u128::from(pocold::node::MEM_BUDGET),"{d:?}");
+    let mib=|x:u128|format!("{:.1}",x as f64/1048576.0);
+    println!("A13-BOUND {}",serde_json::json!({"totalGiB":format!("{:.2}",d.total as f64/1073741824.0),"budgetGiB":pocold::node::MEM_BUDGET>>30,"snapshots":d.snapshots,"snapshotMiB":mib(d.snapshot_bytes),
+        "codeMiB":mib(d.code),"historyMiB":mib(d.history),"sideBlocksMiB":mib(d.side_blocks),"queuesMiB":mib(d.queues),"rpcMiB":mib(d.rpc),"threadsMiB":mib(d.threads),"executionMiB":mib(d.execution)}));
     Node::open(conf(Limits::default()),admitted(&cfg(&["a","b","c"]))).expect("the default devnet boots");
     let _=std::fs::remove_dir_all(&dir);
 }
@@ -579,4 +584,19 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     let q=format!(r#"{{"jsonrpc":"2.0","id":6,"method":"eth_getLogs","params":[{{"fromBlock":"0x{x:x}","toBlock":"latest"}}]}}"#);
     let v:serde_json::Value=serde_json::from_str(&pocold::rpc::handle(&mut node,q.as_bytes())).unwrap();assert_eq!(v["result"].as_array().map(|a|a.len()),Some(546),"{}",&v.to_string()[..200.min(v.to_string().len())]);
     let _=std::fs::remove_dir_all(&dir);
+}
+
+// ---------------- proposal vectors (development/audit-2026-10-22/proposals): D-BODY-MAX ----------------
+/// The independent model's encoded lengths equal pocold's Body encoding, and the decode path
+/// (BODY_MAX on the encoded body, the recommended alternative) accepts exactly the bodies the
+/// model marks valid. Agreement is not an approval of the proposal.
+#[test] fn d_body_max_vectors(){
+    let v:serde_json::Value=serde_json::from_str(include_str!("../../../development/audit-2026-10-22/proposals/vectors/d-body-max.json")).unwrap();
+    let rec=v["recommended"].as_str().unwrap();let max=v["constants"]["BODY_MAX"].as_u64().unwrap() as usize;
+    for s in v["scenarios"].as_array().unwrap(){
+        let items=|k:&str|s[k].as_array().unwrap().iter().map(|n|vec![0xabu8;n.as_u64().unwrap() as usize]).collect::<Vec<_>>();
+        let body=pocold::types::Body{txs:items("txSizes"),evidence:items("evidenceSizes")};let enc=body.encode();
+        assert_eq!(enc.len() as u64,s["encodedLen"].as_u64().unwrap(),"{}",s["id"]);
+        assert_eq!(pocold::types::Body::decode(&enc,max).is_ok(),s["expected"][rec]["valid"]==true,"{}",s["id"]);
+    }
 }

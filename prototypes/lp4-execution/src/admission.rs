@@ -21,6 +21,14 @@
 //!   arithmetic. The simnet retentionStress exception is the gate's own (governance.md R21).
 //! - calibration (R25d): the recorded H_cal and its class; a devnet records its chosen rate
 //!   as a synthetic fixture.
+//! - RpcGuard (R26): `RpcFacts`. Only fields the node enforces are present; an absent field
+//!   enters the gate as 0 and is never given a nominal value (`scope`).
+//!
+//! Scope (D-A02-SCOPE): `Scope::Specification` admits only when no `Condition` remains (an
+//! absent or fixture RpcGuard field, a synthetic calibration, a timing measurement that is not
+//! a bound, an assumed gas monotonicity, the gate's deferred LP3 items, the R21 exception).
+//! `Scope::ExperimentalDevnet` admits a simnet profile on a simnet node with those conditions
+//! reported, and waives only the R26 predicates that read absent fields.
 //!
 //! No bypass: outside this crate a `Genesis` can only be derived from, never built for,
 //! an unadmitted identity, and `Admitted` has no public constructor.
@@ -37,6 +45,8 @@
 //!     pocol_lp4_execution::admission::Admitted{profile:p,genesis:g,spec_bytes:vec![],local:pocol_lp4_execution::admission::NodeLocal::single_host(),report:todo!()}
 //! }
 //! ```
+mod scope;
+pub use scope::{Condition,RpcFacts,Scope,Waiver,RPC_FIELDS,R26_PREDICATES,r26_partial};
 use revm::{InMemoryDB,primitives::{AccountInfo,Address,B256,Bytecode,Bytes,U256,keccak256}};
 use crate::{apply::{self,BlockInput,Genesis,ParentResult,Proposer,SystemPrograms},
     gate::{self,Calibration,FactClass,GateProfile,IdentityFacts,LocalParams,Phase,PhaseFacts,ResourceFacts},
@@ -59,13 +69,13 @@ pub struct NodeLocal{
     pub gossip:[u32;6],
     /// R21 exception; the gate honours it only for a simnet profile on a simnet node.
     pub retention_stress:bool,
-    pub rpc:RpcLimits,
+    pub rpc:RpcFacts,
 }
 impl NodeLocal{
     /// D-A02-PROFILE (b): one host, one clock, so φ=Φ=0 exactly; Δ=1, t_exec=1, Δ_rel=5, Γ=5.
-    pub fn single_host()->Self{Self{delta:1,phi:0,t_exec:1,delta_rel:5,gamma:5,k_hist:32,side_max:8,gossip:DEFAULT_GOSSIP,retention_stress:true,rpc:RpcLimits::default()}}
+    pub fn single_host()->Self{Self{delta:1,phi:0,t_exec:1,delta_rel:5,gamma:5,k_hist:32,side_max:8,gossip:DEFAULT_GOSSIP,retention_stress:true,rpc:RpcFacts::fixture(RpcLimits::default())}}
     /// P11 (governance.md): Δ=1, φ=1 (Φ=2), t_exec=1, Δ_rel=8, Γ=5. For multi-host use.
-    pub fn p11()->Self{Self{delta:1,phi:1,t_exec:1,delta_rel:8,gamma:5,k_hist:32,side_max:8,gossip:DEFAULT_GOSSIP,retention_stress:false,rpc:RpcLimits::default()}}
+    pub fn p11()->Self{Self{delta:1,phi:1,t_exec:1,delta_rel:8,gamma:5,k_hist:32,side_max:8,gossip:DEFAULT_GOSSIP,retention_stress:false,rpc:RpcFacts::fixture(RpcLimits::default())}}
     /// Φ, saturating so that an overflowing φ fails R1 instead of wrapping.
     pub fn capital_phi(&self)->u32{self.phi.checked_mul(2).unwrap_or(u32::MAX)}
 }
@@ -124,6 +134,7 @@ pub struct Request<'a>{
     /// Recorded H_cal and its provenance class.
     pub calibration:Option<(u64,FactClass)>,
     pub timing:Option<&'a Timing>,
+    pub scope:Scope,
 }
 
 /// Every violated rule in numeric order, the gate's missing-fact entries, and notes
@@ -151,6 +162,11 @@ pub struct Report{
     pub r21_exception:bool,
     pub historical_bytes:u64,
     pub notes:Vec<String>,
+    pub scope:Scope,
+    /// Rules partly not evaluated (ExperimentalDevnet only).
+    pub waivers:Vec<Waiver>,
+    /// Why this admission is not specification evidence; empty only for `Scope::Specification`.
+    pub conditions:Vec<Condition>,
 }
 
 /// The only bootable configuration. Fields are private; `admit` is the only constructor.
@@ -162,6 +178,9 @@ impl Admitted{
     pub fn genesis_hash(&self)->[u8;32]{self.profile.genesis_hash()}
     pub fn local(&self)->&NodeLocal{&self.local}
     pub fn report(&self)->&Report{&self.report}
+    pub fn scope(&self)->Scope{self.report.scope}
+    /// True only for a `Scope::Specification` admission, which has no waiver and no condition.
+    pub fn specification_compliant(&self)->bool{self.report.scope==Scope::Specification&&self.report.waivers.is_empty()&&self.report.conditions.is_empty()}
 }
 
 /// Identity used only to derive builder facts: the derived allocRoot depends on the CP,
@@ -206,7 +225,7 @@ pub fn admit(r:&Request<'_>)->Result<Admitted,Rejection>{
     let gp=GateProfile{id:"pocold-admission-v1".into(),cp:cp.clone(),genesis_pre:r.spec_bytes.to_vec(),genesis_hash:hash,chain_id:spec.chain_id,kind:r.kind,forks:r.forks.to_vec(),
         local:LocalParams{delta:l.delta,phi:l.phi,capital_phi:big_phi,t_exec:l.t_exec,delta_rel:l.delta_rel,gamma:l.gamma,x_h:sat_u64(m.x_h),x_w:sat_u64(m.x_w),
             r_keep:R_KEEP,k_hist:l.k_hist,k_final:K_FINAL,k_view:K_VIEW,hist_trie_budget:HIST_TRIE_BUDGET,gossip:l.gossip,retention_stress:l.retention_stress},
-        rpc:l.rpc.clone()};
+        rpc:l.rpc.values().clone()};
     let binding=gp.binding();
     let model=gate::RESOURCE_MODEL.to_string();
 
@@ -239,16 +258,55 @@ pub fn admit(r:&Request<'_>)->Result<Admitted,Rejection>{
         artifact:digest("PoColCalibration",&[&rate.to_be_bytes(),&cp.T_blk.to_be_bytes()])});
     if r.calibration.is_none(){notes.push("calibration: no H_cal recorded (R25d)".into())}
 
-    let report=gate::check(&gp,Some(&resource),identity.as_ref(),calibration.as_ref(),r.node);
+    let mut report=gate::check(&gp,Some(&resource),identity.as_ref(),calibration.as_ref(),r.node);
+    let hist_exception=hist>HIST_TRIE_BUDGET;
+    let conditions=conditions(&cp,r,l,timing,hist_exception,&report.deferred);
+    let mut waivers=Vec::new();
+    match r.scope{
+        Scope::ExperimentalDevnet=>{
+            if r.kind==ProfileKind::Network||r.node!=NodeKind::Simnet{
+                return Err(terminal("R22","the experimental-devnet scope admits only a simnet profile on a simnet node".into()))}
+            if !l.rpc.absent().is_empty(){
+                let (w,failed)=r26_partial(&l.rpc);
+                if failed.is_empty(){report.violations.retain(|v|v!="R26")}else{notes.push(format!("R26: enforced RpcGuard fields fail {failed:?}"))}
+                waivers.push(w);
+            }
+        }
+        Scope::Specification=>{
+            if !conditions.is_empty(){
+                let mut rules=report.violations.clone();rules.extend(conditions.iter().flat_map(|c|c.rules.iter().map(|x|x.to_string())));
+                rules.sort_by_key(|x|x[1..].parse::<u32>().unwrap_or(u32::MAX));rules.dedup();
+                let mut missing:Vec<String>=report.missing.iter().map(|s|s.to_string()).collect();missing.extend(conditions.iter().map(|c|format!("specification:{}",c.id)));
+                notes.extend(conditions.iter().map(|c|c.detail.clone()));
+                return Err(Rejection{rules,missing,notes})
+            }
+        }
+    }
     if !report.accepted(){return Err(Rejection{rules:report.violations,missing:report.missing.iter().map(|s|s.to_string()).collect(),notes})}
 
     // Accepted: the identity and genesis that boot uses.
     let profile=ProfileIdentity::validate(r.spec_bytes,&hash,spec.chain_id,r.kind,r.node,r.forks).map_err(|e|terminal(match e{crate::profile::ProfileError::R22=>"R22",_=>"R24"},format!("{e:?}")))?;
     let genesis=Genesis::build(r.alloc,&profile,&programs).map_err(|e|terminal("R24",format!("genesis: {e:?}")))?;
-    let r21_exception=hist>HIST_TRIE_BUDGET;
+    let r21_exception=hist_exception;
     if r21_exception{notes.push(format!("R21: retained-state bound {hist} B exceeds {HIST_TRIE_BUDGET} B; admitted by the simnet retentionStress exception"))}
     Ok(Admitted{profile,genesis,spec_bytes:r.spec_bytes.to_vec(),local:l.clone(),
-        report:Report{binding,resource_class:report.resource_class,identity_class:report.identity_class,calibration_class:report.calibration_class,deferred:report.deferred,r21_exception,historical_bytes:hist,notes}})
+        report:Report{binding,resource_class:report.resource_class,identity_class:report.identity_class,calibration_class:report.calibration_class,deferred:report.deferred,r21_exception,historical_bytes:hist,notes,
+            scope:r.scope,waivers,conditions}})
+}
+
+/// Every reason the admitted facts are not specification evidence (D-A02-SCOPE).
+fn conditions(cp:&ConsensusParams,r:&Request<'_>,l:&NodeLocal,timing:Option<&Timing>,hist_exception:bool,deferred:&[&'static str;3])->Vec<Condition>{
+    let mut c=Vec::new();
+    let mut add=|id:&'static str,rules:&'static [&'static str],detail:String|c.push(Condition{id,rules,detail});
+    if l.rpc.is_fixture(){add("rpc-fixture",&["R26"],"RpcGuard: the values are a fixture, not limits this node enforces".into())}
+    if !l.rpc.absent().is_empty(){add("rpc-absent",&["R26"],format!("RpcGuard: mechanisms this node does not enforce: {}",l.rpc.absent().join(", ")))}
+    if matches!(r.calibration,Some((_,FactClass::SyntheticFixture))){add("calibration-synthetic",&["R25"],"calibration: H_cal is a synthetic fixture (devnet --work-bits), not a measured hash rate".into())}
+    if let Some(t)=timing{add("timing-not-a-bound",&["R14","R19"],format!("timing: {} apply samples of the synthetic GAS_LIMIT compute workload on this host; not a p99 or worst-case bound (A13-DERIVATION §4)",t.samples))}
+    if in_gas_domain(cp){add("gas-monotonicity-assumed",&["R18"],"SYS gas: GAS_ENVELOPE holds at the fixture's maxima; monotonicity in the domain fields is assumed (A13-DERIVATION §4)".into())}
+    for d in deferred{add(match *d{"LP4:general-R21"=>"gate-deferred-general-R21","LP4:general-R18"=>"gate-deferred-general-R18",_=>"gate-deferred-caps64"},
+        if d.ends_with("R21"){&["R21"]}else{&["R18"]},format!("gate: deferred LP3 obligation {d}"))}
+    if hist_exception{add("r21-retention-stress",&["R21"],"R21: admitted only by the simnet retentionStress exception".into())}
+    c
 }
 
 /// Calibration code: JUMPDEST; PUSH1 0; JUMP — loops until the transaction's gas is spent.

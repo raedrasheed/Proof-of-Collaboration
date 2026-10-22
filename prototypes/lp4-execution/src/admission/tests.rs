@@ -116,7 +116,7 @@ fn sh()->NodeLocal{NodeLocal::single_host()}
     let r=rules(admit(&Request{alloc:&big,..n.request(&sh(),Some(&tt))}));assert!(r.contains(&"R23".to_string()),"{r:?}");
     assert_eq!(rules(admit(&Request{calibration:Some((n.hash_rate+1,FactClass::SyntheticFixture)),..n.request(&sh(),Some(&tt))})),v(&["R25"]),"target_g is not the calibrated value");
     let e=admit(&Request{calibration:None,..n.request(&sh(),Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&["R25"]));assert!(!e.missing.is_empty());
-    let mut rpc=RpcLimits::default();rpc.conn_max=1000;assert_eq!(rules(run(&n,&t,&NodeLocal{rpc,..sh()})),v(&["R26"]));
+    let mut rpc=RpcLimits::default();rpc.conn_max=1000;assert_eq!(rules(run(&n,&t,&NodeLocal{rpc:RpcFacts::fixture(rpc),..sh()})),v(&["R26"]));
     let mut bytes=n.spec_bytes.clone();bytes.pop();assert_eq!(rules(admit(&Request{spec_bytes:&bytes,..n.request(&sh(),Some(&tt))})),v(&["R24"]),"undecodable GenesisSpec");
 }
 #[test] fn rejections_are_deterministic_and_name_their_causes(){
@@ -124,4 +124,77 @@ fn sh()->NodeLocal{NodeLocal::single_host()}
     let a=run(&n,&t,&sh()).err().unwrap();let b=run(&n,&t,&sh()).err().unwrap();
     assert_eq!(a,b);assert_eq!(a.rules,v(&["R5","R7","R9","R13"]));
     assert!(a.to_string().starts_with("-32018 ParamGate rejected [R5, R7, R9, R13]"),"{a}");
+}
+
+// D-A02-SCOPE: an absent RpcGuard field is never nominal; specification scope refuses every open
+// condition; the experimental-devnet scope waives only R26 predicates reading absent fields.
+/// pocold's enforced RpcGuard fields (pocold::RPC_ENFORCED) at its values.
+fn pocold_like()->RpcFacts{RpcFacts::enforced(&[("conn_max",32),("req_buf",1<<20),("resp_max",8<<20),("batch_resp_max",16<<20),("batch_max",20),("logs_count_max",10000),("logs_scan_bytes",32<<20)]).unwrap()}
+#[test] fn r26_predicates_are_the_gate_conjunction(){
+    // Deterministic configurations around every boundary; the split must equal the gate's verdict.
+    let mut x=0x9e3779b97f4a7c15u64;let mut next=||{x^=x<<13;x^=x>>7;x^=x<<17;x};
+    let d=RpcLimits::default();let (mut agree,mut pass,mut fail)=(0,0,0);
+    let mut fails_alone=vec![false;R26_PREDICATES.len()];
+    for i in 0..20000u32{
+        let mut l=d.clone();
+        for f in RPC_FIELDS{if next()%6==0{let v=scope_slot(&mut l,f);*v=match next()%6{0=>0,1=>*v/2,2=>v.saturating_mul(2),3=>v.saturating_mul(3),4=>v.saturating_add(1),_=>v.saturating_sub(1)}}}
+        if i%1000==0{l=d.clone()}
+        let each:Vec<bool>=R26_PREDICATES.iter().map(|p|(p.2)(&l)).collect();
+        assert_eq!(each.iter().all(|b|*b),l.satisfies_r26(),"{l:?}");agree+=1;
+        if l.satisfies_r26(){pass+=1}else{fail+=1}
+        if each.iter().filter(|b|!**b).count()==1{fails_alone[each.iter().position(|b|!*b).unwrap()]=true}
+    }
+    assert!(agree==20000&&pass>100&&fail>100,"{pass} {fail}");
+    // Every predicate except the derive guard can decide the verdict alone (none is dead code).
+    let dead:Vec<&str>=R26_PREDICATES.iter().zip(&fails_alone).filter(|(p,f)|!**f&&p.0!="derive").map(|(p,_)|p.0).collect();
+    assert!(dead.is_empty(),"never the only failing predicate: {dead:?}");
+}
+fn scope_slot<'a>(l:&'a mut RpcLimits,f:&str)->&'a mut u64{
+    match f{"conn_max"=>&mut l.conn_max,"req_buf"=>&mut l.req_buf,"conn_buf"=>&mut l.conn_buf,"send_sock_buf"=>&mut l.send_sock_buf,"heavy_active"=>&mut l.heavy_active,
+        "light_active"=>&mut l.light_active,"light_queue"=>&mut l.light_queue,"heavy_resp_mem"=>&mut l.heavy_resp_mem,"light_resp_mem"=>&mut l.light_resp_mem,
+        "resp_max"=>&mut l.resp_max,"light_resp_max"=>&mut l.light_resp_max,"batch_resp_max"=>&mut l.batch_resp_max,"scratch_heavy"=>&mut l.scratch_heavy,
+        "scratch_light"=>&mut l.scratch_light,"mem_total"=>&mut l.mem_total,"batch_max"=>&mut l.batch_max,"err_item_max"=>&mut l.err_item_max,
+        "logs_count_max"=>&mut l.logs_count_max,"logs_scan_bytes"=>&mut l.logs_scan_bytes,"rate"=>&mut l.rate,"bucket_cap"=>&mut l.bucket_cap,
+        "queue_wait_ms"=>&mut l.queue_wait_ms,"compute_heavy_ms"=>&mut l.compute_heavy_ms,"cancel_max_ms"=>&mut l.cancel_max_ms,"grace_ms"=>&mut l.grace_ms,
+        "min_send_rate"=>&mut l.min_send_rate,"batch_wall_ms"=>&mut l.batch_wall_ms,"enforce_slack_ms"=>&mut l.enforce_slack_ms,"timer_eps_ms"=>&mut l.timer_eps_ms,_=>unreachable!()}
+}
+#[test] fn absent_rpc_fields_enter_the_gate_as_zero_never_nominal(){
+    let f=pocold_like();let v=f.values();
+    assert_eq!((v.heavy_resp_mem,v.light_resp_mem,v.rate,v.bucket_cap,v.min_send_rate,v.compute_heavy_ms,v.mem_total),(0,0,0,0,0,0,0));
+    assert_eq!((v.conn_max,v.resp_max,v.batch_max),(32,8<<20,20));assert_eq!(f.absent().len(),22);assert!(!f.is_fixture());
+    assert!(!v.satisfies_r26(),"absent mechanisms cannot satisfy R26");
+    assert!(RpcFacts::enforced(&[("rate_limit",1)]).is_err());assert!(RpcFacts::enforced(&[("rate",1),("rate",2)]).is_err());
+}
+#[test] fn specification_scope_refuses_every_open_condition(){
+    let (n,t)=base();let tt=rebound(&t,&n.spec_bytes);
+    // The lp4 fixture: complete RpcGuard values, synthetic calibration, a measured timing sample.
+    let e=admit(&Request{scope:Scope::Specification,..n.request(&sh(),Some(&tt))}).err().expect("not specification evidence");
+    assert_eq!(e.rules,v(&["R14","R18","R19","R21","R25","R26"]),"{e}");
+    for id in ["rpc-fixture","calibration-synthetic","timing-not-a-bound","gas-monotonicity-assumed","gate-deferred-general-R18","gate-deferred-general-R21","gate-deferred-caps64"]{
+        assert!(e.missing.contains(&format!("specification:{id}")),"{id}: {:?}",e.missing)}
+    // pocold's facts: the absent mechanisms are named.
+    let local=NodeLocal{rpc:pocold_like(),..sh()};
+    let e=admit(&Request{scope:Scope::Specification,..n.request(&local,Some(&tt))}).err().unwrap();
+    assert!(e.missing.contains(&"specification:rpc-absent".to_string())&&!e.missing.contains(&"specification:rpc-fixture".to_string()));
+    assert!(e.notes.iter().any(|x|x.contains("heavy_resp_mem")&&x.contains("min_send_rate")),"{:?}",e.notes);
+    // A gate violation is still reported with the conditions.
+    let e=admit(&Request{scope:Scope::Specification,..n.request(&NodeLocal{delta_rel:4,..sh()},Some(&tt))}).err().unwrap();assert!(e.rules.contains(&"R2".to_string()));
+}
+#[test] fn experimental_devnet_waives_only_r26_predicates_reading_absent_fields(){
+    let (n,t)=base();let tt=rebound(&t,&n.spec_bytes);
+    let a=admit(&n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))).unwrap_or_else(|e|panic!("{e}"));
+    assert_eq!(a.scope(),Scope::ExperimentalDevnet);assert!(!a.specification_compliant());
+    let w=&a.report().waivers;assert_eq!(w.len(),1);assert_eq!(w[0].rule,"R26");
+    assert_eq!(w[0].checked,vec!["batchRespMax>=respMax","respMax>=2*32768+546*512","logsCountMax>=546","logsScanBytes>=32768"]);
+    assert_eq!(w[0].waived.len()+w[0].checked.len(),R26_PREDICATES.len());
+    let ids:Vec<&str>=a.report().conditions.iter().map(|c|c.id).collect();
+    assert!(ids.contains(&"rpc-absent")&&ids.contains(&"calibration-synthetic")&&ids.contains(&"timing-not-a-bound"),"{ids:?}");
+    // An enforced field below its R26 bound is not waivable.
+    let bad=RpcFacts::enforced(&[("resp_max",1000),("batch_resp_max",16<<20)]).unwrap();
+    let e=admit(&n.request(&NodeLocal{rpc:bad,..sh()},Some(&tt))).err().unwrap();assert_eq!(e.rules,v(&["R26"]));assert!(e.notes.iter().any(|x|x.contains("respMax>=2*32768+546*512")));
+    let bad=RpcFacts::enforced(&[("logs_count_max",545)]).unwrap();assert_eq!(rules(admit(&n.request(&NodeLocal{rpc:bad,..sh()},Some(&tt)))),v(&["R26"]));
+    // Fixture values are evaluated in full and reported as a fixture.
+    let a=admit(&n.request(&sh(),Some(&tt))).unwrap();assert!(a.report().waivers.is_empty());assert!(a.report().conditions.iter().any(|c|c.id=="rpc-fixture"));
+    // The scope is restricted to a simnet profile on a simnet node.
+    let e=admit(&Request{node:NodeKind::Node,..n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&["R22"]));
 }

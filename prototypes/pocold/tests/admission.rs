@@ -53,3 +53,24 @@ fn base()->DevnetConfig{DevnetConfig::new(777930,1_700_000_000,&["a","b","c"])}
     assert!(e.starts_with("-32018 ParamGate rejected [R2]"),"{e}");
     let _=std::fs::remove_dir_all(&d);
 }
+/// D-A02-SCOPE: pocold boots only an experimental-devnet admission. Its R26 facts name only the
+/// RpcGuard limits it enforces; the unimplemented mechanisms are absent (0 in the gate), waived
+/// and reported, never nominal. The same files under the specification scope are refused.
+#[test] fn pocold_admission_is_an_experimental_devnet_with_absent_rpc_mechanisms(){
+    use pocol_lp4_execution::admission::{self,Request,Scope};
+    let d=tmp("scope");let dir=d.join("ok");publish(&base(),&dir,true);
+    let spec=pocold::load_spec(&dir,&pocold::single_host_local()).unwrap();let a=spec.admission();
+    assert_eq!(a.scope(),Scope::ExperimentalDevnet);assert!(!a.specification_compliant());
+    let f=&a.local().rpc;assert_eq!(f.absent().len(),22);assert!(!f.is_fixture());
+    for x in pocold::RPC_ENFORCED{assert!(!f.absent().contains(&x),"{x} is enforced")}
+    assert_eq!((f.values().heavy_resp_mem,f.values().rate,f.values().min_send_rate),(0,0,0),"absent fields are not nominal");
+    assert_eq!(f.values().req_buf,pocold::rpc::REQ_BUF as u64);
+    let w=&a.report().waivers;assert_eq!(w.len(),1);assert_eq!(w[0].checked.len(),4);
+    let j=pocold::admission_json(a);assert_eq!(j["scope"],"experimental-devnet");assert_eq!(j["specificationCompliant"],false);
+    assert!(j["conditions"].as_array().unwrap().iter().any(|c|c["id"]=="rpc-absent"));
+    // Specification scope on the same artifacts and local facts.
+    let n=devnet::build(&base()).unwrap();let t=admission::measure(&n.spec_bytes,&n.alloc,1).unwrap();let local=pocold::single_host_local();
+    let e=admission::admit(&Request{scope:Scope::Specification,..n.request(&local,Some(&t))}).err().expect("not specification compliance");
+    assert!(e.missing.contains(&"specification:rpc-absent".to_string()),"{e}");
+    let _=std::fs::remove_dir_all(&d);
+}

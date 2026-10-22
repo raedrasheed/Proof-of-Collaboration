@@ -77,7 +77,7 @@ impl Devnet{
     /// The admission request for this candidate (simnet profile on a simnet node).
     pub fn request<'a>(&'a self,local:&'a NodeLocal,timing:Option<&'a Timing>)->Request<'a>{
         Request{spec_bytes:&self.spec_bytes,alloc:&self.alloc,forks:&self.forks,kind:ProfileKind::Simnet,node:NodeKind::Simnet,local,
-            calibration:Some((self.hash_rate,FactClass::SyntheticFixture)),timing}
+            calibration:Some((self.hash_rate,FactClass::SyntheticFixture)),timing,scope:crate::admission::Scope::ExperimentalDevnet}
     }
     /// Measures this candidate's timing, then runs the full gate (A02). A `Devnet` is only a
     /// candidate: nothing can boot from it except through the returned `Admitted`.

@@ -9,13 +9,15 @@ use crate::types::{Fixed,pow_hash,le_target};
 #[derive(Debug,Clone)]
 pub enum MinerEvent{Share{tid:[u8;32],nonce:u64},Solution{tid:[u8;32],nonce:u64},Exhausted{tid:[u8;32],hashes:u64}}
 
-pub struct MinerHandle{stop:Arc<AtomicBool>,pub tid:[u8;32]}
+/// Dropping the handle stops the miner and joins its thread, so at most one miner thread per
+/// node exists (A13 thread inventory).
+pub struct MinerHandle{stop:Arc<AtomicBool>,pub tid:[u8;32],thread:Option<std::thread::JoinHandle<()>>}
 impl MinerHandle{pub fn stop(&self){self.stop.store(true,Ordering::SeqCst);}}
-impl Drop for MinerHandle{fn drop(&mut self){self.stop();}}
+impl Drop for MinerHandle{fn drop(&mut self){self.stop();if let Some(t)=self.thread.take(){let _=t.join();}}}
 
 pub fn start(tid:[u8;32],start:u64,end:u64,target:Fixed,t_share:Fixed,max_shares:usize,events:Sender<MinerEvent>)->MinerHandle{
     let stop=Arc::new(AtomicBool::new(false));let flag=stop.clone();
-    std::thread::Builder::new().name("miner".into()).spawn(move||{
+    let thread=crate::threads::spawn("miner",crate::threads::IO_STACK,move||{
         let mut n=start;let mut hashes=0u64;let mut shares=0usize;
         loop{
             if hashes%4096==0&&flag.load(Ordering::Relaxed){return}
@@ -28,5 +30,5 @@ pub fn start(tid:[u8;32],start:u64,end:u64,target:Fixed,t_share:Fixed,max_shares
             n+=1;
         }
     }).expect("spawn miner");
-    MinerHandle{stop,tid}
+    MinerHandle{stop,tid,thread:Some(thread)}
 }
