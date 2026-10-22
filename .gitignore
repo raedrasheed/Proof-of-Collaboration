@@ -15,3 +15,5 @@
 **/keys-txa*.json
 **/txa-node-check.json
 prototypes/pocold/target/
+# Ephemeral exploit-shaped witness programs copied in by the witness runner; never committed.
+**/tests/zz_audit_witness*.rs
