@@ -36,7 +36,10 @@ use pocol_lp4_execution::{admission::{self,NodeLocal,Request},devnet,gate::FactC
 
 /// The node-local parameters of a single-host devnet node, with pocold's actual
 /// gossip frame limit (net::MAX_FRAME) for every message type and its RPC limits.
-pub fn single_host_local()->NodeLocal{NodeLocal{gossip:[net::MAX_FRAME as u32;6],rpc:rpc_facts(&rpc::Limits::default()),..NodeLocal::single_host()}}
+/// D-A13-BUDGET (local, owner-approved option 1): side_max 8 -> 2 (side-branch states; a pruned
+/// side state is rebuilt on demand from its nearest retained ancestor). K_hist stays 32.
+pub const SIDE_MAX:u32=2;
+pub fn single_host_local()->NodeLocal{NodeLocal{gossip:[net::MAX_FRAME as u32;6],rpc:rpc_facts(&rpc::Limits::default()),side_max:SIDE_MAX,..NodeLocal::single_host()}}
 /// R26 facts (D-A02-SCOPE): only the RpcGuard limits pocold enforces, taken from its code and
 /// its running limits. The other RpcGuard mechanisms (HEAVY/LIGHT classes and their response
 /// memory, scratch, queues, pacing, rate buckets, send watchdog, timers) are not implemented,

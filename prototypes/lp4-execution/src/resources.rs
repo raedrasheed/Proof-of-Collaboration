@@ -121,9 +121,9 @@ pub mod memory{
     /// Bytes of one hashbrown entry of `e` bytes at the table's worst: fewer than 16/7 buckets
     /// per entry (load factor 7/8, power-of-two growth), each its entry and a control byte, and
     /// the old table alive beside the new one while it grows (x2). Rounded up.
-    pub fn entry_bytes(e:u128)->u128{(32*(e+1)).div_ceil(7)}
+    pub const fn entry_bytes(e:u128)->u128{(32*(e+1)).div_ceil(7)}
     /// A table's own share beyond its entries (6 buckets, the control tail, alignment), x2.
-    pub fn table_bytes(e:u128)->u128{2*(6*(e+1)+32)}
+    pub const fn table_bytes(e:u128)->u128{2*(6*(e+1)+32)}
     /// Vec growth: a Vec's capacity is at most twice its length, and while it reallocates the old
     /// buffer is alive beside the new one, so a Vec is counted at three times its length.
     pub const VEC:u128=3;
@@ -136,6 +136,11 @@ pub mod memory{
     /// first allocation 4 entries, and its slot in the outer Vec.
     const OP_JOURNAL:u128=2*VEC*JOURNAL_ENTRY;
     const FRAME_JOURNAL:u128=VEC*24+4*JOURNAL_ENTRY;
+    /// A loaded account (both maps' entries, its journal, the frame that loaded it), a loaded
+    /// slot likewise, and the two storage maps' own share that an account's first slot creates.
+    const ACCOUNT_BYTES:u128=entry_bytes(STATE_ACCOUNT)+entry_bytes(ACCOUNT_ENTRY)+OP_JOURNAL+FRAME_JOURNAL;
+    const SLOT_BYTES:u128=entry_bytes(STATE_SLOT)+entry_bytes(SLOT_ENTRY)+OP_JOURNAL+FRAME_JOURNAL;
+    const MAP_BYTES:u128=table_bytes(STATE_SLOT)+table_bytes(SLOT_ENTRY);
     /// Every operation that leaves heap behind for the rest of the execution, at its cheapest.
     /// revm 19.7 inserts an account or slot into the journaled state and the engine database
     /// before it charges the cold cost (revm-interpreter host.rs sload/balance/extcode*,
@@ -143,9 +148,16 @@ pub mod memory{
     /// frame that then runs out of gas keeps that one unpaid entry and cannot load another; the
     /// frame costs at least a warm CALL (100 gas). Paid loads (cold 2600/2100, access lists
     /// 2400/1900) add the same entries for more gas, so these classes cover them.
-    pub fn classes()->[Class;10]{[
-        Class{name:"account loaded unpaid",bytes:entry_bytes(STATE_ACCOUNT)+entry_bytes(ACCOUNT_ENTRY)+table_bytes(STATE_SLOT)+table_bytes(SLOT_ENTRY)+OP_JOURNAL+FRAME_JOURNAL,gas:100},
-        Class{name:"slot loaded unpaid",bytes:entry_bytes(STATE_SLOT)+entry_bytes(SLOT_ENTRY)+OP_JOURNAL+FRAME_JOURNAL,gas:100},
+    /// A loaded account's storage maps (journaled state and engine database) start empty, and an
+    /// empty hashbrown map allocates nothing (checked by a test); a map's own share
+    /// (`table_bytes`) appears with the account's first slot. So with a accounts, s slots and
+    /// m <= min(a, s) non-empty maps, for at least 100(a + s) gas, the bytes are at most
+    /// A·a + S·s + B·m; over that region the largest bytes per gas is at a = s (with the base)
+    /// or at s = 0 or a = 0, which are the three classes below.
+    pub fn classes()->[Class;11]{[
+        Class{name:"account loaded unpaid",bytes:ACCOUNT_BYTES,gas:100},
+        Class{name:"slot loaded unpaid",bytes:SLOT_BYTES,gas:100},
+        Class{name:"account with its first slot",bytes:ACCOUNT_BYTES+SLOT_BYTES+MAP_BYTES,gas:200},
         Class{name:"transient slot (TSTORE)",bytes:entry_bytes(TRANSIENT_ENTRY)+OP_JOURNAL,gas:100},
         Class{name:"journaled write (SSTORE, transfer, nonce)",bytes:OP_JOURNAL,gas:100},
         Class{name:"committed empty frame (warm CALL)",bytes:FRAME_JOURNAL,gas:100},
@@ -185,7 +197,8 @@ pub mod memory{
         let frames=FRAMES.checked_mul(STACK_BYTES+FRAME_BYTES+per_code+64+16)?.checked_add(code)?;
         let pre=(FRAMES*16).checked_add(4096)?.checked_add(1025*std::mem::size_of::<revm::Frame>() as u128)?
             .checked_add(ANCESTORS*entry_bytes(HASH_ENTRY)+table_bytes(HASH_ENTRY))?;
-        let accounts=FIXED_ACCOUNTS.checked_mul(classes()[0].bytes)?;
+        // Fixed accounts load without gas; each may also hold storage maps.
+        let accounts=FIXED_ACCOUNTS.checked_mul(ACCOUNT_BYTES+MAP_BYTES)?;
         let precompile=words(gas).checked_mul(32*8)?.checked_add(PRECOMPILE_STATIC)?;
         frames.checked_add(pre)?.checked_add(accounts)?.checked_add(precompile)
     }

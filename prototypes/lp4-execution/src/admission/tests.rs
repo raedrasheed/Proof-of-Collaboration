@@ -197,4 +197,8 @@ fn scope_slot<'a>(l:&'a mut RpcLimits,f:&str)->&'a mut u64{
     let a=admit(&n.request(&sh(),Some(&tt))).unwrap();assert!(a.report().waivers.is_empty());assert!(a.report().conditions.iter().any(|c|c.id=="rpc-fixture"));
     // The scope is restricted to a simnet profile on a simnet node.
     let e=admit(&Request{node:NodeKind::Node,..n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&["R22"]));
+    // Review F5: a Synthetic (or Network) profile on a simnet node does not get the waiver.
+    for kind in [ProfileKind::Synthetic,ProfileKind::Network]{
+        let e=admit(&Request{kind,..n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&["R22"]),"{kind:?}");
+    }
 }

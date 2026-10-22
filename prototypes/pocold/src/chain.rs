@@ -12,7 +12,9 @@ pub fn truncate(why:&str)->String{if why.len()<=REASON_MAX{return why.to_string(
 /// governance.md R_keep: a non-canonical block this far below the head is removed (A13).
 pub const R_KEEP:u64=2048;
 /// Non-canonical blocks kept in total (A13); the lowest-work leaves leave first.
-pub const SIDE_BLOCKS_MAX:usize=256;
+/// Non-canonical blocks kept (local retention, not validity: consensus.md §10 keeps at most one
+/// per height and fetches a branch that later becomes heavier by sync). D-A13-BUDGET: 256 -> 64.
+pub const SIDE_BLOCKS_MAX:usize=64;
 /// Bound of the invalid-block cache (A05). A forgotten entry is only re-validated.
 pub const INVALID_MAX:usize=4096;
 

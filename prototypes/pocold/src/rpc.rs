@@ -50,12 +50,12 @@ impl Default for Limits{
 /// Connection and work counters, for status and tests: connections refused at the cap,
 /// connection threads alive, requests skipped because their work deadline had passed before
 /// the consensus thread reached them, and batch members not run for the same reason.
-/// Also: heavy requests refused because QUEUED_MAX bodies were already waiting, and requests
-/// refused by JSON_VALUES_MAX.
+/// Also: heavy requests refused because QUEUED_MAX bodies were already waiting, requests
+/// refused by JSON_VALUES_MAX, and requests answered busy because the heavy pool was full.
 #[derive(Debug,Default)]
-pub struct RpcCounters{pub refused:AtomicUsize,pub active:AtomicUsize,pub expired:AtomicUsize,pub expired_members:AtomicUsize,pub queue_full:AtomicUsize,pub too_complex:AtomicUsize}
+pub struct RpcCounters{pub refused:AtomicUsize,pub active:AtomicUsize,pub expired:AtomicUsize,pub expired_members:AtomicUsize,pub queue_full:AtomicUsize,pub too_complex:AtomicUsize,pub busy:AtomicUsize}
 pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0),active:AtomicUsize::new(0),expired:AtomicUsize::new(0),expired_members:AtomicUsize::new(0),
-    queue_full:AtomicUsize::new(0),too_complex:AtomicUsize::new(0)};
+    queue_full:AtomicUsize::new(0),too_complex:AtomicUsize::new(0),busy:AtomicUsize::new(0)};
 
 /// Heavy request bodies waiting in the main queue, per server: the body of a request whose
 /// connection already answered 504 stays there until the node dequeues it, so the connection
@@ -70,9 +70,75 @@ fn hold(c:&Arc<AtomicUsize>,max:usize)->Option<Held>{
     Some(Held(c.clone()))
 }
 /// A request for the consensus thread: body, reply, whether it carried an Origin header (a
-/// site), the instant after which nobody waits for the answer, and its queue place (heavy only;
-/// the light lane is bounded by its own capacity).
-pub struct Request{pub body:Vec<u8>,pub reply:Sender<String>,pub site:bool,pub deadline:Instant,pub held:Option<Held>}
+/// site), the instant after which nobody waits for the answer, its lane, and its queue place
+/// (heavy only; the light lane is bounded by its own capacity).
+pub struct Request{pub body:Vec<u8>,pub reply:Sender<Reply>,pub site:bool,pub deadline:Instant,pub light:bool,pub held:Option<Held>}
+
+/// Response memory (local; after RpcGuard LIGHT_RESP_MAX, HEAVY_RESP_MEM and LIGHT_RESP_MEM,
+/// network.md (ج)). Before a request runs, the consensus thread reserves its class maximum:
+/// LIGHT_RESP_MAX for a light request, RESP_MAX for a heavy one, BATCH_BYTES_HARD for a batch.
+/// After it runs, the reservation shrinks to the response's allocation, and it is released when
+/// the connection has written the response or failed (the Reply is dropped). So answers waiting
+/// on slow readers hold at most the pools, whatever conn_max is (A13 rpc term).
+/// - Light: (conn_max + 1) x LIGHT_RESP_MAX, one per connection plus the one being computed for a
+///   connection that already left, so a light reservation never fails (network.md S1). A light
+///   response larger than LIGHT_RESP_MAX is answered -32008.
+/// - Heavy: HEAVY_RESP_POOL. A full pool answers -32021 {busy, retryAfterMs} before anything
+///   runs (each batch member gets its own busy item), so a state-changing call never loses its
+///   answer. pocold does not queue the request (no QUEUE_WAIT): it answers busy at once.
+/// These pools are not the RpcGuard permit mechanism (no HEAVY_ACTIVE/LIGHT_ACTIVE permits, no
+/// SendPacer, batches are not streamed), so the RpcGuard fields stay absent in admission.
+pub const LIGHT_RESP_MAX:usize=512*1024;
+pub const HEAVY_RESP_POOL:usize=48<<20;
+pub const ERR_ITEM_MAX:usize=256;
+/// The largest batch answer: BATCH_RESP_MAX of answers plus one error item per member.
+pub const BATCH_BYTES_HARD:usize=BATCH_RESP_MAX+BATCH_MAX*ERR_ITEM_MAX+64;
+/// Answers outside the pools: a busy answer (<= BATCH_MAX error items) and the HTTP literals.
+pub const SMALL_REPLY_MAX:usize=BATCH_MAX*ERR_ITEM_MAX+64;
+pub fn light_pool(l:&Limits)->usize{(l.conn_max+1)*LIGHT_RESP_MAX}
+type Pool=(Arc<AtomicUsize>,usize);
+#[derive(Clone)]
+pub struct RespPools{heavy:Pool,light:Pool}
+impl RespPools{
+    pub fn new(l:&Limits)->Self{Self{heavy:(Arc::new(AtomicUsize::new(0)),HEAVY_RESP_POOL),light:(Arc::new(AtomicUsize::new(0)),light_pool(l))}}
+    fn take(p:&Pool,n:usize)->Option<Resv>{
+        let mut cur=p.0.load(Ordering::SeqCst);
+        loop{if cur+n>p.1{return None}match p.0.compare_exchange(cur,cur+n,Ordering::SeqCst,Ordering::SeqCst){Ok(_)=>return Some(Resv{pool:p.0.clone(),n}),Err(c)=>cur=c}}
+    }
+    /// Reserved bytes (heavy, light), for status and tests.
+    pub fn in_use(&self)->(usize,usize){(self.heavy.0.load(Ordering::SeqCst),self.light.0.load(Ordering::SeqCst))}
+}
+pub struct Resv{pool:Arc<AtomicUsize>,n:usize}
+impl Resv{fn shrink(&mut self,to:usize){if to<self.n{self.pool.fetch_sub(self.n-to,Ordering::SeqCst);self.n=to;}}}
+impl Drop for Resv{fn drop(&mut self){self.pool.fetch_sub(self.n,Ordering::SeqCst);}}
+/// An answer and the reservation that covers it until the connection drops it.
+pub struct Reply{pub body:String,_resv:Option<Resv>}
+/// Runs one request under the response pools (see LIGHT_RESP_MAX).
+pub fn answer(n:&mut Node,q:&Request)->Reply{
+    let batch=q.body.iter().find(|b|!b.is_ascii_whitespace())==Some(&b'[');
+    let pools=n.resp_pools();
+    let (pool,need)=if q.light{(&pools.light,LIGHT_RESP_MAX)}else if batch{(&pools.heavy,BATCH_BYTES_HARD)}else{(&pools.heavy,RESP_MAX)};
+    let Some(mut resv)=RespPools::take(pool,need) else{COUNTERS.busy.fetch_add(1,Ordering::SeqCst);return Reply{body:busy(&q.body),_resv:None}};
+    let mut body=handle_until(n,&q.body,q.site,Some(q.deadline));
+    if body.len()>need{body=err(&request_id(&q.body),-32008,"response too large").to_string();}
+    body.shrink_to_fit();resv.shrink(body.capacity());
+    Reply{body,_resv:Some(resv)}
+}
+fn request_id(body:&[u8])->Value{
+    if json_values(body)>JSON_VALUES_MAX{return Value::Null}
+    serde_json::from_slice::<Value>(body).ok().map(|v|id_of(&v)).map(|id|if id.to_string().len()<=128{id}else{Value::Null}).unwrap_or(Value::Null)
+}
+/// -32021 {busy, retryAfterMs}: one error object, or one item per batch member; nothing runs.
+fn busy(body:&[u8])->String{
+    let e=|i:&Value|{let id=id_of(i);let id=if id.to_string().len()<=128{id}else{Value::Null};
+        json!({"jsonrpc":"2.0","id":id,"error":{"code":-32021,"message":"busy","data":{"reason":"busy","retryAfterMs":250}}}).to_string()};
+    if json_values(body)<=JSON_VALUES_MAX{
+        if let Ok(Value::Array(items))=serde_json::from_slice::<Value>(body){
+            if !items.is_empty()&&items.len()<=BATCH_MAX{return format!("[{}]",items.iter().map(e).collect::<Vec<_>>().join(","))}
+        }
+    }
+    e(&serde_json::from_slice::<Value>(body).unwrap_or(Value::Null))
+}
 
 /// The light lane: conn_max places and a wake flag, so the main queue holds at most one Wake
 /// for it at a time, whatever the light request rate.
@@ -162,13 +228,14 @@ fn conn(mut s:TcpStream,node:SyncSender<Event>,light:LightLane,l:&Limits,queued:
     if is_light(&body){
         // The lane holds one request per connection; a full lane (expired requests not yet
         // skipped) is 503.
-        if light.tx.try_send(Event::Rpc(Request{body,reply:tx,site,deadline:work_by,held:None})).is_err(){return respond(&mut s,503,"{}")}
+        if light.tx.try_send(Event::Rpc(Request{body,reply:tx,site,deadline:work_by,light:true,held:None})).is_err(){return respond(&mut s,503,"{}")}
         light.wake(&node);
     }else{
         let Some(held)=hold(queued,queued_max(l)) else{COUNTERS.queue_full.fetch_add(1,Ordering::SeqCst);return respond(&mut s,503,"{}")};
-        if node.send(Event::Rpc(Request{body,reply:tx,site,deadline:work_by,held:Some(held)})).is_err(){return respond(&mut s,503,"{}")}
+        if node.send(Event::Rpc(Request{body,reply:tx,site,deadline:work_by,light:false,held:Some(held)})).is_err(){return respond(&mut s,503,"{}")}
     }
-    match rx.recv_timeout(work_by.saturating_duration_since(Instant::now())){Ok(r)=>respond(&mut s,200,&r),Err(_)=>respond(&mut s,504,"{}")}
+    // The reservation in the Reply is released when it drops, after the write or its failure.
+    match rx.recv_timeout(work_by.saturating_duration_since(Instant::now())){Ok(r)=>respond(&mut s,200,&r.body),Err(_)=>respond(&mut s,504,"{}")}
 }
 fn respond(s:&mut TcpStream,code:u16,body:&str)->std::io::Result<()>{
     let reason=match code{200=>"OK",204=>"No Content",405=>"Method Not Allowed",413=>"Payload Too Large",431=>"Request Header Fields Too Large",503=>"Service Unavailable",_=>"Error"};
@@ -233,7 +300,7 @@ pub fn parse_bytes_max(body_max:usize)->u128{(JSON_VALUES_MAX as u128)*(64+1024+
 /// exceed `limit`, and every later one, is answered -32020 {batchBytes} without running.
 fn batch(items:&[Value],limit:usize,mut run:impl FnMut(usize,&Value)->String)->String{
     // Every delivered byte counts (brackets and separators included). An error item echoes the
-    // request id only while it stays within ERR_ITEM_MAX (256 B).
+    // request id only while it stays within ERR_ITEM_MAX.
     let mut out=String::from("[");let mut over=false;
     for (k,i) in items.iter().enumerate(){
         let mut s=if over{String::new()}else{run(k,i)};

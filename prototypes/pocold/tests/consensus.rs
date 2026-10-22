@@ -469,21 +469,30 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
 }
 #[test] fn a13_boot_refuses_a_bound_above_the_memory_budget(){
     use pocold::node::{Config,Limits,Node};
-    let dir=std::env::temp_dir().join(format!("pocold-a13-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
-    let conf=|limits:Limits|Config{dir:dir.clone(),name:"a13".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits};
-    let err=Node::open(conf(Limits{mem_budget:1<<30,..Default::default()}),admitted(&cfg(&["a","b","c"]))).err().expect("1 GiB is below the bound");
-    assert!(err.starts_with("A13 memory bound"),"{err}");
-    // Network-scale caps cannot be held by a full-snapshot node within the default budget.
+    let dir=std::env::temp_dir().join(format!("pocold-a13-{}",std::process::id()));
+    let conf=|limits:Limits,peers:usize|Config{dir:dir.clone(),name:"a13".into(),miner:None,listen:None,peers:(0..peers).map(|i|format!("127.0.0.1:{}",1+i).parse().unwrap()).collect(),rpc:None,stop_at:None,log:false,limits};
+    let l=pocold::single_host_local();let default=admitted(&cfg(&["a","b","c"]));
+    // The devnet's own configuration: default limits, two configured peers.
+    let d=pocold::resources::derive(default.cp(),l.k_hist,l.side_max,&Limits::default(),2).unwrap();
+    let need=pocold::resources::budget_required(d.total).unwrap();
+    // 1. The approved default boots, with its 1/8 reserve inside the 6 GiB budget.
+    assert!(need<=u128::from(pocold::node::MEM_BUDGET),"the default needs {need} B: {d:?}");
+    let _=std::fs::remove_dir_all(&dir);
+    Node::open(conf(Limits::default(),2),default).expect("the approved default devnet boots");
+    // 2. A budget one byte below what that bound requires is refused.
+    let _=std::fs::remove_dir_all(&dir);
+    let err=Node::open(conf(Limits{mem_budget:(need-1) as u64,..Default::default()},2),admitted(&cfg(&["a","b","c"]))).err().expect("a budget below the requirement is refused");
+    assert!(err.starts_with("A13 memory bound")&&err.contains("exceeds the node memory budget"),"{err}");
+    // 3. The requirement itself boots (the boundary is exact).
+    let _=std::fs::remove_dir_all(&dir);
+    Node::open(conf(Limits{mem_budget:need as u64,..Default::default()},2),admitted(&cfg(&["a","b","c"]))).expect("exactly the required budget boots");
+    // 4. Network-scale caps cannot be held by a full-snapshot node within the default budget.
     let mut big=cfg(&["a","b","c"]);big.slot_cap=4_000_000;big.acct_cap=1_000_000;
-    let err=Node::open(conf(Limits::default()),admitted(&big)).err().expect("network-scale caps exceed the budget");assert!(err.contains("exceeds the node memory budget"),"{err}");
-    let b=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),32,8,&Limits::default(),0).unwrap();
-    assert!(b.total<=u128::from(pocold::node::MEM_BUDGET),"the devnet default fits: {b:?}");
-    // The record for A13-DERIVATION.md: side_max 8, default limits, two configured peers.
-    let d=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),32,8,&Limits::default(),2).unwrap();assert!(d.total<=u128::from(pocold::node::MEM_BUDGET),"{d:?}");
+    let _=std::fs::remove_dir_all(&dir);
+    let err=Node::open(conf(Limits::default(),2),admitted(&big)).err().expect("network-scale caps exceed the budget");assert!(err.contains("exceeds the node memory budget"),"{err}");
     let mib=|x:u128|format!("{:.1}",x as f64/1048576.0);
-    println!("A13-BOUND {}",serde_json::json!({"totalGiB":format!("{:.2}",d.total as f64/1073741824.0),"budgetGiB":pocold::node::MEM_BUDGET>>30,"snapshots":d.snapshots,"snapshotMiB":mib(d.snapshot_bytes),
-        "codeMiB":mib(d.code),"historyMiB":mib(d.history),"sideBlocksMiB":mib(d.side_blocks),"queuesMiB":mib(d.queues),"rpcMiB":mib(d.rpc),"threadsMiB":mib(d.threads),"executionMiB":mib(d.execution)}));
-    Node::open(conf(Limits::default()),admitted(&cfg(&["a","b","c"]))).expect("the default devnet boots");
+    println!("A13-BOUND {}",serde_json::json!({"totalBytes":d.total.to_string(),"totalGiB":format!("{:.3}",d.total as f64/1073741824.0),"requiredBudgetBytes":need.to_string(),"budgetGiB":pocold::node::MEM_BUDGET>>30,
+        "snapshots":d.snapshots,"snapshotMiB":mib(d.snapshot_bytes),"codeMiB":mib(d.code),"historyMiB":mib(d.history),"sideBlocksMiB":mib(d.side_blocks),"queuesMiB":mib(d.queues),"rpcMiB":mib(d.rpc),"threadsMiB":mib(d.threads),"executionMiB":mib(d.execution)}));
     let _=std::fs::remove_dir_all(&dir);
 }
 
@@ -599,4 +608,14 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
         assert_eq!(enc.len() as u64,s["encodedLen"].as_u64().unwrap(),"{}",s["id"]);
         assert_eq!(pocold::types::Body::decode(&enc,max).is_ok(),s["expected"][rec]["valid"]==true,"{}",s["id"]);
     }
+}
+
+// ---------------- A13: the itemized model bound of the default devnet ----------------
+#[test] fn a13_bound_breakdown(){
+    use pocold::node::Limits;
+    // The values pocold boots with: its node-local parameters, default limits, two configured peers.
+    let l=pocold::single_host_local();
+    let d=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits::default(),2).unwrap();
+    assert_eq!(d.items.iter().map(|x|x.1).sum::<u128>(),d.total);
+    println!("A13-BREAKDOWN {}",serde_json::json!({"total":d.total.to_string(),"items":d.items.iter().map(|(k,v)|serde_json::json!([k,v.to_string()])).collect::<Vec<_>>()}));
 }

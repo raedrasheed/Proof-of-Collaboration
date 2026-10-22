@@ -35,7 +35,8 @@ pub const MEM_BUDGET:u64=6<<30;
 /// status rejects and evidence awaiting inclusion (A13 accounting).
 pub const FUTURE_MAX:usize=64;pub const TEMPLATES_MAX:usize=64;pub const SEEN_MAX:usize=4096;pub const REJECTS_MAX:usize=256;pub const EVIDENCE_POOL_MAX:usize=64;
 /// Events waiting for the consensus thread (all sources); senders block when it is full.
-pub const EVENT_QUEUE:usize=256;
+/// D-A13-BUDGET: 256 -> 128 (network.md: queue <= 256); a full queue blocks its senders.
+pub const EVENT_QUEUE:usize=128;
 /// Orphans (blocks whose parent is unknown): parent keys, blocks per parent and bytes, all peers together.
 pub const ORPHAN_PARENTS_MAX:usize=64;pub const ORPHANS_PER_PARENT:usize=16;pub const ORPHAN_BYTES_MAX:usize=16*1024*1024;
 /// Blocks walked on each side of a reorg to restore detached transactions (A11).
@@ -65,7 +66,8 @@ struct Production{parent:[u8;32],height:u64,attempt:u32,mode:Mode,shares:BTreeSe
 /// state is normalized after every transaction and follows the block caps (`PoolMeter`), so
 /// it is bounded like a snapshot (A13).
 pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending_state:InMemoryDB,pub bytes:usize,meter:PoolMeter}
-pub const POOL_MAX_BYTES:usize=64*1024*1024;
+/// D-A13-BUDGET: 64 -> 32 MiB (network.md: pool <= 64 MiB); 256 transactions of TX_MAX.
+pub const POOL_MAX_BYTES:usize=32*1024*1024;
 /// Local limit on pooled transactions (about ten blocks of plain transfers): every new head
 /// re-executes the pool, so its length bounds that work.
 pub const POOL_MAX_TXS:usize=4096;
@@ -83,7 +85,7 @@ pub struct Node{
     rx:Receiver<Event>,
     /// RPC light lane (network.md classification table): drained before every main event and
     /// between heavy batch members, so a light request never waits behind a queue of heavy work.
-    light:crate::rpc::LightLane,light_rx:Receiver<Event>,draining:bool,
+    light:crate::rpc::LightLane,light_rx:Receiver<Event>,draining:bool,resp:crate::rpc::RespPools,
     /// At most one timer Tick waits in the event queue: a tick that takes longer than the timer
     /// period must not fill the queue ahead of blocks, peers and RPC (round 2).
     tick_pending:Arc<std::sync::atomic::AtomicBool>,
@@ -143,11 +145,11 @@ impl Node{
         }
         chain.retain();
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
-        let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.conn_max);
+        let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.conn_max);let resp=crate::rpc::RespPools::new(&cfg.limits.rpc);
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
         let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());
         let net=net::Net::new(cfg.limits.net.clone());
-        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_heights:HashMap::new(),sync_mark:(0,0),sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
+        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_heights:HashMap::new(),sync_mark:(0,0),sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
             pool:Pool{txs:vec![],pending_state:head_state,bytes:0,meter},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;
@@ -188,6 +190,8 @@ impl Node{
         self.draining=false;
         if ran==LIGHT_TURN{self.light.wake(&self.tx);}
     }
+    /// The RPC response pools (rpc::answer reserves from them).
+    pub fn resp_pools(&self)->crate::rpc::RespPools{self.resp.clone()}
     pub fn handle(&mut self,ev:Event){
         match ev{
             Event::Tick=>{self.tick_pending.store(false,std::sync::atomic::Ordering::SeqCst);self.tick()}
@@ -197,7 +201,7 @@ impl Node{
                 // A05/RPC work deadline: a request whose caller already got 504 is not run. Its
                 // body and queue place are freed when `q` drops here.
                 if std::time::Instant::now()>=q.deadline{crate::rpc::COUNTERS.expired.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
-                else{let r=crate::rpc::handle_until(self,&q.body,q.site,Some(q.deadline));let _=q.reply.send(r);}
+                else{let r=crate::rpc::answer(self,&q);let _=q.reply.send(r);}
             }
             Event::Net(NetEvent::Connected(id,peer))=>{let hello=self.hello();peer.send(&hello);self.peers.insert(id,peer);}
             Event::Net(NetEvent::Closed(id))=>{self.peer_heights.remove(&id);if let Some(p)=self.peers.remove(&id){if p.outbound{if let Ok(mut s)=self.outbound.lock(){s.remove(&p.addr);}}}}

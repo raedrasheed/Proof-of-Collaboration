@@ -27,7 +27,8 @@ use crate::rlp;
 /// BODY_MAX <= 196608; R15 checks the profile's message sizes against this at admission.
 pub const MAX_FRAME:usize=256*1024;
 /// Inbound messages waiting for the consensus thread, per listener or dialer.
-pub const NET_EVENT_QUEUE:usize=64;
+/// D-A13-BUDGET: 64 -> 32 per forwarder; a full queue blocks the peer readers behind it.
+pub const NET_EVENT_QUEUE:usize=32;
 
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct Limits{
@@ -36,7 +37,8 @@ pub struct Limits{
     pub queue_bytes_max:usize,pub write_deadline:Duration,
 }
 impl Default for Limits{
-    fn default()->Self{Self{peers_max:32,handshaking_max:8,hello_deadline:Duration::from_secs(5),frame_deadline:Duration::from_secs(30),
+    // D-A13-BUDGET: peers_max 32 -> 8 inbound (network.md: <= 50 peers); a devnet node has two.
+    fn default()->Self{Self{peers_max:8,handshaking_max:8,hello_deadline:Duration::from_secs(5),frame_deadline:Duration::from_secs(30),
         idle_deadline:Duration::from_secs(300),queue_bytes_max:2*1024*1024,write_deadline:Duration::from_secs(10)}}
 }
 /// Shared connection accounting of one node.

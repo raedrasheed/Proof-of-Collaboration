@@ -55,10 +55,13 @@ pub const CONDITIONS:&[(&str,&str)]=&[
     ("revm-representation","the execution term relies on revm 19.7 behaviour checked by source inspection (iterative frames, SharedMemory truncation, fixed stack capacity) and by measured adversarial peaks"),
     ("cpu-and-timing","CPU costs (world-root rebuild, chain scans, pool re-execution, deep-fork rebuild) are not memory terms; worst-case timing is not bounded"),
 ];
+/// The model total and its parts. `items` itemizes every group term ("group/item", bytes); the
+/// group fields are the sums of their items and `total` is the sum of all items.
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct Bound{
     pub snapshots:u128,pub snapshot_bytes:u128,pub code:u128,pub history:u128,pub side_blocks:u128,
     pub queues:u128,pub rpc:u128,pub threads:u128,pub execution:u128,pub total:u128,
+    pub items:Vec<(&'static str,u128)>,
 }
 fn add(v:&[u128])->Option<u128>{v.iter().try_fold(0u128,|a,b|a.checked_add(*b))}
 fn mul(a:u128,b:u128)->Option<u128>{a.checked_mul(b)}
@@ -73,7 +76,11 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let snapshot_bytes=memory::snapshot(accounts,slots,accounts.checked_add(2)?)?;
     let snapshots=add(&[1,u128::from(k_hist),u128::from(side_max),TRANSIENT_SNAPSHOTS])?;
     // Code: CODE_CAP logical bytes per snapshot (code_caps), with analysis, unshared at worst.
-    let code=mul(snapshots,memory::code_bytes(u128::from(cp.CODE_CAP),accounts)?)?;
+    let code_per=memory::code_bytes(u128::from(cp.CODE_CAP),accounts)?;let code=mul(snapshots,code_per)?;
+    let (retained,side_states)=(1+u128::from(k_hist),u128::from(side_max));
+    let mut items=vec![("snapshots/head and K_hist retained states",mul(retained,snapshot_bytes)?),("snapshots/side_max side-branch states",mul(side_states,snapshot_bytes)?),
+        ("snapshots/transient working copies",mul(TRANSIENT_SNAPSHOTS,snapshot_bytes)?),
+        ("code/head and K_hist retained states",mul(retained,code_per)?),("code/side_max side-branch states",mul(side_states,code_per)?),("code/transient working copies",mul(TRANSIENT_SNAPSHOTS,code_per)?)];
     // Per block kept in memory: the map slot (Entry inline), the canonical index, header heap
     // (encoded, ut_raw, bloom, proposer, sig, share nonces), ParentResult shares, nonce ranges
     // (members <= M_max), an empty pruned state and evidence (E_max items <= EVID_BYTES_MAX).
@@ -88,12 +95,13 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // Canonical chain: <= H_END+1 blocks; transactions <= TX_CAP and their bytes <= TXBYTES_CAP
     // (chain cumulative, block invalid beyond); logs <= LOG_CAP charged bytes (USER halts),
     // encoded at most 33/32 of their charge; receipts and hashes per transaction.
-    let history=add(&[mul(u128::from(cp.H_END)+1,per_block)?,u128::from(cp.TXBYTES_CAP),
-        mul(u128::from(cp.TX_CAP),24+24+32+RECEIPT_BASE)?,u128::from(caps::LOG_CAP)/32*33,evidence])?;
+    let hist=[("history/blocks (H_END+1)",mul(u128::from(cp.H_END)+1,per_block)?),("history/transaction bytes (TXBYTES_CAP)",u128::from(cp.TXBYTES_CAP)),
+        ("history/transaction index and receipts (TX_CAP)",mul(u128::from(cp.TX_CAP),24+24+32+RECEIPT_BASE)?),("history/logs (LOG_CAP)",u128::from(caps::LOG_CAP)/32*33),("history/evidence",evidence)];
+    let history=add(&hist.map(|x|x.1))?;items.extend(hist);
     // Side blocks: <= SIDE_BLOCKS_MAX (Chain::retain), each a full block of its own.
     let side_txs=u128::from(cp.BODY_MAX)/MIN_TX_BYTES;
     let side_block=add(&[per_block,mul(u128::from(cp.E_max),u128::from(cp.EVID_BYTES_MAX))?,u128::from(cp.BODY_MAX),mul(side_txs,24+24+32+RECEIPT_BASE)?,u128::from(caps::LOG_BLOCK_MAX)/32*33])?;
-    let side_blocks=mul(chain::SIDE_BLOCKS_MAX as u128,side_block)?;
+    let side_blocks=mul(chain::SIDE_BLOCKS_MAX as u128,side_block)?;items.push(("side/SIDE_BLOCKS_MAX stored side blocks",side_blocks));
     // Queues and caches (node.rs, net.rs constants).
     let frame=net::MAX_FRAME as u128;let block=size_of::<Block>() as u128;let l=&limits.net;
     let pool=add(&[node::POOL_MAX_BYTES as u128,mul(node::POOL_MAX_BYTES as u128/MIN_TX_BYTES,32+24+24)?])?;
@@ -104,33 +112,52 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
         mul(node::EVIDENCE_POOL_MAX as u128,u128::from(cp.EVID_BYTES_MAX)+24)?,mul(node::FUTURE_MAX as u128,32)?])?;
     // Inbound peers <= peers_max; outbound <= one per dialer (net::dial).
     let peers=mul(l.peers_max as u128+dials as u128,add(&[l.queue_bytes_max as u128,2*frame,4096])?)?;
-    let events=add(&[mul(node::EVENT_QUEUE as u128,frame+256)?,mul((1+dials) as u128,mul(net::NET_EVENT_QUEUE as u128,frame+256)?)?])?;
-    let queues=add(&[pool,orphans,future,templates,seen,caches,peers,events])?;
+    let (main_events,net_events)=(mul(node::EVENT_QUEUE as u128,frame+256)?,mul((1+dials) as u128,mul(net::NET_EVENT_QUEUE as u128,frame+256)?)?);
+    let q=[("queues/transaction pool",pool),("queues/orphan blocks",orphans),("queues/future blocks",future),("queues/templates",templates),("queues/seen sets",seen),
+        ("queues/rejection and evidence caches",caches),("queues/peer send queues and frames",peers),("queues/main event queue",main_events),("queues/network event forwarders",net_events)];
+    let queues=add(&q.map(|x|x.1))?;items.extend(q);
     // RPC (rpc::conn): per connection its header buffer (HEAD_MAX+READ_CHUNK, and a lossy copy of
-    // the headers as large), a body of exactly Content-Length <= REQ_BUF bytes, and a response (a
-    // batch is <= BATCH_RESP_MAX plus one error item per member). A heavy body can outlive its
-    // connection in the main queue: at most queued_max of them (rpc::Held). The light lane holds
-    // <= conn_max bodies of <= LIGHT_BODY_MAX. The consensus thread handles one request at a
-    // time: its parse tree (rpc::parse_bytes_max, enforced by JSON_VALUES_MAX) and the response
-    // being built: the batch so far plus one member (its JSON tree and string, a log result
-    // stopping at RESP_MAX), counted as 4 x RESP_MAX.
-    let r=&limits.rpc;use crate::rpc::{REQ_BUF,HEAD_MAX,READ_CHUNK,RESP_MAX,BATCH_RESP_MAX,BATCH_MAX,LIGHT_BODY_MAX};
-    let per_conn=(2*(HEAD_MAX+READ_CHUNK)+REQ_BUF+BATCH_RESP_MAX+BATCH_MAX*256) as u128;
-    let rpc=add(&[mul(r.conn_max as u128,per_conn)?,mul(crate::rpc::queued_max(r) as u128,REQ_BUF as u128+256)?,mul(r.conn_max as u128,LIGHT_BODY_MAX as u128+256)?,
-        crate::rpc::parse_bytes_max(REQ_BUF),(BATCH_RESP_MAX+4*RESP_MAX) as u128])?;
+    // the headers as large) and a body of exactly Content-Length <= REQ_BUF bytes. Answers held
+    // by connections are within the response pools (rpc::answer: light (conn_max+1) x
+    // LIGHT_RESP_MAX, heavy HEAVY_RESP_POOL), except small busy answers and HTTP literals
+    // (SMALL_REPLY_MAX each). A heavy body can outlive its connection in the main queue: at most
+    // queued_max of them (rpc::Held). The light lane holds <= conn_max bodies of <=
+    // LIGHT_BODY_MAX. The consensus thread handles one request at a time: its parse tree
+    // (rpc::parse_bytes_max, enforced by JSON_VALUES_MAX) and the answer being built: the batch
+    // so far (a growing String: VEC x BATCH_BYTES_HARD) plus one member (its JSON tree and
+    // string, a log result stopping at RESP_MAX), counted as 4 x RESP_MAX by inspection.
+    let r=&limits.rpc;use crate::rpc::{REQ_BUF,HEAD_MAX,READ_CHUNK,RESP_MAX,LIGHT_BODY_MAX,HEAVY_RESP_POOL,BATCH_BYTES_HARD,SMALL_REPLY_MAX};
+    let rq=[("rpc/connection requests (conn_max)",mul(r.conn_max as u128,(2*(HEAD_MAX+READ_CHUNK)+REQ_BUF) as u128)?),
+        ("rpc/heavy response pool",HEAVY_RESP_POOL as u128),("rpc/light response pool ((conn_max+1) x LIGHT_RESP_MAX)",crate::rpc::light_pool(r) as u128),
+        ("rpc/small answers outside the pools (conn_max)",mul(r.conn_max as u128,SMALL_REPLY_MAX as u128)?),
+        ("rpc/queued heavy bodies (queued_max)",mul(crate::rpc::queued_max(r) as u128,REQ_BUF as u128+256)?),("rpc/light lane (conn_max)",mul(r.conn_max as u128,LIGHT_BODY_MAX as u128+256)?),
+        ("rpc/request parse tree",crate::rpc::parse_bytes_max(REQ_BUF)),("rpc/answer being built",memory::VEC*(BATCH_BYTES_HARD as u128)+4*(RESP_MAX as u128))];
+    let rpc=add(&rq.map(|x|x.1))?;items.extend(rq);
     // Threads: reserved stacks (an upper bound on their resident stack) and per-thread heap.
     use crate::threads::{IO_STACK,CONSENSUS_STACK};
     let io=io_threads(l.peers_max,dials,r.conn_max)?;
-    let threads=add(&[mul(io,IO_STACK as u128+THREAD_HEAP)?,CONSENSUS_STACK as u128,MAIN_STACK_RESIDENT,2*THREAD_HEAP,STACK_CACHE])?;
+    let th=[("threads/I/O thread stacks and heap",mul(io,IO_STACK as u128+THREAD_HEAP)?),("threads/consensus stack",CONSENSUS_STACK as u128),
+        ("threads/main stack and heap",MAIN_STACK_RESIDENT+2*THREAD_HEAP),("threads/exited-stack cache",STACK_CACHE)];
+    let threads=add(&th.map(|x|x.1))?;items.extend(th);
     // EVM execution buffers, journal, transient storage and loaded state (A13 obligation 4).
-    let execution=mul(EXECUTIONS,memory::execution(memory::execution_gas(cp.GAS_LIMIT),u128::from(cp.B_code_max))?)?;
-    let total=add(&[mul(snapshots,snapshot_bytes)?,code,history,side_blocks,queues,rpc,threads,execution])?;
+    let (gas,code_max)=(memory::execution_gas(cp.GAS_LIMIT),u128::from(cp.B_code_max));
+    let execution=mul(EXECUTIONS,memory::execution(gas,code_max)?)?;let fixed=mul(EXECUTIONS,memory::fixed_heap(gas,code_max)?)?;
+    items.extend([("execution/frames, code analysis, preallocations, precompiles",fixed),("execution/memory and operation classes (worst gas split)",execution.checked_sub(fixed)?)]);
+    let total=add(&items.iter().map(|x|x.1).collect::<Vec<_>>())?;
+    debug_assert_eq!(Some(total),add(&[mul(snapshots,snapshot_bytes)?,code,history,side_blocks,queues,rpc,threads,execution]));
     let _=size_of::<Header>()+size_of::<Body>();
-    Some(Bound{snapshots,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,execution,total})
+    Some(Bound{snapshots,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,execution,total,items})
 }
-/// Boot check: the bound must fit the node's memory budget.
+/// The share of the budget kept outside the model (D-A13-BUDGET): allocator headers, size-class
+/// rounding and fragmentation are not modelled (CONDITIONS), so the model total must fit in
+/// RESERVE_KEEP_EIGHTHS/8 of the budget. 7/8 keeps 12.5% (768 MiB of 6 GiB) in reserve.
+pub const RESERVE_KEEP_EIGHTHS:u128=7;
+/// The smallest budget that boots a bound of `total` bytes: ceil(8·total/7).
+pub fn budget_required(total:u128)->Option<u128>{total.checked_mul(8).map(|x|x.div_ceil(RESERVE_KEEP_EIGHTHS))}
+/// Boot check: the bound, with the reserve, must fit the node's memory budget.
 pub fn check(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:usize)->Result<Bound,String>{
     let b=derive(cp,k_hist,side_max,limits,dials).ok_or_else(||"A13 memory bound: arithmetic overflow".to_string())?;
-    if b.total>u128::from(limits.mem_budget){return Err(format!("A13 memory bound {} B exceeds the node memory budget {} B ({b:?})",b.total,limits.mem_budget))}
+    let need=budget_required(b.total).ok_or_else(||"A13 memory bound: arithmetic overflow".to_string())?;
+    if need>u128::from(limits.mem_budget){return Err(format!("A13 memory bound {} B with its 1/8 reserve needs {need} B, which exceeds the node memory budget {} B ({b:?})",b.total,limits.mem_budget))}
     Ok(b)
 }

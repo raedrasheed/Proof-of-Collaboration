@@ -23,21 +23,17 @@ pub struct Condition{pub id:&'static str,pub rules:&'static [&'static str],pub d
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct Waiver{pub rule:&'static str,pub absent:Vec<&'static str>,pub waived:Vec<&'static str>,pub checked:Vec<&'static str>}
 
-/// The RpcGuard fields of `param_gate::RpcLimits`, in declaration order.
-pub const RPC_FIELDS:[&str;29]=["conn_max","req_buf","conn_buf","send_sock_buf","heavy_active","light_active","light_queue","heavy_resp_mem","light_resp_mem",
-    "resp_max","light_resp_max","batch_resp_max","scratch_heavy","scratch_light","mem_total","batch_max","err_item_max","logs_count_max","logs_scan_bytes",
-    "rate","bucket_cap","queue_wait_ms","compute_heavy_ms","cancel_max_ms","grace_ms","min_send_rate","batch_wall_ms","enforce_slack_ms","timer_eps_ms"];
-fn slot<'a>(l:&'a mut RpcLimits,name:&str)->Option<&'a mut u64>{
-    Some(match name{
-        "conn_max"=>&mut l.conn_max,"req_buf"=>&mut l.req_buf,"conn_buf"=>&mut l.conn_buf,"send_sock_buf"=>&mut l.send_sock_buf,"heavy_active"=>&mut l.heavy_active,
-        "light_active"=>&mut l.light_active,"light_queue"=>&mut l.light_queue,"heavy_resp_mem"=>&mut l.heavy_resp_mem,"light_resp_mem"=>&mut l.light_resp_mem,
-        "resp_max"=>&mut l.resp_max,"light_resp_max"=>&mut l.light_resp_max,"batch_resp_max"=>&mut l.batch_resp_max,"scratch_heavy"=>&mut l.scratch_heavy,
-        "scratch_light"=>&mut l.scratch_light,"mem_total"=>&mut l.mem_total,"batch_max"=>&mut l.batch_max,"err_item_max"=>&mut l.err_item_max,
-        "logs_count_max"=>&mut l.logs_count_max,"logs_scan_bytes"=>&mut l.logs_scan_bytes,"rate"=>&mut l.rate,"bucket_cap"=>&mut l.bucket_cap,
-        "queue_wait_ms"=>&mut l.queue_wait_ms,"compute_heavy_ms"=>&mut l.compute_heavy_ms,"cancel_max_ms"=>&mut l.cancel_max_ms,"grace_ms"=>&mut l.grace_ms,
-        "min_send_rate"=>&mut l.min_send_rate,"batch_wall_ms"=>&mut l.batch_wall_ms,"enforce_slack_ms"=>&mut l.enforce_slack_ms,"timer_eps_ms"=>&mut l.timer_eps_ms,
-        _=>return None})
-}
+/// The RpcGuard fields of `param_gate::RpcLimits`, in declaration order, listed once: the macro
+/// derives RPC_FIELDS, the field lookup and an exhaustive destructuring of RpcLimits (no `..`),
+/// so a field added to RpcLimits and not listed here fails to compile (review F6).
+macro_rules! rpc_fields{($($f:ident),* $(,)?)=>{
+    pub const RPC_FIELDS:&[&str]=&[$(stringify!($f)),*];
+    fn slot<'a>(l:&'a mut RpcLimits,name:&str)->Option<&'a mut u64>{match name{$(stringify!($f)=>Some(&mut l.$f),)* _=>None}}
+    #[allow(dead_code)] fn every_field_is_listed(l:RpcLimits){let RpcLimits{$($f:_),*}=l;}
+}}
+rpc_fields!(conn_max,req_buf,conn_buf,send_sock_buf,heavy_active,light_active,light_queue,heavy_resp_mem,light_resp_mem,
+    resp_max,light_resp_max,batch_resp_max,scratch_heavy,scratch_light,mem_total,batch_max,err_item_max,logs_count_max,logs_scan_bytes,
+    rate,bucket_cap,queue_wait_ms,compute_heavy_ms,cancel_max_ms,grace_ms,min_send_rate,batch_wall_ms,enforce_slack_ms,timer_eps_ms);
 
 /// R26 inputs with their provenance.
 #[derive(Clone,Debug)]

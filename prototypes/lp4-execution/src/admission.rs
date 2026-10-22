@@ -264,7 +264,8 @@ pub fn admit(r:&Request<'_>)->Result<Admitted,Rejection>{
     let mut waivers=Vec::new();
     match r.scope{
         Scope::ExperimentalDevnet=>{
-            if r.kind==ProfileKind::Network||r.node!=NodeKind::Simnet{
+            // Only the intended kind: a Simnet profile on a Simnet node (not Network, not Synthetic).
+            if r.kind!=ProfileKind::Simnet||r.node!=NodeKind::Simnet{
                 return Err(terminal("R22","the experimental-devnet scope admits only a simnet profile on a simnet node".into()))}
             if !l.rpc.absent().is_empty(){
                 let (w,failed)=r26_partial(&l.rpc);

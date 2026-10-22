@@ -178,3 +178,18 @@ mod alloc_meter{
     }
     println!("EXECUTION-MODEL {}",serde_json::json!({"gas":gas as u64,"boundBytes":bound as u64,"cases":out}));
 }
+
+/// A13 obligation 4 (execution classes): a loaded account's storage maps start empty and
+/// allocate nothing, so a map's own share belongs to the account's first slot.
+#[test] fn loaded_accounts_start_with_unallocated_storage_maps(){
+    use revm::primitives::{Account,AccountInfo,EvmStorageSlot,HashMap,U256 as RU};
+    // The account's code is shared (a refcounted clone); only the storage maps are measured.
+    let info=AccountInfo::default();
+    let (a,d)=(Account::from(info.clone()),revm::db::DbAccount{info:info.clone(),..Default::default()});
+    assert_eq!(a.storage.capacity(),0);assert_eq!(d.storage.capacity(),0);
+    let (maps,bytes)=alloc_meter::measure(||(HashMap::<RU,EvmStorageSlot>::default(),HashMap::<RU,RU>::default()));
+    assert_eq!(bytes,0,"empty storage maps allocated {bytes} B");drop(maps);
+    let c=memory::classes();let rate=|i:usize|c[i].bytes as f64/c[i].gas as f64;
+    assert!(c[2].bytes==c[0].bytes+c[1].bytes+memory::table_bytes(memory::STATE_SLOT)+memory::table_bytes(memory::SLOT_ENTRY)&&c[2].gas==c[0].gas+c[1].gas);
+    println!("EXECUTION-CLASSES {}",serde_json::json!({"accountPerGas":rate(0),"slotPerGas":rate(1),"accountWithFirstSlotPerGas":rate(2)}));
+}
