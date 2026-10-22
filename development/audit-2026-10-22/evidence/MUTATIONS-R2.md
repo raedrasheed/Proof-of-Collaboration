@@ -37,3 +37,55 @@ A control that is not caught is recorded as such. M2, M7 and M13 were not caught
 the tests were strengthened and the mutations rerun. M14's first run executed no test, which the
 runner reported as a pass; it now uses the full name. M8 remains probabilistic. The whole set is rerun
 on the final implementation commit (FINAL section below, once run).
+
+## FINAL: the whole set re-run on the final implementation commit (687ac38)
+
+Re-run on 687ac38 (the final implementation commit; prototypes/ tree `68ece272a3c7`) in an
+isolated `git worktree`, release build, `--test-threads=1`, on 2026-10-22T21:23:27Z. The runner
+(`run_mutations_final.py`, kept with the private material) enforces three things per mutation: the
+anchor occurs exactly once (else APPLY-FAIL, never silently "fix present"); a **positive control** —
+the named test passes on the clean tree, proving the verifier reaches the rule; and the mutant run must
+**fail with the test actually executed** — a run matching zero tests is rejected (ZERO-MATCH), not
+counted as a pass. `caught = control OK AND mutant FAILED`.
+
+Result: **14/14 caught**, every positive control OK, every run executed its test.
+
+| id | mutation (re-breaks the fix) | test | control | mutant | result |
+|---|---|---|---|---|---|
+| M16-SIDE | cap back to the pre-R_keep 256; a fixed 270-deep heavier branch | `adopt_a_heavier_branch_at_the_cap_and_survive_restart` | OK | FAILED | CAUGHT |
+| M9-RETAIN | one-pass leaf trimming (the old bug): a newly-exposed parent leaf is not re-queued, so a side chain deeper than the initial leaf set is not trimmed to the cap | `side_blocks_stay_within_the_cap_after_a_reorg_and_evicted_blocks_are_not_taken_again` | OK | FAILED | CAUGHT |
+| M10-EVICT | an evicted block is accepted again (validated and journaled) | `side_blocks_stay_within_the_cap_after_a_reorg_and_evicted_blocks_are_not_taken_again` | OK | FAILED | CAUGHT |
+| M5-DEADLINE | expired batch members are run, not skipped with -32020 | `rpc_work_deadline_skips_expired_work_and_releases_resources` | OK | FAILED | CAUGHT |
+| M4-BUSY | a response reservation never fails (the pool is unbounded) | `a_full_heavy_pool_answers_busy_before_anything_runs` | OK | FAILED | CAUGHT |
+| M13-RESV | the reservation is released before the answer is written | `an_answer_is_reserved_until_its_connection_has_written_it` | OK | FAILED | CAUGHT |
+| M14-BUSYPARSE | the busy path parses the body unconditionally | `a_busy_answer_does_not_parse_an_over_limit_body` | OK | FAILED | CAUGHT |
+| M15-TXRAW | tx_json carries raw beside input (the old encoding), ~4x TX_MAX | `a_max_size_transaction_is_answered_in_the_light_lane` | OK | FAILED | CAUGHT |
+| M3-QUEUECAP | no cap on queued heavy bodies | `abandoned_queued_bodies_are_capped_and_released` | OK | FAILED | CAUGHT |
+| M7-LIGHTTURN | no LIGHT_TURN bound (the lane is drained to empty) | `a_light_turn_runs_at_most_light_turn_requests_then_wakes_the_node` | OK | FAILED | CAUGHT |
+| M1b-WAKE | a Wake for every light request (no coalescing) | `light_lane_wakes_coalesce_until_taken` | OK | FAILED | CAUGHT |
+| F1-CLOSE | close sets the flag and notifies without the queue lock (the old racy code) | `a_close_between_the_writers_test_and_its_wait_wakes_it` | OK | FAILED | CAUGHT |
+| M2-MINER | the old miner handle is not dropped/joined before the next production starts (its Drop, which decrements LIVE, never runs), so two handles are LIVE at once and PEAK>1 | `miner_replacement_keeps_at_most_one_miner_thread` | OK | FAILED | CAUGHT |
+| F8-DIRTY | report DirtyKeys where the block meter halts on dirty accounts | `d_a03_dirty_vectors` | OK | FAILED | CAUGHT |
+
+Compile-time check (a build catch, not a test):
+
+| id | file | mutation | control | mutant | result |
+|---|---|---|---|---|---|
+| F6-FIELD | scope.rs | drop timer_eps_ms from the rpc_fields!(...) list | clean tree compiles (cargo test --no-run: Finished) | COMPILE-FAIL (E0027 missing field; 'could not compile ... due to 1 previous error'; exit 101) | CAUGHT (compile-time) |
+
+Two corrections from the first FINAL attempt (preserved for honesty):
+- The runner first classified a mutant as COMPILE-FAIL whenever the output held a line starting
+  `error:` — but `cargo test` prints `error: test failed` on a **failing** test, so 12 genuine catches
+  were mislabelled. The classifier now reads the named test's own `ok`/`FAILED` line first and only
+  calls COMPILE-FAIL when no test ran (a real `error[E…]`/"could not compile"). The controls were
+  unaffected (they pass, so no `error:` line).
+- Two mutations needed the final code's shape: **M9** changed `while`→`if`, which does not compile
+  (`break` outside a loop); it now removes the parent re-queue (`leaves.push`), the true one-pass bug.
+  **M2** first targeted `lock()`'s `pr.miner=None`, which is redundant on the final code (the old miner
+  is already dropped in `restart_production`/`begin_attempt` before `lock` runs, by Rust ownership), so
+  removing it caused no handle overlap and the test (correctly) did not fire; it now `mem::forget`s the
+  old handle in `restart_production` so its `Drop` never decrements `miner::LIVE`, leaving two handles
+  live at once — which the test's `PEAK == 1` assertion catches.
+
+Raw results and timings: `evidence/mutations-final.json`. The earlier unsuccessful attempts above (M2,
+M7, M13, M14, M8 on b132a05; the misclassified first FINAL run) are kept, not discarded.

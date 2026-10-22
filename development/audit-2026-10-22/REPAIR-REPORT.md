@@ -112,10 +112,17 @@ implementation commit):
 - **Measured RSS (final code, evidence/rss-final.json):** 12.26–12.32 MB VmHWM per node under idle +
   bounded adversarial load, 0.22% of the model. Measured, not the model bound and not a ceiling
   (A13-DERIVATION §2b).
-- **Debug build (lp4-execution and pocold, single-threaded) and the mutation controls re-run on the
-  final code (evidence/mutations-final.json, run in an isolated worktree with a positive control per
-  test and zero-matching-test runs rejected):** in progress at the time of this commit; their results
-  are appended here and in evidence/MUTATIONS-R2.md on completion.
+- **Debug build (final code, evidence/debug-final.log):** lp4-execution full debug suite 162 passed;
+  pocold lib 37 + admission 3 + net 20 = 60 passed. The pocold `consensus` binary (~50 tests, the
+  270-/360-block deep-reorg re-execution + restart and the mining tests) is **release-verified** (part
+  of the pocold 110 above): a single-threaded debug run of it exceeded the 5000s wall cap without
+  finishing — an unoptimized-build runtime limit, not a failure — so it is excluded from the debug pass
+  and recorded as such.
+- **Mutation controls re-run on the final code (`687ac38`, evidence/mutations-final.json, §MUTATIONS):**
+  14 of 14 test-failure mutations caught, plus the F6 compile-time field-inventory catch (15 controls in
+  all). Each has a positive control (the named test passes on clean code) and a mutant run that fails
+  with the test actually executed; zero-matching-test runs are rejected. The classifier correction and
+  the M9/M2 re-targeting (from the first FINAL attempt) are recorded in evidence/MUTATIONS-R2.md.
 
 ## 4. Independent review
 
