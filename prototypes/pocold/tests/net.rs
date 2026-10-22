@@ -359,8 +359,9 @@ fn hex(b:&[u8])->String{b.iter().map(|x|format!("{x:02x}")).collect()}
 /// replaces the miner; /proc is sampled continuously for threads named "miner". The node stops
 /// at that height, so it does not load the tests after this one.
 #[test] fn miner_replacement_keeps_at_most_one_miner_thread(){let _g=serial();
-    #[cfg(not(target_os="linux"))]{eprintln!("THREADS-NOT-MEASURED");return}
-    let miners=||->Vec<String>{std::fs::read_dir("/proc/self/task").unwrap().filter_map(|e|{let e=e.ok()?;let n=std::fs::read_to_string(e.path().join("comm")).ok()?;(n.trim()=="miner").then(||e.file_name().to_string_lossy().to_string())}).collect()};
+    // /proc sampling is a Linux cross-check; the handle high-water mark is exact on every platform.
+    let miners=||->Vec<String>{if !cfg!(target_os="linux"){return vec![]}std::fs::read_dir("/proc/self/task").unwrap().filter_map(|e|{let e=e.ok()?;let n=std::fs::read_to_string(e.path().join("comm")).ok()?;(n.trim()=="miner").then(||e.file_name().to_string_lossy().to_string())}).collect()};
+    if !cfg!(target_os="linux"){eprintln!("THREADS-NOT-MEASURED (miner sampling)");}
     let before=miners().len();assert_eq!(before,0,"no miner runs before the test");
     let dir=std::env::temp_dir().join(format!("pocold-net-miner-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
     let cfg=Config{dir,name:"miner".into(),miner:Some(devnet::miner_identity("a").key),listen:None,peers:vec![],rpc:None,stop_at:Some(6),log:false,limits:small()};
@@ -371,7 +372,7 @@ fn hex(b:&[u8])->String{b.iter().map(|x|format!("{x:02x}")).collect()}
     assert!(wait_until(2000,||miners().is_empty()),"the miner is joined when the node stops");
     let handles=pocold::miner::PEAK.load(Ordering::SeqCst);
     println!("MINER {}",serde_json::json!({"minerThreadsSeen":seen.len(),"peakConcurrentSampled":peak,"peakLiveHandles":handles}));
-    assert!(seen.len()>=2,"the miner was replaced at least once: {} miner threads seen",seen.len());
+    if cfg!(target_os="linux"){assert!(seen.len()>=2,"the miner was replaced at least once: {} miner threads seen",seen.len());}
     // Exact: the handle count bounds the threads at every instant; sampling /proc is a cross-check.
     assert_eq!(handles,1,"a miner was started before the previous one was joined");
     assert!(peak<=1,"at most one miner thread at a time: {peak}");
