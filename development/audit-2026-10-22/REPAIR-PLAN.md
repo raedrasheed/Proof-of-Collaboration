@@ -23,19 +23,18 @@ Rules for this repair:
   legitimate body (accepted); a committed-but-invalid body (header commits to garbage) is still a block
   rejection and is cached.
 
-### A02 — ParamGate and validated admission (lp4-execution `paramgate.rs`, `devnet.rs`; pocold `lib.rs`)
-- New `paramgate::check(spec, local, nodeKind)` evaluating every rule whose inputs exist: R1–R7 (with the
-  node's local timing), R8–R13, R16, R17, R18 (derived SYS bounds plus the measured genesis system slots ≤
-  SYS_SLOT_MAX), R20, R22–R25, plus the CP schema bounds. It returns all violated rules in order. R14/R19
-  (measured validate p99) and R15/R26 (gossip/RPC service constants) are checked against the node's
-  constants and a measured p99.
-- New `Admitted` type with private fields, constructible only through `admit(...)`, which runs the full gate
-  and genesis construction. `devnet::build`, `devnet::load` and `pocold::load_spec` return `Admitted`;
-  `pocold::chain::Spec` can only be made from an `Admitted`. `Genesis::build` stays available inside the
-  crate and to its own unit tests only.
-- Devnet profile consequence: the LP5–LP10 devnet defaults violate R16 (REG_RECORDS_MAX 8192 < 12386) and,
-  with honest local timing (Δ ≥ 1 s, t_exec ≥ 1 s), R3/R7. The defaults move to gate-valid values; see
-  decision D-A02-PROFILE.
+### A02 — ParamGate and validated admission (lp4-execution `admission.rs`, `devnet.rs`; pocold `lib.rs`, `chain.rs`, `main.rs`)
+- As implemented: the accepted LP3 evaluator `gate::check` (lp1-node `gate.rs`, `param_gate.rs`,
+  `timing.rs`, shared byte-for-byte) evaluates R1–R26 and returns every violated rule in order. A
+  first-draft plan for a new `paramgate.rs` was dropped in favour of reusing the accepted evaluator.
+  `admission::admit` builds its facts from the real artifacts (D-A02-FACTS) and the node's local
+  parameters; schema/decode failures are R24.
+- `Admitted` has private fields and only `admit` constructs it (compile-fail doc tests pin E0624/E0451).
+  `Genesis::build` is crate-private; `devnet::load` (an unadmitted load path) is removed; `devnet::build`
+  returns a candidate whose `admit` measures timing and runs the gate. `pocold::chain::Spec` is
+  constructible only from an `Admitted`; `pocold::load_spec` (run, status) and `init-devnet` run the gate
+  and refuse boot with `-32018 ParamGate rejected [...]`.
+- Devnet and test profiles move to gate-valid values (D-A02-PROFILE).
 
 ### A03 — runtime log and state limits (lp4-execution `user_phase.rs`, `apply.rs`)
 - A per-block meter (logs bytes and count, dirty storage keys, dirty accounts, live slots and accounts,
@@ -45,6 +44,11 @@ Rules for this repair:
 - Tests: exactly at, one below and one above each limit; cumulative logs across transactions; receipts,
   gas, roots and state after a halt; a halted transaction does not consume the budget.
 - Adjacent limits are reported separately: what is enforced, what remains open.
+- As implemented: `user_phase::caps` (LOG_BLOCK_MAX, LOG_COUNT_MAX=546, LOG_CAP, DIRTY_BLOCK_MAX,
+  ACCT_DIRTY_BLOCK_MAX), SLOT_CAP/ACCT_CAP over the user state (D-A03-CAPS), the user-context SYS
+  allowance (D-A03-SYSUSER); LOG_CAP uses the canonical ancestors' charged log bytes
+  (`BlockInput::cum_log_bytes`, pocold `Entry::cum_log_bytes`). The profile-free Cancun control path is
+  left geth-equivalent.
 
 ### A04 — journal framing (pocold `store.rs`)
 - Journal format v2 (`POCOLJ2`): every record header carries its own check over the length, so a damaged
@@ -142,13 +146,70 @@ accepted with status 1). No accepted vector changes. Applied under the standing 
 recommended option; recorded for independent confirmation.
 
 ### D-A02-PROFILE — devnet defaults must pass ParamGate (profile, not a rule)
-The LP5–LP10 devnet profile violates R16 and, with honest timing, R3/R7. Options: (a) adopt P11 timing
-(T_blk=10, D_att=60, Δ_fb_wait=6), the approved dev profile; (b) a gate-valid single-host profile that uses
-φ=0, which is exact on one machine (Φ=0, Δ=1, t_exec=1, Δ_rel=5, Δ_fb_wait=3, D_att=25, Γ=5, T_blk=4,
-REG_RECORDS_MAX=16384); (c) exempt simnet from R1–R7 (rejected: it weakens the gate). Recommended:
-**(b) for single-host suites, (a) for any multi-host use**. The node refuses any combination that fails the
-gate. Earlier LP5–LP10 evidence was produced with a profile that this gate now rejects; that evidence is
-kept as historical and the suites are re-run.
+Correction to the first draft of this plan: R16 uses the profile's own Lmax = max(U, 2·E_win+D+1), not the
+network constant 4113. For the devnet (U=40, E_win=16, D=4) R16 needs 64+2·(40+2048) = 4240 ≤ 8192, so the
+LP5–LP10 devnet profile did **not** violate R16; REG_RECORDS_MAX stays 8192. It violated the timing rules:
+with honest local timing (Δ ≥ 1 s, t_exec ≥ 1 s) the old e2e flags (T_blk=1, D_att=4, Δ_fb_wait=1) fail R3
+and R7 (`pocold init-devnet` now prints `-32018 ParamGate rejected [R3, R7]` for them).
+Options: (a) P11 timing; (b) a gate-valid single-host profile with φ=0 (exact on one machine: one clock);
+(c) exempting simnet from R1–R7 (rejected: it weakens the gate). **Chosen: (b) for single-host suites, (a) for
+multi-host use.** Local: Δ=1, φ=Φ=0, t_exec=1, Δ_rel=5, Γ=5 (σ=2, X^W=7). Devnet defaults: T_blk=4, c=2,
+Δ_fb_wait=3, D_att=25 (R7: 25+5 ≥ 2(7+8)). The e2e suites use T_blk=1, c=8, D_att=25 (pocold) and T_blk=2,
+c=8, D_att=41 (extension): a larger c makes an attempt with one miner offline exhaust its nonce space rarely
+(e^{-8·2/3}), and R7 then requires the longer D_att. Earlier LP5–LP10 evidence was produced with a profile
+that this gate rejects; it is kept as historical and the suites are re-run on admitted profiles.
+
+### D-A02-FACTS — where each gate fact comes from (no caller-supplied "ok")
+The accepted LP3 evaluator (`lp1-node/src/gate.rs`, shared byte-for-byte) decides; `lp4-execution
+admission.rs` assembles its facts from the real artifacts and labels them:
+- identity (R23, R24a): allocRoot re-derived from the alloc, sysCodeHash of the bundled programs, balances.
+- R18 slots/keys/accounts: the P7 derivation `resources::derive`, raised to the system slots measured in the
+  constructed genesis; the user context is charged SYS_KEYS_USER_MAX keys and 16 accounts.
+- R18 gas: per-call maxima measured by `resources::tests::sys_gas_envelope_fixture` (worst case plus a
+  sweep-deletion scenario; the test fails if any measurement exceeds the table), composed into the worst
+  call sequence of each phase (ordinary 2E+7 calls; final 2E+7+(D−1) settleFinal). Applicable only inside
+  the measured domain S_max ≤ 256, M_max ≤ 256, D ≤ 16, E_max ≤ 4, RET ≤ 128; outside it the facts are
+  absent and R18 fails. Monotonicity in those fields is an assumption, kept open under A13.
+- R14/R19: a timing record measured for the exact profile (`admission::measure`: blocks applied to a
+  scratch copy of the genesis, each with a GAS_LIMIT compute loop, through closing and the final block).
+  It is representative, not a worst-case proof (A13).
+- R21: (K_hist + side) full snapshots at ACCT_CAP·200 + (SLOT_CAP+SYS_SLOT_MAX)·96 bytes (pocold keeps
+  full snapshots). At network caps this exceeds HIST_TRIE_BUDGET; single-host simnet nodes are admitted
+  only through the gate's own simnet retentionStress exception, which the report states. A node kind
+  `Node` never gets it.
+- R25d: the devnet's H_cal is recorded as a synthetic fixture (chosen difficulty, not a measured rate);
+  target_g is computed from it with the R25d formula.
+
+### D-A02-PROPOSER — when the signed proposer builds (local production, not consensus)
+With Φ=0 a template stamped max(L(0), C) while C < L(0) is in the future for every receiver, which then
+correctly ignores it, leaving only the proposer mining. The proposer now waits until C+Φ ≥ L(0) before
+building. The timestamp formula is unchanged; only the moment of building moves.
+
+### D-A03-CAPS — SLOT_CAP and ACCT_CAP bound the user state
+Ambiguity: genesis `check_caps` counted every account and slot, including the five system programs, against
+SLOT_CAP/ACCT_CAP, while the spec gives system storage its own bound (SYS_SLOT_MAX, R18) and makes the caps
+an exceptional halt (a SYSTEM call cannot halt). Counting system slots would let user transactions fill
+the cap and the same block's system phase then invalidate the block. Options: (1) count everything and make
+the USER phase reserve headroom for later system writes (couples execution to program internals); (2) the
+caps bound the user state (everything outside the five programs) and SYS_SLOT_MAX bounds the programs'
+storage, checked after the block. **Chosen: (2)**, the split R21's bound already uses (SLOT_CAP+SYS_SLOT_MAX).
+Compatibility: block validity changes only where total slots > SLOT_CAP ≥ user slots, unreachable at devnet
+caps; the preserved LP4 test of post-phase-2 cap atomicity now uses SYS_SLOT_MAX, the cap that governs the
+storage phase 2 writes.
+
+### D-A03-DIRTY — what DIRTY_BLOCK_MAX and ACCT_DIRTY_BLOCK_MAX count
+Per block, the union over USER transactions of the storage keys and accounts whose value changed in the
+transaction (net per transaction; an account receiving and paying out the same amount is unchanged). A
+transaction whose diff would exceed either set halts. The halt's own nonce/fee effects always apply; if
+even they would exceed ACCT_DIRTY_BLOCK_MAX (or create an account beyond ACCT_CAP), the transaction cannot
+be included (block invalid; builders skip it, as for TX_CAP).
+
+### D-A03-SYSUSER — the user-context SYS allowance
+Counted as storage keys of the five system programs changed by USER transactions (≤ SYS_KEYS_USER_MAX), the
+programs whose storage they change (≤ 16), and none while closing (`SysWriteClosing`); each is an exceptional
+halt. Escrow balance credits (coinbase tips) and the ChunkFactory nonce are not storage writes. The v1
+programs expose no USER-callable storage write, so this is enforced but currently vacuous; R18's user
+allowance relies on it.
 
 ### D-A04-FORMAT — journal v2
 An experimental local storage format, not a protocol change. v1 migrates only when it parses completely;

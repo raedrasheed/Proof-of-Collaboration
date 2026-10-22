@@ -170,7 +170,7 @@ fn simulate(n:&Node,o:&Value,tag:&Value,gas:Option<u64>)->Result<ExecutionResult
     let mut st=e.state.clone();
     // eth_call simulation: fund the caller for value transfers, never committed.
     if let Some(a)=st.accounts.get_mut(&tx.caller){a.info.balance=a.info.balance.max(tx.value);}
-    native::execute_for_profile(&st,tx,&ctx,&n.chain.spec.profile).map(|r|r.result).map_err(|e|(-32000,format!("{e:?}")))
+    native::execute_for_profile(&st,tx,&ctx,n.chain.spec.profile()).map(|r|r.result).map_err(|e|(-32000,format!("{e:?}")))
 }
 fn find_tx<'a>(n:&'a Node,h:&B256)->Option<(&'a Entry,usize)>{
     for x in n.chain.canonical.iter().rev(){let e=&n.chain.blocks[x];if let Some(i)=e.tx_hashes.iter().position(|t|t==h){return Some((e,i))}}None
@@ -185,7 +185,7 @@ fn block_json(n:&Node,e:&Entry,full:bool)->Value{
         "pocol":{"attempt":x.a,"signed":e.signed,"proposer":hex(&x.proposer),"shares":x.shares.len(),"templateId":hex(&template_id(&x.ut_raw)),"final":e.is_final}})
 }
 fn tx_json(n:&Node,e:&Entry,i:usize)->Value{
-    let raw=&e.body.txs[i];let env=wire::decode_for_profile(raw,&n.chain.spec.profile);
+    let raw=&e.body.txs[i];let env=wire::decode_for_profile(raw,n.chain.spec.profile());
     let mut v=json!({"hash":format!("{}",e.tx_hashes[i]),"blockHash":hex(&e.hash),"blockNumber":qty(e.height),"transactionIndex":qty(i as u64),"raw":hex(raw)});
     if let Ok(env)=env{let t=env.tx_env();v["from"]=json!(format!("{:#x}",env.sender()));v["to"]=t.transact_to.to().map(|a|json!(format!("{a:#x}"))).unwrap_or(Value::Null);
         v["nonce"]=json!(qty(t.nonce.unwrap_or(0)));v["gas"]=json!(qty(t.gas_limit));v["value"]=json!(qty256(t.value));v["input"]=json!(hex(&t.data));v["type"]=json!(qty(env.kind() as u64));
@@ -202,7 +202,7 @@ fn decode_receipt(r:&[u8])->Option<(bool,u64,Vec<(Address,Vec<B256>,Vec<u8>)>)>{
 fn receipt_json(n:&Node,e:&Entry,i:usize)->Value{
     let Some((status,cum,logs))=decode_receipt(&e.receipts[i]) else{return Value::Null};
     let prev=if i==0{0}else{decode_receipt(&e.receipts[i-1]).map(|r|r.1).unwrap_or(0)};
-    let env=wire::decode_for_profile(&e.body.txs[i],&n.chain.spec.profile).ok();
+    let env=wire::decode_for_profile(&e.body.txs[i],n.chain.spec.profile()).ok();
     let (from,to,contract,price)=match &env{Some(env)=>{let t=env.tx_env();let from=env.sender();
         let created=if t.transact_to.is_create(){let mut p=Vec::new();crate::rlp::encode_bytes(from.as_slice(),&mut p);let nb=t.nonce.unwrap_or(0).to_be_bytes();let f=nb.iter().position(|x|*x!=0).unwrap_or(8);crate::rlp::encode_bytes(&nb[f..],&mut p);let mut o=Vec::new();crate::rlp::encode_list_payload(&p,&mut o);
             Some(Address::from_slice(&keccak256(&o)[12..]))}else{None};

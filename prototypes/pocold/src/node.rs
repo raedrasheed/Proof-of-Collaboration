@@ -18,8 +18,6 @@ pub struct Config{
     pub listen:Option<SocketAddr>,
     pub peers:Vec<SocketAddr>,
     pub rpc:Option<SocketAddr>,
-    /// Local timing parameters (not consensus): Δ_rel, Φ (future slack), Γ.
-    pub delta_rel:u64,pub phi:u64,pub gamma:u64,
     /// Optional: stop after the canonical head reaches this height.
     pub stop_at:Option<u64>,
     pub log:bool,
@@ -31,7 +29,9 @@ pub fn now_ms()->u128{SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_m
 pub fn now_s()->u64{(now_ms()/1000) as u64}
 
 struct Locked{header:Header,body:Body,tid:[u8;32],ctx:ChildCtx,fallback:bool}
-enum Mode{Wait{deadline_ms:u128},Locked(Box<Locked>),Idle}
+/// Propose: Draw(h,0) waits until its template timestamp max(L(0),C) is not in the
+/// future for receivers (C+Φ >= L(0)); with Φ=0 a template built earlier is rejected.
+enum Mode{Wait{deadline_ms:u128},Locked(Box<Locked>),Idle,Propose{at_s:u64}}
 struct Production{parent:[u8;32],height:u64,attempt:u32,mode:Mode,shares:BTreeSet<u64>,miner:Option<MinerHandle>,solved:bool,received_ms:u128}
 
 /// Pending pool: transactions are kept only if they execute in order on top of
@@ -51,6 +51,8 @@ pub struct Node{
     prod:Option<Production>,
     orphans:HashMap<[u8;32],Vec<Block>>,
     future:Vec<Block>,
+    /// Own sealed blocks waiting in `future` for their timestamp (Φ=2φ may be 0 on one host).
+    own_future:HashSet<[u8;32]>,
     templates:HashMap<[u8;32],(Header,Body,u128)>,
     received:HashMap<[u8;32],u128>,
     pub pool:Pool,
@@ -75,7 +77,7 @@ fn result_bytes(r:&Option<ParentResult>)->Vec<u8>{
 impl Node{
     /// Opens the journal, replays and re-executes every committed block.
     pub fn open(cfg:Config,spec:Spec)->Result<Self,String>{
-        let binding=spec.genesis_hash;
+        let binding=spec.genesis_hash();
         let rec=store::open(&cfg.dir,&binding).map_err(|e|format!("store: {e:?}"))?;
         let mut chain=Chain::new(spec);
         for (i,payload) in rec.payloads.iter().enumerate(){
@@ -98,7 +100,7 @@ impl Node{
         let fwd=tx.clone();std::thread::spawn(move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}});
         let head_state=chain.head().state.clone();
         let mut node=Self{cfg,chain,journal:rec.journal,peers:HashMap::new(),outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,miner_tx,prod:None,
-            orphans:HashMap::new(),future:Vec::new(),templates:HashMap::new(),received:HashMap::new(),
+            orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
             pool:Pool{txs:vec![],pending_state:head_state,bytes:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;
         if rec.torn_tail{node.log("recovered torn journal tail into a new journal");}
@@ -136,16 +138,18 @@ impl Node{
             Event::Net(NetEvent::Message(id,m))=>self.on_msg(id,m),
         }
     }
-    fn hello(&self)->Msg{let h=self.chain.head();Msg::Hello{chain_id:self.chain.spec.chain_id(),genesis:self.chain.spec.genesis_hash,head:h.hash,height:h.height,node:self.cfg.name.clone()}}
+    /// Φ = 2φ from the admitted local parameters (future-timestamp slack).
+    fn capital_phi(&self)->u64{u64::from(self.chain.spec.local().capital_phi())}
+    fn hello(&self)->Msg{let h=self.chain.head();Msg::Hello{chain_id:self.chain.spec.chain_id(),genesis:self.chain.spec.genesis_hash(),head:h.hash,height:h.height,node:self.cfg.name.clone()}}
     fn broadcast(&self,m:&Msg,except:Option<PeerId>){for (id,p) in &self.peers{if Some(*id)!=except{p.send(m);}}}
 
     // ---------------- import ----------------
     /// Validates, journals (fsync) and inserts a block. Returns Ok(true) if new head.
     pub fn import(&mut self,b:Block,from:Option<PeerId>)->Result<bool,Reject>{
         let hash=b.hash();
-        let mut res=self.chain.validate(&b,Some(now_s()),self.cfg.phi);
+        let mut res=self.chain.validate(&b,Some(now_s()),self.capital_phi());
         if let Err(Reject::NeedsRebuild(p))=&res{let p=*p;self.log("TrieRebuild for a fork below the K_hist window");
-            if let Err(e)=self.chain.ensure_state(&p){return Err(e)}res=self.chain.validate(&b,Some(now_s()),self.cfg.phi);}
+            if let Err(e)=self.chain.ensure_state(&p){return Err(e)}res=self.chain.validate(&b,Some(now_s()),self.capital_phi());}
         let (entry,_)=match res{
             Ok(v)=>v,
             Err(Reject::UnknownParent)=>{
@@ -190,12 +194,12 @@ impl Node{
     pub fn submit_tx(&mut self,raw:Vec<u8>,relay:bool)->Result<B256,String>{
         let cp=self.chain.spec.cp();
         if raw.len()>cp.TX_MAX as usize{return Err("-32014 oversized".into())}
-        let env=wire::decode_for_profile(&raw,&self.chain.spec.profile).map_err(|e|format!("{} {e:?}",e.specified_pool_code().unwrap_or(-32000)))?;
+        let env=wire::decode_for_profile(&raw,self.chain.spec.profile()).map_err(|e|format!("{} {e:?}",e.specified_pool_code().unwrap_or(-32000)))?;
         let hash=env.hash();
         if self.pool.txs.iter().any(|(h,_)|*h==hash){return Ok(hash)}
         if self.pool.bytes+raw.len()>POOL_MAX_BYTES{return Err("-32016 pool full".into())}
         let ctx=self.next_block_ctx();
-        let r=native::execute_for_profile(&self.pool.pending_state,env.tx_env(),&ctx,&self.chain.spec.profile).map_err(|e|format!("-32000 {e:?}"))?;
+        let r=native::execute_for_profile(&self.pool.pending_state,env.tx_env(),&ctx,self.chain.spec.profile()).map_err(|e|format!("-32000 {e:?}"))?;
         self.pool.pending_state.commit(r.state);
         self.pool.bytes+=raw.len();self.pool.txs.push((hash,raw.clone()));
         if relay{self.broadcast(&Msg::Tx{raw},None);}
@@ -210,7 +214,7 @@ impl Node{
     fn template_txs(&self)->Vec<Vec<u8>>{
         let cp=self.chain.spec.cp();let mut out=Vec::new();let mut gas=0u64;let mut bytes=0usize;
         for (_,raw) in &self.pool.txs{
-            let Ok(env)=wire::decode_for_profile(raw,&self.chain.spec.profile) else{continue};let g=env.tx_env().gas_limit;
+            let Ok(env)=wire::decode_for_profile(raw,self.chain.spec.profile()) else{continue};let g=env.tx_env().gas_limit;
             if gas+g>cp.GAS_LIMIT||bytes+raw.len()>cp.BODY_MAX as usize-1024{break}
             gas+=g;bytes+=raw.len();out.push(raw.clone());
         }
@@ -234,6 +238,8 @@ impl Node{
             let ctx=match self.chain.child_ctx(&p,0){Ok(c)=>c,Err(e)=>{self.log(&format!("ctx error {e:?}"));return}};
             let me=self.cfg.miner.as_ref().map(|k|k.address());
             if me==Some(ctx.proposer){
+                let phi=self.capital_phi();
+                if now_s().saturating_add(phi)<ctx.window.lower(){if let Some(pr)=&mut self.prod{pr.mode=Mode::Propose{at_s:ctx.window.lower()-phi};}return;}
                 let txs=self.template_txs();
                 if let Some(t)=self.build_signed_template(&p,txs){
                     self.stats.signed_templates+=1;
@@ -242,7 +248,7 @@ impl Node{
                 }
             }
             let received=self.prod.as_ref().unwrap().received_ms;
-            let deadline=ctx.window.deadline_ms(received,self.cfg.delta_rel,self.chain.spec.cp().dFbWait).unwrap_or(0);
+            let deadline=ctx.window.deadline_ms(received,u64::from(self.chain.spec.local().delta_rel),self.chain.spec.cp().dFbWait).unwrap_or(0);
             if let Some(pr)=&mut self.prod{pr.mode=Mode::Wait{deadline_ms:deadline};}
             // A signed template may already have arrived for this parent.
             if let Some((h,b,arr))=self.templates.remove(&parent_hash){if arr<=deadline{self.try_lock_signed(h,b);}}
@@ -297,26 +303,28 @@ impl Node{
         let ctx=match self.chain.child_ctx(&p,0){Ok(c)=>c,Err(_)=>return false};
         let tid=template_id(&shell.ut_raw);
         let ok_sig=matches!(hashes::recover_address(&hashes::sig_msg(&tid),&shell.sig),Ok(a) if a[..]==shell.proposer[..]);
-        if !ok_sig||shell.proposer[..]!=ctx.proposer[..]||!ctx.window.contains(shell.ts)||crate::timing::is_future(shell.ts,now_s(),self.cfg.phi){return false}
+        if !ok_sig||shell.proposer[..]!=ctx.proposer[..]||!ctx.window.contains(shell.ts)||crate::timing::is_future(shell.ts,now_s(),self.capital_phi()){return false}
         let Ok(effects)=self.chain.evidence_effects(&p,&body,shell.h) else{return false};
         let rebuilt=self.chain.rebuild_signed(&p,&ctx,shell.ts,Address::from_slice(&shell.proposer),&body,effects);
         match rebuilt{Ok(ut) if ut==shell.ut_raw=>{self.lock(shell,body,false);true},_=>false}
     }
     fn tick(&mut self){
         // Retry future blocks.
-        if !self.future.is_empty(){let f=std::mem::take(&mut self.future);for b in f{let _=self.import(b,None);}}
+        if !self.future.is_empty(){let f=std::mem::take(&mut self.future);for b in f{let h=b.hash();if self.import(b,None).is_ok()&&self.own_future.remove(&h){self.stats.mined+=1;}}
+            let waiting:HashSet<[u8;32]>=self.future.iter().map(|b|b.hash()).collect();self.own_future.retain(|h|waiting.contains(h));}
         let now=now_ms();
         let Some(pr)=&self.prod else{return};
         let parent=pr.parent;let a=pr.attempt;
         match &pr.mode{
+            Mode::Propose{at_s} if now_s()>=*at_s=>{self.begin_attempt(0);}
             Mode::Wait{deadline_ms} if now>*deadline_ms=>{
                 // FB is sticky for (parent, h, 0).
                 let p=self.chain.get(&parent).unwrap().clone_light();self.lock_fallback(&p,0);
             }
-            Mode::Locked(_)|Mode::Idle|Mode::Wait{..}=>{
+            Mode::Locked(_)|Mode::Idle|Mode::Wait{..}|Mode::Propose{..}=>{
                 let p=self.chain.get(&parent).unwrap();
                 if let Ok(w)=crate::timing::AttemptWindow::new(p.ts,a,self.chain.spec.cp().D_att){
-                    if w.advance_due(now_s(),self.cfg.gamma){self.log(&format!("attempt {} expired; advancing",a));self.begin_attempt(a+1);}
+                    if w.advance_due(now_s(),u64::from(self.chain.spec.local().gamma)){self.log(&format!("attempt {} expired; advancing",a));self.begin_attempt(a+1);}
                 }
             }
         }
@@ -335,7 +343,10 @@ impl Node{
                 let key=self.cfg.miner.as_ref().unwrap();
                 h.winner_sig=key.sign_hash(&B256::from(hashes::win_msg(&tid,nonce,&share_root(&h))));reseal(&mut h);
                 let b=Block{header:h,body:l.body.clone()};
-                match self.import(b,None){Ok(_)=>{self.stats.mined+=1;}Err(e)=>self.log(&format!("own block rejected: {e:?}"))}
+                let hash=b.hash();
+                match self.import(b,None){Ok(_)=>{self.stats.mined+=1;}
+                    Err(Reject::Future)=>{self.own_future.insert(hash);self.log("own block waits for its timestamp");}
+                    Err(e)=>self.log(&format!("own block rejected: {e:?}"))}
             }
             _=>{}
         }
@@ -343,7 +354,7 @@ impl Node{
     fn on_msg(&mut self,from:PeerId,m:Msg){
         match m{
             Msg::Hello{chain_id,genesis,head,height,node}=>{
-                if chain_id!=self.chain.spec.chain_id()||genesis!=self.chain.spec.genesis_hash{
+                if chain_id!=self.chain.spec.chain_id()||genesis!=self.chain.spec.genesis_hash(){
                     self.log(&format!("peer {node}: wrong network; closing"));if let Some(p)=self.peers.get(&from){p.close();}return;
                 }
                 if !self.chain.blocks.contains_key(&head)&&height>0{
@@ -393,9 +404,9 @@ impl Node{
     pub fn peer_count(&self)->usize{self.peers.len()}
     pub fn status_json(&self)->serde_json::Value{
         let h=self.chain.head();
-        let mode=match &self.prod{None=>"none".to_string(),Some(p)=>match &p.mode{Mode::Idle=>"idle".into(),Mode::Wait{..}=>format!("wait a={}",p.attempt),
+        let mode=match &self.prod{None=>"none".to_string(),Some(p)=>match &p.mode{Mode::Idle=>"idle".into(),Mode::Wait{..}=>format!("wait a={}",p.attempt),Mode::Propose{at_s}=>format!("propose at {at_s}"),
             Mode::Locked(l)=>format!("{} h={} a={} shares={} mining={}",if l.fallback{"FB"}else{"PROP"},p.height,p.attempt,p.shares.len(),p.miner.is_some())}};
-        serde_json::json!({"name":self.cfg.name,"chainId":self.chain.spec.chain_id(),"genesisHash":hex(&self.chain.spec.genesis_hash),"head":{"height":h.height,"hash":hex(&h.hash),"ts":h.ts,"signed":h.signed,"final":h.is_final,"totalWork":format!("{:#x}",h.total_work)},
+        serde_json::json!({"name":self.cfg.name,"chainId":self.chain.spec.chain_id(),"genesisHash":hex(&self.chain.spec.genesis_hash()),"head":{"height":h.height,"hash":hex(&h.hash),"ts":h.ts,"signed":h.signed,"final":h.is_final,"totalWork":format!("{:#x}",h.total_work)},
             "peers":self.peers.values().map(|p|p.addr.clone()).collect::<Vec<_>>(),"production":mode,"miner":self.cfg.miner.as_ref().map(|k|format!("{:#x}",k.address())),
             "pool":self.pool.txs.len(),"journalRecords":self.journal_records(),"blocksKnown":self.chain.blocks.len(),"invalidKnown":self.chain.invalid.len(),
             "stats":{"imported":self.stats.imported,"mined":self.stats.mined,"signedTemplates":self.stats.signed_templates,"fallbackTemplates":self.stats.fallback_templates,"sharesSeen":self.stats.shares_seen,"hashesInExhaustedRanges":self.stats.hashes,"reorgs":self.stats.reorgs}})

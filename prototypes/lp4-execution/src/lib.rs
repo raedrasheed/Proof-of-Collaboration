@@ -122,6 +122,7 @@ pub mod fees;
 pub(crate) mod hashes {
     pub type H256=[u8;32];
     pub fn keccak256(bytes:&[u8])->H256{revm::primitives::keccak256(bytes).0}
+    pub fn sha256(bytes:&[u8])->H256{use sha2::Digest;sha2::Sha256::digest(bytes).into()}
 }
 
 pub mod user_phase;
@@ -153,3 +154,10 @@ pub mod apply;
 pub mod devnet;
 pub mod txsign;
 pub mod resources;
+
+// A02 boot admission: the accepted LP3 ParamGate evaluator and its arithmetic,
+// shared byte-for-byte with lp1-node (not copied), and the fact assembly around it.
+#[path="../../lp1-node/src/timing.rs"] #[allow(dead_code)] pub mod timing;
+#[path="../../lp1-node/src/param_gate.rs"] #[allow(dead_code)] pub mod param_gate;
+#[path="../../lp1-node/src/gate.rs"] #[allow(dead_code)] pub mod gate;
+pub mod admission;

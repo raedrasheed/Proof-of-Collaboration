@@ -13,7 +13,7 @@ fn run_chain(net:&devnet::Devnet,blocks:u64,txs_at:&dyn Fn(u64)->Vec<Vec<u8>>)->
         let txs=txs_at(h);
         let input=BlockInput{height:h,timestamp:1_800_000_000+2*h,base_fee,gas_limit:8_000_000,prevrandao:B256::ZERO,
             proposer:if h%2==0{Proposer::Signed(ids[(h as usize)%3])}else{Proposer::Fallback},
-            parent_result:prev.clone(),evidence:vec![],evidence_raw:&[],transactions:&txs,ancestors:vec![(0,net.genesis_hash)]};
+            parent_result:prev.clone(),evidence:vec![],evidence_raw:&[],transactions:&txs,ancestors:vec![(0,net.genesis_hash)],cum_log_bytes:0};
         let o=apply_block(&state,&net.genesis,&net.profile,&input).unwrap_or_else(|e|panic!("h={h}: {e:?}"));
         state=o.state.clone();parent_gas=o.gas_used;
         // Winner rotates; shares: one for each other miner, two for the next one.
@@ -84,19 +84,19 @@ fn run_chain(net:&devnet::Devnet,blocks:u64,txs_at:&dyn Fn(u64)->Vec<Vec<u8>>)->
 #[test] fn wrong_parent_result_presence_and_reverted_system_call_reject(){
     let net=devnet3();let g=net.genesis.state();
     let bad=BlockInput{height:1,timestamp:1_800_000_002,base_fee:U256::from(1_000_000_000u64),gas_limit:8_000_000,prevrandao:B256::ZERO,proposer:Proposer::Fallback,
-        parent_result:Some(ParentResult{block_hash:B256::ZERO,winner:net.miners[0].id,shares:vec![]}),evidence:vec![],evidence_raw:&[],transactions:&[],ancestors:vec![]};
+        parent_result:Some(ParentResult{block_hash:B256::ZERO,winner:net.miners[0].id,shares:vec![]}),evidence:vec![],evidence_raw:&[],transactions:&[],ancestors:vec![],cum_log_bytes:0};
     assert!(matches!(apply_block(g,&net.genesis,&net.profile,&bad),Err(ApplyError::Context(_))));
     let chain=run_chain(&net,1,&|_|vec![]);
     // h=2 with a winner of address zero: recordResult reverts -> whole block rejected.
     let input=BlockInput{height:2,timestamp:1_800_000_004,base_fee:U256::from(875_000_000u64),gas_limit:8_000_000,prevrandao:B256::ZERO,proposer:Proposer::Fallback,
-        parent_result:Some(ParentResult{block_hash:B256::ZERO,winner:Address::ZERO,shares:vec![]}),evidence:vec![],evidence_raw:&[],transactions:&[],ancestors:vec![]};
+        parent_result:Some(ParentResult{block_hash:B256::ZERO,winner:Address::ZERO,shares:vec![]}),evidence:vec![],evidence_raw:&[],transactions:&[],ancestors:vec![],cum_log_bytes:0};
     assert!(matches!(apply_block(&chain[0].0.state,&net.genesis,&net.profile,&input),Err(ApplyError::System{..})));
 }
 
 #[test] fn evidence_burns_bond_and_tombs_identity(){
     let net=devnet3();let chain=run_chain(&net,3,&|_|vec![]);let s=&chain[2].0.state;let accused=net.miners[1].id;
     let input=BlockInput{height:4,timestamp:1_800_000_008,base_fee:U256::from(1_000_000_000u64)/U256::from(2),gas_limit:8_000_000,prevrandao:B256::ZERO,proposer:Proposer::Fallback,
-        parent_result:Some(chain[2].1.clone()),evidence:vec![EvidenceEffect::PunishAndInvalidate{accused,j:3}],evidence_raw:&[vec![0xc0]],transactions:&[],ancestors:vec![]};
+        parent_result:Some(chain[2].1.clone()),evidence:vec![EvidenceEffect::PunishAndInvalidate{accused,j:3}],evidence_raw:&[vec![0xc0]],transactions:&[],ancestors:vec![],cum_log_bytes:0};
     let base=crate::fees::next_base_fee(chain[2].0.state.accounts.get(&escrow()).map(|_|U256::from(1u64)).unwrap()*U256::ZERO+chain_base(&chain),0,8_000_000).unwrap();
     let input=BlockInput{base_fee:base,..input};
     let o=apply_block(s,&net.genesis,&net.profile,&input).unwrap();
@@ -119,7 +119,7 @@ fn chain_base(chain:&[(BlockOutput,ParentResult)])->U256{let mut b=U256::from(1_
     let mut finals=vec![];
     for h in 1..=16u64{
         let input=BlockInput{height:h,timestamp:1_800_000_000+2*h,base_fee:base,gas_limit:8_000_000,prevrandao:B256::ZERO,proposer:Proposer::Fallback,
-            parent_result:prev.clone(),evidence:vec![],evidence_raw:&[],transactions:&[],ancestors:vec![]};
+            parent_result:prev.clone(),evidence:vec![],evidence_raw:&[],transactions:&[],ancestors:vec![],cum_log_bytes:0};
         let o=apply_block(&state,&net.genesis,&net.profile,&input).unwrap_or_else(|e|panic!("h={h} {e:?}"));
         base=crate::fees::next_base_fee(base,o.gas_used,8_000_000).unwrap();
         if h>=10{assert!(o.facts.closing,"closing from H_CLOSE");assert_eq!(o.facts.close_h,10);}
@@ -139,7 +139,7 @@ fn chain_base(chain:&[(BlockOutput,ParentResult)])->U256{let mut b=U256::from(1_
     assert_eq!(rewards+f.burned_total,U256::from(15u64)*U256::from(2_000_000_000_000_000_000u128)+U256::from(3u64)*bond);
     // No child of F.
     let child=BlockInput{height:17,timestamp:1_800_000_034,base_fee:base,gas_limit:8_000_000,prevrandao:B256::ZERO,proposer:Proposer::Fallback,
-        parent_result:prev.clone(),evidence:vec![],evidence_raw:&[],transactions:&[],ancestors:vec![]};
+        parent_result:prev.clone(),evidence:vec![],evidence_raw:&[],transactions:&[],ancestors:vec![],cum_log_bytes:0};
     assert!(apply_block(&state,&net.genesis,&net.profile,&child).is_err());
 }
 
@@ -202,4 +202,117 @@ impl Sv{
     // SV7s: signed pot 164000 (proposer = w), C=1 -> paid 26778, baseBurn 137222.
     let mut s=Sv::new(1000,500);let w=s.identity("w",false,true);s.ledger(1,&[(w,1)]);s.pot(1,164000,U256::from_be_slice(w.as_slice())<<8u32,w);
     assert_eq!(s.settle(1),U256::from(137222));assert_eq!(s.bal(w),U256::from(26778));
+}
+
+// ---------------- A03: runtime limits are exceptional halts of the transaction ----------------
+mod a03{
+    use super::*;
+    use crate::{rlp,txsign::Tx,user_phase::{caps,Halt}};
+    use revm::primitives::{AccountInfo,Bytecode,Bytes};
+    /// LOG0 x calldata[0..32] times, each with calldata[32..64] zero bytes of data.
+    const LOGN:&[u8]=&[0x5f,0x35,0x5b,0x80,0x15,0x61,0x00,0x15,0x57,0x60,0x20,0x35,0x5f,0xa0,0x60,0x01,0x90,0x03,0x60,0x02,0x56,0x5b,0x00];
+    /// One LOG2 (topics 9, 7) with calldata[32..64] data bytes.
+    const LOG2:&[u8]=&[0x60,0x07,0x60,0x09,0x60,0x20,0x35,0x5f,0xa2,0x00];
+    /// SSTORE(0,1) then one LOG0 with calldata[32..64] data bytes.
+    const STORE_LOG:&[u8]=&[0x60,0x01,0x5f,0x55,0x60,0x20,0x35,0x5f,0xa0,0x00];
+    /// SSTORE(i+1, 1) for i in 0..calldata[0..32].
+    const FILL:&[u8]=&[0x5f,0x35,0x5b,0x80,0x15,0x61,0x00,0x14,0x57,0x60,0x01,0x81,0x55,0x60,0x01,0x90,0x03,0x60,0x02,0x56,0x5b,0x00];
+    /// CALL(gas, address i+0x1000, value 1) for i in 0..calldata[0..32] (new accounts).
+    const SPRAY:&[u8]=&[0x5f,0x35,0x5b,0x80,0x15,0x61,0x00,0x1e,0x57,0x5f,0x5f,0x5f,0x5f,0x60,0x01,0x85,0x61,0x10,0x00,0x01,0x5a,0xf1,0x50,0x60,0x01,0x90,0x03,0x60,0x02,0x56,0x5b,0x00];
+    fn addr(n:u8)->Address{Address::from([n;20])}
+    fn word(v:u64)->[u8;32]{U256::from(v).to_be_bytes()}
+    fn data(a:u64,b:u64)->Bytes{[word(a),word(b)].concat().into()}
+    struct Fx{net:devnet::Devnet,parent:revm::InMemoryDB}
+    fn fx(c:&DevnetConfig,code:&[(Address,&[u8])])->Fx{
+        let net=devnet::build(c).unwrap();let mut parent=net.genesis.state().clone();
+        for (a,c) in code{let b=Bytecode::new_raw(Bytes::copy_from_slice(c));parent.insert_account_info(*a,AccountInfo{code_hash:b.hash_slow(),code:Some(b),..Default::default()});}
+        Fx{net,parent}
+    }
+    fn cfg()->DevnetConfig{DevnetConfig::new(777900,1_800_000_000,&["a","b","c"])}
+    fn tx(nonce:u64,to:Address,d:Bytes,gas:u64,value:u64)->Vec<u8>{
+        Tx{chain_id:777900,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas,to:Some(to),value:U256::from(value),data:d}.sign_1559(&devnet::account_key("alice"))
+    }
+    fn apply(f:&Fx,txs:&[Vec<u8>],cum_log_bytes:u64)->Result<BlockOutput,ApplyError>{
+        let input=BlockInput{height:1,timestamp:1_800_000_004,base_fee:U256::from(1_000_000_000u64),gas_limit:f.net.profile.cp().GAS_LIMIT,prevrandao:B256::ZERO,
+            proposer:Proposer::Fallback,parent_result:None,evidence:vec![],evidence_raw:&[],transactions:txs,ancestors:vec![(0,f.net.genesis_hash)],cum_log_bytes};
+        apply_block(&f.parent,&f.net.genesis,&f.net.profile,&input)
+    }
+    /// (status, cumulative gas, number of logs) of each receipt.
+    fn receipts(o:&BlockOutput)->Vec<(bool,u64,usize)>{o.receipts.iter().map(|r|{let it=rlp::decode(&r[1..]).unwrap();let l=it.list().unwrap();
+        let g=l[1].bytes().unwrap().iter().fold(0u64,|n,b|n<<8|u64::from(*b));(l[0].bytes().unwrap()==[1],g,l[3].list().unwrap().len())}).collect()}
+    fn alice()->Address{devnet::account_key("alice").address()}
+
+    #[test] fn log_block_max_below_at_and_above(){
+        let f=fx(&cfg(),&[(addr(0x41),LOGN)]);
+        // One LOG0 with d bytes is charged 36+d: 32731 and 32732 fit, 32733 exceeds 32768.
+        for (d,ok) in [(32731u64,true),(32732,true),(32733,false)]{
+            let o=apply(&f,&[tx(0,addr(0x41),data(1,d),2_000_000,0)],0).unwrap();let r=receipts(&o);
+            assert_eq!((r[0].0,r[0].2),(ok,usize::from(ok)),"data={d}");
+            assert_eq!(o.log_bytes,if ok{36+d}else{0});
+            if !ok{assert_eq!(o.halts,vec![(0,Halt::LogBytes)]);assert_eq!(r[0].1,2_000_000,"a halt charges all gas");assert_eq!(o.logs_bloom,[0u8;256]);}
+        }
+    }
+    #[test] fn lg2_546_logs_succeed_547_halt_and_topics_are_charged(){
+        let f=fx(&cfg(),&[(addr(0x41),LOGN),(addr(0x42),LOG2)]);
+        let r=|n:u64,d:u64|{let o=apply(&f,&[tx(0,addr(0x41),data(n,d),7_000_000,0)],0).unwrap();(receipts(&o)[0],o.halts)};
+        assert_eq!(r(546,24).0.2,546,"LG2: 546 LOG0 of 24 bytes (546*60 = 32760) succeed");
+        assert_eq!(r(547,24).1,vec![(0,Halt::LogCount)],"LG2: the 547th halts");
+        assert_eq!(r(546,0).0.2,546);assert_eq!(r(547,0).1,vec![(0,Halt::LogCount)],"547 empty logs fit the bytes but not the count");
+        // LOG2: 36 + 2*32 + d bytes.
+        let t=|d:u64|apply(&f,&[tx(0,addr(0x42),data(0,d),2_000_000,0)],0).unwrap();
+        assert_eq!(t(32768-100).log_bytes,32768);assert_eq!(t(32768-99).halts,vec![(0,Halt::LogBytes)]);
+    }
+    #[test] fn cumulative_logs_across_transactions_and_a_halt_consumes_no_budget(){
+        let f=fx(&cfg(),&[(addr(0x41),LOGN)]);
+        let txs=[tx(0,addr(0x41),data(1,20000),1_000_000,0),tx(1,addr(0x41),data(1,12732),1_000_000,0),tx(2,addr(0x41),data(1,12696),1_000_000,0)];
+        let o=apply(&f,&txs,0).unwrap();let r=receipts(&o);
+        assert_eq!(r.iter().map(|x|(x.0,x.2)).collect::<Vec<_>>(),vec![(true,1),(false,0),(true,1)]);
+        assert_eq!(o.halts,vec![(1,Halt::LogBytes)]);assert_eq!(o.log_bytes,20036+12732);assert_eq!(o.log_bytes,32768);
+        assert_eq!(r[1].1-r[0].1,1_000_000,"the halted transaction is charged its whole gas limit");
+        assert_eq!(o.gas_used,r[2].1);
+        // Deterministic: re-application yields the same roots.
+        let again=apply(&f,&txs,0).unwrap();assert_eq!((again.state_root,again.receipts_root,again.logs_bloom),(o.state_root,o.receipts_root,o.logs_bloom));
+    }
+    #[test] fn a_halt_reverts_state_except_nonce_and_fee(){
+        let f=fx(&cfg(),&[(addr(0x43),STORE_LOG)]);
+        let before=f.parent.accounts[&alice()].info.clone();let escrow0=f.parent.accounts[&crate::pay::escrow_address()].info.balance;
+        let o=apply(&f,&[tx(0,addr(0x43),data(0,32733),400_000,5)],0).unwrap();
+        assert_eq!(o.halts,vec![(0,Halt::LogBytes)]);
+        let a=&o.state.accounts[&alice()].info;let price=U256::from(2_000_000_000u64);// base 1 gwei + tip 1 gwei
+        assert_eq!(a.nonce,before.nonce+1);assert_eq!(a.balance,before.balance-price*U256::from(400_000u64),"all gas at the effective price; the value is not transferred");
+        let c=&o.state.accounts[&addr(0x43)];assert_eq!(c.info.balance,U256::ZERO);assert!(c.storage.get(&U256::ZERO).copied().unwrap_or_default()==U256::ZERO,"SSTORE reverted");
+        // The Escrow coinbase receives tip*gas_limit; closeBlock(tips) records the same tips.
+        assert_eq!(o.tips,U256::from(1_000_000_000u64)*U256::from(400_000u64));
+        assert!(o.state.accounts[&crate::pay::escrow_address()].info.balance>=escrow0+o.tips);
+        // The same transaction within the limit succeeds and stores.
+        let ok=apply(&f,&[tx(0,addr(0x43),data(0,100),400_000,5)],0).unwrap();assert!(ok.halts.is_empty());
+        assert_eq!(ok.state.accounts[&addr(0x43)].storage[&U256::ZERO],U256::from(1));assert_eq!(ok.state.accounts[&addr(0x43)].info.balance,U256::from(5));
+        assert_ne!(ok.state_root,o.state_root);
+    }
+    #[test] fn log_cap_is_aggregate_over_the_chain(){
+        let f=fx(&cfg(),&[(addr(0x41),LOGN)]);
+        let at=|d:u64|apply(&f,&[tx(0,addr(0x41),data(1,d),1_000_000,0)],caps::LOG_CAP-100).unwrap();
+        assert!(at(64).halts.is_empty(),"36+64 = the remaining 100 bytes");assert_eq!(at(65).halts,vec![(0,Halt::LogCap)]);
+    }
+    #[test] fn dirty_keys_and_accounts_per_block(){
+        let mut c=cfg();c.gas_limit=120_000_000;
+        let f=fx(&c,&[(addr(0x44),FILL),(addr(0x45),SPRAY)]);
+        let fill=|n:u64|apply(&f,&[tx(0,addr(0x44),data(n,0),110_000_000,0)],0).unwrap();
+        assert!(fill(4096).halts.is_empty(),"4096 changed keys");assert_eq!(fill(4097).halts,vec![(0,Halt::DirtyKeys)]);
+        // Dirty accounts: alice, the Escrow coinbase (tip) and n new accounts; the sprayer
+        // receives n wei and pays out n wei, so its state does not change.
+        let spray=|n:u64|apply(&f,&[tx(0,addr(0x45),Bytes::from(word(n).to_vec()),110_000_000,n)],0).unwrap();
+        assert!(spray(2046).halts.is_empty(),"2+2046 = 2048 accounts");assert_eq!(spray(2047).halts,vec![(0,Halt::DirtyAccounts)]);
+    }
+    #[test] fn slot_and_account_caps_halt_the_transaction(){
+        let net=devnet::build(&cfg()).unwrap();let (slots,accts)=crate::user_phase::live_counts(net.genesis.state());
+        let mut c=cfg();c.slot_cap=slots+10;c.acct_cap=accts+2+5;// +2: the injected contracts
+        let f=fx(&c,&[(addr(0x44),FILL),(addr(0x45),SPRAY)]);
+        // Filling the user state exactly to SLOT_CAP leaves the block valid although the
+        // system phases write new SYS slots in the same block (D-A03-CAPS).
+        let fill=|n:u64|apply(&f,&[tx(0,addr(0x44),data(n,0),2_000_000,0)],0).unwrap();
+        assert_eq!(fill(10).halts,vec![]);assert_eq!(fill(11).halts,vec![(0,Halt::SlotCap)]);
+        let spray=|n:u64|apply(&f,&[tx(0,addr(0x45),Bytes::from(word(n).to_vec()),2_000_000,n)],0).unwrap();
+        assert!(spray(5).halts.is_empty());assert_eq!(spray(6).halts,vec![(0,Halt::AcctCap)]);
+    }
 }

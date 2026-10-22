@@ -50,7 +50,7 @@ def main():
         n += 1
     try:
         # 8M gas limit: one full 24 KiB chunk per block.
-        dn.init(work, "a,b,c", ["--t-blk", "1", "--tau", "20", "--d-att", "4", "--fb-wait", "1", "--work-bits", "15"])
+        dn.init(work, "a,b,c", ["--t-blk", "1", "--tau", "20", "--c", "8", "--d-att", "25", "--fb-wait", "3", "--work-bits", "15"])
         info = json.load(open(os.path.join(work, "net", "devnet.json"))); cid = str(info["chainId"])
         dn.start(work, log=True); wait(lambda: min(dn.rpc(8540 + i, "pocol_status")["head"]["height"] for i in range(3)) >= 3, 90, "nodes up")
         sdir = os.path.join(work, "site1"); want = site_files(sdir, 1)

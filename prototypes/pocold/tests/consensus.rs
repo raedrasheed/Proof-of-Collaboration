@@ -7,12 +7,16 @@ use pocol_lp4_execution::{apply,devnet::{self,DevnetConfig},txsign::{Key,Tx}};
 use revm::primitives::{Address,B256,U256};
 
 struct Net{chain:Chain,keys:HashMap<Address,Key>}
-fn cfg(miners:&[&str])->DevnetConfig{let mut c=DevnetConfig::new(777910,1_800_000_000,miners);c.target_g=devnet::to_fixed((U256::from(1)<<244)-U256::from(1));c.d_att=10;c.tau=40;c.c=8;c}
+/// Gate-valid test profile (A02): about 2^12 hashes per block (target 2^244-1 at T_blk=4),
+/// c=8, and D_att=73 so that R7 holds with single-host timing: 73+5 >= 2(7+8*4).
+/// Genesis is in the past: honest single-host Φ=0 tolerates no future timestamps.
+fn cfg(miners:&[&str])->DevnetConfig{let mut c=DevnetConfig::new(777910,1_700_000_000,miners);c.hash_rate=1024;c.d_att=73;c.tau=40;c.c=8;c}
+/// The admitted spec (full ParamGate with measured timing); a Devnet alone cannot boot.
+fn admitted(c:&DevnetConfig)->Spec{let d=devnet::build(c).unwrap();Spec::new(d.admit(&pocold::single_host_local()).unwrap_or_else(|e|panic!("{e}")).0)}
 fn net_with(c:&DevnetConfig)->Net{
     let d=devnet::build(c).unwrap();let mut keys=HashMap::new();
     for m in &d.miners{keys.insert(m.id,Key::from_secret(&m.key.secret()).unwrap());}
-    let spec=Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes,profile:d.profile,genesis:d.genesis};
-    Net{chain:Chain::new(spec),keys}
+    Net{chain:Chain::new(admitted(c)),keys}
 }
 fn net()->Net{net_with(&cfg(&["a","b","c"]))}
 
@@ -59,7 +63,7 @@ fn remine(n:&Net,mut h:lp1hdr::Header,body:Body)->Block{h.nonce=0;h.shares=vec![
     assert_eq!(n.chain.head().state.accounts[&bob].info.balance,U256::from(10u128.pow(24))+U256::from(sent));assert_eq!(nonce,5);
     // Every miner earned rewards; ledger and pending invariants hold at the head.
     let s=&n.chain.head().state;for id in apply::record_list(s){assert!(s.accounts[&apply::miner_record(s,id).unwrap().reward].info.balance>U256::ZERO);}
-    apply::check_escrow_invariant(s,&n.chain.spec.profile,35,false).unwrap();
+    apply::check_escrow_invariant(s,n.chain.spec.profile(),35,false).unwrap();
     // Replay into a fresh chain: identical hashes and state roots for every block.
     let mut m=net();for b in &blocks{import(&mut m,b);}
     assert_eq!(m.chain.head,n.chain.head);
@@ -196,7 +200,9 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
 }
 
 #[test] fn final_block_has_no_child_and_h_end_is_enforced(){
-    let mut c=cfg(&["a","b"]);c.h_close=4;c.h_end=9;let mut n=net_with(&c);
+    // Gate-valid short end (end/full style): R_max=0 and a two-record registry make
+    // R20 need Z_close >= ceil(2/2)+P2+D+1 = 8, so H_CLOSE+Z_close <= H_END=9 (R13).
+    let mut c=cfg(&["a","b"]);c.h_close=1;c.h_end=9;c.r_max=0;c.m_max=2;c.reg_records_max=2;c.ret=2;c.z_close=8;let mut n=net_with(&c);
     let mut final_at=None;
     for _ in 0..9{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);if n.chain.head().is_final{final_at=Some(n.chain.head().height);break}}
     assert_eq!(final_at,Some(9));
@@ -235,11 +241,11 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     use pocold::{node::{Config,Event,Node},net::{Msg,NetEvent}};
     let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
     let keys:HashMap<Address,Key>=d.miners.iter().map(|m|(m.id,Key::from_secret(&m.key.secret()).unwrap())).collect();
-    let spec=Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes.clone(),profile:d.profile.clone(),genesis:devnet::build(&c).unwrap().genesis};
+    let spec=admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-ev-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
-    let mut node=Node::open(Config{dir,name:"t".into(),miner:None,listen:None,peers:vec![],rpc:None,delta_rel:600,phi:100_000_000,gamma:1,stop_at:None,log:false},spec).unwrap();
+    let mut node=Node::open(Config{dir,name:"t".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false},spec).unwrap();
     node.handle(Event::Tick);
-    let net2=Net{chain:Chain::new(Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes.clone(),profile:d.profile.clone(),genesis:d.genesis}),keys};
+    let net2=Net{chain:Chain::new(admitted(&c)),keys};
     let g=net2.chain.head;let p=net2.chain.get(&g).unwrap().clone();let ctx=net2.chain.child_ctx(&p,0).unwrap();
     let mk=|off:u64|{let (h,_,_)=net2.chain.build_signed(&p,&net2.keys[&ctx.proposer],ctx.window.lower()+off,Body::default(),vec![]).unwrap();h};
     let (t1,t2)=(mk(0),mk(1));
@@ -258,9 +264,9 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     // (live TrieRebuild) must replay that journal; replay applies the same TrieRebuild.
     use pocold::node::{Config,Node};
     let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
-    let spec=|| Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes.clone(),profile:d.profile.clone(),genesis:devnet::build(&c).unwrap().genesis};
+    let spec=|| admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-replay-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
-    let conf=||Config{dir:dir.clone(),name:"r".into(),miner:None,listen:None,peers:vec![],rpc:None,delta_rel:600,phi:100_000_000,gamma:1,stop_at:None,log:false};
+    let conf=||Config{dir:dir.clone(),name:"r".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false};
     let mut n=net();let mut hashes=vec![n.chain.head];
     let mut node=Node::open(conf(),spec()).unwrap();
     for _ in 0..70{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);node.import(b,None).unwrap();hashes.push(n.chain.head);}
@@ -281,9 +287,9 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     // block marked invalid; the correct body is accepted afterwards.
     use pocold::node::{Config,Node};
     let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
-    let spec=Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes.clone(),profile:d.profile.clone(),genesis:d.genesis};
+    let spec=admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-copy-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
-    let mut node=Node::open(Config{dir:dir.clone(),name:"c".into(),miner:None,listen:None,peers:vec![],rpc:None,delta_rel:600,phi:100_000_000,gamma:1,stop_at:None,log:false},spec).unwrap();
+    let mut node=Node::open(Config{dir:dir.clone(),name:"c".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false},spec).unwrap();
     let n=net();let g=n.chain.head;let good=fallback(&n,g,0);
     let junk=Block{header:good.header.clone(),body:Body{txs:vec![vec![0xc0;40]],evidence:vec![]}};
     assert!(matches!(node.import(junk,None),Err(Reject::Envelope(_))),"mismatched body is an envelope rejection");
@@ -296,9 +302,9 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
 fn a01_node(tag:&str)->(pocold::node::Node,std::path::PathBuf){
     use pocold::node::{Config,Node};
     let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
-    let spec=Spec{genesis_hash:d.genesis_hash.0,spec_bytes:d.spec_bytes,profile:d.profile,genesis:d.genesis};
+    let spec=admitted(&c);
     let dir=std::env::temp_dir().join(format!("pocold-a01-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
-    (Node::open(Config{dir:dir.clone(),name:"a01".into(),miner:None,listen:None,peers:vec![],rpc:None,delta_rel:600,phi:100_000_000,gamma:1,stop_at:None,log:false},spec).unwrap(),dir)
+    (Node::open(Config{dir:dir.clone(),name:"a01".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false},spec).unwrap(),dir)
 }
 #[test] fn a01_malformed_or_unbound_bodies_reject_only_the_copy(){
     let n=net();let g=n.chain.head;let good=fallback(&n,g,0);
@@ -338,4 +344,26 @@ fn a01_node(tag:&str)->(pocold::node::Node,std::path::PathBuf){
     assert!(matches!(node.import(b.clone(),None),Err(Reject::Block(_))));
     assert!(matches!(node.import(b,None),Err(Reject::Block(s)) if s.contains("known invalid")),"cached verdict for committed content");
     let _=std::fs::remove_dir_all(&dir);
+}
+
+// ---------------- audit A03 regression: an over-limit log is an exceptional halt ----------------
+#[test] fn a03_over_limit_log_halts_the_transaction_and_the_block_is_valid(){
+    // The audited case: CREATE whose initcode emits LOG0 with 32769 data bytes (36+32769 > 32768).
+    let mut n=net();let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);
+    let alice=devnet::account_key("alice");let before=n.chain.head().state.accounts[&alice.address()].info.clone();
+    let init=vec![0x61,0x80,0x01,0x5f,0xa0,0x00];
+    let tx=Tx{chain_id:777910,nonce:0,max_priority:U256::from(1u64),max_fee:U256::from(100_000_000_000u64),gas:2_000_000,to:None,value:U256::ZERO,data:init.into()}.sign_1559(&alice);
+    let head=n.chain.head;let blk=signed(&n,head,Body{txs:vec![tx],evidence:vec![]},0);
+    let (e,_)=n.chain.validate(&blk,None,0).expect("the block stays valid");
+    let it=rlp::decode(&e.receipts[0][1..]).unwrap();let l=it.list().unwrap();
+    assert_eq!(l[0].bytes().unwrap(),&[] as &[u8],"status 0");assert_eq!(l[3].list().unwrap().len(),0,"no logs");
+    assert_eq!(e.gas_used,2_000_000,"all gas charged");assert_eq!(e.cum_log_bytes,0,"a halted transaction charges no log bytes");
+    let a=&e.state.accounts[&alice.address()].info;assert_eq!(a.nonce,before.nonce+1);assert!(a.balance<before.balance);
+    assert!(n.chain.insert(e),"becomes head");
+    // Within the limit the same pattern succeeds and the chain accumulates its log bytes.
+    let init=vec![0x61,0x7f,0xdc,0x5f,0xa0,0x00];// LOG0 with 32732 bytes: 36+32732 = 32768
+    let tx=Tx{chain_id:777910,nonce:1,max_priority:U256::from(1u64),max_fee:U256::from(100_000_000_000u64),gas:2_000_000,to:None,value:U256::ZERO,data:init.into()}.sign_1559(&alice);
+    let head=n.chain.head;let blk=signed(&n,head,Body{txs:vec![tx],evidence:vec![]},0);
+    let (e,_)=n.chain.validate(&blk,None,0).unwrap();let it=rlp::decode(&e.receipts[0][1..]).unwrap();
+    assert_eq!(it.list().unwrap()[0].bytes().unwrap(),&[1u8]);assert_eq!(e.cum_log_bytes,32768);
 }

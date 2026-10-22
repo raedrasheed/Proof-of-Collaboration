@@ -33,7 +33,7 @@ fn network_like(miners:usize,h_close:u64,h_end:u64)->DevnetConfig{
     for h in 1..=80u64{
         let evidence=if h==30{(0..4).map(|i|EvidenceEffect::Punish{accused:ids[200+i]}).collect()}else{vec![]};
         let input=BlockInput{height:h,timestamp:1_800_000_000+60*h,base_fee:base,gas_limit:8_000_000,prevrandao:B256::ZERO,
-            proposer:if h%2==0{Proposer::Signed(ids[(h as usize*7)%256])}else{Proposer::Fallback},parent_result:prev.clone(),evidence,evidence_raw:&[],transactions:&[],ancestors:vec![]};
+            proposer:if h%2==0{Proposer::Signed(ids[(h as usize*7)%256])}else{Proposer::Fallback},parent_result:prev.clone(),evidence,evidence_raw:&[],transactions:&[],ancestors:vec![],cum_log_bytes:0};
         let o=apply::apply_block(&state,&net.genesis,&net.profile,&input).unwrap_or_else(|e|panic!("h={h} {e:?}"));
         base=crate::fees::next_base_fee(base,o.gas_used,8_000_000).unwrap();
         let (k,a)=(o.meter.keys.len(),o.meter.accounts.len());
@@ -53,3 +53,41 @@ fn network_like(miners:usize,h_close:u64,h_end:u64)->DevnetConfig{
 }
 
 #[test] fn r21_retention_formula(){assert_eq!(r21_retained_bytes(32,2,100,1000),34*(100*ACCOUNT_BYTES+1000*SLOT_BYTES));}
+
+/// A02/A13 SYS gas envelope fixture at a gate-valid REG_RECORDS_MAX (R16). Scenario 1 is
+/// the P7 worst case plus evidence that invalidates pending pots. Scenario 2 makes the
+/// beginBlock sweep delete records (76 tombstones, short E_win) before closing.
+/// Records the largest gas of every SYSTEM call name in any phase class;
+/// `admission::GAS_ENVELOPE` must dominate every value.
+fn gas_scenario(c:&DevnetConfig,evidence_at:&dyn Fn(u64,&[Address])->Vec<EvidenceEffect>,owners:usize,seen:&mut std::collections::BTreeMap<&'static str,u64>)->([u64;3],usize){
+    let net=devnet::build(c).unwrap();
+    let ids:Vec<Address>=net.miners.iter().map(|m|m.id).collect();
+    let mut state=net.genesis.state().clone();let mut prev:Option<ParentResult>=None;let mut base=U256::from(1_000_000_000u64);let mut block_max=[0u64;3];let mut fewest=usize::MAX;
+    for h in 1..=c.h_end{
+        let input=BlockInput{height:h,timestamp:1_800_000_000+60*h,base_fee:base,gas_limit:8_000_000,prevrandao:B256::ZERO,
+            proposer:if h%2==0{Proposer::Signed(ids[(h as usize*7)%owners])}else{Proposer::Fallback},parent_result:prev.clone(),evidence:evidence_at(h,&ids),evidence_raw:&[],transactions:&[],ancestors:vec![],cum_log_bytes:0};
+        let o=apply::apply_block(&state,&net.genesis,&net.profile,&input).unwrap_or_else(|e|panic!("h={h} {e:?}"));
+        base=crate::fees::next_base_fee(base,o.gas_used,8_000_000).unwrap();
+        for (name,g) in &o.meter.call_gas{let e=seen.entry(*name).or_default();*e=(*e).max(*g);}
+        let class=if o.is_final{2}else if o.facts.closing{1}else{0};block_max[class]=block_max[class].max(o.system_gas);
+        state=o.state.clone();fewest=fewest.min(apply::record_list(&state).len());
+        let shares:Vec<(u64,Address)>=(0..256u64).map(|i|(i*3+1,ids[((h+i) as usize)%owners])).collect();
+        prev=Some(ParentResult{block_hash:B256::from(U256::from(h)),winner:ids[h as usize%owners],shares});
+        if o.is_final{return (block_max,fewest)}
+    }
+    panic!("final block not reached")
+}
+#[test] fn sys_gas_envelope_fixture(){
+    let mut seen:std::collections::BTreeMap<&'static str,u64>=Default::default();
+    let mut c=network_like(256,60,80);c.reg_records_max=16384;
+    let (worst,_)=gas_scenario(&c,&|h,ids|match h{30=>(0..4).map(|i|EvidenceEffect::Punish{accused:ids[200+i]}).collect(),
+        31=>(0..4u64).map(|i|EvidenceEffect::PunishAndInvalidate{accused:ids[100+i as usize],j:30-i}).collect(),_=>vec![]},256,&mut seen);
+    let mut c2=c.clone();c2.e_win=16;c2.u=40;
+    let (sweep,fewest)=gas_scenario(&c2,&|h,ids|if (2..=20).contains(&h){(0..4).map(|i|EvidenceEffect::Punish{accused:ids[100+4*(h as usize-2)+i]}).collect()}else{vec![]},100,&mut seen);
+    assert!(fewest<=256-76,"the sweep scenario must delete the 76 tombstoned records, fewest={fewest}");
+    println!("GAS-ENVELOPE {}",serde_json::json!({"perCall":seen,"blockMax":{"worst":worst,"sweep":sweep},"G_SYS":c.cp()[44].to_u64()}));
+    for (name,g) in &seen{
+        let bound=crate::admission::GAS_ENVELOPE.iter().find(|(n,_)|n==name).map(|x|x.1);
+        assert!(bound.map_or(false,|b|*g<=b),"envelope misses {name}={g} bound={bound:?}");
+    }
+}

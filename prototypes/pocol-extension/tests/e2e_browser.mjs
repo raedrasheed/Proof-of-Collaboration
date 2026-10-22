@@ -153,7 +153,7 @@ async function storedDict(b, dist, stKey) {
 async function main() {
   for (const p of [30300, 30301, 30302, 8540, 8541, 8542, TAP, CANARY]) if (!(await portFree(p))) throw new Error('port busy ' + p);
   await new Promise((r) => tapServer.listen(TAP, '127.0.0.1', r)); await new Promise((r) => canaryServer.listen(CANARY, '0.0.0.0', r)); await new Promise((r) => udp.bind(UDP, '0.0.0.0', r));
-  if (!REUSE) py(['init', work, '--miners', 'a,b,c', '--t-blk', '2', '--tau', '20', '--d-att', '4', '--fb-wait', '1', '--work-bits', '15']);
+  if (!REUSE) py(['init', work, '--miners', 'a,b,c', '--t-blk', '2', '--tau', '20', '--c', '8', '--d-att', '41', '--fb-wait', '3', '--work-bits', '15']);
   const info = JSON.parse(readFileSync(join(work, 'net', 'devnet.json'), 'utf8')); const cid = String(info.chainId);
   const profileBase = JSON.parse(readFileSync(join(work, 'net', 'profile.json'), 'utf8'));
   if (!REUSE) py(['start', work, '--log']);

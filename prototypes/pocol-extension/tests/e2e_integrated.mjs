@@ -51,7 +51,7 @@ async function chromeView(b, profile, s) {
 async function main() {
   for (const p of [30300, 30301, 30302, 8540, 8541, 8542]) if (!(await portFree(p))) throw new Error('port busy ' + p);
   const t0 = Date.now();
-  devnet(['init', work, '--miners', 'a,b,c', '--t-blk', '2', '--tau', '20', '--d-att', '4', '--fb-wait', '1', '--work-bits', '15']);
+  devnet(['init', work, '--miners', 'a,b,c', '--t-blk', '2', '--tau', '20', '--c', '8', '--d-att', '41', '--fb-wait', '3', '--work-bits', '15']);
   const info = JSON.parse(readFileSync(join(work, 'net', 'devnet.json'), 'utf8')); const cid = String(info.chainId);
   const profile = JSON.parse(readFileSync(join(work, 'net', 'profile.json'), 'utf8'));
   devnet(['start', work, '--log']);

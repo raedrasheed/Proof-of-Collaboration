@@ -2,17 +2,26 @@
 //! construction (signed / Build_fb), ParentResult (D142) and D133 fork choice.
 use std::collections::{HashMap,BTreeMap};
 use crate::{assignment::{self,Assignment,DrawWeights,Membership,NonceMode,ParentMember,ParentView,ShareCount},asert,hashes,header::Header,timing::AttemptWindow};
-use pocol_lp4_execution::{apply::{self,BlockInput,BlockOutput,EvidenceEffect,Genesis,ParentResult,Proposer},fees,profile::ProfileIdentity,txsign::Key};
+use pocol_lp4_execution::{admission::{Admitted,NodeLocal},apply::{self,BlockInput,BlockOutput,EvidenceEffect,Genesis,ParentResult,Proposer},fees,profile::ProfileIdentity,txsign::Key};
 use revm::{InMemoryDB,primitives::{Address,B256,U256}};
 use crate::types::*;
 
 /// Immutable chain configuration: cfg = {chainId, genesisHash, ForkSchedule, CP, M_0}.
-pub struct Spec{pub profile:ProfileIdentity,pub genesis:Genesis,pub genesis_hash:[u8;32],pub spec_bytes:Vec<u8>}
+/// Constructible only from a ParamGate admission (A02): nothing boots an unadmitted profile.
+pub struct Spec{admitted:Admitted}
 impl Spec{
-    pub fn cp(&self)->&pocol_lp4_execution::profile::ConsensusParams{self.profile.cp()}
-    pub fn chain_id(&self)->u64{self.profile.spec().chain_id}
-    pub fn target_g(&self)->Fixed{Fixed::from_be_slice(&self.profile.cp().target_g.to_be_bytes()).unwrap()}
-    pub fn active_version(&self,h:u64)->u16{self.profile.forks().active_version(h)}
+    pub fn new(admitted:Admitted)->Self{Self{admitted}}
+    pub fn profile(&self)->&ProfileIdentity{self.admitted.profile()}
+    pub fn genesis(&self)->&Genesis{self.admitted.genesis()}
+    pub fn genesis_hash(&self)->[u8;32]{self.admitted.genesis_hash()}
+    pub fn spec_bytes(&self)->&[u8]{self.admitted.spec_bytes()}
+    /// The node-local timing admitted with the profile (Φ=2φ, Δ_rel, Γ).
+    pub fn local(&self)->&NodeLocal{self.admitted.local()}
+    pub fn admission(&self)->&Admitted{&self.admitted}
+    pub fn cp(&self)->&pocol_lp4_execution::profile::ConsensusParams{self.profile().cp()}
+    pub fn chain_id(&self)->u64{self.profile().spec().chain_id}
+    pub fn target_g(&self)->Fixed{Fixed::from_be_slice(&self.profile().cp().target_g.to_be_bytes()).unwrap()}
+    pub fn active_version(&self,h:u64)->u16{self.profile().forks().active_version(h)}
 }
 
 #[derive(Clone,Debug)]
@@ -38,6 +47,8 @@ pub struct Entry{
     pub tx_hashes:Vec<B256>,
     pub cum_txs:u64,
     pub cum_tx_bytes:u64,
+    /// Charged log bytes up to and including this block (LOG_CAP, A03).
+    pub cum_log_bytes:u64,
     /// R21: state dropped outside the K_hist window; rebuilt by re-execution on demand.
     pub pruned:bool,
     /// Draw(h,0) for this block's height on its branch (evidence type 1 DrawIndex).
@@ -96,11 +107,11 @@ pub fn work(t:&Fixed)->U256{from_fixed(&crate::fixed::work(t))}
 
 impl Chain{
     pub fn new(spec:Spec)->Self{
-        let gh=spec.genesis_hash;let cp=spec.cp();
+        let gh=spec.genesis_hash();let cp=spec.cp();
         let mut h=blank_header();h.chain_id=spec.chain_id();h.genesis_hash=gh;h.ts=cp.g_ts;h.target=spec.target_g();
         let genesis=Entry{hash:gh,header:h,body:Body::default(),height:0,parent:None,total_work:U256::ZERO,import_seq:0,signed:false,ts:cp.g_ts,
-            target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis.state().clone(),is_final:false,result:None,
-            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![]};
+            target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis().state().clone(),is_final:false,result:None,
+            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![]};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
         Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist:32,rebuilds:0,invalid:HashMap::new(),seen_templates:BTreeMap::new()}
     }
@@ -147,11 +158,11 @@ impl Chain{
     // ---------------- execution ----------------
     fn execute(&self,p:&Entry,ctx:&ChildCtx,ts:u64,proposer:Proposer,body:&Body,effects:Vec<EvidenceEffect>)->Result<BlockOutput,Reject>{
         let input=BlockInput{height:ctx.height,timestamp:ts,base_fee:ctx.base_fee,gas_limit:self.spec.cp().GAS_LIMIT,prevrandao:ctx.prevrandao,proposer,
-            parent_result:ctx.parent_result.clone(),evidence:effects,evidence_raw:&body.evidence,transactions:&body.txs,ancestors:ctx.ancestors.clone()};
-        apply::apply_block(&p.state,&self.spec.genesis,&self.spec.profile,&input).map_err(|e|Reject::Block(format!("apply {e:?}")))
+            parent_result:ctx.parent_result.clone(),evidence:effects,evidence_raw:&body.evidence,transactions:&body.txs,ancestors:ctx.ancestors.clone(),cum_log_bytes:p.cum_log_bytes};
+        apply::apply_block(&p.state,self.spec.genesis(),self.spec.profile(),&input).map_err(|e|Reject::Block(format!("apply {e:?}")))
     }
     fn fill_ut(&self,p:&Entry,ctx:&ChildCtx,ts:u64,out:&BlockOutput,proposer:&[u8])->Header{
-        let mut h=blank_header();h.chain_id=self.spec.chain_id();h.genesis_hash=self.spec.genesis_hash;h.parent_hash=p.hash;h.h=ctx.height;h.a=ctx.attempt;
+        let mut h=blank_header();h.chain_id=self.spec.chain_id();h.genesis_hash=self.spec.genesis_hash();h.parent_hash=p.hash;h.h=ctx.height;h.a=ctx.attempt;
         h.protocol_version=self.spec.active_version(ctx.height);h.ts=ts;h.target=ctx.target;h.state_root=out.state_root.0;h.tx_root=out.transactions_root.0;
         h.receipts_root=out.receipts_root.0;h.logs_bloom=out.logs_bloom.to_vec();h.gas_limit=self.spec.cp().GAS_LIMIT;h.gas_used=out.gas_used;
         h.base_fee=to_fixed(ctx.base_fee);h.evidence_root=out.evidence_root.0;h.proposer=proposer.to_vec();reseal(&mut h);h
@@ -188,7 +199,7 @@ impl Chain{
         // 1. sizes, 1b NetID.
         if x.encoded.len()>crate::header::HDR_MAX{return blk("1 header size")}
         if x.chain_id!=self.spec.chain_id(){return blk("netChain")}
-        if x.genesis_hash!=self.spec.genesis_hash{return blk("netGenesis")}
+        if x.genesis_hash!=self.spec.genesis_hash(){return blk("netGenesis")}
         if x.protocol_version!=self.spec.active_version(x.h){return blk("netVersion")}
         if !self.blocks.contains_key(&x.parent_hash){return Err(Reject::UnknownParent)}
         if let Some(r)=self.invalid.get(&x.parent_hash){return blk(format!("ancestorInvalid {r}"))}
@@ -265,7 +276,7 @@ impl Chain{
         let entry=Entry{hash,header:x.clone(),body:b.body.clone(),height:x.h,parent:Some(p.hash),total_work:p.total_work.saturating_add(work(&x.target)),
             import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,
             result:Some(ParentResult{block_hash:B256::from(hash),winner:addr(&owner),shares}),receipts:out.receipts,tx_hashes,
-            cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,pruned:false,drawn:ctx.proposer,
+            cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,cum_log_bytes:p.cum_log_bytes+out.log_bytes,pruned:false,drawn:ctx.proposer,
             ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect()};
         Ok((entry,ctx))
     }
@@ -302,7 +313,7 @@ impl Chain{
         };
         let (u1,s1)=parse(a)?;let (u2,s2)=parse(b)?;
         if u1.ut_raw==u2.ut_raw{return blk("ev1 identical")}
-        if u1.parent_hash!=u2.parent_hash||u1.h!=u2.h||u1.a!=0||u2.a!=0||u1.chain_id!=self.spec.chain_id()||u2.chain_id!=self.spec.chain_id()||u1.genesis_hash!=self.spec.genesis_hash||u2.genesis_hash!=self.spec.genesis_hash{return blk("ev1 context")}
+        if u1.parent_hash!=u2.parent_hash||u1.h!=u2.h||u1.a!=0||u2.a!=0||u1.chain_id!=self.spec.chain_id()||u2.chain_id!=self.spec.chain_id()||u1.genesis_hash!=self.spec.genesis_hash()||u2.genesis_hash!=self.spec.genesis_hash(){return blk("ev1 context")}
         if u1.h+u64::from(self.spec.cp().E_win)<h_incl{return blk("ev1 too old")}
         let r1=hashes::recover_address(&hashes::sig_msg(&template_id(&u1.ut_raw)),&s1).map_err(|_|Reject::Block("ev1 sig1".into()))?;
         let r2=hashes::recover_address(&hashes::sig_msg(&template_id(&u2.ut_raw)),&s2).map_err(|_|Reject::Block("ev1 sig2".into()))?;

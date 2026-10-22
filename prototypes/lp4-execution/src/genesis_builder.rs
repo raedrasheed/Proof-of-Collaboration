@@ -12,6 +12,11 @@ impl GenesisImage{
  pub(crate) fn verify_candidate(&self,db:&InMemoryDB,p:&ProfileIdentity)->Result<(),GenesisError>{
   if B256::from(p.genesis_hash())!=self.profile{return Err(GenesisError::Profile)}
   check_caps(db,p)?;
+  // System storage is bounded by SYS_SLOT_MAX (R18, D-A03-CAPS); only SYSTEM calls write
+  // it, so exceeding it cannot be a transaction halt and invalidates the candidate. The
+  // admission gate derives SYS_SLOT_MAX >= every reachable footprint (resources::derive).
+  let sys:u64=(0..5).filter_map(|i|db.accounts.get(&system(i))).map(|a|a.storage.values().filter(|v|**v!=U256::ZERO).count() as u64).sum();
+  if sys>u64::from(p.cp().SYS_SLOT_MAX){return Err(GenesisError::Capacity)}
   if sum_balances(db)?>self.supply_bound{return Err(GenesisError::Supply)}
   if let Some(a)=db.accounts.get(&crate::pay_address()).and_then(|a|a.info()){if a.code_hash!=revm::primitives::KECCAK_EMPTY{return Err(GenesisError::Code)}}
   for (i,hash) in self.codes.iter().enumerate(){let a=db.accounts.get(&system(i)).and_then(|a|a.info()).ok_or(GenesisError::Code)?;if a.code_hash!=*hash{return Err(GenesisError::Code)}}
@@ -32,8 +37,10 @@ pub(crate) fn code_hash(programs:&[Bytes;5])->B256{
 }
 fn check_caps(db:&InMemoryDB,p:&ProfileIdentity)->Result<(),GenesisError>{
  code_caps::validate_snapshot(db,CodeLimits{runtime:p.cp().B_code_max,logical:p.cp().CODE_CAP}).map_err(|_|GenesisError::Code)?;
+ // D-A03-CAPS: SLOT_CAP/ACCT_CAP bound the user state; the five system programs are
+ // bounded by SYS_SLOT_MAX (R18). USER transactions halt before exceeding a cap (A03).
  let mut accounts=0u64;let mut slots=0u64;
- for a in db.accounts.values().filter(|a|a.info().is_some()){
+ for a in db.accounts.iter().filter(|(k,a)|a.info().is_some()&&!(0..5).any(|i|**k==system(i))).map(|(_,a)|a){
   accounts=accounts.checked_add(1).ok_or(GenesisError::Capacity)?;
   slots=slots.checked_add(u64::try_from(a.storage.values().filter(|v|**v!=U256::ZERO).count()).map_err(|_|GenesisError::Capacity)?).ok_or(GenesisError::Capacity)?;
  }
@@ -75,4 +82,6 @@ pub(crate) fn world_root(db:&InMemoryDB)->Result<B256,GenesisError>{
  }crate::trie::state_root(&accounts,accounts.len()).map(B256::from).map_err(|_|GenesisError::Root)
 }
 pub(crate) fn construct_root(alloc:&InMemoryDB,p:&ProfileIdentity,programs:&[Bytes;5])->Result<B256,GenesisError>{Ok(construct(alloc,p,programs)?.root)}
+/// The constructed genesis state without the allocRoot comparison (A02 fact assembly).
+pub(crate) fn construct_state(alloc:&InMemoryDB,p:&ProfileIdentity,programs:&[Bytes;5])->Result<(B256,InMemoryDB),GenesisError>{let i=construct(alloc,p,programs)?;Ok((i.root,i.state))}
 #[cfg(test)]pub(crate) fn derive_fixture_root(alloc:&InMemoryDB,p:&ProfileIdentity,programs:&[Bytes;5])->Result<B256,GenesisError>{Ok(construct(alloc,p,programs)?.root)}

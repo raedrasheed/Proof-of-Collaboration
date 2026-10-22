@@ -86,6 +86,8 @@ pub struct BlockInput<'a>{
     pub transactions:&'a [Vec<u8>],
     /// (height, blockHash) for the last <=256 ancestors; BLOCKHASH(0)=genesisHash.
     pub ancestors:Vec<(u64,B256)>,
+    /// Charged log bytes of the canonical ancestors (LOG_CAP, A03).
+    pub cum_log_bytes:u64,
 }
 
 #[derive(Clone,Debug)]
@@ -104,6 +106,10 @@ pub struct BlockOutput{
     pub is_final:bool,
     pub facts:ChainFacts,
     pub meter:Meter,
+    /// Charged log bytes of this block (LOG-ACCT-01); the child's cum_log_bytes adds it.
+    pub log_bytes:u64,
+    /// USER transactions that halted exceptionally (A03), by index.
+    pub halts:Vec<(usize,crate::user_phase::Halt)>,
 }
 
 /// Parent-state facts used by consensus (finality, closing, membership).
@@ -164,7 +170,9 @@ pub struct Genesis{image:crate::genesis_builder::GenesisImage}
 impl Genesis{
     /// Verifies sysCodeHash and allocRoot against the GenesisSpec; rejects nonzero
     /// alloc storage at the reserved Ledger address (LEDGER-01 clause 5).
-    pub fn build(alloc:&InMemoryDB,profile:&ProfileIdentity,programs:&SystemPrograms)->Result<Self,ApplyError>{
+    /// Crate-internal: outside this crate a Genesis exists only inside an `admission::Admitted`
+    /// or a `devnet::Devnet` candidate, never from an unadmitted identity.
+    pub(crate) fn build(alloc:&InMemoryDB,profile:&ProfileIdentity,programs:&SystemPrograms)->Result<Self,ApplyError>{
         if alloc.accounts.get(&ledger()).map(|a|a.storage.values().any(|v|*v!=U256::ZERO)).unwrap_or(false){return Err(ApplyError::Genesis("nonzero Ledger alloc storage".into()))}
         crate::genesis_builder::build(alloc,profile,&programs.codes).map(|image|Self{image}).map_err(|e|ApplyError::Genesis(format!("{e:?}")))
     }
@@ -181,7 +189,9 @@ struct Exec<'a>{state:InMemoryDB,profile:&'a ProfileIdentity,block:NativeBlockCo
 /// CapsTracker (P7): distinct storage keys changed and accounts touched by SYSTEM
 /// calls in one block, plus the largest single-call gas.
 #[derive(Clone,Debug,Default)]
-pub struct Meter{pub keys:std::collections::HashSet<(Address,U256)>,pub accounts:std::collections::HashSet<Address>,pub max_call_gas:u64,pub calls:u32}
+pub struct Meter{pub keys:std::collections::HashSet<(Address,U256)>,pub accounts:std::collections::HashSet<Address>,pub max_call_gas:u64,pub calls:u32,
+    /// Gas spent by each SYSTEM call in order (measurement only; never a validity input).
+    pub call_gas:Vec<(&'static str,u64)>}
 impl<'a> Exec<'a>{
     fn call(&mut self,name:&'static str,to:Address,data:Vec<u8>)->Result<Bytes,ApplyError>{
         let err=|d:String|ApplyError::System{call:name,detail:d};
@@ -204,7 +214,7 @@ impl<'a> Exec<'a>{
         let (state,logs)=evm.context.evm.journaled_state.finalize();
         if !logs.is_empty(){return Err(ApplyError::Logs)}
         for (a,acct) in state.iter(){ if acct.is_touched(){self.meter.accounts.insert(*a);} for (k,v) in acct.storage.iter(){ if v.is_changed(){self.meter.keys.insert((*a,*k));} } }
-        self.meter.max_call_gas=self.meter.max_call_gas.max(result.gas.spent());self.meter.calls+=1;
+        self.meter.max_call_gas=self.meter.max_call_gas.max(result.gas.spent());self.meter.calls+=1;self.meter.call_gas.push((name,result.gas.spent()));
         commit_epoch(&mut self.state,state);
         code_caps::validate_snapshot(&self.state,self.limits).map_err(ApplyError::Caps)?;
         Ok(result.output)
@@ -272,7 +282,8 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
 
     // Phase 1: USER transactions.
     let budget=cp.BODY_MAX as usize;
-    let users=crate::user_phase::execute_for_profile(&ex.state,input.transactions,&ex.block,budget,budget,profile).map_err(|e|ApplyError::User(format!("{e:?}")))?;
+    let ctx=crate::user_phase::UserContext{cum_log_bytes:input.cum_log_bytes,closing:chain_facts(&ex.state).closing};
+    let users=crate::user_phase::execute_for_block(&ex.state,input.transactions,&ex.block,budget,budget,profile,ctx).map_err(|e|ApplyError::User(format!("{e:?}")))?;
     ex.state=users.state().clone();
     let tips=users.tips();
     code_caps::validate_snapshot(&ex.state,limits).map_err(ApplyError::Caps)?;
@@ -306,7 +317,7 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
     let state_root=state_root(&state)?;
     let facts=chain_facts(&state);
     Ok(BlockOutput{state,state_root,transactions_root:c.transactions_root,receipts_root:c.receipts_root,evidence_root,logs_bloom:c.logs_bloom,gas_used:c.gas_used,
-        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter})
+        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec()})
 }
 
 /// T17: Escrow surplus = balance-(Σpending+heldTotal+burnedTotal) >= 0, and
