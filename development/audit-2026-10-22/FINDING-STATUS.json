@@ -1,429 +1,722 @@
 {
- "auditedSnapshot": "090eae4dc059d1a7df330d9fe674c873ac515564",
+ "auditedSnapshot": "090eae4",
  "repairBranch": "claude/audit-repair-a01-a14",
- "auditReportSha256": "b4862d72262ef05741f68c1817ad536458f876a96fff96ba853700e31f4e9769",
- "attachmentsVerification": "BLOCKED: FINDINGS.json, COVERAGE.md, REPRODUCE.md, overlays and SHA256SUMS were not provided",
- "statusLegend": {
-  "OPEN": "not repaired",
-  "REPAIRED-PENDING-VERIFICATION": "code changed, required evidence incomplete",
-  "CLOSED": "repaired and every required check run on the repaired code",
-  "CLOSED-WITH-LIMITATIONS": "repaired; listed evidence missing or blocked"
+ "pr": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/27",
+ "commits": {
+  "prHead": "ec09120",
+  "lastImplementation": "687ac38",
+  "integrationTested": "c19dc8a",
+  "witnessTested": "ec09120",
+  "chromeTested": "c19dc8a"
+ },
+ "axes": {
+  "implemented": "YES | PARTIAL",
+  "verified": "VERIFIED (Linux) | PARTIAL: regression tests, mutation controls and the reconstructed witness with its positive control on the recorded commits",
+  "partiallyResolved": "requirements still technically incomplete",
+  "blocked": "environment: only another platform can clear it; decision: only an owner decision can clear it",
+  "accepted": "owner acceptance; none is recorded"
+ },
+ "witnessProvenance": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
+ "integration": {
+  "commit": "c19dc8a9f9fb38a41b7376e90152986965736d0d",
+  "result": "FAIL",
+  "failuresOnlyExpectedPlatformLimitation": true,
+  "suites": [
+   {
+    "suite": "lp1-node-tests",
+    "exit": 101,
+    "pass": false,
+    "executedAndFailed": {
+     "binary": "tests/store_journal.rs",
+     "executed": true,
+     "passed": 1,
+     "failed": 11,
+     "unsupportedPlatformErrors": 11
+    },
+    "onlyExpectedPlatformLimitation": true,
+    "platformNote": "store_journal uses the Windows-only atomic journal; on this host its tests execute and fail with UnsupportedPlatform, identically on the audited 090eae4. Windows verification is required to pass them."
+   },
+   {
+    "suite": "ext-build",
+    "exit": 0,
+    "pass": true
+   },
+   {
+    "suite": "lp4-tests",
+    "exit": 0,
+    "pass": true
+   },
+   {
+    "suite": "pocold-build",
+    "exit": 0,
+    "pass": true
+   },
+   {
+    "suite": "pocold-tests",
+    "exit": 0,
+    "pass": true
+   },
+   {
+    "suite": "ext-unit",
+    "exit": 0,
+    "pass": true
+   },
+   {
+    "suite": "e2e-devnet",
+    "exit": 0,
+    "pass": true
+   },
+   {
+    "suite": "e2e-site",
+    "exit": 0,
+    "pass": true
+   },
+   {
+    "suite": "e2e-browser",
+    "exit": 0,
+    "pass": true
+   },
+   {
+    "suite": "e2e-integrated",
+    "exit": 0,
+    "pass": true
+   }
+  ]
  },
  "findings": [
   {
    "id": "A01",
    "severity": "HIGH",
    "title": "Valid block hash poisoning through an unbound body",
-   "requirement": "consensus D129 envReject vs blockReject; validation order",
    "reproduction": {
     "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocold/src/types.rs ordered_root; chain.rs validate; node.rs import/mark_invalid",
-   "plannedRepair": "see REPAIR-PLAN.md#a01",
    "repairCommits": [
     "ac3a951",
     "d132203"
    ],
-   "verification": [
-    "pocold consensus::a01_malformed_or_unbound_bodies_reject_only_the_copy (7 unbound copies, then the real body becomes head)",
-    "consensus::a01_committed_invalid_body_is_still_a_block_rejection_and_cached",
-    "consensus::a_valid_header_with_a_foreign_body_rejects_only_that_copy",
-    "witness A01 NOT_REPRODUCED",
-    "e2e devnet partition/heal/restart/replay",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
-   ],
-   "remainingLimitations": [
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "consensus::a01_malformed_or_unbound_bodies_reject_only_the_copy",
+     "consensus::a01_committed_invalid_body_is_still_a_block_rejection_and_cached",
+     "consensus::a_valid_header_with_a_foreign_body_rejects_only_that_copy",
+     "consensus::body_max_bounds_the_encoded_body_not_the_item_sum",
+     "consensus::d_body_max_vectors"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [],
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": [
+     "D-BODY-MAX (encoded body on every path; found while reviewing this repair)"
+    ]
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "BLOCKED BY DECISION"
   },
   {
    "id": "A02",
    "severity": "HIGH",
-   "title": "Genesis admission bypasses ParamGate and SYS_SLOT_MAX",
-   "requirement": "governance.md R1-R25, R18; LP4 resource gates",
+   "title": "ParamGate not enforced before boot",
    "reproduction": {
-    "onAuditedSnapshot": "REPRODUCED (R9, R13, SYS_SLOT_MAX)",
+    "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/lp4-execution/src/devnet.rs build/load; apply.rs Genesis::build; pocold/src/lib.rs load_spec; chain.rs Spec",
-   "plannedRepair": "see REPAIR-PLAN.md#a02",
    "repairCommits": [
     "10678de",
-    "d132203"
+    "d132203",
+    "33f98b7",
+    "77d6984"
    ],
-   "verification": [
-    "lp4 admission::tests (R1-R26 rule boundaries, audit reproductions, determinism, approved profiles admitted)",
-    "compile_fail doc tests (no bypass of Admitted / Genesis::build)",
-    "pocold admission::{load_refuses_the_audited_profiles_and_admits_the_valid_one, init_devnet_refuses_gate_invalid_timing_and_writes_nothing}",
-    "witnesses A02-R9, A02-R13, A02-SYS_SLOT_MAX NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "admission::tests (R1–R26 at their boundaries; audit reproductions)",
+     "admission::tests::{r26_predicates_are_the_gate_conjunction, absent_rpc_fields_enter_the_gate_as_zero_never_nominal, specification_scope_refuses_every_open_condition, experimental_devnet_waives_only_r26_predicates_reading_absent_fields}",
+     "pocold admission::pocold_admission_is_an_experimental_devnet_with_absent_rpc_mechanisms",
+     "compile_fail doc tests (no bypass constructor)",
+     "admission::tests: the experimental scope admits only ProfileKind::Simnet (Synthetic and Network refused, review F5)",
+     "RPC_FIELDS derived with an exhaustive RpcLimits pattern (review F6; omitting a field fails to compile)"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [
+    "Only an experimental-devnet admission is possible: Specification scope refuses every current profile (rpc-absent, calibration-synthetic, timing-not-a-bound, gas-monotonicity-assumed, gate-deferred LP3 items)",
+    "R14/R19 timing is a single measured sample on the booting host, not a p99 or worst-case bound; under CPU contention a debug build fails closed [R14, R19]",
+    "R18 gas facts assume monotonicity in the domain fields (A13 §4 item 1)",
+    "R26: 22 RpcGuard mechanisms are not implemented (absent, waived only in the experimental scope)"
    ],
-   "remainingLimitations": [
-    "R14/R19 timing is a representative measurement on the booting machine, not a worst-case bound",
-    "R25d is the declared synthetic devnet calibration",
-    "R26: RpcGuard mechanisms pocold does not implement keep nominal values (A13-DERIVATION.md §4)",
-    "D-A02-PROFILE devnet and e2e profiles need owner confirmation",
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": [
+     "D-A02-PROFILE (devnet parameters; engineering, approved under the standing authorization)"
+    ]
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "PARTIALLY RESOLVED"
   },
   {
    "id": "A03",
    "severity": "HIGH",
-   "title": "Full block execution accepts an over-limit EVM log",
-   "requirement": "execution.md caps: LOG_BLOCK_MAX/LOG_CAP/DIRTY_BLOCK_MAX/ACCT_DIRTY_BLOCK_MAX/SLOT_CAP/ACCT_CAP exceptional halt",
+   "title": "Runtime log and state limits not enforced",
    "reproduction": {
     "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/lp4-execution/src/user_phase.rs; native.rs; apply.rs",
-   "plannedRepair": "see REPAIR-PLAN.md#a03",
    "repairCommits": [
-    "10678de"
+    "10678de",
+    "07ac864",
+    "b132a05"
    ],
-   "verification": [
-    "lp4 apply::tests::a03::* (LOG_BLOCK_MAX below/at/above, 546/547 logs, cumulative logs, LOG_CAP, dirty keys/accounts, SLOT_CAP/ACCT_CAP, SYS allowance, revert except nonce and fee, roots)",
-    "pocold consensus::a03_over_limit_log_halts_the_transaction_and_the_block_is_valid",
-    "witness A03 NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
-   ],
-   "remainingLimitations": [
-    "LOG-ACCT-01, D-A03-DIRTY and D-A03-CAPS are consensus decisions taken under the standing authorization and need owner confirmation",
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "apply::tests::a03::* (LOG_BLOCK_MAX, LG2, topics, cumulative, LOG_CAP, dirty keys/accounts, caps, halt semantics)",
+     "apply::tests::a03::proposals::{log_acct_01_vectors, d_a03_dirty_vectors (status, halt kind and dirty-account count, incl. the block-invalid residue case), d_a03_caps_vectors, log_cap_aggregate_vectors}",
+     "consensus::a03_over_limit_log_halts_the_transaction_and_the_block_is_valid"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [],
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": [
+     "LOG-ACCT-01",
+     "D-A03-DIRTY (including the block-invalid halt-residue case)",
+     "D-A03-CAPS",
+     "D-A03-SYSUSER",
+     "LOG-CAP-AGGREGATE"
+    ]
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "BLOCKED BY DECISION"
   },
   {
    "id": "A04",
    "severity": "HIGH",
-   "title": "Journal record-length corruption rolls back committed records",
-   "requirement": "LP2 P3/P4 durability policy; LP4 P9",
+   "title": "Journal frame corruption drops committed records",
    "reproduction": {
     "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocold/src/store.rs open",
-   "plannedRepair": "see REPAIR-PLAN.md#a04",
    "repairCommits": [
     "20bedce",
-    "d132203"
+    "d132203",
+    "cedabe7"
    ],
-   "verification": [
-    "pocold store::a04_* (audit case, every single-bit flip, truncation, boundary edits, duplicates, commit damage, uncommitted tail, v1 migration)",
-    "torn tail at every offset",
-    "witness A04 NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "store::a04_* (every single-bit flip fails closed; truncation; boundary edits; commit-file damage; uncommitted tail; v1 migration; 4 KiB slots)"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [
+    "Real power loss is not tested (simulated by file edits only)"
    ],
-   "remainingLimitations": [
-    "journal format v2 (experimental local storage); v1 migrates only when fully verified",
-    "reordered complete records pass the framing layer (replay fails closed)",
-    "hardware power loss not tested",
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)",
+     "journal v2 on Windows (file replacement by rename with open handles, directory fsync skipped): untested"
+    ],
+    "decision": [
+     "D-A04-FORMAT journal v2 (local storage format, engineering)"
+    ]
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "VERIFIED (Linux) — BLOCKED BY ENVIRONMENT (Windows)"
   },
   {
    "id": "A05",
    "severity": "HIGH",
-   "title": "Peer and RPC resource admission is not globally bounded",
-   "requirement": "VA bounded resources; governance RpcGuard R15/R26",
+   "title": "P2P and RPC resource exhaustion",
    "reproduction": {
-    "onAuditedSnapshot": "REPRODUCED (48 pre-Hello peers kept; RPC threads unbounded)",
+    "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocold/src/net.rs; rpc.rs serve/conn; node.rs orphans/invalid cache",
-   "plannedRepair": "see REPAIR-PLAN.md#a05",
    "repairCommits": [
     "a2dbf16",
-    "d132203"
+    "d132203",
+    "cedabe7",
+    "33f98b7",
+    "45712cd",
+    "77d6984",
+    "b132a05",
+    "a5e2517"
    ],
-   "verification": [
-    "pocold net::* (idle peers, Hello-only handshake, oversized/stalled frames, slow reader, churn, outbound slots under an inbound flood, RPC cap refuses excess unread, batches)",
-    "rpc unit tests (RESP_MAX with request id, BATCH_RESP_MAX members not run)",
-    "consensus::range_sync_reaches_the_peer_head_through_truncated_responses",
-    "consensus::get_logs_limits_answer_32020_with_resume_data (network.md:298)",
-    "witness A05 NOT_REPRODUCED (see FINDINGS-EVIDENCE note)",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
+   "implemented": "PARTIAL",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "net::* (idle/hello deadlines, frames, slow reader, churn, inbound floods, connection cap, batches)",
+     "net::rpc_work_deadline_skips_expired_work_and_releases_resources (deadline derived from the measured heavy duration; mutations: no skip, no batch deadline: each fails)",
+     "net::legitimate_requests_progress_under_bounded_heavy_load",
+     "net::a_light_turn_runs_at_most_light_turn_requests_then_wakes_the_node (mutation: no LIGHT_TURN bound fails)",
+     "net::a_light_flood_coalesces_wakes_and_main_events_progress (mutation: a Wake per request fails)",
+     "net::abandoned_queued_bodies_are_capped_and_released (mutation: no cap fails)",
+     "net::a_full_heavy_pool_answers_busy_before_anything_runs (mutation: reservations never fail fails)",
+     "rpc::tests::response_pools_reserve_shrink_and_release",
+     "net::rpc_request_buffer_covers_headers_and_body (413 drained before close; its mutation is caught in release 2 of 3 runs, a race)",
+     "net::tests::a_close_between_the_writers_test_and_its_wait_wakes_it (F1; mutation fails)",
+     "net::miner_replacement_keeps_at_most_one_miner_thread (F7; mutation fails)",
+     "net::peer_threads_stay_within_the_inventory_while_consensus_is_stalled (invariant check)",
+     "net::light_lane_wakes_coalesce_until_taken (mutation fails)",
+     "net::an_answer_is_reserved_until_its_connection_has_written_it (mutation fails)",
+     "rpc::tests::a_busy_answer_does_not_parse_an_over_limit_body (mutation fails)",
+     "consensus::a_max_size_transaction_is_answered_in_the_light_lane (mutation fails)"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [
+    "RpcGuard is implemented only in part: connection cap, REQ_BUF, RESP_MAX, batch limits, log limits, a work deadline, a light lane with LIGHT_TURN, response pools after LIGHT_RESP_MAX/HEAVY_RESP_MEM/LIGHT_RESP_MEM (no permits, no QUEUE_WAIT, batches not streamed), queued-body cap, JSON value cap; HEAVY/LIGHT permits, scratch budgets, per-connection rate buckets, per-class compute deadlines and the send watchdog are not implemented",
+    "A running request cannot be preempted: one heavy member (<= 30M gas) holds the consensus thread to completion",
+    "Light methods are light by response size only (eth_sendRawTransaction executes; receipt and transaction lookups scan the chain): no light compute deadline"
    ],
-   "remainingLimitations": [
-    "RPC work deadline not tested in isolation",
-    "loopback only; RpcGuard memory accounting not implemented",
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": []
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "PARTIALLY RESOLVED"
   },
   {
    "id": "A06",
    "severity": "HIGH",
-   "title": "Wallet conflict and lock transitions do not revoke signing eligibility",
-   "requirement": "browser.md signEligible, D58/D77/D79, ProfileMutex/eligibilityEpoch",
+   "title": "Signing eligibility across wallet and profile transitions",
    "reproduction": {
-    "onAuditedSnapshot": "REPRODUCED (conflict grant, sign-before-approval, submit after lock+endpoint change)",
+    "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocol-extension/src/sw.js wallet()/profiles; viewer.js",
-   "plannedRepair": "see REPAIR-PLAN.md#a06",
    "repairCommits": [
     "51aa8f7",
-    "4856842"
+    "4856842",
+    "cedabe7",
+    "df63725"
    ],
-   "verification": [
-    "extension tests/worker_test.mjs (51 checks on the real worker; of the original 45, 28 fail on 090eae4)",
-    "real Chrome e2e_browser.mjs A06 checks (conflict, unsigned display, identity before submission, lock, profile change, endpoint change, 30 s check)",
-    "witnesses A06-conflict, A06-sign-before-approval, A06-lock-and-endpoint-change NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "worker_test.mjs (A06 and A06-R2 submission states over a deterministic transport barrier; mutations: no re-check, no hook, submission under the mutex: each fails)",
+     "e2e_browser.mjs real Chrome A06 and A06-R2 (lock, profile change and endpoint change while queued; lock after initiation)"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [
+    "After a request is initiated it may be broadcast; it is reported as initiated/broadcast, never as cancelled (by design)"
    ],
-   "remainingLimitations": [
-    "a signed submission proceeds if the wallet locks while transport capacity is awaited (signing is the commitment point)",
-    "the 30 s check revokes on a proven identity mismatch only, not on transport errors",
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": [
+     "D-A06-CONFLICT (engineering)",
+     "D-A06-SUBMIT (changed expectation: a profile change during signing cancels the not-yet-initiated submission)"
+    ]
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "VERIFIED (Linux) — BLOCKED BY ENVIRONMENT (Windows)"
   },
   {
    "id": "A07",
    "severity": "MEDIUM",
-   "title": "Extension GenesisSpec decoder accepts invalid schema and values",
-   "requirement": "M1 GenesisSpec schema; browser profile admission",
+   "title": "Extension GenesisSpec decoder accepts invalid specs",
    "reproduction": {
     "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocol-extension/src/lib/rp.js decodeSpec",
-   "plannedRepair": "see REPAIR-PLAN.md#a07",
    "repairCommits": [
     "51aa8f7",
     "4856842"
    ],
-   "verification": [
-    "tests/decoder_diff.mjs (1151 items, 0 mismatches against the Rust verdicts)",
-    "pocold decoder_reference::reference_verdicts_for_the_decoder_corpus",
-    "worker_test A07 review case (linear-time gsVersion detail)",
-    "witness A07 NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
-   ],
-   "remainingLimitations": [
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "tests/decoder_diff.mjs (1151 items vs Rust verdicts)",
+     "pocold decoder_reference"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [],
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": []
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "VERIFIED (Linux) — BLOCKED BY ENVIRONMENT (Windows)"
   },
   {
    "id": "A08",
    "severity": "HIGH",
-   "title": "RP trust verification accepts malformed header fields",
-   "requirement": "RP Hpre1 structural checks",
+   "title": "RP header structure not validated",
    "reproduction": {
     "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocol-extension/src/lib/rp.js decodeHeader/verifyWindow",
-   "plannedRepair": "see REPAIR-PLAN.md#a08",
    "repairCommits": [
     "51aa8f7"
    ],
-   "verification": [
-    "decoder corpus (every UT field, seal, shares, winner signature)",
-    "live RP mutations in e2e_browser.mjs",
-    "witness A08 NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
-   ],
-   "remainingLimitations": [
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "decoder corpus (every UT field, seal, shares, winner signature)",
+     "live RP mutations in e2e_browser.mjs"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [],
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": []
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "VERIFIED (Linux) — BLOCKED BY ENVIRONMENT (Windows)"
   },
   {
    "id": "A09",
    "severity": "MEDIUM",
-   "title": "Concurrent receive reservations exceed the session cap",
-   "requirement": "browser.md D98/D100 SESSION_RECV_MAX",
+   "title": "Session receive reservations not atomic",
    "reproduction": {
     "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocol-extension/src/lib/transport.js request/Pool",
-   "plannedRepair": "see REPAIR-PLAN.md#a09",
    "repairCommits": [
     "51aa8f7"
    ],
-   "verification": [
-    "worker_test A09 (peak <= SESSION_RECV_MAX; release on fetch error, deadline, HTTP 500, pool exhaustion)",
-    "witness A09 NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
-   ],
-   "remainingLimitations": [
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "worker_test.mjs A09 (peak <= cap; release on every path)"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [],
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": []
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "VERIFIED (Linux) — BLOCKED BY ENVIRONMENT (Windows)"
   },
   {
    "id": "A10",
    "severity": "MEDIUM",
-   "title": "RPC batch bypasses ORIGIN_DENY",
-   "requirement": "governance.md ORIGIN_DENY",
+   "title": "ORIGIN_DENY not applied per batch member",
    "reproduction": {
     "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocold/src/rpc.rs conn/handle",
-   "plannedRepair": "see REPAIR-PLAN.md#a10",
    "repairCommits": [
     "a2dbf16"
    ],
-   "verification": [
-    "pocold net::a10_origin_deny_applies_to_every_batch_member",
-    "witness A10 NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
-   ],
-   "remainingLimitations": [
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "net::a10_origin_deny_applies_to_every_batch_member"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [],
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": []
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "VERIFIED (Linux) — BLOCKED BY ENVIRONMENT (Windows)"
   },
   {
    "id": "A11",
    "severity": "MEDIUM",
-   "title": "Reorg drops orphaned transactions from the pending pool",
-   "requirement": "consensus pending-pool restoration on reorg",
+   "title": "Reorg drops detached transactions",
    "reproduction": {
     "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocold/src/node.rs rebuild_pool/on_new_head",
-   "plannedRepair": "see REPAIR-PLAN.md#a11",
    "repairCommits": [
     "a2dbf16",
     "d132203"
    ],
-   "verification": [
-    "pocold consensus::{a11_reorg_restores_detached_transactions_without_resubmission, a11_excludes_included_and_conflicting_transactions_and_keeps_order}",
-    "witness A11 NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
-   ],
-   "remainingLimitations": [
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "consensus::a11_reorg_restores_detached_transactions_without_resubmission",
+     "consensus::a11_excludes_included_and_conflicting_transactions_and_keeps_order"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [],
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": []
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "VERIFIED (Linux) — BLOCKED BY ENVIRONMENT (Windows)"
   },
   {
    "id": "A12",
    "severity": "MEDIUM",
-   "title": "Storage timeout releases admission before the write settles",
-   "requirement": "browser.md D101/D102 reply vs ownership",
+   "title": "Storage admission released before the write settles",
    "reproduction": {
     "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocol-extension/src/sw.js route(storage_set); lib/records.js write",
-   "plannedRepair": "see REPAIR-PLAN.md#a12",
    "repairCommits": [
     "51aa8f7"
    ],
-   "verification": [
-    "worker_test A12 (unsettled write keeps its slot; slots return on settlement)",
-    "witness A12 NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
-   ],
-   "remainingLimitations": [
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "worker_test.mjs A12"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [],
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": []
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "VERIFIED (Linux) — BLOCKED BY ENVIRONMENT (Windows)"
   },
   {
    "id": "A13",
    "severity": "HIGH",
-   "title": "Resource formulas do not establish the claimed general boot bounds",
-   "requirement": "LP4 R18/R21 full-domain derivations",
+   "title": "Resource derivations do not match the representation",
    "reproduction": {
-    "onAuditedSnapshot": "SOURCE REVIEW (no runtime witness)",
+    "onAuditedSnapshot": "source review (no runtime witness)",
+    "by": "source review",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/lp4-execution/src/resources.rs; development/lp4/p7-resources/DERIVATION.md; pocold chain.rs retention",
-   "plannedRepair": "see REPAIR-PLAN.md#a13",
    "repairCommits": [
     "25be2da",
-    "d132203"
+    "d132203",
+    "cedabe7",
+    "33f98b7",
+    "45712cd",
+    "77d6984",
+    "b132a05",
+    "3c07cb5",
+    "a5e2517"
    ],
-   "verification": [
-    "lp4 resources::tests::{snapshot_model_bounds_measured_clone_bytes, sys_gas_envelope_fixture}",
-    "pool meter equals a recount after zero-value calls (EIP-161 commit shared with the block phase)",
-    "apply::tests::a03::a13_reads_and_empty_calls_leave_no_container_residue (mutation fails)",
-    "pocold consensus::{a13_side_branch_states_are_capped_and_rebuilt_on_demand (mutation fails), a13_rebuild_of_a_deep_fork_keeps_only_the_target_state, a13_boot_refuses_a_bound_above_the_memory_budget, a13_pool_pending_state_is_capped_and_normalized (mutation fails)}",
-    "A13-DERIVATION.md",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
+   "implemented": "YES",
+   "verified": {
+    "status": "PARTIAL",
+    "tests": [
+     "resources::tests::{snapshot_model_bounds_measured_clone_bytes, execution_model_bounds_measured_adversarial_peaks (public cases), loaded_accounts_start_with_unallocated_storage_maps, sys_gas_envelope_fixture}",
+     "lp4 tests/rss_snapshot.rs (full-cap snapshot clones: RSS 0.45 of the model)",
+     "private adversarial execution measurements, each case against its own term (evidence/PRIVATE-REVIEW-PACKAGE.md; not in the public repository)",
+     "consensus::{a13_* (side states, deep-fork rebuild, boot bound with separate default/below/exact/network-scale assertions, pool caps), a13_bound_breakdown}",
+     "evidence/rss-*.json (measured RSS of a 3-node devnet under load: not worst-case evidence)",
+     "A13-DERIVATION.md §2a, §2b, §4 (each assumption ENFORCED / DERIVED / INSPECTION / OPEN)",
+     "consensus::{a_competing_branch_within_side_blocks_max_is_adopted, side_blocks_stay_within_the_cap_after_a_reorg_and_evicted_blocks_are_not_taken_again, replay_skips_a_duplicate_record} (mutations fail)"
+    ],
+    "witnessOnRepair": "n/a (source review)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [
+    "OPEN: gas monotonicity in the domain fields (§4.1)",
+    "OPEN: R14/R19 timing is not a worst-case bound (§4.2)",
+    "OPEN: allocator overhead and fragmentation (§4.3b); the boot gate keeps a 1/8 reserve for them, which is a margin, not a proof; the 5.13 GiB model total counts requested bytes",
+    "OPEN: CPU costs (world-root rebuild, chain scans, pool re-execution, deep-fork rebuild) (§4.5–4.7)",
+    "OPEN: RetentionStore and the redb trie are not implemented (§4.10); the specification's node targets <= 750 MiB plus 192 MiB RPC (network.md:158), pocold's in-memory architecture needs 5.13 GiB of model",
+    "INSPECTION only: transient-snapshot inventory, one EVM execution at a time, the answer-being-built tree ratio (§4.11, §4.13, §4.16)",
+    "DERIVED with stated revm 19.7 facts: execution memory, operation classes (§4.4, §3a)",
+    "No guaranteed process-memory ceiling exists (§2b)",
+    "OPEN (architectural): adoption of a heavier branch at depth <= R_keep (2048, network.md:143) is met only to SIDE_BLOCKS_MAX = 320 (raised from 256; a deeper branch is preserved in the journal, not adopted in one shot); full R_keep needs block bodies off the heap, proposed as D-REORG-REDB (§4.18)"
    ],
-   "remainingLimitations": [
-    "open obligations in A13-DERIVATION.md §4 (gas monotonicity, representative timing, stack residency, CPU of pool re-execution and root rebuild, RpcGuard mechanisms, RetentionStore not implemented)",
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": [
+     "D-A13-BUDGET (owner approved option 1: local limits reduced, 6 GiB kept)"
+    ]
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "PARTIALLY RESOLVED"
   },
   {
    "id": "A14",
    "severity": "LOW",
-   "title": "Transport accepts mismatched JSON-RPC version and response id",
-   "requirement": "JSON-RPC 2.0 response correlation",
+   "title": "JSON-RPC responses not correlated with the request",
    "reproduction": {
     "onAuditedSnapshot": "REPRODUCED",
+    "by": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
     "evidence": "evidence/baseline-090eae4.log"
    },
-   "affectedCode": "prototypes/pocol-extension/src/lib/transport.js request",
-   "plannedRepair": "see REPAIR-PLAN.md#a14",
    "repairCommits": [
     "51aa8f7",
     "d132203"
    ],
-   "verification": [
-    "worker_test A14 (13 malformed shapes rejected; exact result and error accepted)",
-    "rpc unit test: -32008 carries the request id",
-    "witness A14 NOT_REPRODUCED",
-    "integration on e3a24b1: PASS (evidence/integration.json)",
-    "witnesses on the final commit: evidence/witnesses-final.log"
-   ],
-   "remainingLimitations": [
-    "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)"
-   ],
-   "disposition": "CLOSED-WITH-LIMITATIONS"
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux)",
+    "tests": [
+     "worker_test.mjs A14 (13 malformed shapes)",
+     "rpc unit tests (-32008 carries the request id)"
+    ],
+    "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
+    "commits": {
+     "integration": "c19dc8a",
+     "witness": "ec09120",
+     "realChrome": "c19dc8a"
+    }
+   },
+   "partiallyResolved": [],
+   "blocked": {
+    "environment": [
+     "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
+    ],
+    "decision": []
+   },
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); no external human audit",
+   "disposition": "VERIFIED (Linux) — BLOCKED BY ENVIRONMENT (Windows)"
   }
  ],
- "finalCommit": "e3a24b107145a507ff84a3505f941dc4f856c166",
- "integration": {
-  "result": "PASS",
-  "evidence": "evidence/integration.json",
-  "note": "Integration ran on e3a24b1 = cedabe7 plus an evidence commit; the later commits change development/ only."
- },
- "independentReview": "Three independent read-only reviews by separate agent instances (not an external human audit): Rust side and extension side of 090eae4..4856842, then the review-fix commits. Confirmed findings were fixed in d132203, 4856842 and cedabe7, or documented as residuals (REPAIR-REPORT.md section 3).",
- "dependencies": {
-  "libsecp256k1 0.5.0": "unmaintained (cryptographic). Replaced by k256 0.13.4 in pocold (equivalence: evidence/secp-equivalence.md). Kept in lp1-node, the accepted LP3 evaluator pinned to Rust 1.58.1 (k256 0.13 needs >= 1.65).",
-  "rand 0.7.3": "RUSTSEC-2026-0097 = GHSA-cq8v-f236-94qc (one advisory, conditional on the log feature, not enabled). Reachable only through libsecp256k1: gone from pocold, kept in lp1-node.",
-  "derivative 2.2.0, paste 1.0.15": "unmaintained notices, build-time proc-macros via revm/alloy. Kept; replacing them needs a revm upgrade."
- },
- "blocked": [
-  "Windows verification on the exact commit: BLOCKED BY PLATFORM (no Windows host; the manual 'LP3 S1 Windows verification' workflow was not dispatched because it spends the owner's Actions minutes)",
-  "audit attachments (FINDINGS.json, COVERAGE.md, REPRODUCE.md, overlays, SHA256SUMS) not provided",
-  "Rust 1.58.1 not available here (lp1-node lockfile unchanged from 090eae4)"
- ],
- "statusNote": "Every finding is CLOSED-WITH-LIMITATIONS: repaired and verified on the final commit, but Windows verification of that exact commit is blocked by platform, and some findings carry the further limitations listed.",
- "lastCodeCommit": "cedabe7fe13f1c478097c677d06aa56f68a87dd5",
- "witnesses": {
-  "commit": "ed25c7ef26f7b5cf8baafc939437c1b5c9e7bd0d",
-  "result": "18 observations, all NOT_REPRODUCED",
-  "log": "evidence/witnesses-final.log",
-  "programs": "kept local (BASELINE.md)"
+ "summary": {
+  "PARTIALLY RESOLVED": [
+   "A02",
+   "A05",
+   "A13"
+  ],
+  "BLOCKED BY DECISION": [
+   "A01",
+   "A03"
+  ],
+  "VERIFIED (Linux) — BLOCKED BY ENVIRONMENT (Windows)": [
+   "A04",
+   "A06",
+   "A07",
+   "A08",
+   "A09",
+   "A10",
+   "A11",
+   "A12",
+   "A14"
+  ],
+  "ACCEPTED": []
  }
 }

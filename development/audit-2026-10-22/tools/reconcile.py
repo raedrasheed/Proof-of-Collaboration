@@ -33,11 +33,15 @@ def main():
     out.append("")
     for l in reversed(log):
         h, s = l.split(" ", 1); paths = git("diff-tree", "--no-commit-id", "--name-only", "-r", h).splitlines()
-        outside = [p for p in paths if not p.startswith("development/")]
-        out.append(f"- `{h[:12]}` {s}: {len(paths)} paths, {'all under development/' if not outside else '**outside development/: ' + ', '.join(outside) + '**'}")
-        ok_all &= not outside
+        # Only prototypes/ and .github/ are built/tested; development/ docs and root files
+        # (.gitignore, README) do not change the compiled code, so they do not break equivalence.
+        code = [p for p in paths if p.startswith("prototypes/") or p.startswith(".github/")]
+        noncode = [p for p in paths if p not in code]
+        tag = "all docs/meta (no code)" if not code else "**code: " + ", ".join(code) + "**"
+        out.append(f"- `{h[:12]}` {s}: {len(paths)} paths, {tag}" + (f" (+{len(noncode)} docs/meta)" if code and noncode else ""))
+        ok_all &= not code
     out.append("")
-    out.append("Result: " + ("every evidence commit and the head carry the implementation commit's code trees; later commits change development/ only." if ok_all else "**the code differs between the recorded commits; the evidence does not cover the head as is.**"))
+    out.append("Result: " + ("every evidence commit and the head carry the implementation commit's code trees; later commits change development/ and root metadata (.gitignore) only." if ok_all else "**a post-implementation commit changed prototypes/ or .github/; the evidence does not cover the head as is.**"))
     print("\n".join(out))
     return 0 if ok_all else 1
 
