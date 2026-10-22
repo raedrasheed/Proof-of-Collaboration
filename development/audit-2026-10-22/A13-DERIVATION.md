@@ -33,18 +33,20 @@ Assumptions and where they are enforced:
 
 | term | formula | enforced by |
 |---|---|---|
-| snapshots | (1 genesis + K_hist + side_max + 10 transient) × snapshot | `Chain::retain` (K_hist window; side states ≤ side_max, lowest work pruned first); transient: apply copy, USER copy, per-tx engine and PAY copies, production clones, pool state and its copies, rolling rebuild (2) |
+| snapshots | (1 genesis + K_hist + side_max + 10 transient) × snapshot | `Chain::retain` (K_hist window; side states ≤ side_max, lowest work pruned first); transient: apply copy, USER copy, per-tx engine and PAY copies, production clones, pool state and its copies, rolling rebuild (2). The pool's pending state is normalized after every transaction and refuses a transaction whose effects would pass SLOT_CAP, ACCT_CAP or SYS_SLOT_MAX (`PoolMeter`), so it is one snapshot like the others |
 | code | snapshots × (CODE_CAP · 9/8 + 97 B per code entry) | `code_caps::validate_snapshot` (logical code per state); counted unshared |
 | history | (H_END+1) × per-block + TXBYTES_CAP + TX_CAP × 380 B + LOG_CAP × 33/32 + identities × (EVID_BYTES_MAX+24) | H_END (apply_block); TX_CAP/TXBYTES_CAP chain-cumulative (block invalid); LOG_CAP (USER `Halt::LogCap`); evidence ≤ one per identity ever (a tombstoned record makes further evidence a host error), identities ≤ M_max + R_max · H_END |
 | per block | 3 × (map slot of `Entry` 1184 B) + 2 × header_max + bloom/sig/proposer + 8·S + 32·(S+1) shares + 64·M ranges + an empty state | header_max = 768 + 9·S_max (network.md 3067 B for S=256) |
 | side blocks | SIDE_BLOCKS_MAX (256) × (per-block + BODY_MAX + receipts + LOG_BLOCK_MAX) | `Chain::retain`: ≤ 256 non-canonical blocks (lowest-work leaves leave first), none R_keep (2048) or more below the head, descendants removed with them |
-| queues | pool (64 MiB + entries) + orphans (16 MiB) + future (64) + templates (64) + seen caches (4096) + invalid (4096) + rejects (256) + receipt times (1024) + evidence pool (64) + per-peer queues + event queues | constants in `node.rs`, `chain.rs`, `net.rs` (A05) |
-| rpc | conn_max × (MAX_BODY + 16 KiB + RESP_MAX) + 3 × LOGS_SCAN_BYTES | `rpc.rs`: connection cap, request size, `capped` (RESP_MAX → −32008), log scan budget (−32005) |
-| threads | (2 × peers_max + conn_max + 8 + dials) × 64 KiB resident stack | thread creation bounded by the A05 caps |
+| queues | pool (64 MiB and ≤ POOL_MAX_TXS = 4096 transactions, plus entries) + orphans (16 MiB) + future (64) + templates (64) + seen caches (4096) + invalid (4096) + rejects (256) + receipt times (1024) + evidence pool (64) + per-peer queues for (peers_max inbound + one per dialer) + event queues | constants in `node.rs`, `chain.rs`, `net.rs` (A05) |
+| rpc | conn_max × (MAX_BODY + 16 KiB + BATCH_RESP_MAX + BATCH_MAX × 256 B) + BATCH_RESP_MAX + 4 × RESP_MAX | `rpc.rs`: connection cap (excess refused unread), request size, batch members run and serialized one at a time with the delivered bytes ≤ BATCH_RESP_MAX (later members −32020 {batchBytes}, not run), `capped` (RESP_MAX → −32008 with the request id), eth_getLogs stopping at RESP_MAX of result, LOGS_COUNT_MAX or LOGS_SCAN_BYTES (−32005) |
+| threads | (2 × peers_max + 3 × dials + conn_max + 8) × 64 KiB resident stack | thread creation bounded by the A05 caps (inbound) and the configured peers (outbound) |
 
-Single-host devnet default (D-A13-PROFILE; side_max 8, default limits): **4.71 GiB** ≤ the 6 GiB node
-budget (`node::MEM_BUDGET`): snapshots 51 × 38.2 MiB, code 209 MiB, history 1576 MiB (LOG_CAP dominates),
-side blocks 285 MiB, queues 421 MiB, RPC 385 MiB, threads 7 MiB. A budget below the bound, or
+Single-host devnet default (D-A13-PROFILE; side_max 8, default limits, two configured peers): **4.92 GiB**
+≤ the 6 GiB node budget (`node::MEM_BUDGET`): snapshots 51 × 38.2 MiB, code 209 MiB, history 1576 MiB
+(LOG_CAP dominates), side blocks 285 MiB, queues 426 MiB, RPC 593 MiB, threads 7 MiB. (Before the independent
+review: 4.71 GiB. The RPC term had counted one RESP_MAX response per connection while a batch could
+build more, and the pool's pending state was not capped; both are now enforced as above.) A budget below the bound, or
 network-scale caps (ACCT_CAP 10^6, SLOT_CAP 4·10^6), make `Node::open` refuse to boot
 (`a13_boot_refuses_a_bound_above_the_memory_budget`).
 
@@ -76,5 +78,15 @@ and only that exception admits a simnet node (`resource_rules_r14_to_r21`).
    `eth_getTransactionByHash` scans the canonical chain; both are CPU, not memory, costs.
 6. A deep-fork rebuild re-executes every block from the nearest retained ancestor (memory is now two
    snapshots, CPU is proportional to the depth).
-7. The node bound covers pocold's in-memory representation only; the spec's RetentionStore (disk) and
+7. Every new head re-executes the pool (≤ POOL_MAX_TXS transactions, each on a copy of the pending
+   state): CPU, not memory.
+8. R14/R19 timing is measured when a node loads the devnet (`load_spec`, used by `run` and `status`), on
+   that machine; the record init-devnet writes is informational. R25d is the declared synthetic devnet
+   calibration (`--work-bits`), not a measured hash rate.
+9. R26 receives pocold's implemented RpcGuard values from its code (`pocold::rpc_facts`: connection cap,
+   request size, RESP_MAX, BATCH_MAX, BATCH_RESP_MAX, LOGS_COUNT_MAX, LOGS_SCAN_BYTES). pocold does not
+   implement the remaining RpcGuard mechanisms: HEAVY/LIGHT response memory accounting, scratch budgets,
+   BatchStreamer pacing, rate buckets, RPC_MEM_TOTAL. Those fields keep their nominal values; the memory
+   they would bound is covered by the RPC term above instead.
+10. The node bound covers pocold's in-memory representation only; the spec's RetentionStore (disk) and
    redb-based trie are not implemented, so the governance R21 historical-trie model is not exercised.

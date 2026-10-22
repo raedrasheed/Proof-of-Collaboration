@@ -3,9 +3,10 @@
 //! or a wrong network identity close the connection; they never touch block state.
 //!
 //! Resource bounds (A05, local and not consensus; `Limits`):
-//! - at most `peers_max` connections (inbound and outbound together), of which at most
-//!   `handshaking_max` have not yet delivered their Hello; excess connections are closed
-//!   on accept, before any thread is spawned;
+//! - at most `peers_max` inbound connections, of which at most `handshaking_max` have not
+//!   yet delivered their Hello; excess connections are closed on accept, before any thread is
+//!   spawned. Outbound connections are separate (one per configured peer, `dial`), so inbound
+//!   connections can never take the slots the node needs to reach its own peers;
 //! - the first frame must be a Hello and must arrive within `hello_deadline`; a frame
 //!   whose length has arrived must complete within `frame_deadline`; an established peer
 //!   silent for `idle_deadline` is closed;
@@ -40,12 +41,14 @@ impl Default for Limits{
 }
 /// Shared connection accounting of one node.
 #[derive(Debug,Default)]
-pub struct Counters{pub live:AtomicUsize,pub handshaking:AtomicUsize,pub refused:AtomicUsize,pub dropped_slow:AtomicUsize}
+pub struct Counters{pub live:AtomicUsize,pub handshaking:AtomicUsize,pub refused:AtomicUsize,pub dropped_slow:AtomicUsize,
+    /// Outbound connections (not counted in `live`/`handshaking`).
+    pub outbound:AtomicUsize}
 #[derive(Clone,Debug)]
 pub struct Net{pub limits:Limits,pub counters:Arc<Counters>}
 impl Net{
     pub fn new(limits:Limits)->Self{Self{limits,counters:Arc::new(Counters::default())}}
-    /// Reserves a connection slot (and a handshake slot), or refuses.
+    /// Reserves an inbound connection slot (and a handshake slot), or refuses.
     fn admit(&self)->bool{
         let c=&self.counters;
         if c.live.fetch_add(1,Ordering::SeqCst)>=self.limits.peers_max{c.live.fetch_sub(1,Ordering::SeqCst);c.refused.fetch_add(1,Ordering::SeqCst);return false}
@@ -139,12 +142,17 @@ fn read_by(r:&mut TcpStream,buf:&mut [u8],deadline:Instant)->bool{
     }
     true
 }
-/// Starts reader and writer threads for an admitted connection (slot already reserved).
-fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net){
-    let release=|net:&Net,handshaking:bool|{net.counters.live.fetch_sub(1,Ordering::SeqCst);if handshaking{net.counters.handshaking.fetch_sub(1,Ordering::SeqCst);}};
+/// Starts reader and writer threads for an admitted connection (inbound: slot already reserved).
+/// Returns whether the connection was handed to the node; every later end sends Closed.
+fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net)->bool{
+    let release=move|net:&Net,handshaking:bool|{
+        if outbound{net.counters.outbound.fetch_sub(1,Ordering::SeqCst);}
+        else{net.counters.live.fetch_sub(1,Ordering::SeqCst);if handshaking{net.counters.handshaking.fetch_sub(1,Ordering::SeqCst);}}
+    };
+    if outbound{net.counters.outbound.fetch_add(1,Ordering::SeqCst);}
     let _=stream.set_nodelay(true);let addr=stream.peer_addr().map(|a|a.to_string()).unwrap_or_default();
     let id=NEXT.fetch_add(1,Ordering::SeqCst);
-    let (Ok(reader),Ok(writer))=(stream.try_clone(),stream.try_clone()) else{release(&net,true);return};
+    let (Ok(reader),Ok(writer))=(stream.try_clone(),stream.try_clone()) else{release(&net,true);return false};
     let out=Arc::new(Outbox{q:Mutex::new((VecDeque::new(),0)),cv:Condvar::new(),closed:AtomicBool::new(false),max:net.limits.queue_bytes_max});
     let peer=Peer{id,addr,outbound,out:out.clone(),sock:Arc::new(stream),counters:net.counters.clone()};
     let write_deadline=net.limits.write_deadline;
@@ -161,10 +169,11 @@ fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net
                 wpeer.close();return
             }
         }
-    }).is_err(){release(&net,true);return}
-    if events.send(NetEvent::Connected(id,peer.clone())).is_err(){peer.close();release(&net,true);return}
+    }).is_err(){release(&net,true);return false}
+    if events.send(NetEvent::Connected(id,peer.clone())).is_err(){peer.close();release(&net,true);return false}
     let rpeer=peer.clone();let rnet=net.clone();
-    let spawned=std::thread::Builder::new().name(format!("peer-{id}")).spawn(move||{let net=rnet;
+    let tev=events.clone();
+    let spawned=std::thread::Builder::new().name(format!("peer-{id}")).spawn(move||{let net=rnet;let events=tev;
         let mut r=reader;let l=net.limits.clone();let mut hello=false;let mut last=Instant::now();let started=Instant::now();
         loop{
             let wait=if hello{last+l.idle_deadline}else{started+l.hello_deadline};
@@ -177,14 +186,16 @@ fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net
             if !hello{
                 // Nothing but a Hello is accepted before the handshake.
                 if !matches!(m,Msg::Hello{..}){break}
-                hello=true;net.counters.handshaking.fetch_sub(1,Ordering::SeqCst);
+                hello=true;if !outbound{net.counters.handshaking.fetch_sub(1,Ordering::SeqCst);}
             }
             last=Instant::now();
             if events.send(NetEvent::Message(id,m)).is_err(){break}
         }
         rpeer.close();release(&net,!hello);let _=events.send(NetEvent::Closed(id));
     });
-    if spawned.is_err(){peer.close();release(&net,true);}
+    // The node already knows this peer: it must also learn that it is gone.
+    if spawned.is_err(){peer.close();release(&net,true);let _=events.send(NetEvent::Closed(id));}
+    true
 }
 /// Accepts inbound peers on `listener` (loopback only), within the connection limits.
 pub fn listen(listener:TcpListener,events:SyncSender<NetEvent>,net:Net){
@@ -192,7 +203,7 @@ pub fn listen(listener:TcpListener,events:SyncSender<NetEvent>,net:Net){
         for s in listener.incoming(){
             let Ok(s)=s else{continue};
             if !s.peer_addr().map(|a|a.ip().is_loopback()).unwrap_or(false){continue}
-            if net.admit(){spawn_peer(s,false,events.clone(),net.clone())}else{let _=s.shutdown(std::net::Shutdown::Both);}
+            if net.admit(){spawn_peer(s,false,events.clone(),net.clone());}else{let _=s.shutdown(std::net::Shutdown::Both);}
         }
     }).expect("spawn listener");
 }
@@ -202,10 +213,11 @@ pub fn dial(addr:SocketAddr,events:SyncSender<NetEvent>,connected:Arc<Mutex<std:
     std::thread::Builder::new().name(format!("dial-{addr}")).spawn(move||{
         loop{
             let live=connected.lock().map(|s|s.contains(&addr.to_string())).unwrap_or(false);
-            if !live&&net.admit(){
-                match TcpStream::connect_timeout(&addr,Duration::from_millis(500)){
-                    Ok(s)=>{if let Ok(mut set)=connected.lock(){set.insert(addr.to_string());}spawn_peer(s,true,events.clone(),net.clone());}
-                    Err(_)=>{net.counters.live.fetch_sub(1,Ordering::SeqCst);net.counters.handshaking.fetch_sub(1,Ordering::SeqCst);}
+            if !live{
+                if let Ok(s)=TcpStream::connect_timeout(&addr,Duration::from_millis(500)){
+                    if let Ok(mut set)=connected.lock(){set.insert(addr.to_string());}
+                    // Not handed to the node (no Closed will follow): dial again later.
+                    if !spawn_peer(s,true,events.clone(),net.clone()){if let Ok(mut set)=connected.lock(){set.remove(&addr.to_string());}}
                 }
             }
             std::thread::sleep(Duration::from_millis(300));

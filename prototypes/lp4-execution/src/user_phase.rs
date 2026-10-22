@@ -141,6 +141,35 @@ fn effects(pre:&InMemoryDB,post:&EvmState)->Effects{
  }
  e
 }
+/// Nonzero storage slots of the five system programs.
+fn sys_slots(db:&InMemoryDB)->u64{
+ db.accounts.iter().filter(|(k,a)|is_system(k)&&a.info().is_some()).map(|(_,a)|a.storage.values().filter(|v|**v!=U256::ZERO).count() as u64).sum()
+}
+/// A13: the pending pool state follows the user-state caps a block enforces (SLOT_CAP,
+/// ACCT_CAP; D-A03-CAPS) and system storage stays within SYS_SLOT_MAX, so after
+/// `normalize` it is bounded like any snapshot. A transaction whose effects would pass a cap
+/// would halt in a block; the pool refuses it instead of keeping its effects.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub struct PoolMeter{live_slots:u64,live_accts:u64,sys_slots:u64,slot_cap:u64,acct_cap:u64,sys_slot_max:u64}
+impl PoolMeter{
+ pub fn of(db:&InMemoryDB,profile:&crate::profile::ProfileIdentity)->Self{
+  let (live_slots,live_accts)=live_counts(db);let cp=profile.cp();
+  Self{live_slots,live_accts,sys_slots:sys_slots(db),slot_cap:cp.SLOT_CAP,acct_cap:cp.ACCT_CAP,sys_slot_max:u64::from(cp.SYS_SLOT_MAX)}
+ }
+ /// Admits the state diff of one transaction executed on `pre`, or names the cap it would pass.
+ pub fn admit(&mut self,pre:&InMemoryDB,post:&EvmState)->Result<(),Halt>{
+  let e=effects(pre,post);let mut d_sys=0i64;
+  for (a,acct) in post.iter().filter(|(a,x)|is_system(a)&&x.is_touched()){let _=a;
+   for (_,v) in acct.storage.iter().filter(|(_,v)|v.is_changed()){
+    if v.original_value()==U256::ZERO&&v.present_value()!=U256::ZERO{d_sys+=1}else if v.original_value()!=U256::ZERO&&v.present_value()==U256::ZERO{d_sys-=1}
+   }
+  }
+  let (s,a,y)=(add(self.live_slots,e.d_slots),add(self.live_accts,e.d_accts),add(self.sys_slots,d_sys));
+  if s>self.slot_cap{return Err(Halt::SlotCap)}if a>self.acct_cap{return Err(Halt::AcctCap)}if y>self.sys_slot_max{return Err(Halt::SysKeys)}
+  self.live_slots=s;self.live_accts=a;self.sys_slots=y;Ok(())
+ }
+ pub fn live(&self)->(u64,u64,u64){(self.live_slots,self.live_accts,self.sys_slots)}
+}
 fn new_count<T:std::hash::Hash+Eq+Copy>(set:&HashSet<T>,items:&[T])->usize{let mut seen=HashSet::new();items.iter().filter(|x|!set.contains(x)&&seen.insert(**x)).count()}
 fn add(n:u64,d:i64)->u64{if d>=0{n.saturating_add(d as u64)}else{n.saturating_sub(d.unsigned_abs())}}
 impl BlockMeter{

@@ -3,7 +3,7 @@
 //! an immutable head snapshot. RPC never affects validity (consensus §13).
 use std::io::{Read,Write};
 use std::net::{SocketAddr,TcpListener,TcpStream};
-use std::sync::{Arc,Mutex,atomic::{AtomicUsize,Ordering},mpsc::{self,SyncSender}};
+use std::sync::{Arc,atomic::{AtomicUsize,Ordering},mpsc::{self,SyncSender}};
 use std::time::{Duration,Instant};
 use serde_json::{json,Value};
 use revm::primitives::{Address,B256,Bytes,TxEnv,TxKind,U256,keccak256,ExecutionResult};
@@ -12,8 +12,12 @@ use crate::{node::{Event,Node},types::*,chain::{self,Entry}};
 
 pub const MAX_BODY:usize=1024*1024;
 /// RpcGuard RESP_MAX and LOGS_SCAN_BYTES (governance.md): a larger response is replaced
-/// by -32008; eth_getLogs stops after scanning this many log data bytes (-32005).
-pub const RESP_MAX:usize=8*1024*1024;pub const LOGS_SCAN_BYTES:usize=32*1024*1024;
+/// by -32008; eth_getLogs stops after scanning this many log data bytes, or once its result
+/// would exceed RESP_MAX or LOGS_COUNT_MAX logs (-32005), so it never builds more.
+pub const RESP_MAX:usize=8*1024*1024;pub const LOGS_SCAN_BYTES:usize=32*1024*1024;pub const LOGS_COUNT_MAX:usize=10000;
+/// Batches (network.md): at most BATCH_MAX members; the member that makes the delivered bytes
+/// exceed BATCH_RESP_MAX, and every later one, is answered -32020 {batchBytes} without running.
+pub const BATCH_MAX:usize=20;pub const BATCH_RESP_MAX:usize=16*1024*1024;
 /// ORIGIN_DENY (governance.md): local mining interfaces are never reachable from a site.
 pub const ORIGIN_DENY:[&str;2]=["pocol_submitShare","pocol_getTemplate"];
 
@@ -21,44 +25,35 @@ pub const ORIGIN_DENY:[&str;2]=["pocol_submitShare","pocol_getTemplate"];
 /// REQ_READ_DEADLINE are governance.md RpcGuard values.
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct Limits{
-    /// Concurrent connections. At the cap, the oldest connection still reading its request
-    /// for at least `evict_after` is closed for a new one; otherwise the new one gets 503.
-    pub conn_max:usize,pub evict_after:Duration,
+    /// Concurrent connections; an excess connection gets 503 and is closed without being read
+    /// (network.md RPC_CONN_MAX).
+    pub conn_max:usize,
     /// Whole request (headers and body), one response write, and the node's answer.
     pub read_deadline:Duration,pub write_deadline:Duration,pub work_deadline:Duration,
 }
 impl Default for Limits{
-    fn default()->Self{Self{conn_max:32,evict_after:Duration::from_secs(1),read_deadline:Duration::from_secs(10),write_deadline:Duration::from_secs(10),work_deadline:Duration::from_secs(30)}}
+    fn default()->Self{Self{conn_max:32,read_deadline:Duration::from_secs(10),write_deadline:Duration::from_secs(10),work_deadline:Duration::from_secs(30)}}
 }
-struct Slot{id:u64,started:Instant,reading:bool,sock:TcpStream}
-type Slots=Arc<Mutex<Vec<Slot>>>;
 /// Connection counters, for status and tests.
 #[derive(Debug,Default)]
-pub struct RpcCounters{pub refused:AtomicUsize,pub evicted:AtomicUsize}
-pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0),evicted:AtomicUsize::new(0)};
+pub struct RpcCounters{pub refused:AtomicUsize}
+pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0)};
 
 pub fn serve(addr:SocketAddr,node:SyncSender<Event>,limits:Limits)->Result<(),String>{
     if !addr.ip().is_loopback(){return Err("RPC binds loopback only".into())}
     let l=TcpListener::bind(addr).map_err(|e|format!("rpc bind {addr}: {e}"))?;
-    let slots:Slots=Arc::new(Mutex::new(Vec::new()));
+    let live=Arc::new(AtomicUsize::new(0));
     std::thread::Builder::new().name("rpc".into()).spawn(move||{
         let mut next=0u64;
         for s in l.incoming(){
-            let Ok(s)=s else{continue};next+=1;let id=next;
-            let admitted={
-                let Ok(mut v)=slots.lock() else{continue};
-                if v.len()>=limits.conn_max{
-                    // Slow or idle request readers yield to new clients; working requests do not.
-                    if let Some(i)=v.iter().enumerate().filter(|(_,x)|x.reading&&x.started.elapsed()>=limits.evict_after).min_by_key(|(_,x)|x.started).map(|(i,_)|i){
-                        let x=v.remove(i);let _=x.sock.shutdown(std::net::Shutdown::Both);COUNTERS.evicted.fetch_add(1,Ordering::SeqCst);
-                    }
-                }
-                match s.try_clone(){Ok(c) if v.len()<limits.conn_max=>{v.push(Slot{id,started:Instant::now(),reading:true,sock:c});true}_=>false}
-            };
-            if !admitted{COUNTERS.refused.fetch_add(1,Ordering::SeqCst);let mut s=s;let _=s.set_write_timeout(Some(Duration::from_millis(100)));let _=respond(&mut s,503,"{}");continue}
-            let (n,lim,sl)=(node.clone(),limits.clone(),slots.clone());
-            if std::thread::Builder::new().name(format!("rpc-{id}")).spawn(move||{let _=conn(s,n,&lim,id,&sl);if let Ok(mut v)=sl.lock(){v.retain(|x|x.id!=id);}}).is_err(){
-                if let Ok(mut v)=slots.lock(){v.retain(|x|x.id!=id);}
+            let Ok(mut s)=s else{continue};next+=1;let id=next;
+            if live.fetch_add(1,Ordering::SeqCst)>=limits.conn_max{
+                live.fetch_sub(1,Ordering::SeqCst);COUNTERS.refused.fetch_add(1,Ordering::SeqCst);
+                let _=s.set_write_timeout(Some(Duration::from_millis(100)));let _=respond(&mut s,503,"{}");continue
+            }
+            let (n,lim,lv)=(node.clone(),limits.clone(),live.clone());
+            if std::thread::Builder::new().name(format!("rpc-{id}")).spawn(move||{let _=conn(s,n,&lim);lv.fetch_sub(1,Ordering::SeqCst);}).is_err(){
+                live.fetch_sub(1,Ordering::SeqCst);
             }
         }
     }).map_err(|e|e.to_string())?;
@@ -70,7 +65,7 @@ fn read_until(s:&mut TcpStream,tmp:&mut [u8],deadline:Instant)->std::io::Result<
     if left.is_zero(){return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"request deadline"))}
     s.set_read_timeout(Some(left.max(Duration::from_millis(1))))?;s.read(tmp)
 }
-fn conn(mut s:TcpStream,node:SyncSender<Event>,l:&Limits,id:u64,slots:&Slots)->std::io::Result<()>{
+fn conn(mut s:TcpStream,node:SyncSender<Event>,l:&Limits)->std::io::Result<()>{
     let deadline=Instant::now()+l.read_deadline;s.set_write_timeout(Some(l.write_deadline))?;
     let mut buf=Vec::new();let mut tmp=[0u8;8192];let head_end;
     loop{let n=read_until(&mut s,&mut tmp,deadline)?;if n==0{return Ok(())}buf.extend_from_slice(&tmp[..n]);
@@ -85,8 +80,6 @@ fn conn(mut s:TcpStream,node:SyncSender<Event>,l:&Limits,id:u64,slots:&Slots)->s
     if len>MAX_BODY{return respond(&mut s,413,"{}")}
     while buf.len()<head_end+len{let n=read_until(&mut s,&mut tmp,deadline)?;if n==0{break}buf.extend_from_slice(&tmp[..n]);}
     let body=buf[head_end..(head_end+len).min(buf.len())].to_vec();
-    // Complete request: no longer evictable.
-    if let Ok(mut v)=slots.lock(){if let Some(x)=v.iter_mut().find(|x|x.id==id){x.reading=false;}}
     // A10: with an Origin header ORIGIN_DENY applies to the request and to every batch member,
     // inside the consensus thread before any member executes.
     let (tx,rx)=mpsc::channel();if node.send(Event::Rpc(body,tx,origin.is_some())).is_err(){return respond(&mut s,503,"{}")}
@@ -105,7 +98,9 @@ fn parse_addr(v:&Value)->Option<Address>{v.as_str()?.parse().ok()}
 fn parse_u256(v:&Value)->Option<U256>{v.as_str().and_then(|s|U256::from_str_radix(s.trim_start_matches("0x"),16).ok())}
 
 pub fn handle(n:&mut Node,body:&[u8])->String{handle_with(n,body,false)}
-fn capped(v:Value)->String{let s=v.to_string();if s.len()<=RESP_MAX{s}else{err(&Value::Null,-32008,"response too large").to_string()}}
+/// One response, or -32008 with the request's id when it exceeds RESP_MAX.
+fn capped(v:Value,id:&Value)->String{let s=v.to_string();if s.len()<=RESP_MAX{s}else{err(id,-32008,"response too large").to_string()}}
+fn id_of(v:&Value)->Value{v.get("id").cloned().unwrap_or(Value::Null)}
 /// `site`: the request carried an Origin header. ORIGIN_DENY is decided for the request
 /// and for every batch member before any member executes; a denied member is answered
 /// -32601 and never reaches its method; malformed members are -32600 (A10).
@@ -114,12 +109,24 @@ pub fn handle_with(n:&mut Node,body:&[u8],site:bool)->String{
     let denied=|i:&Value|site&&i.get("method").and_then(|m|m.as_str()).map_or(false,|m|ORIGIN_DENY.contains(&m));
     let site_err=|i:&Value|err(&i.get("id").cloned().unwrap_or(Value::Null),-32601,"method not available to sites");
     if let Value::Array(items)=&v{
-        if items.is_empty()||items.len()>20{return err(&Value::Null,-32600,"batch").to_string()}
+        if items.is_empty()||items.len()>BATCH_MAX{return err(&Value::Null,-32600,"batch").to_string()}
         let deny:Vec<bool>=items.iter().map(|i|denied(i)).collect();
-        return capped(Value::Array(items.iter().zip(deny).map(|(i,d)|if d{site_err(i)}else{one(n,i)}).collect()));
+        return batch(items,BATCH_RESP_MAX,|k,i|if deny[k]{site_err(i).to_string()}else{capped(one(n,i),&id_of(i))});
     }
     if denied(&v){return site_err(&v).to_string()}
-    capped(one(n,&v))
+    let id=id_of(&v);capped(one(n,&v),&id)
+}
+/// Batch members run and are serialized one at a time, so a batch holds at most `limit` bytes
+/// of answers plus the member being built (A13). The member that makes the delivered bytes
+/// exceed `limit`, and every later one, is answered -32020 {batchBytes} without running.
+fn batch(items:&[Value],limit:usize,mut run:impl FnMut(usize,&Value)->String)->String{
+    let mut out=String::from("[");let mut sent=0usize;let mut over=false;
+    for (k,i) in items.iter().enumerate(){
+        let mut s=if over{String::new()}else{run(k,i)};
+        if over||sent+s.len()>limit{over=true;s=json!({"jsonrpc":"2.0","id":id_of(i),"error":{"code":-32020,"message":"batch response limit","data":{"reason":"batchBytes"}}}).to_string();}
+        sent+=s.len();if k>0{out.push(',');}out.push_str(&s);
+    }
+    out.push(']');out
 }
 fn one(n:&mut Node,v:&Value)->Value{
     if !v.is_object(){return err(&Value::Null,-32600,"invalid request")}
@@ -282,22 +289,34 @@ fn logs(n:&Node,f:&Value)->R{
     if to<from||to-from+1>1024{return Err((-32020,"range > 1024 blocks".into()))}
     let addrs:Vec<Address>=match &f["address"]{Value::String(s)=>s.parse().ok().into_iter().collect(),Value::Array(a)=>a.iter().filter_map(parse_addr).collect(),_=>vec![]};
     let topics:Vec<Option<Vec<B256>>>=f["topics"].as_array().map(|t|t.iter().map(|x|match x{Value::Null=>None,Value::String(s)=>s.parse().ok().map(|b|vec![b]),Value::Array(a)=>Some(a.iter().filter_map(|y|y.as_str()?.parse().ok()).collect()),_=>None}).collect()).unwrap_or_default();
-    let mut out=vec![];let mut scanned=0usize;
+    let mut out=vec![];let mut scanned=0usize;let mut bytes=2usize;
     for h in from..=to{let Some(e)=n.chain.canonical_at(h) else{break};
         scanned+=e.receipts.iter().map(|r|r.len()).sum::<usize>();if scanned>LOGS_SCAN_BYTES{return Err((-32005,"log scan limit".into()))}
         for i in 0..e.receipts.len(){let r=receipt_json(n,e,i);for l in r["logs"].as_array().cloned().unwrap_or_default(){
             let a:Address=l["address"].as_str().unwrap().parse().unwrap();if !addrs.is_empty()&&!addrs.contains(&a){continue}
             let lt:Vec<B256>=l["topics"].as_array().unwrap().iter().map(|x|x.as_str().unwrap().parse().unwrap()).collect();
             if topics.iter().enumerate().any(|(k,want)|match want{None=>false,Some(w)=>lt.get(k).map(|t|!w.contains(t)).unwrap_or(true)}){continue}
-            out.push(l);if out.len()>10000{return Err((-32005,"too many logs".into()))}}}}
+            bytes+=l.to_string().len()+1;if bytes>RESP_MAX-1024{return Err((-32005,"log response limit".into()))}
+            out.push(l);if out.len()>LOGS_COUNT_MAX{return Err((-32005,"too many logs".into()))}}}}
     Ok(Value::Array(out))
 }
 
 #[cfg(test)]
 mod tests{
     #[test] fn responses_above_resp_max_become_an_error(){
-        let small=super::capped(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"0x1"}));assert!(small.contains("\"result\""));
-        let big=super::capped(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"a".repeat(super::RESP_MAX)}));
+        let id=serde_json::json!(7);
+        let small=super::capped(serde_json::json!({"jsonrpc":"2.0","id":7,"result":"0x1"}),&id);assert!(small.contains("\"result\""));
+        let big=super::capped(serde_json::json!({"jsonrpc":"2.0","id":7,"result":"a".repeat(super::RESP_MAX)}),&id);
         assert!(big.contains("-32008")&&big.len()<200,"{}",&big[..big.len().min(200)]);
+        // The error answers the request (A14 clients require the request id).
+        let v:serde_json::Value=serde_json::from_str(&big).unwrap();assert_eq!(v["id"],7);
+    }
+    #[test] fn batch_members_beyond_the_byte_limit_are_not_run(){
+        let items:Vec<serde_json::Value>=(0..5).map(|i|serde_json::json!({"jsonrpc":"2.0","id":i,"method":"m"})).collect();let mut ran=vec![];
+        let out=super::batch(&items,1000,|k,_|{ran.push(k);serde_json::json!({"jsonrpc":"2.0","id":k,"result":"a".repeat(380)}).to_string()});
+        let v:serde_json::Value=serde_json::from_str(&out).unwrap();let a=v.as_array().unwrap();
+        assert_eq!(ran,vec![0,1,2],"members after the one that crossed the limit never run");
+        assert!(a[0]["result"].is_string()&&a[1]["result"].is_string());
+        for (k,x) in a.iter().enumerate().skip(2){assert_eq!(x["error"]["code"],-32020);assert_eq!(x["error"]["data"]["reason"],"batchBytes");assert_eq!(x["id"],k as u64);}
     }
 }

@@ -47,7 +47,9 @@ fn store_with(src:&Path,name:&str,journal:&[u8])->PathBuf{
     let rec=OV+64;let start=40+rec;
     for off in [start,start+5,start+8,start+44,start+rec-1]{
         let mut bad=full.clone();bad[off]^=0x5a;let d=store_with(&dir,&format!("flip{off}"),&bad);
-        match store::open(&d,&B){Err(StoreError::Corrupt(_))=>{},Ok(r)=>assert!(r.payloads.len()<3&&!r.payloads.iter().any(|p|p!=&vec![0u8;64]&&p!=&vec![1u8;64]&&p!=&vec![2u8;64]),"off {off}: corrupted record must not be accepted"),Err(e)=>panic!("{e:?}")}
+        // All three records are committed: damage to any of them fails closed, files untouched (A04).
+        assert!(matches!(store::open(&d,&B),Err(StoreError::Corrupt(1))),"off {off}: committed record 1 damaged");
+        assert_eq!(fs::read(d.join("blocks.journal")).unwrap(),bad,"off {off}: nothing modified");
         let _=fs::remove_dir_all(&d);
     }
 }
@@ -119,22 +121,38 @@ fn three_records(name:&str)->(PathBuf,Vec<u8>){
         let r=store::open(&d,&B).unwrap_or_else(|e|panic!("{n} zero bytes: {e:?}"));
         assert!(r.torn_tail&&r.payloads.len()==3,"{n} zero bytes");drop(r);let _=fs::remove_dir_all(&d);
     }
-    // Non-zero garbage after the last record is not an interrupted append.
+    // Non-zero bytes after the committed end were never committed (the commit file counts 3 and ends
+    // there): an interrupted append, recovered, with the original bytes kept (review finding).
     let mut g=j.clone();g.extend([0xde,0xad,0xbe,0xef,0x01,0x02,0x03,0x04,0x05]);let d=store_with(&dir,"a04-g",&g);
-    assert!(matches!(store::open(&d,&B),Err(StoreError::Corrupt(3))));
+    let r=store::open(&d,&B).unwrap();assert!(r.torn_tail&&r.payloads.len()==3);drop(r);
+    assert_eq!(fs::read(d.join("blocks.journal.torn-0")).unwrap(),g,"original bytes kept");assert_eq!(fs::read(d.join("blocks.journal")).unwrap(),j);let _=fs::remove_dir_all(&d);
+    // More than one maximal record of such bytes cannot be a single interrupted append.
+    let mut big=j.clone();big.extend(std::iter::repeat_n(0x5au8,store::MAX_RECORD+OV+1));let d=store_with(&dir,"a04-big",&big);
+    assert!(matches!(store::open(&d,&B),Err(StoreError::Corrupt(3))));assert_eq!(fs::read(d.join("blocks.journal")).unwrap(),big,"untouched");let _=fs::remove_dir_all(&d);
+    // Garbage after a complete record beyond the commit count would be a second uncommitted append.
+    let mut two=j.clone();two.extend(store::encode_frame(&[7u8;20]));two.extend([0xde,0xad,0xbe,0xef,0x01,0x02,0x03,0x04,0x05]);let d=store_with(&dir,"a04-two",&two);
+    assert!(matches!(store::open(&d,&B),Err(StoreError::Corrupt(4))));let _=fs::remove_dir_all(&d);
 }
 #[test] fn a04_commit_file_damage(){
     let (dir,_)=three_records("a04-commit");let c=fs::read(dir.join("blocks.commit")).unwrap();
     // One damaged slot: the other (older) slot still bounds the committed count; the journal satisfies it.
-    for slot in [0usize,64]{
+    // Slots at 0 and 4096 (separate sectors).
+    assert_eq!(c.len(),4096+64);
+    for slot in [0usize,4096]{
         let d=tmp("a04-c1");fs::create_dir_all(&d).unwrap();fs::copy(dir.join("blocks.journal"),d.join("blocks.journal")).unwrap();
         let mut bad=c.clone();bad[slot+3]^=0x10;fs::write(d.join("blocks.commit"),&bad).unwrap();
         let r=store::open(&d,&B).unwrap_or_else(|e|panic!("slot {slot}: {e:?}"));assert_eq!(r.payloads.len(),3);drop(r);let _=fs::remove_dir_all(&d);
     }
     let d=tmp("a04-c2");fs::create_dir_all(&d).unwrap();fs::copy(dir.join("blocks.journal"),d.join("blocks.journal")).unwrap();
-    let mut bad=c.clone();bad[3]^=0x10;bad[67]^=0x10;fs::write(d.join("blocks.commit"),&bad).unwrap();
+    let mut bad=c.clone();bad[3]^=0x10;bad[4099]^=0x10;fs::write(d.join("blocks.commit"),&bad).unwrap();
     assert_eq!(store::open(&d,&B).err(),Some(StoreError::CommitCorrupt));
     fs::remove_file(d.join("blocks.commit")).unwrap();assert_eq!(store::open(&d,&B).err(),Some(StoreError::MissingCommit));
+    // The first v2 layout (both slots adjacent, 128 bytes) is read and rewritten in the current layout.
+    let d=tmp("a04-c3");fs::create_dir_all(&d).unwrap();fs::copy(dir.join("blocks.journal"),d.join("blocks.journal")).unwrap();
+    let legacy=[&c[..64],&c[4096..4160]].concat();fs::write(d.join("blocks.commit"),&legacy).unwrap();
+    {let r=store::open(&d,&B).unwrap();assert_eq!(r.payloads.len(),3);}
+    assert_eq!(fs::read(d.join("blocks.commit")).unwrap().len(),4096+64);
+    {let mut r=store::open(&d,&B).unwrap();r.journal.append(&[1u8;10]).unwrap();}assert_eq!(store::open(&d,&B).unwrap().payloads.len(),4);let _=fs::remove_dir_all(&d);
 }
 #[test] fn a04_v1_journal_migrates_only_when_fully_verified(){
     use sha2::{Digest,Sha256};

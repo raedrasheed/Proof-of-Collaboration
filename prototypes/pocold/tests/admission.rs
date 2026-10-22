@@ -1,5 +1,6 @@
 //! A02 boot path: `init-devnet` and `load_spec` (used by `run` and `status`) run the full
-//! ParamGate on the real files and refuse every violation with its rules (-32018).
+//! ParamGate on the real files and refuse every violation with its rules (-32018). Timing
+//! facts are measured on the booting machine.
 use pocol_lp4_execution::devnet::{self,DevnetConfig};
 use std::path::{Path,PathBuf};
 
@@ -28,8 +29,13 @@ fn base()->DevnetConfig{DevnetConfig::new(777930,1_700_000_000,&["a","b","c"])}
         let e=load(&dir).expect_err(name);assert!(e.starts_with(&format!("-32018 ParamGate rejected {rule}")),"{name}: {e}");
     }
     let dir=d.join("ok");publish(&base(),&dir,true);load(&dir).unwrap();
-    let dir=d.join("untimed");publish(&base(),&dir,false);
-    let e=load(&dir).unwrap_err();assert!(e.starts_with("-32018 ParamGate rejected [R14, R19]")&&e.contains("no measurement"),"{e}");
+    // R14/R19 use a measurement taken at load on this machine (review finding): a devnet.json
+    // without a timing record still boots, and a forged record changes nothing.
+    let dir=d.join("untimed");publish(&base(),&dir,false);load(&dir).unwrap();
+    let dir=d.join("forged");publish(&base(),&dir,true);
+    let mut info:serde_json::Value=serde_json::from_str(&std::fs::read_to_string(dir.join("devnet.json")).unwrap()).unwrap();
+    info["timing"]["phaseMs"]=serde_json::json!([3_600_000,3_600_000,3_600_000]);std::fs::write(dir.join("devnet.json"),info.to_string()).unwrap();
+    load(&dir).unwrap();
     let _=std::fs::remove_dir_all(&d);
 }
 #[test] fn init_devnet_refuses_gate_invalid_timing_and_writes_nothing(){

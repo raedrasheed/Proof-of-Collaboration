@@ -73,6 +73,14 @@ Rules for this repair:
   deterministic eviction (only a cache; never a validity input).
 - Tests: idle peers, missing Hello, slow reader, reconnect churn, excess RPC connections; legitimate clients
   keep being served; thread counts and queue sizes stay bounded.
+- After the independent review (D-A05-REVIEW):
+  - outbound dials are counted apart from inbound slots;
+  - excess RPC connections are refused unread, as network.md says (no eviction);
+  - batch members are streamed with BATCH_RESP_MAX;
+  - eth_getLogs stops at RESP_MAX of result;
+  - a stalled head re-requests ranges;
+  - a failed peer-thread spawn reports Closed and frees the dial address;
+  - orphans are deduplicated by header and body, and a junk orphan copy triggers a re-request.
 
 ### A06 — wallet and profile transitions (extension `sw.js`, `wallet.js`)
 - Profile epoch and wallet epoch counters. Every await in the signing path re-checks: same profile epoch,
@@ -232,12 +240,20 @@ admission.rs` assembles its facts from the real artifacts and labels them:
 - R14/R19: a timing record measured for the exact profile (`admission::measure`: blocks applied to a
   scratch copy of the genesis, each with a GAS_LIMIT compute loop, through closing and the final block).
   It is representative, not a worst-case proof (A13).
+  - Taken by init-devnet, and again by every node when it loads the devnet (`pocold::load_spec`, used
+    by `run` and `status`) on the machine that boots it.
+  - The value devnet.json records is informational (review finding: it was read back at boot, so a value
+    from another machine or an edited value would pass).
+  - A measurement takes well under a second for the devnet profile.
 - R21: (K_hist + side) full snapshots at ACCT_CAP·200 + (SLOT_CAP+SYS_SLOT_MAX)·96 bytes (pocold keeps
   full snapshots). At network caps this exceeds HIST_TRIE_BUDGET; single-host simnet nodes are admitted
   only through the gate's own simnet retentionStress exception, which the report states. A node kind
   `Node` never gets it.
 - R25d: the devnet's H_cal is recorded as a synthetic fixture (chosen difficulty, not a measured rate);
   target_g is computed from it with the R25d formula.
+- R26: the RpcGuard values pocold implements come from its code (`pocold::rpc_facts`); the mechanisms it
+  does not implement keep nominal values and are listed in A13-DERIVATION.md §4 (review finding: all of
+  R26 used the nominal values).
 
 ### D-A02-PROPOSER — when the signed proposer builds (local production, not consensus)
 With Φ=0 a template stamped max(L(0), C) while C < L(0) is in the future for every receiver, which then
@@ -278,6 +294,58 @@ SYS_SLOT_MAX 65536 (≥ the derived 42138), R_max = 0 (the v1 programs implement
 H_END 20000 / H_CLOSE 19000, side_max 8. Bound 4.71 GiB ≤ the 6 GiB node budget; R21 then holds without
 the simnet retentionStress exception. Alternatives: keep network caps and raise the budget (rejected:
 hundreds of GiB), or exempt the devnet from the memory check (rejected: it is the A13 requirement).
+
+### D-A05-REVIEW — changes after the independent review (local limits, not consensus)
+- RPC connection cap: network.md:213 says an excess connection is closed without being read. The first
+  repair instead evicted the oldest connection still reading after 1 s (and the plan said "immediate 503").
+  A flood could then cut off an honest client that was still uploading. Now: at RPC_CONN_MAX the new
+  connection gets 503, unread; idle readers end at the whole-request deadline. A refused client may see a
+  reset instead of the 503.
+- Batches: network.md:276. The member that makes the delivered bytes exceed BATCH_RESP_MAX (16 MiB), and
+  every later member, is answered −32020 {batchBytes} without running.
+- Oversized single responses keep −32008 but now carry the request id. The extension's A14 check
+  requires the id; with `id: null` this error had become a client-side recvParse.
+- P2P outbound: peers_max/handshaking_max bound inbound connections only. Each configured peer has one
+  dialer holding at most one connection, so a local process filling the inbound slots cannot stop the
+  node from reaching its peers.
+- Range sync: `Peer::offer` stops a response at half the requester's queue. The requester now asks the
+  best announced peer for the next range when its head has not moved for 1 s, at most once a second.
+- Pool: the pending state follows the block caps (SLOT_CAP, ACCT_CAP, SYS_SLOT_MAX) and is normalized
+  after every transaction. A transaction that would pass a cap is refused (`-32000 … SlotCap`), because it
+  would halt in a block. POOL_MAX_TXS = 4096 bounds the re-execution work at each new head.
+
+### D-A04-UNCOMMITTED — bytes after the committed end are an interrupted append
+- Rule: if every committed record verifies, and what follows the committed end is at most one maximal
+  record, those bytes were never committed (an append commits before the next begins). They are recovered
+  as an interrupted append whatever they contain: the original is kept as `blocks.journal.torn-n`.
+- Why: the review found that a crash can persist a later page of an append before its header page. The
+  first repair then refused to boot although the commit file proves the bytes were never committed.
+- Still failing closed:
+  - fewer verified records than committed, or the verified end before the committed end;
+  - more than one maximal record of trailing bytes;
+  - anything after an extra, uncommitted complete record (that would be a second uncommitted append).
+- Commit slots now sit at offsets 0 and 4096 (separate sectors). The first v2 layout (128 bytes, both
+  slots adjacent) is read and rewritten in the new layout on open.
+- Compatibility: only journals written by this branch use v2, and they open unchanged. v1 handling is
+  unchanged.
+- Changed test expectation: `a04_zero_filled_tail_is_an_interrupted_append` asserted Corrupt for non-zero
+  bytes after the last committed record. It now asserts recovery with the original kept. Two new
+  fail-closed cases sit next to it (oversized tail; garbage after an extra record).
+- `complete_record_corruption_is_never_skipped` no longer accepts an `Ok` outcome.
+
+### D-BODY-MAX — BODY_MAX bounds the encoded body on every path (consensus alignment)
+- consensus.md:56: Body = [txs, evidence] ≤ BODY_MAX.
+  - `Body::decode` (blocks from peers and from the journal) checked the encoded length.
+  - `Chain::validate` (every import, own blocks included) checked the sum of item bytes.
+  - The producer kept 1024 B of margin over the item sum.
+- Consequence: a miner could build and import a block of about 350 transactions whose encoding exceeds
+  BODY_MAX. Its peers would drop that block at decode, and its own journal replay would fail.
+- Change:
+  - `validate` checks the encoded length, so a committed oversized body is a block rejection;
+  - template selection counts each transaction's RLP header;
+  - the signed template drops transactions until the encoded body (evidence included) fits.
+- This is a validity change on the local path only. It now matches the spec and the network path, so no
+  valid block of the spec becomes invalid.
 
 ### D-DEP-SECP — k256 replaces libsecp256k1 in the node; the reference evaluator keeps its accepted set
 - Reachability: `recover_address` verifies header proposer signatures and winner signatures. A different

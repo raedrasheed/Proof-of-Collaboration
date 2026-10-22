@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc,Mutex,mpsc::{self,Receiver,Sender,SyncSender}};
 use std::time::{Duration,SystemTime,UNIX_EPOCH};
 use crate::{hashes,header::Header};
-use pocol_lp4_execution::{apply::ParentResult,txsign::Key,wire,native::{self,NativeBlockContext}};
+use pocol_lp4_execution::{apply::ParentResult,txsign::Key,wire,native::{self,NativeBlockContext},user_phase::{self,PoolMeter}};
 use revm::{InMemoryDB,DatabaseCommit,primitives::{Address,B256,U256}};
 use crate::{chain::{self,Chain,ChildCtx,Entry,Reject,Spec},miner::{self,MinerEvent,MinerHandle},net::{self,Msg,NetEvent,Peer,PeerId},store::{self,Journal},types::*};
 
@@ -56,15 +56,23 @@ enum Mode{Wait{deadline_ms:u128},Locked(Box<Locked>),Idle,Propose{at_s:u64}}
 struct Production{parent:[u8;32],height:u64,attempt:u32,mode:Mode,shares:BTreeSet<u64>,miner:Option<MinerHandle>,solved:bool,received_ms:u128}
 
 /// Pending pool: transactions are kept only if they execute in order on top of
-/// the head state (pending state), so several nonces per sender are allowed.
-pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending_state:InMemoryDB,pub bytes:usize}
+/// the head state (pending state), so several nonces per sender are allowed. The pending
+/// state is normalized after every transaction and follows the block caps (`PoolMeter`), so
+/// it is bounded like a snapshot (A13).
+pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending_state:InMemoryDB,pub bytes:usize,meter:PoolMeter}
 pub const POOL_MAX_BYTES:usize=64*1024*1024;
+/// Local limit on pooled transactions (about ten blocks of plain transfers): every new head
+/// re-executes the pool, so its length bounds that work.
+pub const POOL_MAX_TXS:usize=4096;
 
 pub struct Node{
     pub cfg:Config,
     pub chain:Chain,
     journal:Journal,
     peers:HashMap<PeerId,Peer>,
+    /// Range sync: the height each peer announced (Hello) or relayed, our head height and when it
+    /// last changed, and when a range was last requested.
+    peer_heights:HashMap<PeerId,u64>,sync_mark:(u64,u128),sync_ask_ms:u128,
     outbound:Arc<Mutex<HashSet<String>>>,
     pub tx:SyncSender<Event>,
     rx:Receiver<Event>,
@@ -125,11 +133,11 @@ impl Node{
         chain.retain();
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
         let fwd=tx.clone();std::thread::spawn(move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}});
-        let head_state=chain.head().state.clone();
+        let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());
         let net=net::Net::new(cfg.limits.net.clone());
-        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,miner_tx,prod:None,
+        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_heights:HashMap::new(),sync_mark:(0,0),sync_ask_ms:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
-            pool:Pool{txs:vec![],pending_state:head_state,bytes:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
+            pool:Pool{txs:vec![],pending_state:head_state,bytes:0,meter},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;
         if rec.torn_tail{node.log("recovered torn journal tail into a new journal");}
         if rec.migrated_v1{node.log("migrated a fully verified v1 journal to format v2 (original kept as blocks.journal.v1-n)");}
@@ -162,7 +170,7 @@ impl Node{
             Event::Miner(m)=>self.on_miner(m),
             Event::Rpc(body,reply,site)=>{let r=crate::rpc::handle_with(self,&body,site);let _=reply.send(r);}
             Event::Net(NetEvent::Connected(id,peer))=>{let hello=self.hello();peer.send(&hello);self.peers.insert(id,peer);}
-            Event::Net(NetEvent::Closed(id))=>{if let Some(p)=self.peers.remove(&id){if p.outbound{if let Ok(mut s)=self.outbound.lock(){s.remove(&p.addr);}}}}
+            Event::Net(NetEvent::Closed(id))=>{self.peer_heights.remove(&id);if let Some(p)=self.peers.remove(&id){if p.outbound{if let Ok(mut s)=self.outbound.lock(){s.remove(&p.addr);}}}}
             Event::Net(NetEvent::Message(id,m))=>self.on_msg(id,m),
         }
     }
@@ -196,21 +204,28 @@ impl Node{
         self.received.insert(hash,now_ms());
         if self.received.len()>RECEIVED_MAX{let keep=self.chain.head().height.saturating_sub(8);let blocks=&self.chain.blocks;self.received.retain(|h,_|blocks.get(h).map_or(false,|e|e.height>=keep));}
         let old_head=self.chain.head;
-        let new_head=self.chain.insert(entry);self.stats.imported+=1;self.chain.retain();
+        let new_head=self.chain.insert(entry);self.stats.imported+=1;
+        // A11: the detached transactions are read before retain() may prune the abandoned branch.
+        let detached=if new_head{self.detached_txs(old_head)}else{vec![]};
+        self.chain.retain();
         self.broadcast(&Msg::Block{header:b.header.encoded.clone(),body:b.body.encode()},from);
         if new_head{
             if self.chain.get(&self.chain.head).and_then(|e|e.parent)!=Some(old_head){self.stats.reorgs+=1;}
             self.log(&format!("head h={} {} signed={} txs={}",self.chain.head().height,&hex(&hash)[..14],self.chain.head().signed,b.body.txs.len()));
-            self.on_new_head(old_head);
+            self.on_new_head(detached);
         }
         // Orphans waiting for this block.
-        if let Some(children)=self.take_orphans(&hash){for c in children{let _=self.import(c,None);}}
+        // A copy whose body does not match its header is only an envelope fault: ask the peers for
+        // the real block under that hash (the junk copy may have taken its orphan slot).
+        if let Some(children)=self.take_orphans(&hash){for c in children{let h=c.hash();if matches!(self.import(c,None),Err(Reject::Envelope(_))){self.broadcast(&Msg::GetBlock{hash:h},None);}}}
         Ok(new_head)
     }
     /// Bounded orphan store (A05): per parent, parent keys and bytes; the oldest parent goes first.
     fn add_orphan(&mut self,parent:[u8;32],b:Block){
         let hash=b.hash();let size=b.header.encoded.len()+b.body.txs.iter().chain(b.body.evidence.iter()).map(|x|x.len()).sum::<usize>();
-        if self.orphans.get(&parent).map_or(false,|l|l.len()>=ORPHANS_PER_PARENT||l.iter().any(|x|x.hash()==hash)){return}
+        // Duplicates are the same header AND body: a copy with a foreign body (an envelope fault once
+        // the parent arrives) must not keep the real block out (review finding, A01-adjacent).
+        if self.orphans.get(&parent).map_or(false,|l|l.len()>=ORPHANS_PER_PARENT||l.iter().any(|x|x.hash()==hash&&x.body==b.body)){return}
         if size>ORPHAN_BYTES_MAX{return}
         if !self.orphans.contains_key(&parent){self.orphan_order.push_back(parent);}
         self.orphans.entry(parent).or_default().push(b);self.orphan_bytes+=size;
@@ -224,8 +239,7 @@ impl Node{
     }
     pub fn orphan_stats(&self)->(usize,usize,usize){(self.orphans.len(),self.orphans.values().map(|l|l.len()).sum(),self.orphan_bytes)}
     fn reject(&mut self,hash:[u8;32],why:&str){self.rejects.push_back((hex(&hash),chain::truncate(why)));if self.rejects.len()>REJECTS_MAX{self.rejects.pop_front();}self.log(&format!("reject {}: {why}",&hex(&hash)[..14]));}
-    fn on_new_head(&mut self,old_head:[u8;32]){
-        let detached=self.detached_txs(old_head);
+    fn on_new_head(&mut self,detached:Vec<Vec<u8>>){
         self.rebuild_pool(detached);
         if let Some(s)=self.cfg.stop_at{if self.chain.head().height>=s{self.stopped=true;return}}
         self.restart_production();
@@ -243,10 +257,13 @@ impl Node{
         let env=wire::decode_for_profile(&raw,self.chain.spec.profile()).map_err(|e|format!("{} {e:?}",e.specified_pool_code().unwrap_or(-32000)))?;
         let hash=env.hash();
         if self.pool.txs.iter().any(|(h,_)|*h==hash){return Ok(hash)}
-        if self.pool.bytes+raw.len()>POOL_MAX_BYTES{return Err("-32016 pool full".into())}
+        if self.pool.bytes+raw.len()>POOL_MAX_BYTES||self.pool.txs.len()>=POOL_MAX_TXS{return Err("-32016 pool full".into())}
         let ctx=self.next_block_ctx();
         let r=native::execute_for_profile(&self.pool.pending_state,env.tx_env(),&ctx,self.chain.spec.profile()).map_err(|e|format!("-32000 {e:?}"))?;
-        self.pool.pending_state.commit(r.state);
+        // A13: the effects must stay within the caps a block enforces; then only live entries are kept.
+        self.pool.meter.admit(&self.pool.pending_state,&r.state).map_err(|h|format!("-32000 pending state would exceed a cap ({h:?})"))?;
+        let touched:Vec<Address>=r.state.keys().copied().collect();
+        self.pool.pending_state.commit(r.state);user_phase::normalize(&mut self.pool.pending_state,&touched);user_phase::drop_unreferenced_code(&mut self.pool.pending_state);
         self.pool.bytes+=raw.len();self.pool.txs.push((hash,raw.clone()));
         if relay{self.broadcast(&Msg::Tx{raw},None);}
         Ok(hash)
@@ -268,6 +285,7 @@ impl Node{
     }
     fn rebuild_pool(&mut self,detached:Vec<Vec<u8>>){
         let old=std::mem::take(&mut self.pool.txs);self.pool.bytes=0;self.pool.pending_state=self.chain.head().state.clone();
+        self.pool.meter=PoolMeter::of(&self.pool.pending_state,self.chain.spec.profile());
         // Transactions in abandoned blocks return to the pool (consensus §10), before the previous
         // pool; each is re-executed on the new head (nonce, balance, fee) and duplicates are skipped.
         for raw in detached{let _=self.submit_tx(raw,false);}
@@ -276,10 +294,12 @@ impl Node{
     /// Pool transactions that still execute in order (for a signed template).
     fn template_txs(&self)->Vec<Vec<u8>>{
         let cp=self.chain.spec.cp();let mut out=Vec::new();let mut gas=0u64;let mut bytes=0usize;
+        // Encoded item length (RLP string header included); the three list headers take <= 12 bytes.
+        let enc=|n:usize|n+1+if n<56{0}else if n<256{1}else if n<65536{2}else{3};
         for (_,raw) in &self.pool.txs{
             let Ok(env)=wire::decode_for_profile(raw,self.chain.spec.profile()) else{continue};let g=env.tx_env().gas_limit;
-            if gas+g>cp.GAS_LIMIT||bytes+raw.len()>cp.BODY_MAX as usize-1024{break}
-            gas+=g;bytes+=raw.len();out.push(raw.clone());
+            if gas+g>cp.GAS_LIMIT||bytes+enc(raw.len())>cp.BODY_MAX as usize-12{break}
+            gas+=g;bytes+=enc(raw.len());out.push(raw.clone());
         }
         out
     }
@@ -326,7 +346,9 @@ impl Node{
         for _ in 0..8{
             let body=Body{txs:txs.clone(),evidence:evidence.clone()};
             let effects=match self.chain.evidence_effects(p,&body,p.height+1){Ok(e)=>e,Err(_)=>vec![]};
-            let body=if effects.len()==body.evidence.len(){body}else{Body{txs:txs.clone(),evidence:vec![]}};
+            let mut body=if effects.len()==body.evidence.len(){body}else{Body{txs:txs.clone(),evidence:vec![]}};
+            // Evidence shares BODY_MAX with the transactions: drop transactions until the encoded body fits.
+            while body.encode().len()>self.chain.spec.cp().BODY_MAX as usize&&!body.txs.is_empty(){body.txs.pop();}txs=body.txs.clone();
             match self.chain.build_signed(p,key,now_s(),body.clone(),effects){
                 Ok((h,_,_))=>return Some((h,body)),
                 Err(Reject::Block(why))=>{
@@ -371,7 +393,18 @@ impl Node{
         let rebuilt=self.chain.rebuild_signed(&p,&ctx,shell.ts,Address::from_slice(&shell.proposer),&body,effects);
         match rebuilt{Ok(ut) if ut==shell.ut_raw=>{self.lock(shell,body,false);true},_=>false}
     }
+    /// Range responses stop when the requester's queue is half full (Peer::offer). A head that has
+    /// not moved for a second while a peer announced a higher block asks that peer for the next
+    /// range, at most once a second (review finding: the rest used to come only by orphan walk-back).
+    fn sync_ranges(&mut self,now:u128){
+        let ours=self.chain.head().height;
+        if ours!=self.sync_mark.0{self.sync_mark=(ours,now);return}
+        if now.saturating_sub(self.sync_mark.1)<1000||now.saturating_sub(self.sync_ask_ms)<1000{return}
+        let best=self.peer_heights.iter().filter(|(_,h)|**h>ours).max_by_key(|(_,h)|**h).map(|(i,h)|(*i,*h));
+        if let Some((id,h))=best{if let Some(p)=self.peers.get(&id){p.send(&Msg::GetRange{start:ours+1,count:(h-ours).min(512)});self.sync_ask_ms=now;}}
+    }
     fn tick(&mut self){
+        self.sync_ranges(now_ms());
         // Retry future blocks.
         if !self.future.is_empty(){let f=std::mem::take(&mut self.future);for b in f{let h=b.hash();if self.import(b,None).is_ok()&&self.own_future.remove(&h){self.stats.mined+=1;}}
             let waiting:HashSet<[u8;32]>=self.future.iter().map(|b|b.hash()).collect();self.own_future.retain(|h|waiting.contains(h));}
@@ -420,6 +453,7 @@ impl Node{
                 if chain_id!=self.chain.spec.chain_id()||genesis!=self.chain.spec.genesis_hash(){
                     self.log(&format!("peer {node}: wrong network; closing"));if let Some(p)=self.peers.get(&from){p.close();}return;
                 }
+                self.peer_heights.insert(from,height);
                 if !self.chain.blocks.contains_key(&head)&&height>0{
                     let ours=self.chain.head().height;
                     if let Some(p)=self.peers.get(&from){
@@ -430,6 +464,7 @@ impl Node{
             }
             Msg::Block{header,body}=>{
                 let Ok(h)=decode_header(&header) else{return};
+                if let Some(x)=self.peer_heights.get_mut(&from){*x=(*x).max(h.h);}
                 let Ok(b)=Body::decode(&body,self.chain.spec.cp().BODY_MAX as usize) else{return};
                 let _=self.import(Block{header:h,body:b},Some(from));
             }

@@ -261,8 +261,9 @@ impl Chain{
         if !bound{return Err(Reject::Envelope("15 body does not match the header roots".into()))}
         // 1 (body): sizes and evidence bounds before any evidence evaluation.
         if b.body.txs.iter().any(|t|t.len()>cp.TX_MAX as usize){return blk("1 TX_MAX")}
-        let body_bytes:usize=b.body.txs.iter().chain(b.body.evidence.iter()).map(|t|t.len()).sum();
-        if body_bytes>cp.BODY_MAX as usize{return blk("1 BODY_MAX")}
+        // consensus.md: Body = [txs, evidence] <= BODY_MAX, the encoded body, exactly as Body::decode
+        // checks it for blocks from peers (review finding: the raw item sum was checked here).
+        if b.body.encode().len()>cp.BODY_MAX as usize{return blk("1 BODY_MAX")}
         if b.body.evidence.len()>usize::from(cp.E_max)||b.body.evidence.iter().any(|e|e.len()>cp.EVID_BYTES_MAX as usize){return blk("1 evidence bounds")}
         // 12. exclusive form. Fallback: body 0xc2c0c0 and UT byte-equal to Build_fb (needs apply).
         let mut fb_out=None;

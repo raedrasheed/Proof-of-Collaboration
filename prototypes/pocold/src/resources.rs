@@ -72,14 +72,17 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let seen=add(&[mul(node::SEEN_MAX as u128+1,3*hdr+128)?,mul(node::SEEN_MAX as u128+1,192)?])?;
     let caches=add(&[mul(chain::INVALID_MAX as u128,32+REASON_MAX+64)?,mul(node::RECEIVED_MAX as u128+1,64)?,mul(node::REJECTS_MAX as u128+1,64+REASON_MAX+64)?,
         mul(node::EVIDENCE_POOL_MAX as u128,u128::from(cp.EVID_BYTES_MAX)+24)?,mul(node::FUTURE_MAX as u128,32)?])?;
-    let peers=mul(l.peers_max as u128,add(&[l.queue_bytes_max as u128,2*frame,4096])?)?;
+    // Inbound peers <= peers_max; outbound <= one per dialer (net::dial).
+    let peers=mul(l.peers_max as u128+dials as u128,add(&[l.queue_bytes_max as u128,2*frame,4096])?)?;
     let events=add(&[mul(node::EVENT_QUEUE as u128,frame+256)?,mul((1+dials) as u128,mul(net::NET_EVENT_QUEUE as u128,frame+256)?)?])?;
     let queues=add(&[pool,orphans,future,templates,seen,caches,peers,events])?;
-    // RPC: per connection a request (<= MAX_BODY + 16 KiB headers) and a response (<= RESP_MAX);
-    // the consensus thread builds one response at a time from <= LOGS_SCAN_BYTES of logs.
-    let r=&limits.rpc;
-    let rpc=add(&[mul(r.conn_max as u128,(crate::rpc::MAX_BODY+16384+crate::rpc::RESP_MAX) as u128)?,mul(crate::rpc::LOGS_SCAN_BYTES as u128,3)?])?;
-    let threads=mul(add(&[2*l.peers_max as u128,r.conn_max as u128,8,dials as u128])?,STACK_RESIDENT)?;
+    // RPC: per connection a request (<= MAX_BODY + 16 KiB headers) and a response (a batch is
+    // <= BATCH_RESP_MAX plus one error item per member); the consensus thread builds one
+    // response at a time: the batch so far plus one member (its JSON tree and string, a log
+    // result stopping at RESP_MAX), counted as 4 x RESP_MAX.
+    let r=&limits.rpc;use crate::rpc::{MAX_BODY,RESP_MAX,BATCH_RESP_MAX,BATCH_MAX};
+    let rpc=add(&[mul(r.conn_max as u128,(MAX_BODY+16384+BATCH_RESP_MAX+BATCH_MAX*256) as u128)?,(BATCH_RESP_MAX+4*RESP_MAX) as u128])?;
+    let threads=mul(add(&[2*l.peers_max as u128,3*dials as u128,r.conn_max as u128,8])?,STACK_RESIDENT)?;
     let total=add(&[mul(snapshots,snapshot_bytes)?,code,history,side_blocks,queues,rpc,threads])?;
     let _=size_of::<Header>()+size_of::<Body>();
     Some(Bound{snapshots,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,total})

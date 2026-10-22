@@ -5,15 +5,21 @@
 //! Format v2 (`POCOLJ2`, experimental local storage, not a protocol format):
 //!   journal = MAGIC(8) ‖ binding(32) ‖ record*
 //!   record  = len u32 ‖ lenCheck(4) = sha256("POCOL-REC-LEN" ‖ len)[..4] ‖ sha256(payload) ‖ payload ‖ 0x01
-//!   commit  = two 64-byte slots {seq u64, count u64, end u64, sha256(tag ‖ binding ‖ seq ‖ count ‖ end)};
+//!   commit  = two 64-byte slots {seq u64, count u64, end u64, sha256(tag ‖ binding ‖ seq ‖ count ‖ end)}
+//!             at offsets 0 and 4096 (separate sectors, so one torn sector write cannot damage both);
 //!             the valid slot with the larger seq gives the committed record count and end offset.
+//!             A 128-byte commit file (both slots adjacent, the first v2 layout) is read and rewritten.
 //! Classification of what follows the last verified record (LP2 P3/P4):
 //!   * nothing → clean;
 //!   * a strict prefix of a record (header incomplete, or header check valid and record incomplete), or an
 //!     all-zero suffix no longer than one maximal record → an interrupted append (torn tail): recovered
 //!     into a new journal holding the verified prefix, the original bytes kept as `blocks.journal.torn-n`;
 //!   * anything else (bad header check, bad digest or marker in a complete record, length over the
-//!     maximum) → `Corrupt`, nothing is modified.
+//!     maximum) → `Corrupt`, nothing is modified, unless it lies entirely after the committed end:
+//!     with every committed record verified and at most one maximal record of bytes after them, those
+//!     bytes were never committed (appends commit before the next starts), so they are an interrupted
+//!     append whatever they contain (review finding: a crash can persist a later page of an append
+//!     before its header page);
 //! Fewer verified records than the commit count (damaged or truncated committed data) → `Corrupt`.
 //! A v1 journal (`POCOLJ1`) is migrated only when it parses completely with no tail; otherwise the
 //! store refuses to open (`LegacyNeedsReview`) and nothing is modified.
@@ -28,6 +34,8 @@ pub const MAX_RECORD:usize=4*1024*1024;
 const HDR:usize=8;            // len + lenCheck
 const OVERHEAD:usize=HDR+32+1; // header + digest + marker
 const SLOT:usize=64;
+/// Offset of the second commit slot (its own 4 KiB sector).
+const SLOT_STRIDE:usize=4096;
 
 #[derive(Debug,PartialEq,Eq)]
 pub enum StoreError{Io(String),Locked,Binding,Corrupt(u64),TooLarge,MissingJournal,MissingCommit,CommitCorrupt,LegacyNeedsReview}
@@ -47,10 +55,10 @@ fn slot_bytes(binding:&[u8;32],seq:u64,count:u64,end:u64)->[u8;SLOT]{
 }
 /// The valid commit slot with the larger seq: (seq, count, end).
 fn read_commit(bytes:&[u8],binding:&[u8;32])->Option<(u64,u64,u64)>{
-    if bytes.len()!=2*SLOT{return None}
+    let second=match bytes.len(){n if n==SLOT_STRIDE+SLOT=>SLOT_STRIDE,n if n==2*SLOT=>SLOT,_=>return None};
     let parse=|s:&[u8]|{let u=|i:usize|u64::from_be_bytes(s[i..i+8].try_into().unwrap());let (seq,count,end)=(u(0),u(8),u(16));
         (s[24..56]==slot_check(binding,seq,count,end)[..]&&s[56..].iter().all(|b|*b==0)).then_some((seq,count,end))};
-    match (parse(&bytes[..SLOT]),parse(&bytes[SLOT..])){(Some(a),Some(b))=>Some(if a.0>=b.0{a}else{b}),(Some(a),None)|(None,Some(a))=>Some(a),_=>None}
+    match (parse(&bytes[..SLOT]),parse(&bytes[second..second+SLOT])){(Some(a),Some(b))=>Some(if a.0>=b.0{a}else{b}),(Some(a),None)|(None,Some(a))=>Some(a),_=>None}
 }
 pub fn encode_frame(payload:&[u8])->Vec<u8>{
     let mut rec=Vec::with_capacity(payload.len()+OVERHEAD);let len=payload.len() as u32;
@@ -85,6 +93,10 @@ fn parse_v1_strict(bytes:&[u8])->Option<Vec<Vec<u8>>>{
     }
     Some(out)
 }
+/// A commit file holding one valid slot (`seq`, `count`, `end`) in the current layout.
+fn commit_file(binding:&[u8;32],seq:u64,count:u64,end:u64)->Vec<u8>{
+    let mut c=vec![0u8;SLOT_STRIDE+SLOT];let off=(seq%2) as usize*SLOT_STRIDE;c[off..off+SLOT].copy_from_slice(&slot_bytes(binding,seq,count,end));c
+}
 fn write_new(path:&Path,dir:&Path,bytes:&[u8])->Result<(),StoreError>{
     let tmp=path.with_extension("tmp");{let mut f=File::create(&tmp)?;f.write_all(bytes)?;f.sync_all()?;}
     fs::rename(&tmp,path)?;sync_dir(dir);Ok(())
@@ -107,7 +119,7 @@ pub fn open(dir:&Path,binding:&[u8;32])->Result<Recovered,StoreError>{
         let artifacts=fs::read_dir(dir)?.filter_map(|e|e.ok()).any(|e|{let n=e.file_name().to_string_lossy().to_string();n.starts_with("blocks.journal.torn-")||n.starts_with("blocks.journal.v1-")});
         if artifacts||cpath.exists(){return Err(StoreError::MissingJournal)}
         let mut head=Vec::with_capacity(40);head.extend(MAGIC);head.extend(binding);
-        write_new(&cpath,dir,&[slot_bytes(binding,0,0,40),[0u8;SLOT]].concat())?;
+        write_new(&cpath,dir,&commit_file(binding,0,0,40))?;
         write_new(&path,dir,&head)?;
     }
     let mut bytes=Vec::new();File::open(&path)?.read_to_end(&mut bytes)?;
@@ -118,13 +130,16 @@ pub fn open(dir:&Path,binding:&[u8;32])->Result<Recovered,StoreError>{
         let payloads=parse_v1_strict(&bytes).ok_or(StoreError::LegacyNeedsReview)?;
         backup(dir,"blocks.journal.v1",&bytes)?;
         let mut v2=Vec::new();v2.extend(MAGIC);v2.extend(binding);for p in &payloads{v2.extend(encode_frame(p));}
-        write_new(&cpath,dir,&[slot_bytes(binding,1,payloads.len() as u64,v2.len() as u64),[0u8;SLOT]].concat())?;
+        write_new(&cpath,dir,&commit_file(binding,1,payloads.len() as u64,v2.len() as u64))?;
         write_new(&path,dir,&v2)?;bytes=v2;migrated=true;
     }
     if &bytes[..8]!=MAGIC{return Err(StoreError::Binding)}
     let mut cbytes=Vec::new();match File::open(&cpath){Ok(mut f)=>{f.read_to_end(&mut cbytes)?;},Err(_)=>return Err(StoreError::MissingCommit)}
     let (seq,count,cend)=read_commit(&cbytes,binding).ok_or(StoreError::CommitCorrupt)?;
     let (payloads,pos,tail)=parse_v2(&bytes,40);
+    // Bytes that cannot be a record but lie after every committed record were never committed.
+    let uncommitted=payloads.len() as u64==count&&pos as u64==cend&&bytes.len()-pos<=MAX_RECORD+OVERHEAD;
+    let tail=if matches!(tail,Tail::Corrupt)&&uncommitted{Tail::Torn}else{tail};
     if matches!(tail,Tail::Corrupt){return Err(StoreError::Corrupt(payloads.len() as u64))}
     // Committed data must all be present and verified; extra complete records were fsynced before a crash
     // that preceded their commit-file update and are kept (they are complete and verified).
@@ -137,6 +152,8 @@ pub fn open(dir:&Path,binding:&[u8;32])->Result<Recovered,StoreError>{
         backup(dir,"blocks.journal.torn",&bytes)?;
         write_new(&path,dir,&bytes[..pos])?;
     }
+    // The first v2 layout kept both slots in one sector: rewrite it in the current layout.
+    if cbytes.len()==2*SLOT{write_new(&cpath,dir,&commit_file(binding,seq,count,cend))?;}
     let commit=OpenOptions::new().read(true).write(true).open(&cpath)?;
     let file=OpenOptions::new().append(true).open(&path)?;
     let mut j=Journal{file,commit,path,_lock:lock,binding:*binding,seq,end:pos as u64,records:payloads.len() as u64};
@@ -147,7 +164,7 @@ fn sync_dir(dir:&Path){if let Ok(d)=File::open(dir){let _=d.sync_all();}}
 
 impl Journal{
     fn write_commit(&mut self)->Result<(),StoreError>{
-        self.seq+=1;let off=(self.seq%2) as u64*SLOT as u64;
+        self.seq+=1;let off=(self.seq%2) as u64*SLOT_STRIDE as u64;
         self.commit.seek(SeekFrom::Start(off))?;self.commit.write_all(&slot_bytes(&self.binding,self.seq,self.records,self.end))?;self.commit.sync_data()?;Ok(())
     }
     /// Appends one record, fsyncs it, then records it in the commit file (fsynced) before returning.

@@ -211,6 +211,19 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     assert!(n.chain.build_fallback(&p,0).is_err(),"no valid child above H_END/final");
 }
 
+#[test] fn ordinary_blocks_then_closing_then_final_at_h_end(){
+    // Review finding: the test above runs with H_CLOSE=1, so the ordinary-to-closing transition is
+    // covered here with the audited H_CLOSE=4 and the gate-valid H_END = H_CLOSE + Z_close = 12 (R13).
+    let mut c=cfg(&["a","b"]);c.h_close=4;c.h_end=12;c.r_max=0;c.m_max=2;c.reg_records_max=2;c.ret=2;c.z_close=8;let mut n=net_with(&c);
+    let mut closing=vec![];let mut final_at=None;
+    for _ in 0..12{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);let e=n.chain.head();
+        closing.push((e.height,apply::chain_facts(&e.state).closing));if e.is_final{final_at=Some(e.height);break}}
+    assert!(closing.iter().filter(|(h,_)|*h<4).all(|(_,c)|!c),"ordinary below H_CLOSE: {closing:?}");
+    assert!(closing.iter().filter(|(h,_)|*h>=4).all(|(_,c)|*c),"closing from H_CLOSE on: {closing:?}");
+    assert_eq!(final_at,Some(12));
+    let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();assert!(n.chain.build_fallback(&p,0).is_err(),"no valid child above H_END/final");
+}
+
 #[test] fn k_hist_retention_and_trie_rebuild_for_deep_fork(){
     let mut n=net();n.chain.k_hist=4;let mut hashes=vec![n.chain.head];
     for _ in 0..12{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);n.chain.retain();hashes.push(n.chain.head);}
@@ -467,4 +480,65 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     assert!(b.total<=u128::from(pocold::node::MEM_BUDGET),"the devnet default fits: {b:?}");
     Node::open(conf(Limits::default()),admitted(&cfg(&["a","b","c"]))).expect("the default devnet boots");
     let _=std::fs::remove_dir_all(&dir);
+}
+
+// ---------------- review finding (A13): the pool's pending state follows the block caps ----------------
+#[test] fn a13_pool_pending_state_is_capped_and_normalized(){
+    use pocold::node::{Config,Node};
+    let mut c=cfg(&["a","b","c"]);c.slot_cap=40;
+    let dir=std::env::temp_dir().join(format!("pocold-a13-pool-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let mut node=Node::open(Config{dir:dir.clone(),name:"pool".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},admitted(&c)).unwrap();
+    // Each CREATE stores 16 fresh slots in its constructor and leaves an account without code.
+    let mut init=Vec::new();for i in 0..16u8{init.extend([0x60,0x01,0x60,i,0x55]);}init.push(0x00);
+    let alice=devnet::account_key("alice");
+    let create=|nonce:u64|Tx{chain_id:777910,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:1_000_000,to:None,value:U256::ZERO,data:init.clone().into()}.sign_1559(&alice);
+    let slots=|n:&Node|n.pool_state().accounts.values().filter(|a|a.info().is_some()).map(|a|a.storage.values().filter(|v|**v!=U256::ZERO).count()).sum::<usize>();
+    let base=slots(&node);
+    assert!(node.submit_tx(create(0),false).is_ok()&&node.submit_tx(create(1),false).is_ok(),"32 of 40 slots");
+    let e=node.submit_tx(create(2),false).unwrap_err();assert!(e.contains("SlotCap"),"{e}");
+    assert_eq!(node.pool.txs.len(),2);assert_eq!(slots(&node),base+32,"the refused transaction left no effects");
+    // Reads and empty calls leave no residue in the pending state (normalize).
+    let mut read=Vec::new();for i in 0..200u8{read.extend([0x60,i,0x54,0x50]);}read.push(0x00);
+    let entries=|n:&Node|n.pool_state().accounts.values().map(|a|a.storage.len()).sum::<usize>();let e0=entries(&node);
+    let tx=Tx{chain_id:777910,nonce:2,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:1_000_000,to:None,value:U256::ZERO,data:read.into()}.sign_1559(&alice);
+    node.submit_tx(tx,false).unwrap();assert_eq!(entries(&node),e0,"200 SLOADs add no storage entries");
+    let _=std::fs::remove_dir_all(&dir);
+}
+
+// ---------------- review finding (A05): range sync continues after a truncated response ----------------
+#[test] fn range_sync_reaches_the_peer_head_through_truncated_responses(){
+    use pocold::node::{Config,Limits,Node};
+    use std::io::{Read,Write};
+    let port=||std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let c=cfg(&["a","b","c"]);let mut n=net();let mut blocks=vec![];
+    for _ in 0..120{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);blocks.push(b);}
+    // A small peer queue: every range response stops after about 16 KiB (half the queue).
+    let mut l=Limits::default();l.net.queue_bytes_max=32*1024;
+    let (pa,pb,rb)=(port(),port(),port());let tag=std::process::id();
+    let dir=|x:&str|{let d=std::env::temp_dir().join(format!("pocold-sync-{x}-{tag}"));let _=std::fs::remove_dir_all(&d);d};
+    let mut a=Node::open(Config{dir:dir("a"),name:"a".into(),miner:None,listen:Some(format!("127.0.0.1:{pa}").parse().unwrap()),peers:vec![],rpc:None,stop_at:None,log:false,limits:l.clone()},admitted(&c)).unwrap();
+    for b in blocks{a.import(b,None).unwrap();}assert_eq!(a.chain.head().height,120);
+    a.start_network().unwrap();std::thread::spawn(move||a.run());
+    let mut b=Node::open(Config{dir:dir("b"),name:"b".into(),miner:None,listen:Some(format!("127.0.0.1:{pb}").parse().unwrap()),peers:vec![format!("127.0.0.1:{pa}").parse().unwrap()],
+        rpc:Some(format!("127.0.0.1:{rb}").parse().unwrap()),stop_at:None,log:false,limits:l},admitted(&c)).unwrap();
+    b.start_network().unwrap();std::thread::spawn(move||b.run());
+    let height=||->u64{let Ok(mut s)=std::net::TcpStream::connect(("127.0.0.1",rb)) else{return 0};let body=r#"{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}"#;
+        let _=write!(s,"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",body.len());let mut o=String::new();let _=s.read_to_string(&mut o);
+        o.split("\"result\":\"0x").nth(1).and_then(|x|u64::from_str_radix(x.split('"').next()?,16).ok()).unwrap_or(0)};
+    let t=std::time::Instant::now();while height()<120&&t.elapsed()<std::time::Duration::from_secs(60){std::thread::sleep(std::time::Duration::from_millis(200));}
+    assert_eq!(height(),120,"B syncs all 120 blocks from A (one Hello, truncated range responses)");
+}
+
+// ---------------- review finding: BODY_MAX bounds the encoded body on every path ----------------
+#[test] fn body_max_bounds_the_encoded_body_not_the_item_sum(){
+    let mut n=net();for _ in 0..2{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);}
+    let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    let max=n.chain.spec.cp().BODY_MAX as usize;let k=max/100;
+    // k items of 100 bytes: the raw sum fits BODY_MAX, the encoding (2-byte item headers) does not.
+    let body=Body{txs:vec![vec![0x02;100];k],evidence:vec![]};assert!(k*100<=max&&body.encode().len()>max);
+    let good=signed(&n,head,Body::default(),0);
+    let mut h=good.header.clone();h.tx_root=pocold::types::ordered_root(&body.txs).unwrap();reseal(&mut h);
+    let mut b=remine_signed(&n,h,ctx.proposer);b.body=body.clone();
+    assert!(matches!(n.chain.validate(&b,None,0),Err(Reject::Block(s)) if s.contains("BODY_MAX")),"the locally checked limit is the encoded one");
+    assert!(Body::decode(&body.encode(),max).is_err(),"peers reject the same body at decode");
 }
