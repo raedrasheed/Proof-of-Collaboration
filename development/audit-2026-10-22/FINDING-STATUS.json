@@ -1,0 +1,238 @@
+{
+ "auditedSnapshot": "090eae4dc059d1a7df330d9fe674c873ac515564",
+ "repairBranch": "claude/audit-repair-a01-a14",
+ "auditReportSha256": "b4862d72262ef05741f68c1817ad536458f876a96fff96ba853700e31f4e9769",
+ "attachmentsVerification": "BLOCKED: FINDINGS.json, COVERAGE.md, REPRODUCE.md, overlays and SHA256SUMS were not provided",
+ "statusLegend": {
+  "OPEN": "not repaired",
+  "REPAIRED-PENDING-VERIFICATION": "code changed, required evidence incomplete",
+  "CLOSED": "repaired and every required check run on the repaired code",
+  "CLOSED-WITH-LIMITATIONS": "repaired; listed evidence missing or blocked"
+ },
+ "findings": [
+  {
+   "id": "A01",
+   "severity": "HIGH",
+   "title": "Valid block hash poisoning through an unbound body",
+   "requirement": "consensus D129 envReject vs blockReject; validation order",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocold/src/types.rs ordered_root; chain.rs validate; node.rs import/mark_invalid",
+   "plannedRepair": "see REPAIR-PLAN.md#a01",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A02",
+   "severity": "HIGH",
+   "title": "Genesis admission bypasses ParamGate and SYS_SLOT_MAX",
+   "requirement": "governance.md R1-R25, R18; LP4 resource gates",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED (R9, R13, SYS_SLOT_MAX)",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/lp4-execution/src/devnet.rs build/load; apply.rs Genesis::build; pocold/src/lib.rs load_spec; chain.rs Spec",
+   "plannedRepair": "see REPAIR-PLAN.md#a02",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A03",
+   "severity": "HIGH",
+   "title": "Full block execution accepts an over-limit EVM log",
+   "requirement": "execution.md caps: LOG_BLOCK_MAX/LOG_CAP/DIRTY_BLOCK_MAX/ACCT_DIRTY_BLOCK_MAX/SLOT_CAP/ACCT_CAP exceptional halt",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/lp4-execution/src/user_phase.rs; native.rs; apply.rs",
+   "plannedRepair": "see REPAIR-PLAN.md#a03",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A04",
+   "severity": "HIGH",
+   "title": "Journal record-length corruption rolls back committed records",
+   "requirement": "LP2 P3/P4 durability policy; LP4 P9",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocold/src/store.rs open",
+   "plannedRepair": "see REPAIR-PLAN.md#a04",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A05",
+   "severity": "HIGH",
+   "title": "Peer and RPC resource admission is not globally bounded",
+   "requirement": "VA bounded resources; governance RpcGuard R15/R26",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED (48 pre-Hello peers kept; RPC threads unbounded)",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocold/src/net.rs; rpc.rs serve/conn; node.rs orphans/invalid cache",
+   "plannedRepair": "see REPAIR-PLAN.md#a05",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A06",
+   "severity": "HIGH",
+   "title": "Wallet conflict and lock transitions do not revoke signing eligibility",
+   "requirement": "browser.md signEligible, D58/D77/D79, ProfileMutex/eligibilityEpoch",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED (conflict grant, sign-before-approval, submit after lock+endpoint change)",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocol-extension/src/sw.js wallet()/profiles; viewer.js",
+   "plannedRepair": "see REPAIR-PLAN.md#a06",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A07",
+   "severity": "MEDIUM",
+   "title": "Extension GenesisSpec decoder accepts invalid schema and values",
+   "requirement": "M1 GenesisSpec schema; browser profile admission",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocol-extension/src/lib/rp.js decodeSpec",
+   "plannedRepair": "see REPAIR-PLAN.md#a07",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A08",
+   "severity": "HIGH",
+   "title": "RP trust verification accepts malformed header fields",
+   "requirement": "RP Hpre1 structural checks",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocol-extension/src/lib/rp.js decodeHeader/verifyWindow",
+   "plannedRepair": "see REPAIR-PLAN.md#a08",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A09",
+   "severity": "MEDIUM",
+   "title": "Concurrent receive reservations exceed the session cap",
+   "requirement": "browser.md D98/D100 SESSION_RECV_MAX",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocol-extension/src/lib/transport.js request/Pool",
+   "plannedRepair": "see REPAIR-PLAN.md#a09",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A10",
+   "severity": "MEDIUM",
+   "title": "RPC batch bypasses ORIGIN_DENY",
+   "requirement": "governance.md ORIGIN_DENY",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocold/src/rpc.rs conn/handle",
+   "plannedRepair": "see REPAIR-PLAN.md#a10",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A11",
+   "severity": "MEDIUM",
+   "title": "Reorg drops orphaned transactions from the pending pool",
+   "requirement": "consensus pending-pool restoration on reorg",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocold/src/node.rs rebuild_pool/on_new_head",
+   "plannedRepair": "see REPAIR-PLAN.md#a11",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A12",
+   "severity": "MEDIUM",
+   "title": "Storage timeout releases admission before the write settles",
+   "requirement": "browser.md D101/D102 reply vs ownership",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocol-extension/src/sw.js route(storage_set); lib/records.js write",
+   "plannedRepair": "see REPAIR-PLAN.md#a12",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A13",
+   "severity": "HIGH",
+   "title": "Resource formulas do not establish the claimed general boot bounds",
+   "requirement": "LP4 R18/R21 full-domain derivations",
+   "reproduction": {
+    "onAuditedSnapshot": "SOURCE REVIEW (no runtime witness)",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/lp4-execution/src/resources.rs; development/lp4/p7-resources/DERIVATION.md; pocold chain.rs retention",
+   "plannedRepair": "see REPAIR-PLAN.md#a13",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  },
+  {
+   "id": "A14",
+   "severity": "LOW",
+   "title": "Transport accepts mismatched JSON-RPC version and response id",
+   "requirement": "JSON-RPC 2.0 response correlation",
+   "reproduction": {
+    "onAuditedSnapshot": "REPRODUCED",
+    "evidence": "evidence/baseline-090eae4.log"
+   },
+   "affectedCode": "prototypes/pocol-extension/src/lib/transport.js request",
+   "plannedRepair": "see REPAIR-PLAN.md#a14",
+   "repairCommits": [],
+   "verification": [],
+   "remainingLimitations": [],
+   "disposition": "OPEN"
+  }
+ ]
+}
