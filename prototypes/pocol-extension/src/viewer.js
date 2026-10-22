@@ -19,6 +19,10 @@ function dismiss(id) {
   const i = confirms.findIndex((c) => c.id === id); if (i >= 0) { confirms.splice(i, 1)[0].resolve(false); return; }
   if (showing && showing.id === id) showing.done(false);
 }
+// The session ended (revoked or worker lost): every queued or shown confirmation is withdrawn.
+function dismissAll() { for (const c of confirms.splice(0)) c.resolve(false); if (showing) showing.done(false); }
+// Approve is armed only after a pause, so a double click on one dialog cannot approve the next.
+const ARM_MS = 600;
 function pump() {
   if (showing || !confirms.length) return;
   const { q, id, resolve } = confirms.shift();
@@ -30,6 +34,7 @@ function pump() {
   $('modal').hidden = false; $('modal').dataset.kind = q.type;
   const done = (ok) => { if (showing !== cur) return; $('approve').onclick = $('reject').onclick = null; $('modal').hidden = true; showing = null; resolve(ok); pump(); };
   const cur = { id, done }; showing = cur;
+  $('approve').disabled = true; setTimeout(() => { if (showing === cur) $('approve').disabled = false; }, ARM_MS);
   $('approve').onclick = () => done(true); $('reject').onclick = () => done(false);
 }
 
@@ -68,6 +73,7 @@ async function mount(path, opts = {}) {
 
 // D103 section 5: worker gone or replaced -> tear frames down, announce possible loss, reload only by the user.
 function workerLost() {
+  dismissAll();
   if (!ctx || ctx.revoked) return; teardown(); ctx.current = null; ctx.frame = Number.MAX_SAFE_INTEGER;
   const p = Object.assign(document.createElement('p'), { className: 'err', textContent: 'انقطع عامل الإضافة؛ قد تكون آخر الكتابات غير محفوظة ' });
   const b = Object.assign(document.createElement('button'), { type: 'button', id: 'reload', textContent: 'إعادة التحميل' }); b.onclick = () => location.reload();
@@ -87,10 +93,11 @@ async function start() {
   ctx = { name, site, sessionId: r.sessionId, port, files, frame: 0, current: null, entry: r.entry, version: r.version };
   port.onMessage.addListener(async (m) => {
     if (m.hello !== undefined) { if (ctx.genId && ctx.genId !== m.hello) workerLost(); ctx.genId = m.hello; return; }
-    if (m.ask !== undefined) { const ok = await confirmUI(m.q, m.ask); port.postMessage({ answer: m.ask, ok }); return; }
+    // The port may be gone by the time a withdrawn dialog resolves (revocation, lost worker).
+    if (m.ask !== undefined) { const ok = await confirmUI(m.q, m.ask); try { port.postMessage({ answer: m.ask, ok }); } catch {} return; }
     if (m.dismiss !== undefined) { dismiss(m.dismiss); return; }
     // Identity or profile change (browser.md: 4901): the frame is torn down, nothing reloads by itself.
-    if (m.revoked) { ctx.revoked = true; teardown(); ctx.frame = Number.MAX_SAFE_INTEGER; fail(`أُنهيت الجلسة (${m.revoked.code}): ${m.revoked.message}`); return; }
+    if (m.revoked) { ctx.revoked = true; dismissAll(); teardown(); ctx.frame = Number.MAX_SAFE_INTEGER; fail(`أُنهيت الجلسة (${m.revoked.code}): ${m.revoked.message}`); return; }
     if (!ctx.current || m.frame !== ctx.current.frame) return; // replies to a torn-down frame are dropped (D99)
     if (m.navigate) {
       const to = m.navigate;

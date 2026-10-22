@@ -19,6 +19,7 @@ export async function workerChecks(dist) {
   const mk = (h) => { const pre = '0x' + h; const b = H.fromHex(pre); const sp = RP.decodeSpec(b); return { pre, hash: H.toHex(C.keccak(b)), chainId: Number(sp.chainId) }; };
   const s1 = mk(hex1), s2 = mk(hex1.replace('846553f100', '846553f101')), s3 = mk(hex1.replace('830bdee8', '830bdee9'));
   ok('fixture specs: s2 shares the chainId with another genesis, s3 has another chainId', s1.chainId === s2.chainId && s1.hash !== s2.hash && s3.chainId !== s1.chainId, `${s1.chainId} ${s3.chainId}`);
+  const netKeyOf = (sp) => H.toHex(C.keccak(R.encode([new TextEncoder().encode('PoCol-net-v1'), R.encUint(BigInt(sp.chainId)), H.fromHex(sp.hash)])));
   const prof = (name, s, endpoint = 'http://127.0.0.1:8599') => ({ name, chainId: s.chainId, genesisPre: s.pre, genesisHash: s.hash, endpoint, trustLevel: 'LN' });
 
   // The 30 s identity ticks are captured (not scheduled) so the tests can fire them.
@@ -36,7 +37,7 @@ export async function workerChecks(dist) {
     const wait = async (m, v) => { if (env.gates[m]) await env.gates[m]; return typeof v === 'function' ? v() : v; };
     const log = installFetchMock({ ...fx.handlers,
       eth_chainId: () => wait('eth_chainId', () => '0x' + env.chainId.toString(16)), pocol_status: () => wait('pocol_status', () => ({ genesisHash: env.genesis })),
-      eth_getTransactionCount: () => wait('eth_getTransactionCount', '0x0'), eth_getBlockByNumber: () => wait('eth_getBlockByNumber', { number: '0x5', baseFeePerGas: '0x3b9aca00' }),
+      eth_getTransactionCount: () => wait('eth_getTransactionCount', () => (env.nonce === undefined ? '0x0' : env.nonce)), eth_getBlockByNumber: () => wait('eth_getBlockByNumber', { number: '0x5', baseFeePerGas: '0x3b9aca00' }),
       eth_estimateGas: () => wait('eth_estimateGas', '0x5208'), eth_sendRawTransaction: ([raw]) => wait('eth_sendRawTransaction', () => H.toHex(C.keccak(H.fromHex(raw)))) });
     await loadWorker(dist, 'wt' + ++n);
     for (const p of [prof('p1', s1), ...extra]) { const r = await mock.send({ type: 'profiles.add', profile: p }); if (!r.ok) throw new Error('profile ' + JSON.stringify(r)); }
@@ -180,7 +181,37 @@ export async function workerChecks(dist) {
     ok('A06 viewer disconnected during confirmation -> no signature, interval cleared', w.count('eth_sendRawTransaction') === 0 && w.tick.live === false);
     void s;
   });
+  // ---- independent review follow-ups (A06) ----
+  await scenario(async () => {
+    const w = await world(); const open = w.gate('eth_chainId');
+    const op = w.mock.send({ type: 'open', name: 'p1', site: w.site, path: '/' }, 8); await sleep(50);
+    await w.mock.send({ type: 'profiles.add', profile: prof('p1', s1, 'http://127.0.0.1:8600') }); open(); const r = await op;
+    ok('A06 review: a profile change while a site is opening -> the open is refused (4901), no session on the old profile', r.ok === false && r.error.code === 4901, JSON.stringify(r));
+  });
+  await scenario(async () => {
+    const w = await world();
+    w.port.post({ seq: 900, frame: 1, text: JSON.stringify({ id: 900, kind: 'nav', payload: { method: 'site_openExternal', params: ['https://example.org/'] } }) });
+    const a = await w.ask('confirmExternal'); w.env.genesis = '0x' + '77'.repeat(32); w.tick.f(); await w.port.next((m) => m.revoked, 2000); w.answer(a, true); await sleep(100);
+    ok('A06 review: an external-link dialog answered after the session was revoked opens no tab', w.mock.tabsCreated.length === 0, JSON.stringify(w.mock.tabsCreated));
+  });
+  await scenario(async () => {
+    const w = await world({ grant: false });
+    const un = w.mock.send({ type: 'wallet.unlock', password: 'x' }); await sleep(20);
+    await w.mock.send({ type: 'wallet.create', password: 'y', seedHex: '0x' + '43'.repeat(32) }); const r = await un;
+    const addr = (await w.mock.send({ type: 'wallet.address', name: 'p1' })).address;
+    const want = W.addressOf(await W.networkKey(H.fromHex('0x' + '43'.repeat(32)), netKeyOf(s1)));
+    ok('A06 review: an unlock that was decrypting when the wallet was replaced does not reinstate the old seed', r.ok === false && addr === want, JSON.stringify([r, addr, want]));
+  });
+  await scenario(async () => {
+    const w = await world(); w.env.nonce = -1; const t = realNow(); const r = await w.reply(w.tx());
+    ok('A06 review: a negative quantity from the endpoint fails the request (no hang, nothing sent)', code(r) === -32603 && realNow() - t < 3000 && w.count('eth_sendRawTransaction') === 0, JSON.stringify(r));
+  });
   globalThis.setInterval = realSI; globalThis.clearInterval = realCI; Date.now = realNow;
+  // ---- A07 review: the gsVersion detail of a huge specVersion item is computed in linear time ----
+  {
+    const huge = R.encode([new Uint8Array(200000).fill(0x9a)]); const t = Date.now(); let e = null; try { RP.decodeSpec(huge); } catch (x) { e = x; }
+    ok('A07 review: a 200 KB specVersion item is rejected (gsVersion) quickly', e && e.gs === 'gsVersion' && Date.now() - t < 2000, `${e && e.gs} ${Date.now() - t} ms`);
+  }
 
   // ---- A12: the admission slot of an unsettled write is kept after its storeTimeout reply ----
   await scenario(async () => {

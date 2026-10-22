@@ -75,6 +75,8 @@ const bytesOf = (b, it) => b.subarray(it.start, it.start + it.len);
 const significant = (v) => { let i = 0; while (i < v.length && v[i] === 0) i++; return v.subarray(i); };
 const bitLen = (v) => (v.length === 0 ? 0 : 8 * (v.length - 1) + (32 - Math.clz32(v[0])));
 const big = (v) => { let n = 0n; for (const x of v) n = (n << 8n) | BigInt(x); return n; };
+// Linear-time parse for an unbounded item (the gsVersion detail can be ~MAX_SPEC_BYTES long).
+const bigHex = (v) => (v.length ? BigInt('0x' + hex(v)) : 0n);
 const cmp = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; };
 const hex = (v) => Array.from(v, (x) => x.toString(16).padStart(2, '0')).join('');
 function isReserved(id) {
@@ -93,7 +95,7 @@ export function decodeGenesisSpec(b) {
   const cp = slot[2] || none, m0 = slot[4] || none;
   if (children(b, cp).some((x) => x.list)) throw gsErr('gsStructure', 'CP item is a list');
   for (const e of children(b, m0)) if (!e.list || children(b, e).some((x) => x.list)) throw gsErr('gsStructure', 'M_0List entry');
-  if (slot[0]) { const raw = bytesOf(b, slot[0]); const sig = significant(raw); if (!(sig.length === 1 && sig[0] === SPEC_VERSION)) throw gsErr('gsVersion', big(raw).toString(10)); }
+  if (slot[0]) { const raw = bytesOf(b, slot[0]); const sig = significant(raw); if (!(sig.length === 1 && sig[0] === SPEC_VERSION)) throw gsErr('gsVersion', bigHex(raw).toString(10)); }
   if (!(slot.every((x) => x) && topLen === 6)) throw gsErr('gsCount', `top ${topLen}`);
   const [version, chain, , allocRoot, , sysCodeHash] = slot;
   const cps = children(b, cp); if (cps.length !== CP_LEN) throw gsErr('gsCount', `CP ${cps.length}`);

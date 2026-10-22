@@ -162,14 +162,15 @@ chrome.tabs.onRemoved.addListener((tabId) => { removeDnr(tabId).catch(() => {});
 // ---------------- open a site (D26 step 2: the worker fetches and verifies) ----------------
 const b64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); };
 async function openSite({ name, site, path, tabId }) {
+  const ep0 = eligibilityEpoch; // A06 review: a session opened across a profile change is refused
   const profile = (await profiles()).find((p) => p.name === name); if (!profile) throw new Error('unknown profile ' + name);
   if (profile.invalid) throw Object.assign(new Error('profile no longer valid: ' + profile.invalid), { code: 4901 });
   if (!/^0x[0-9a-fA-F]{40}$/.test(site)) throw new Error('site address');
   if (tabId === undefined) throw Object.assign(new Error('a site opens only in a viewer tab'), { code: 4900 });
   opening.set(tabId, (opening.get(tabId) || 0) + 1);
-  try { return await openVerified(profile, site, path, tabId); } finally { opening.set(tabId, opening.get(tabId) - 1); if (!opening.get(tabId)) opening.delete(tabId); }
+  try { return await openVerified(profile, site, path, tabId, ep0); } finally { opening.set(tabId, opening.get(tabId) - 1); if (!opening.get(tabId)) opening.delete(tabId); }
 }
-async function openVerified(profile, site, path, tabId) {
+async function openVerified(profile, site, path, tabId, ep0) {
   /*@fault noDnr*/await installDnr(tabId);/*@else*//* TEST FAULT: DNR not installed *//*@end*/
   const rpc = rpcFor(profile, pools.trust); await checkNetwork(profile, rpc);
   let trust = { level: profile.trustLevel, message: profile.trustLevel === 'LN' ? 'LN: عقدة محلية تتحقق من التنفيذ كاملًا' : 'DEV: شبكة تطوير بلا تحقق' };
@@ -183,6 +184,9 @@ async function openVerified(profile, site, path, tabId) {
   const files = {}; for (const [p, f] of s.files) files[p] = { mime: f.mime, b64: b64(f.data) };
   const sessionId = crypto.randomUUID(); const now = Math.floor(performance.now());
   const recv = { recv: 0 };
+  // A profile change during the awaits above was not seen by profilesChanged (the session did not
+  // exist yet): refuse rather than register a session on a removed or changed profile.
+  if (eligibilityEpoch !== ep0) return { ok: false, error: { code: 4901, message: 'network profiles changed while the site was opening; open it again' } };
   // The session freezes its profile (without the recomputed conflict flag) for signEligible.
   const frozen = Object.freeze(Object.fromEntries(PROFILE_FIELDS.map((k) => [k, profile[k]])));
   const sess = { profile: frozen, site: site.toLowerCase(), netKey: profile.netKey, bucket: bridge.newSession(now), approved: null, rpc: rpcFor(profile, pools.site, recv), tabId, trust,
@@ -247,6 +251,7 @@ async function route(sess, m, ctl) {
     try {
       const okExt = await ctl.ask({ type: 'confirmExternal', url: m.params[0] });
       if (!okExt) return E(4001, 'user rejected');
+      if (sess.closed) return E(4900, 'disconnected');
       await chrome.tabs.create({ url: m.params[0] }); return { result: null };
     } finally { sess.confirmPending = false; }
   }
@@ -285,11 +290,13 @@ async function wallet(sess, m, ask) {
   if (sess.approved !== address) return E(4100, 'unauthorized');
   const o = m.params[0]; if (o.from && o.from.toLowerCase() !== address.toLowerCase()) return E(4100, 'from is not the granted account');
   const step = async (p) => { const v = await p; const c = changed(sess, ep); if (c) throw { reply: c }; return v; };
+  // Endpoint quantities: hex strings of at most 256 bits (a negative or malformed value never reaches RLP).
+  const qty = (v) => { if (typeof v !== 'string' || !/^0x[0-9a-fA-F]{1,64}$/.test(v)) throw { reply: E(-32603, 'endpoint returned a malformed quantity') }; return BigInt(v); };
   try {
-    const nonce = o.nonce ? BigInt(o.nonce) : BigInt(await step(sess.rpc('eth_getTransactionCount', [address, 'pending'])));
-    const base = BigInt((await step(sess.rpc('eth_getBlockByNumber', ['latest', false]))).baseFeePerGas);
+    const nonce = o.nonce ? BigInt(o.nonce) : qty(await step(sess.rpc('eth_getTransactionCount', [address, 'pending'])));
+    const blk = await step(sess.rpc('eth_getBlockByNumber', ['latest', false])); const base = qty(blk && blk.baseFeePerGas);
     const data = o.data || '0x', value = o.value ? BigInt(o.value) : 0n;
-    const gas = o.gas ? BigInt(o.gas) : BigInt(await step(sess.rpc('eth_estimateGas', [{ from: address, to: o.to, data, value: '0x' + value.toString(16) }])));
+    const gas = o.gas ? BigInt(o.gas) : qty(await step(sess.rpc('eth_estimateGas', [{ from: address, to: o.to, data, value: '0x' + value.toString(16) }])));
     const maxPriority = o.maxPriorityFeePerGas ? BigInt(o.maxPriorityFeePerGas) : 1000000000n;
     const tx = { chainId: sess.profile.chainId, nonce, maxPriority, maxFee: o.maxFeePerGas ? BigInt(o.maxFeePerGas) : base * 2n + maxPriority, gas, to: o.to, value, data };
     const ut = unsignedTx(tx);
@@ -324,15 +331,17 @@ chrome.runtime.onConnect.addListener((port) => {
     p.dismiss = () => { if (waiting.delete(id)) { post({ dismiss: id }); resolve(false); } };
     return p;
   };
-  const end = () => {
+  // keepDnr: after a revocation the tab keeps its DNR rules until it closes or opens again, so the
+  // frame being torn down is never left with CSP alone.
+  const end = (keepDnr = false) => {
     alive = false; sess.closed = true; clearInterval(tick); cancelApprovals((s) => s === sess, 4900, 'disconnected');
-    for (const r of waiting.values()) r(false); waiting.clear(); sessions.delete(sid); removeDnr(sess.tabId).catch(() => {});
+    for (const r of waiting.values()) r(false); waiting.clear(); sessions.delete(sid); if (!keepDnr) removeDnr(sess.tabId).catch(() => {});
   };
   // A changed identity or profile tears the frame down and cancels the session's requests (4901);
   // their replies are flushed before the port closes.
   sess.revoke = (code, message) => {
     if (!alive || sess.closed) return; sess.closed = true; post({ revoked: { code, message } }); cancelApprovals((s) => s === sess, code, message);
-    setTimeout(() => { if (alive) { end(); port.disconnect(); } }, 0);
+    setTimeout(() => { if (alive) { end(true); port.disconnect(); } }, 0);
   };
   const tick = setInterval(() => { if (!sess.checking) { sess.checking = true; identity(sess).finally(() => { sess.checking = false; }); } isUnlocked(); }, IDENTITY_CHECK_MS);
   port.onMessage.addListener((msg) => {
@@ -366,7 +375,9 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       case 'session.storage': { const s = sessions.get(msg.sessionId); if (!s || !sender.tab || sender.tab.id !== s.tabId) return { ok: false }; await booted; const snap = await records.load(s.netKey, s.site); return { ok: true, storage: snap.dict, storageError: snap.error || null }; }
       case 'wallet.create': { const seed = msg.seedHex ? fromHex(msg.seedHex) : crypto.getRandomValues(new Uint8Array(32)); if (seed.length !== 32) throw new Error('seed');
         lockWallet('wallet replaced'); await store.set({ wallet: await encryptSeed(seed, msg.password) }); walletChanged('wallet replaced'); unlocked = { seed, until: Date.now() + LOCK_MS }; return { ok: true }; }
-      case 'wallet.unlock': { const w = (await store.get('wallet')).wallet; if (!w) return { ok: false, error: 'no wallet' }; const seed = await decryptSeed(w, msg.password);
+      case 'wallet.unlock': { const e0 = walletEpoch; const w = (await store.get('wallet')).wallet; if (!w) return { ok: false, error: 'no wallet' }; const seed = await decryptSeed(w, msg.password);
+        // A wallet.create (or lock) during the decryption wins: the old seed is never reinstated.
+        if (walletEpoch !== e0) return { ok: false, error: 'wallet changed during unlock' };
         walletChanged('wallet unlocked again'); unlocked = { seed, until: Date.now() + LOCK_MS }; return { ok: true }; }
       case 'wallet.lock': lockWallet('wallet locked'); return { ok: true };
       case 'wallet.status': return { ok: true, exists: !!(await store.get('wallet')).wallet, unlocked: isUnlocked() };

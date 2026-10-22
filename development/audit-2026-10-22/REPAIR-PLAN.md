@@ -108,6 +108,24 @@ Rules for this repair:
   - The identity check also runs every 30 s per session (browser.md); a mismatch revokes the session with
     4901. The same tick enforces the lock timeout.
   - The account grant is bound to the granted address, so a replaced wallet is not covered by an old grant.
+  - After the independent review:
+    - a site whose open overlapped a profile change is refused (4901), because profilesChanged could not
+      see a session that did not exist yet;
+    - an external-link confirmation answered after a revocation opens nothing;
+    - every queued or shown dialog is withdrawn when the session is revoked or the worker is lost;
+    - approve is armed 600 ms after a dialog appears, so a double click cannot approve the next dialog.
+      This was pre-existing, and the queue swap made it reachable;
+    - an unlock that was decrypting when the wallet was replaced does not reinstate the old seed;
+    - endpoint quantities must be hex of at most 256 bits, and `encUint` refuses negative values (a
+      negative value looped);
+    - a revoked tab keeps its DNR rules until it closes or opens again;
+    - the gsVersion detail is parsed in linear time (5 s at MAX_SPEC_BYTES, instead of tens of minutes).
+  - Not changed, and documented:
+    - a submission that is already signed proceeds even if the wallet locks while
+      eth_sendRawTransaction waits for transport capacity (≤ RESERVE_WAIT_MS). Signing is the commitment
+      point, as in browser.md's order;
+    - the 30 s check leaves read access on transport errors and revokes only on a proven identity
+      mismatch. Signing still fails closed there.
 
 ### A07 — complete GenesisSpec verification in the extension (`rp.js`)
 - Full schema: top-level arity, specVersion, chainId width and value, 52 CP values with widths and bounds,
