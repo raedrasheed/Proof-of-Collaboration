@@ -473,3 +473,32 @@ signed → queued for transport → request initiated → broadcast.
 ### D-WIN-R2 — Windows verification
 See [WINDOWS-VERIFICATION.md](WINDOWS-VERIFICATION.md). A scoped manual workflow is prepared. Dispatch
 returns 404 until the file is on `main`, so it has not run.
+
+### D-A13-BUDGET — local reductions to fit the 6 GiB budget (owner approved option 1; local, not consensus)
+
+- Status: **APPROVED by the owner** (PR #27 conversation, option 1: reduce local, non-consensus resource
+  limits and keep the 6 GiB node budget). The owner authorised choosing the exact values. The approval
+  covers no consensus change and waives no specification requirement.
+- Trigger: at 45712cd the corrected model put the devnet default at 7,112,758,897 B (6.62 GiB), so
+  `Node::open` refused it.
+- Result: 5,506,111,035 B (5.13 GiB), inside the 7/8 reserve the boot gate now enforces. The required
+  budget is 6,292,698,326 B.
+- Values, contributions, basis and trade-offs: [A13-DERIVATION.md §2a](A13-DERIVATION.md#2a-d-a13-budget-itemized-bound-reductions-and-reserve-round-2).
+  Summary of the changes:
+  - side_max 8 → 2;
+  - SIDE_BLOCKS_MAX 256 → 64;
+  - POOL_MAX_BYTES 64 → 32 MiB;
+  - inbound peers_max 32 → 8;
+  - EVENT_QUEUE 256 → 128;
+  - NET_EVENT_QUEUE 64 → 32;
+  - RPC response pools replace the 16 MiB per-connection answer allowance (RPC_CONN_MAX stays 32);
+  - two accounting corrections: the execution classes (proof and test) and the answer being built.
+- Each value was checked to be local first: it changes no validity rule, root, gas rule or accepted
+  transaction, breaks no normative minimum, refuses no valid maximum-size block, and removes no history
+  the reorganisation rules need.
+- K_hist (32), RPC_CONN_MAX (32), consensus caps and the TRANSIENT_SNAPSHOTS inventory are unchanged.
+- Alternatives not taken:
+  - raising the budget (not authorised);
+  - lowering K_hist (it widens the deep-fork rebuild from genesis);
+  - lowering RPC_CONN_MAX (a normative value);
+  - lowering conservative coefficients without proof.

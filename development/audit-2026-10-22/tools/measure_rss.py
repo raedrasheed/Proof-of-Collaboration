@@ -15,7 +15,7 @@ counts every cap at its maximum at once) and not a guaranteed ceiling (the model
 overhead and fragmentation open; nothing in the process enforces a ceiling).
 """
 import json, os, subprocess, sys, tempfile, threading, time, urllib.request
-HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(os.path.dirname(HERE))
+HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 POCOLD = os.path.join(ROOT, "prototypes", "pocold")
 sys.path.insert(0, os.path.join(POCOLD, "scripts"))
 import devnet as dn
