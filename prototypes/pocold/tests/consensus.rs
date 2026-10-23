@@ -714,7 +714,7 @@ fn grow(h:&mut Net,parent:[u8;32],n:usize,first:&dyn Fn(&Net,[u8;32])->Block)->V
     let (t,_r)=std::sync::mpsc::channel();
     let a=pocold::rpc::answer(&mut n,&pocold::rpc::Request::local(body.into_bytes(),t,std::time::Instant::now()+std::time::Duration::from_secs(30),true));
     let v:serde_json::Value=serde_json::from_str(&a.body).unwrap();
-    assert_eq!(v["result"]["hash"],format!("{hash}"),"answered, not -32008: {}",&a.body[..a.body.len().min(200)]);
+    assert_eq!(v["result"]["hash"],format!("{hash}"),"answered, not -32020 {{resultBytes}}: {}",&a.body[..a.body.len().min(200)]);
     assert!(v["result"].get("raw").is_none());assert!(a.body.len()<=2*txmax+2048,"{} B",a.body.len());
     let _=std::fs::remove_dir_all(&dir);
 }

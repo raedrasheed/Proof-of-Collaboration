@@ -237,7 +237,7 @@ impl Budget{
 pub fn rate_refused(k:u32,l:&Limits)->Option<u64>{
     (k>l.bucket_cap).then(||(u64::from(k-l.bucket_cap)*1000).div_ceil(u64::from(l.rate.max(1))).max(1))
 }
-/// The SendPacer's backstop check (network.md:249: "فحص احتياطي كل 50 ms").
+/// The SendPacer's backstop check (network.md:246: "فحص احتياطي كل 50 ms").
 pub const PACER_BACKSTOP:Duration=Duration::from_millis(50);
 /// SendPacer (network.md:237-256). The answer is written in chunks on a non-blocking socket (a write
 /// that would block sends nothing, on every platform). A is the bytes the socket has accepted, size
