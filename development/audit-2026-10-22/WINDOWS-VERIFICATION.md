@@ -172,3 +172,61 @@ This is a real gap, not only a test issue:
   small platform shim (libc / windows-sys, both already in the lock), or state the kernel-buffer term
   explicitly.
 - The test assertion is not weakened.
+
+### Run 4: ad7064a (evidence-only commit, code as in a39379b): same result as Run 3
+- Run: https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/39956990270. It was triggered by
+  a push that added only run 3's evidence.
+- Artifact zip SHA-256 `5967228c777b7ea4446ab860d89607decfd0a75c3327c01203f6f239355d543d`, copied to
+  `evidence/windows-ad7064a/`.
+- pocold 123/124, with the same single failure (`an_answer_is_reserved_until_its_connection_has_written_it`).
+  Everything else PASS.
+- **Not counted as new verification**: the code is the same as in Run 3. It only shows the result
+  repeats.
+
+### Run 5: be95e26 (integration: caps-r2 + rpcguard-r2 + SO_SNDBUF): FAIL, with 3 tests left
+- Run: https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/39995765956.
+- Artifact zip SHA-256 `689cc2e20d2be85d16491a8c7c31246aa627fa0f155482567fc098c0ed74fe8c`, copied to
+  `evidence/windows-be95e26/`.
+- PASS:
+  - lp1-store-journal 12;
+  - lp1-node-all 150;
+  - **lp4-execution 168** (with the caps track's tests and RpcGuard's simulate stop hook);
+  - the extension (234).
+- pocold: **148 passed, 3 failed**, 14 binaries. New tests that pass on Windows:
+  - tests/caps.rs and the caps identity tests;
+  - the RpcGuard round-2 tests;
+  - `get_params_and_rpc_stats_report_the_limits`. **SO_SNDBUF is set on Windows and reads back 32768.**
+
+The 3 failures have one cause: the client's receive window on Windows loopback.
+
+| test | Windows message |
+|---|---|
+| `an_answer_is_reserved_until_its_connection_has_written_it` | `built=true, 8388608 B reserved` |
+| `send_pacer_closes_a_slow_reader_after_grace` | the pacer did not close the non-reading client within 5 s |
+| `batch_wall_closes_the_batch` | the wall did not close the send within 20 s |
+
+- In all three, a client that never reads asks for a ~14 MiB answer.
+- With the server's send buffer now 32 KiB, the Windows kernel still took the whole answer within a
+  second. So the absorption is on the **client's** side: its receive window, which Windows loopback
+  grows without the application reading.
+- Then the server's socket accepts every byte:
+  - the reservation is released;
+  - the pacer sees A = size, a fast reader, and correctly does not close;
+  - the send completes before BATCH_WALL.
+- pocold's logic is unchanged. What differs on Windows is that an unread client cannot be told apart
+  from a fast one by the bytes the server's socket accepted.
+
+What this means:
+- Server-side memory stays bounded: reservations are released when the kernel has the bytes.
+- The kernel memory belongs to the client's socket, which the server cannot size. A local client can
+  hold up to about one answer (≤ BATCH_BYTES_HARD) of kernel memory per connection.
+- The SendPacer's slow-reader detection is effectively disabled for such clients on Windows loopback.
+- Status: **OPEN, documented platform limitation.** RpcGuard's SO_SNDBUF bounds only the server's side.
+
+Change in the next commit:
+- The three tests use a client with SO_RCVBUF = 64 KiB (`unread_client`). They test pocold's pacer, wall
+  and reservations, which need a kernel that does not absorb the answer. The pocold assertions are
+  unchanged.
+- A new measurement, `unread_default_client_absorption`, records the default-window behavior on every
+  platform (ABSORB line, `kernelTookWholeAnswer`) without asserting it. The Windows runs keep the
+  limitation visible.

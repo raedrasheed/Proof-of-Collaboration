@@ -57,6 +57,15 @@ fn rpc(port:u16,body:&str,origin:bool)->(u16,String){
     let mut out=String::new();let _=s.read_to_string(&mut out);
     let code=out.get(9..12).and_then(|c|c.parse().ok()).unwrap_or(0);(code,out.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
 }
+/// A client that does not read and whose kernel does not take the answer for it: SO_RCVBUF bounds its
+/// receive window. With the default window, Windows loopback takes a whole ~14 MiB unread answer
+/// within a second (Windows runs 3 and 5), so an unread client cannot be told from a fast one there
+/// by the bytes the server's socket accepted. These tests check pocold's pacer, wall and
+/// reservations, so they need the bounded window; the default is measured, not asserted
+/// (`unread_default_client_absorption`).
+fn unread_client(port:u16)->TcpStream{
+    let s=TcpStream::connect(("127.0.0.1",port)).unwrap();pocold::rpc::sockbuf::set_recv(&s,64*1024).unwrap();let _=s.set_nodelay(true);s
+}
 fn small()->Limits{
     let mut l=Limits::default();
     l.net=net::Limits{peers_max:6,handshaking_max:3,hello_deadline:Duration::from_millis(500),frame_deadline:Duration::from_millis(500),
@@ -439,7 +448,7 @@ fn hex(b:&[u8])->String{b.iter().map(|x|format!("{x:02x}")).collect()}
     // An unread socket takes the send buffer (tcp_wmem max) plus the receiver's unread window.
     let member=r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"data":"0x621000006000fd","gas":"0x1c9c380"},"latest"]}"#;
     let body=format!("[{}]",vec![member;10].join(","));
-    let mut s=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();
+    let mut s=unread_client(r.rpc);
     write!(s,"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
     // Wait until the answer is built and its write is blocked on the unread socket.
     let want=(pocold::rpc::RESP_MAX as u64)+(12<<20);
@@ -492,7 +501,7 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     // non-reading client's write blocks and A stays far below the response size.
     let member=r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"data":"0x621000006000fd","gas":"0x1c9c380"},"latest"]}"#;
     let body=format!("[{}]",vec![member;10].join(","));
-    let mut s=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();
+    let mut s=unread_client(r.rpc);
     write!(s,"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
     // Do not read. Poll pacer_closed and record when the pacer fires.
     let t=Instant::now();while counter(&c.pacer_closed)==p0&&t.elapsed()<Duration::from_secs(5){std::thread::sleep(Duration::from_millis(10));}
@@ -680,7 +689,7 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     let mut l=small();l.rpc.batch_wall=Duration::from_secs(2);l.rpc.min_send_rate=1;l.rpc.grace=Duration::from_secs(600);l.rpc.work_deadline=Duration::from_secs(60);let r=start("wall2",l);
     let member=r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"data":"0x621000006000fd","gas":"0x1c9c380"},"latest"]}"#;let body=format!("[{}]",vec![member;10].join(","));
     let (w1,p0,s0)=(counter(&c.batch_wall_hits),counter(&c.pacer_closed),counter(&c.send_done));
-    let mut s=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();let t=Instant::now();
+    let mut s=unread_client(r.rpc);let t=Instant::now();
     write!(s,"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
     assert!(wait_until(20_000,||counter(&c.batch_wall_hits)>w1),"the wall closes the send");let at=t.elapsed();
     assert!(at>=Duration::from_millis(1900)&&at<Duration::from_secs(15),"at BATCH_WALL from read-end: {at:?}");
@@ -736,4 +745,22 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     // (Linux 16 KiB before autotuning, Windows 64 KiB).
     let want=if cfg!(target_os="linux"){2*pocold::rpc::SEND_SOCK_BUF}else{pocold::rpc::SEND_SOCK_BUF};
     assert_eq!(st["sendSockBuf"],want,"the RPC connection's kernel send buffer is SEND_SOCK_BUF");
+}
+/// Measurement only (no assertion on the platform): how much of an unread ~14 MiB answer the kernel
+/// takes for a client with the default receive window, one second after the answer is built. The
+/// server's SO_SNDBUF is set (SEND_SOCK_BUF); what remains is the client's receive window. Printed
+/// as ABSORB for the evidence; the answer is then read in full, and the pool must return to baseline.
+#[test] fn unread_default_client_absorption(){let _g=serial();
+    let mut l=small();l.rpc.write_deadline=Duration::from_secs(30);l.rpc.work_deadline=Duration::from_secs(60);let r=start("absorb",l);
+    let member=r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"data":"0x621000006000fd","gas":"0x1c9c380"},"latest"]}"#;
+    let body=format!("[{}]",vec![member;10].join(","));let base=pocold::rpc::RESP_MAX as u64;
+    let mut s=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();let _=s.set_nodelay(true);
+    write!(s,"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
+    let mut peak=0u64;let t=Instant::now();
+    while t.elapsed()<Duration::from_secs(3){peak=peak.max(stats(r.rpc)["heavyReserved"].as_u64().unwrap_or(0));if peak>base+(12<<20){break}std::thread::sleep(Duration::from_millis(5));}
+    std::thread::sleep(Duration::from_secs(1));let after=stats(r.rpc)["heavyReserved"].as_u64().unwrap_or(0);
+    let mut out=Vec::new();s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();let _=s.read_to_end(&mut out);
+    assert!(wait_until(10_000,||stats(r.rpc)["heavyReserved"].as_u64()==Some(base)),"the reservation is released after the answer");
+    println!("ABSORB {}",serde_json::json!({"os":std::env::consts::OS,"answerBytes":out.len(),"peakReserved":peak.saturating_sub(base),
+        "reservedOneSecondLater":after.saturating_sub(base),"kernelTookWholeAnswer":peak>base+(12<<20)&&after<=base}));
 }
