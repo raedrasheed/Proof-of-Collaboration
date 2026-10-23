@@ -44,7 +44,7 @@ output: `mutations-redb-3342af3.out`.
 
 ## Superseded partial runs (kept unchanged, `mutations-redb-superseded/`)
 
-- `mutations-redb-9ce5a7c-partial.out`: 21 of 34 controls ran before the run was stopped for the
+- `mutations-redb-9ce5a7c-partial.out`: 21 of the 26 controls then defined ran before the run was stopped for the
   second review's fixes. 20 were CAUGHT. **MR5-REPLAYPROTECT was not caught (mutant OK)**: the flood
   test then used siblings of an older block, so replay evicted those and never needed its
   child-record protection. Corrected in `f2477e7` (flood siblings of the head); MR5 is caught above.

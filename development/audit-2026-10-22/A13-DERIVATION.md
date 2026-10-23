@@ -214,6 +214,7 @@ reaches none of the caps, so it is not evidence about the worst case and is not 
 
 | run (commit) | workload | peak RSS / node (VmHWM) | threads / node | model total | RSS ÷ model |
 |---|---|---:|---:|---:|---:|
+| redb-final (`3c3792e`, D-REORG-REDB final code; `evidence/rss-redb-final.json`) | 90 s idle, then 71,466 light + 3,853 30M-gas eth_calls + 352 heavy batches + 193 transfers | 11.98–12.30 MB (idle 10.1–10.3 MB) | 26–29 | 5,627,687,516 B | 0.0021–0.0022 |
 | final (`d610492`, code tree-equal to `bb9d8b8`; `evidence/rss-final.json`) | 90 s idle, then 48,065 light + 2,287 30M-gas eth_calls + 242 heavy batches + 187 transfers; height 154, 4 peers each | 12.26–12.32 MB (idle 10.5–10.6 MB) | 26–29 | 5,623,469,297 B | 0.0022 |
 | b132a05 (`evidence/rss-b132a05.json`, before the second review's changes) | 39,815 light + 1,960 eth_calls + 194 batches + 187 transfers; height 157, 4 peers | 11.9–12.0 MB | — | 5,506,111,035 B | 0.0022 |
 | 10 full-cap state clones (`lp4-execution/tests/rss_snapshot.rs`) | 20,005 accounts, 115,536 slots | +181,104,640 B vs 10 × 40,006,582 B modelled | — | — | 0.45 |

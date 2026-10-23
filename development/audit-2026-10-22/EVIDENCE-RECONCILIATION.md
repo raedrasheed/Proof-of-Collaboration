@@ -1,4 +1,50 @@
-# Evidence reconciliation (round 2)
+# Evidence reconciliation (round 2, D-REORG-REDB final code)
+
+Commit roles for the final verification, and proof that every evidence commit carries the same built
+code (prototypes/ and .github/ trees), so the results apply to the final implementation.
+
+| role | commit |
+|---|---|
+| audited snapshot | `090eae4` |
+| last implementation commit (prototypes/ and .github/) | `3c3792e` |
+| integration-tested commit | `3c3792e` (evidence/integration.json, last run) |
+| witness-tested commit | `3c3792e` (evidence/witnesses-redb-final.log) |
+| real-Chrome-tested commit | `3c3792e` (in the integration) |
+| RSS-measured commit | `3c3792e` (evidence/rss-redb-final.json) |
+| mutation-controlled commit | `3342af3`, whose Rust sources equal `3c3792e`'s. The two prototypes/ trees differ only in `tests/e2e_devnet.py`, by `git diff 3342af3 3c3792e -- prototypes` |
+| spec-depth release runs | `441ce73` (evidence/spec-depth-441ce73.log). `prototypes/pocold/src/` is identical to `3c3792e`'s (`git diff 441ce73 3c3792e -- prototypes/pocold/src` is empty); the later commits only add and correct tests |
+
+The debug-phase-A run (assert-release, `--include-ignored`) also runs both spec-depth tests on
+`3c3792e` itself (REPAIR-REPORT §3b).
+
+The integration's `dirty: true` is one uncommitted evidence file: the previous run's append to
+`integration.json`, made by the failed run on 82ddb03 and committed later. No code was uncommitted. The
+witness log header's "2 uncommitted paths" are evidence files written by the integration and the RSS
+run.
+
+## Tree equivalence (tools/reconcile.py)
+
+```
+| role | commit | prototypes/ tree | .github/ tree | code equal to the implementation commit |
+|---|---|---|---|---|
+| last implementation commit | `3c3792e90eb3c31c83abc91f26e861c8510a824f` | `85e63f96f225` | `347e2324e80c` | yes |
+| integration-tested commit | `3c3792e90eb3c31c83abc91f26e861c8510a824f` | `85e63f96f225` | `347e2324e80c` | yes |
+| witness-tested commit | `3c3792e90eb3c31c83abc91f26e861c8510a824f` | `85e63f96f225` | `347e2324e80c` | yes |
+| real-Chrome-tested commit | `3c3792e90eb3c31c83abc91f26e861c8510a824f` | `85e63f96f225` | `347e2324e80c` | yes |
+| PR head | `7e786137d66799c0b468e86d1fed8d47b8d1322e` | `85e63f96f225` | `347e2324e80c` | yes |
+
+Commits after the implementation commit (1):
+
+- `7e786137d667` audit-repair r2: final-code evidence for 3c3792e — integration, RSS, witnesses: 3 paths, all docs/meta (no code)
+
+Result: every evidence commit and the head carry the implementation commit's code trees; later commits change development/ and root metadata (.gitignore) only.
+```
+
+---
+
+## History: reconciliation as recorded for `687ac38` (before D-REORG-REDB)
+
+### (round 2, 687ac38)
 
 Commit roles for this round's verification, and proof that every evidence commit carries the same
 built code (prototypes/ and .github/ trees), so the test results apply to the final implementation.

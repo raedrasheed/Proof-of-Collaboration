@@ -3,11 +3,11 @@
  "repairBranch": "claude/audit-repair-a01-a14",
  "pr": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/27",
  "commits": {
-  "prHead": "ec09120",
-  "lastImplementation": "687ac38",
-  "integrationTested": "c19dc8a",
-  "witnessTested": "ec09120",
-  "chromeTested": "c19dc8a"
+  "prHead": "latest commit on claude/audit-repair-a01-a14 (docs only after 3c3792e)",
+  "lastImplementation": "3c3792e",
+  "integrationTested": "3c3792e",
+  "witnessTested": "3c3792e",
+  "chromeTested": "3c3792e"
  },
  "axes": {
   "implemented": "YES | PARTIAL",
@@ -18,7 +18,7 @@
  },
  "witnessProvenance": "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)",
  "integration": {
-  "commit": "c19dc8a9f9fb38a41b7376e90152986965736d0d",
+  "commit": "3c3792e90eb3c31c83abc91f26e861c8510a824f",
   "result": "FAIL",
   "failuresOnlyExpectedPlatformLimitation": true,
   "suites": [
@@ -109,9 +109,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [],
@@ -155,9 +155,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [
@@ -202,9 +202,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [],
@@ -246,9 +246,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [
@@ -309,9 +309,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [
@@ -353,9 +353,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [
@@ -396,9 +396,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [],
@@ -433,9 +433,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [],
@@ -469,9 +469,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [],
@@ -505,9 +505,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [],
@@ -543,9 +543,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [],
@@ -579,9 +579,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [],
@@ -613,7 +613,11 @@
     "77d6984",
     "b132a05",
     "3c07cb5",
-    "a5e2517"
+    "a5e2517",
+    "66d69c6",
+    "f7c345b",
+    "54b2da1",
+    "9ce5a7c"
    ],
    "implemented": "YES",
    "verified": {
@@ -625,32 +629,35 @@
      "consensus::{a13_* (side states, deep-fork rebuild, boot bound with separate default/below/exact/network-scale assertions, pool caps), a13_bound_breakdown}",
      "evidence/rss-*.json (measured RSS of a 3-node devnet under load: not worst-case evidence)",
      "A13-DERIVATION.md §2a, §2b, §4 (each assumption ENFORCED / DERIVED / INSPECTION / OPEN)",
-     "consensus::{a_competing_branch_within_side_blocks_max_is_adopted, side_blocks_stay_within_the_cap_after_a_reorg_and_evicted_blocks_are_not_taken_again, replay_skips_a_duplicate_record} (mutations fail)"
+     "consensus::a_competing_branch_within_side_blocks_max_is_adopted",
+     "D-REORG-REDB (R_keep adoption): consensus::{adoption_at_the_spec_depth_2048_and_not_at_2049 and d133_tie_break_at_depth_400_holds_through_eviction_and_refetch (release, --ignored; evidence/spec-depth-9ce5a7c.log), r_keep_boundary_adopts_at_depth_r_keep_and_keeps_the_valid_chain_beyond, d133_tie_break_at_depth_holds_through_eviction_and_refetch, side_cap_holds_after_a_reorg_and_only_a_session_takes_an_evicted_block_again, a_session_branch_is_adopted_through_a_flood_of_competing_side_branches, replay_gives_a_reimported_block_a_new_import_seq, an_offloaded_block_is_served_viewed_and_re_executed_from_the_journal, a_crash_around_an_adoption_reopens_on_one_whole_chain, a_sync_session_refetches_an_evicted_branch_and_serves_it, a_long_catch_up_is_not_bounded_by_the_protected_branch_size, a_side_branch_below_the_k_hist_window_imports_without_rebuilding_each_parent, a_call_on_a_pruned_state_is_32017_not_an_empty_state_simulation}; mutation controls evidence/mutations-redb.json"
     ],
     "witnessOnRepair": "n/a (source review)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [
     "OPEN: gas monotonicity in the domain fields (§4.1)",
     "OPEN: R14/R19 timing is not a worst-case bound (§4.2)",
-    "OPEN: allocator overhead and fragmentation (§4.3b); the boot gate keeps a 1/8 reserve for them, which is a margin, not a proof; the 5.13 GiB model total counts requested bytes",
+    "OPEN: allocator overhead and fragmentation (§4.3b); the boot gate keeps a 1/8 reserve for them, which is a margin, not a proof; the 5.241 GiB model total (5,627,687,516 B) counts requested bytes",
     "OPEN: CPU costs (world-root rebuild, chain scans, pool re-execution, deep-fork rebuild) (§4.5–4.7)",
-    "OPEN: RetentionStore and the redb trie are not implemented (§4.10); the specification's node targets <= 750 MiB plus 192 MiB RPC (network.md:158), pocold's in-memory architecture needs 5.13 GiB of model",
+    "OPEN: RetentionStore and the redb trie are not implemented (§4.10); the specification's node targets <= 750 MiB plus 192 MiB RPC (network.md:158), pocold's in-memory architecture needs 5.241 GiB of model",
+    "CONDITION (not in the steady-state bound): open-time replay holds the whole journal (store::open, pre-existing) and a two-entry-per-record replay index",
     "INSPECTION only: transient-snapshot inventory, one EVM execution at a time, the answer-being-built tree ratio (§4.11, §4.13, §4.16)",
     "DERIVED with stated revm 19.7 facts: execution memory, operation classes (§4.4, §3a)",
     "No guaranteed process-memory ceiling exists (§2b)",
-    "OPEN (architectural): adoption of a heavier branch at depth <= R_keep (2048, network.md:144) is met only to SIDE_BLOCKS_MAX = 320 (raised from 256; a deeper branch is preserved in the journal, not adopted in one shot); full R_keep needs block bodies off the heap, proposed as D-REORG-REDB (§4.18)"
+    "FOLLOW-UP (local, no validity effect): journal compaction; the append-only journal grows with every import and re-fetch (D-REORG-REDB-DESIGN-FREEZE.md R2.6)"
    ],
    "blocked": {
     "environment": [
      "Windows on the exact commit: not run (no Windows host; the scoped workflow audit-r2-windows-verify.yml returns 404 on dispatch until its file is on main; see WINDOWS-VERIFICATION.md)"
     ],
     "decision": [
-     "D-A13-BUDGET (owner approved option 1: local limits reduced, 6 GiB kept)"
+     "D-A13-BUDGET (owner approved option 1: local limits reduced, 6 GiB kept)",
+     "D-REORG-REDB (owner approved 2026-10-23 as a storage repair for R_keep adoption; D133 and validity unchanged; §4.18 implemented)"
     ]
    },
    "accepted": "NOT ACCEPTED (owner acceptance pending)",
@@ -679,9 +686,9 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "c19dc8a",
-     "witness": "ec09120",
-     "realChrome": "c19dc8a"
+     "integration": "3c3792e",
+     "witness": "3c3792e",
+     "realChrome": "3c3792e"
     }
    },
    "partiallyResolved": [],

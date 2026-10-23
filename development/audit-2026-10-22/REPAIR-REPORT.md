@@ -14,11 +14,12 @@
 |---|---|
 | Audited snapshot | `090eae4dc059d1a7df330d9fe674c873ac515564` (branch `claude/affectionate-pascal-rjhh2k`) |
 | Repair branch, PR | `claude/audit-repair-a01-a14`, [PR #27](https://github.com/raedrasheed/Proof-of-Collaboration/pull/27) (draft) |
-| Last implementation commit (prototypes/ and .github/) | `687ac38` |
-| Integration-tested commit | `c19dc8a` (code = 687ac38) |
-| Witness-tested commit | `ec09120` (code = 687ac38) |
-| Real-Chrome-tested commit | `c19dc8a` (in the integration) |
-| PR head | latest commit on `claude/audit-repair-a01-a14` (docs-only after `687ac38`; see EVIDENCE-RECONCILIATION.md) |
+| Last implementation commit (prototypes/ and .github/) | `3c3792e` (D-REORG-REDB final code; before it, `687ac38`) |
+| Integration-tested commit | `3c3792e` |
+| Witness-tested commit | `3c3792e` |
+| Real-Chrome-tested commit | `3c3792e` (in the integration) |
+| Mutation-controlled commit | `3342af3` (Rust sources equal to `3c3792e`) |
+| PR head | latest commit on `claude/audit-repair-a01-a14` (docs-only after `3c3792e`; see EVIDENCE-RECONCILIATION.md) |
 | Tree equivalence | [EVIDENCE-RECONCILIATION.md](EVIDENCE-RECONCILIATION.md) |
 | Plan, decisions | [REPAIR-PLAN.md](REPAIR-PLAN.md) |
 | Per-finding status (five axes) | [FINDING-STATUS.json](FINDING-STATUS.json) |
@@ -126,6 +127,111 @@ implementation commit):
   all). Each has a positive control (the named test passes on clean code) and a mutant run that fails
   with the test actually executed; zero-matching-test runs are rejected. The classifier correction and
   the M9/M2 re-targeting (from the first FINAL attempt) are recorded in evidence/MUTATIONS-R2.md.
+
+## 3b. D-REORG-REDB (owner-approved): implementation and verification on the final code
+
+**What it is.** A storage repair for adopting a heavier branch at depth ≤ R_keep = 2048
+(network.md:144). D133, block validity, state roots, receipts and genesisHash are unchanged, and no
+retention limit is a validity rule. Design, proofs and resource bounds are in
+proposals/D-REORG-REDB-DESIGN-FREEZE.md, Revision 2:
+- R2.3 multi-branch adoption theorem;
+- R2.4 RPC scope matched to storage.md:70;
+- R2.5 replay equal to live;
+- R2.6 bounds;
+- R2.8 independent review.
+
+**Mechanism.**
+- Non-canonical blocks are offloaded to metadata, with their bytes in the journal. Canonical blocks stay
+  whole, so no RPC scope changed.
+- At most R_keep unprotected side blocks are kept (D118's one per height).
+- Locator sync sessions over Status `totalWork` re-fetch evicted branches. Their non-canonical blocks
+  are protected, up to 2·R_keep (network.md:27).
+- Adopted blocks are restored by root-checked re-execution.
+- Replay replays every record. A re-import gets a new importSeq (consensus.md:205), a block with a
+  pending child record is protected, and the largest R_keep the directory has used is applied.
+- New blocks at or below head − R_keep are refused before validation, as local retention
+  (governance.md:200), never as invalid.
+- `eth_call`/`eth_estimateGas` on a pruned state now answer −32017 like the state reads (consensus.md
+  §10). This was a pre-existing inconsistency found during the RPC check.
+- `pocol_status` gains additive `retention` and sync counters.
+
+**Why a metadata cap ≥ R_keep is not enough for several branches.** The cap evicts the lowest
+cumulative work first, which is exactly the start of a deep competing branch. The guarantee therefore
+rests on protected re-fetch (R2.1, R2.3), and the tests below exercise it with a flood past the cap.
+
+**Defects found and fixed during verification** (each with a test and a mutation control):
+- the spec-depth run exposed quadratic rebuilds of deep side branches, because the K_hist prune also
+  dropped side states (`9ce5a7c`);
+- an independent agent review (R2.8) found two HIGH session-liveness bugs. A block removed at once and
+  a duplicate both counted as progress, and a Hello started a session at once. It also found three LOW
+  items: orphaned session blocks, replay copy and offset, and R_keep persistence (`441ce73`). All fixed;
+- a mutation control showed the flood test did not make replay protection load-bearing (`f2477e7`);
+- another showed retain()'s boundary was masked by the import-time refusal (`3342af3`).
+
+**Results, separated by outcome:**
+- **PASS, release, spec depth with the default limits** (`--ignored`, evidence/spec-depth-441ce73.log;
+  same `src/` as 3c3792e):
+  - `adoption_at_the_spec_depth_2048_and_not_at_2049`: a 611-block heavier branch forked 2048 deep is
+    adopted and survives restart. Forked 2049 deep it is not adopted and not marked invalid. 51.8 s;
+  - `d133_tie_break_at_depth_400_holds_through_eviction_and_refetch`: signed-before-fallback wins
+    400 deep, the smaller importSeq wins between two signed branches, and X is evicted (784) then
+    re-fetched and adopted. 19.0 s.
+- **PASS, release, the D-REORG-REDB acceptance tests** (in pocold 123):
+  - R_keep boundary and retain boundary;
+  - side cap with solicited-only re-fetch;
+  - a multi-branch flood during a session;
+  - replay importSeq and largest-R_keep rules;
+  - off-heap fidelity;
+  - crash around an adoption (fsynced-uncommitted and torn records);
+  - a 3-node TCP re-fetch with RPC compared block by block and a third node served by the restored
+    node;
+  - long catch-up;
+  - a false-Status peer that cannot hold the session;
+  - out-of-order session blocks;
+  - linear deep side import;
+  - pruned-state eth_call.
+- **Mutation controls (evidence/MUTATIONS-REDB.md): 30 of 30 caught.** These are 19 D-REORG-REDB
+  controls plus the 11 earlier controls that still apply (the 687ac38 controls on the removed 320-cap
+  tests are superseded). Each control passed on clean code, and its mutant failed with the test run.
+  The superseded partial runs are kept unchanged:
+  - one uncaught control (MR5) on 9ce5a7c;
+  - one compile-fail and one uncaught control (MR3, MR7) on 441ce73.
+- **Integration on 3c3792e (evidence/integration.json, last run):** every suite PASS except lp1
+  `store_journal`, the expected Windows-only limitation (result FAIL;
+  `failuresOnlyExpectedPlatformLimitation = true`):
+  - lp4 162, pocold 123 (2 ignored: the spec-depth tests above), extension 234;
+  - 3-node devnet 17/17, website 20;
+  - real Chrome 79, integrated Chrome 18.
+- **FAIL, recorded and classified: the earlier integration on 82ddb03 (code 3342af3).**
+  - e2e-devnet failed at "heal: c reorganizes". c's isolated branch happened to be heavier, so a and
+    b reorganized to it and all nodes converged, which is correct by D133. The check had assumed the
+    a/b side was always heavier.
+  - A standalone rerun failed "every miner produced blocks": the counter restarts with its process.
+    That check also fails in 2 of 4 runs on the pre-change 687ac38.
+  - Both checks now assert the protocol property (evidence/e2e-devnet-classification/, original logs
+    kept).
+- **Witnesses on 3c3792e (evidence/witnesses-redb-final.log):** 17 observations, all NOT_REPRODUCED;
+  15 positive controls OK, 0 MISSING, 0 erroneous REPRODUCED.
+- **Measured RSS on 3c3792e (evidence/rss-redb-final.json):** 11.98–12.30 MB VmHWM per node (26–29
+  threads) under 71,466 light, 3,853 30M-gas, 352 batch and 193 transfer requests. That is 0.21–0.22%
+  of the model, a measurement and not the bound.
+- **A13 model on the final code (evidence/a13-breakdown-redb.json):** 5,627,687,516 B. The gate needs
+  6,431,642,876 B of 6,442,450,944 B; reserve 803,955,360 B, unused 10,808,068 B (A13-DERIVATION §2a-redb,
+  §2b).
+- **Debug on 3c3792e** (evidence/debug-redb/; the 687ac38 partial record, 28 of 31 in pure debug, is
+  kept unchanged as PARTIAL in evidence/debug-complete-687ac38.json):
+  - phase A, assert-release (release with debug assertions and overflow checks), each consensus test
+    alone including the two spec-depth tests: **44 of 44 PASS**;
+  - phase B, pure debug, each consensus test alone: **in progress**;
+  - phase C, the other pocold binaries in pure debug: **pending**. Until they report, debug
+    verification of the final code is not complete. lp4-execution is unchanged since 687ac38 (its tree
+    is identical), and its full debug run there was 162 PASS.
+
+**Still open around R_keep:**
+- journal compaction;
+- the CPU cost of a deep reorg (fork-point state rebuilt from genesis below K_hist);
+- the open-time replay transient;
+- Windows (not run).
 
 ## 4. Independent review
 
