@@ -78,7 +78,19 @@ pub struct Entry{
     pub drawn:Address,
     /// This block's nonce ranges (owner lookup for evidence without old state).
     pub ranges:Vec<(Address,u128,u128)>,
+    /// D-REORG-REDB off-heap block store: the journal frame offset of this block's record, set by
+    /// the node after `journal.append` (and recomputed on replay). `None` for a bare chain with no
+    /// journal and for genesis (never journaled). Only a block with `body_off = Some` may be offloaded.
+    pub body_off:Option<u64>,
+    /// When true, `body`, `receipts`, `tx_hashes` and `header.encoded` have been dropped (empty) and
+    /// are read on demand from the journal at `body_off`. State residence stays governed by `pruned`.
+    pub offloaded:bool,
 }
+
+/// Source of a block's bytes for the off-heap store: given a journal frame offset (an `Entry.body_off`),
+/// returns (headerBytes, bodyBytes, parentResultBytes). Implemented by the node over `store::Journal`
+/// (`read_at`); a bare chain passes `None` and never offloads, so it is never called there.
+pub trait BlockBytes{fn record_at(&self,off:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8>),Reject>;}
 
 /// Everything a child of `p` at attempt `a` needs, derived only from p and its state.
 pub struct ChildCtx{
@@ -140,7 +152,7 @@ impl Chain{
         let mut h=blank_header();h.chain_id=spec.chain_id();h.genesis_hash=gh;h.ts=cp.g_ts;h.target=spec.target_g();
         let genesis=Entry{hash:gh,header:h,body:Body::default(),height:0,parent:None,total_work:U256::ZERO,import_seq:0,signed:false,ts:cp.g_ts,
             target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis().state().clone(),is_final:false,result:None,
-            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![]};
+            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
         let k_hist=u64::from(spec.local().k_hist);
         Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0}
@@ -308,7 +320,7 @@ impl Chain{
             import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,
             result:Some(ParentResult{block_hash:B256::from(hash),winner:addr(&owner),shares}),receipts:out.receipts,tx_hashes,
             cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,cum_log_bytes:p.cum_log_bytes+out.log_bytes,pruned:false,drawn:ctx.proposer,
-            ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect()};
+            ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect(),body_off:None,offloaded:false};
         Ok((entry,ctx))
     }
 
@@ -436,18 +448,31 @@ impl Chain{
     pub fn side_counts(&self)->(usize,usize){let side=self.blocks.values().filter(|e|e.height>0&&!self.is_canonical(&e.hash));let (mut n,mut s)=(0,0);for e in side{n+=1;if !e.pruned{s+=1}}(n,s)}
     /// TrieRebuild: re-executes from the nearest retained ancestor and checks
     /// every stateRoot against the committed header.
-    pub fn ensure_state(&mut self,hash:&[u8;32])->Result<(),Reject>{
+    pub fn ensure_state(&mut self,hash:&[u8;32])->Result<(),Reject>{self.ensure_state_with(hash,None)}
+    /// As `ensure_state`, but given a `BlockBytes` source so a block whose body was offloaded
+    /// (D-REORG-REDB) is re-executed from its journal record. A bare chain (nothing offloaded) passes
+    /// `None`. A pruned block reached on the rebuild path that is offloaded but has no source, or no
+    /// `body_off`, is an error — never a silent empty body.
+    pub fn ensure_state_with(&mut self,hash:&[u8;32],src:Option<&dyn BlockBytes>)->Result<(),Reject>{
         let mut path=vec![];let mut cur=*hash;
         while self.blocks.get(&cur).map(|e|e.pruned).unwrap_or(false){path.push(cur);cur=self.blocks[&cur].parent.ok_or_else(||Reject::Block("rebuild root".into()))?;}
         if path.is_empty(){return Ok(())}
         // A13: rolling re-execution. Only the block being extended holds a state; intermediate
         // states are dropped, so a rebuild of any depth keeps at most two snapshots alive.
+        let body_max=self.spec.cp().BODY_MAX as usize;
         let mut p=self.blocks.get(&cur).ok_or_else(||Reject::Block("rebuild root".into()))?.clone();
         for h in path.into_iter().rev(){
             let e=self.blocks[&h].clone();
-            let ctx=self.child_ctx(&p,e.header.a)?;let effects=self.evidence_effects(&p,&e.body,e.height)?;
+            // Off-heap body: fetch and decode from the journal when this block was offloaded.
+            let body=if e.offloaded{
+                let off=e.body_off.ok_or_else(||Reject::Block("offloaded block without body_off".into()))?;
+                let src=src.ok_or(Reject::NeedsRebuild(h))?;
+                let (_,bb,_)=src.record_at(off)?;
+                Body::decode(&bb,body_max).map_err(|_|Reject::Block("offloaded body decode".into()))?
+            }else{e.body.clone()};
+            let ctx=self.child_ctx(&p,e.header.a)?;let effects=self.evidence_effects(&p,&body,e.height)?;
             let proposer=if e.signed{Proposer::Signed(Address::from_slice(&e.header.proposer))}else{Proposer::Fallback};
-            let out=self.execute(&p,&ctx,e.ts,proposer,&e.body,effects)?;
+            let out=self.execute(&p,&ctx,e.ts,proposer,&body,effects)?;
             if out.state_root.0!=e.header.state_root{return blk("rebuild stateRoot mismatch")}
             // Re-derive ParentResult from the header and the rebuilt assignment (parentResultMismatch).
             let owner=|n:u64|ctx.assignment.owner(n).map(|a|addr(&a));

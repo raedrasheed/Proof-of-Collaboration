@@ -34,7 +34,7 @@ const MAGIC:&[u8;8]=b"POCOLJ2\n";
 const MAGIC_V1:&[u8;8]=b"POCOLJ1\n";
 pub const MAX_RECORD:usize=4*1024*1024;
 const HDR:usize=8;            // len + lenCheck
-const OVERHEAD:usize=HDR+32+1; // header + digest + marker
+pub const OVERHEAD:usize=HDR+32+1; // header + digest + marker (frame bytes beyond the payload)
 const SLOT:usize=64;
 /// Offset of the second commit slot (its own 4 KiB sector).
 const SLOT_STRIDE:usize=4096;

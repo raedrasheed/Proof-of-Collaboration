@@ -11,6 +11,14 @@ use pocol_lp4_execution::{apply::ParentResult,txsign::Key,wire,native::{self,Nat
 use revm::{InMemoryDB,primitives::{Address,B256,U256}};
 use crate::{chain::{self,Chain,ChildCtx,Entry,Reject,Spec},miner::{self,MinerEvent,MinerHandle},net::{self,Msg,NetEvent,Peer,PeerId},store::{self,Journal},types::*};
 
+/// D-REORG-REDB: the journal is the off-heap block store. `record_at` reads a block record back by
+/// its frame offset for on-demand body fetch (fork choice and retention stay on resident metadata).
+impl chain::BlockBytes for Journal{
+    fn record_at(&self,off:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8>),Reject>{
+        self.read_at(off).map_err(|e|Reject::Block(format!("journal read_at {off}: {e:?}")))
+    }
+}
+
 pub struct Config{
     pub dir:PathBuf,
     pub name:String,
@@ -128,7 +136,9 @@ impl Node{
         let binding=spec.genesis_hash();
         let rec=store::open(&cfg.dir,&binding).map_err(|e|format!("store: {e:?}"))?;
         let mut chain=Chain::new(spec);
+        let mut rec_off=40u64; // first record frame starts after MAGIC(8)+binding(32)
         for (i,payload) in rec.payloads.iter().enumerate(){
+            let this_off=rec_off; rec_off+=(payload.len()+store::OVERHEAD) as u64;
             let (hb,bb,rb)=store::decode_record(payload).map_err(|e|format!("record {i}: {e}"))?;
             let header=decode_header(&hb).map_err(|e|format!("record {i}: {e}"))?;
             let body=Body::decode(&bb,chain.spec.cp().BODY_MAX as usize).map_err(|e|format!("record {i}: {e}"))?;
@@ -139,12 +149,13 @@ impl Node{
             // A record of a block retention removed, or of its descendant, is skipped (live import
             // refused it or kept it only until then); a duplicate is the same block again.
             if chain.was_evicted(&block.hash())||chain.was_evicted(&block.header.parent_hash){continue}
-            let (entry,_)=match chain.validate(&block,None,0){
+            let (mut entry,_)=match chain.validate(&block,None,0){
                 Err(Reject::Duplicate)=>continue,
-                Err(Reject::NeedsRebuild(p))=>{chain.ensure_state(&p).map_err(|e|format!("replay {i}: rebuild {e:?}"))?;chain.validate(&block,None,0).map_err(|e|format!("replay {i}: {e:?}"))?}
+                Err(Reject::NeedsRebuild(p))=>{chain.ensure_state_with(&p,Some(&rec.journal)).map_err(|e|format!("replay {i}: rebuild {e:?}"))?;chain.validate(&block,None,0).map_err(|e|format!("replay {i}: {e:?}"))?}
                 r=>r.map_err(|e|format!("replay {i}: {e:?}"))?,
             };
             if result_bytes(&entry.result)!=rb{return Err(format!("parentResultMismatch at record {i}"))}
+            entry.body_off=Some(this_off);
             chain.insert(entry);chain.retain();
         }
         chain.retain();
@@ -227,8 +238,8 @@ impl Node{
         if self.chain.was_evicted(&hash){return Err(Reject::Evicted)}
         let mut res=self.chain.validate(&b,Some(now_s()),self.capital_phi());
         if let Err(Reject::NeedsRebuild(p))=&res{let p=*p;self.log("TrieRebuild for a fork below the K_hist window");
-            if let Err(e)=self.chain.ensure_state(&p){return Err(e)}res=self.chain.validate(&b,Some(now_s()),self.capital_phi());}
-        let (entry,_)=match res{
+            if let Err(e)=self.chain.ensure_state_with(&p,Some(&self.journal)){return Err(e)}res=self.chain.validate(&b,Some(now_s()),self.capital_phi());}
+        let (mut entry,_)=match res{
             Ok(v)=>v,
             Err(Reject::UnknownParent)=>{
                 let parent=b.header.parent_hash;
@@ -242,7 +253,8 @@ impl Node{
         };
         self.observe_template(&b.header);self.observe_win(&b.header);
         let record=store::encode_record(&b.header.encoded,&b.body.encode(),&result_bytes(&entry.result));
-        if let Err(e)=self.journal.append(&record){self.log(&format!("FATAL journal append: {e:?}"));std::process::exit(70);}
+        // D-REORG-REDB: record the journal frame offset so this block's body can be read back off-heap.
+        match self.journal.append(&record){Ok(off)=>entry.body_off=Some(off),Err(e)=>{self.log(&format!("FATAL journal append: {e:?}"));std::process::exit(70);}}
         self.received.insert(hash,now_ms());
         if self.received.len()>RECEIVED_MAX{let keep=self.chain.head().height.saturating_sub(8);let blocks=&self.chain.blocks;self.received.retain(|h,_|blocks.get(h).map_or(false,|e|e.height>=keep));}
         let old_head=self.chain.head;
