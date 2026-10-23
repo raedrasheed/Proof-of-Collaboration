@@ -1,10 +1,13 @@
-# RpcGuard in pocold: three items that need a normative decision
+# RpcGuard in pocold: four items that need a normative decision
 
-**Status: PROPOSED — not approved.** Nothing in this document is implemented. P1 and P2 are open
-limits. P3 records how pocold reads a gap in the text: pocold keeps its pre-existing behaviour there
-and introduces nothing new.
+**Status: PROPOSED — not approved.** None of the options below is adopted. P1 and P2 are open
+limits; no option of either is implemented. P3 records how pocold reads a gap in the text: option A
+is the running behaviour pending a decision (round 2 added code that encodes it, the `EFFECTFUL`
+exemption in rpc.rs `member`; it keeps the behaviour pocold had before RpcGuard and under stage A).
+P4 (round 3) records the methods pocold serves outside the classification table: pocold keeps
+serving them pending a decision, and no option is implemented.
 
-All three concern RpcGuard, a local service policy (D87, consensus.md §13). None touches validity,
+All four concern RpcGuard, a local service policy (D87, consensus.md §13). None touches validity,
 fork choice, GenesisSpec, CP values or any protocol constant. Each option would still fix
 RPC-visible behaviour beyond what network.md:182–330 says, so under the audit rules each is a
 proposal only.
@@ -109,11 +112,16 @@ expired. eth_sendRawTransaction (a light method) pools a transaction; pocol_subm
 pocold) submits a share.
 
 pocold checks the deadline before such a method runs; past the deadline, the method does not run and
-the answer is −32020. For every read-only method, pocold also checks once the answer is encoded and
-replaces a late result with −32020. That check is not applied to the two effectful methods. A late
-answer to an effectful method therefore keeps its result. This is the behaviour pocold had before
-RpcGuard (no deadline at all) and under stage A (entry check only), so the fix round introduces no new
-semantics for these methods.
+the answer is −32020. For every other method, pocold also checks once the answer is encoded and
+replaces a late answer with −32020 (round 2: a late result; round 3, review RG2-M1: a late result or
+error). That check is not applied to the two effectful methods. A late answer to an effectful method
+therefore keeps its result. This is the behaviour pocold had before RpcGuard (no deadline at all) and
+under stage A (entry check only), so the fix rounds introduce no new semantics for these methods.
+
+**Running behaviour (second review, m7).** Option A below is what pocold runs, pending a decision. It
+is encoded in code since round 2 (`const EFFECTFUL` in rpc.rs, which `member` exempts from the
+post-encoding check), so choosing B would change that code: remove the exemption and add a test that
+a transaction pooled after its deadline is answered −32020.
 
 ### Options
 
@@ -127,3 +135,60 @@ semantics for these methods.
 > For a method whose effect is applied when it runs (eth_sendRawTransaction, pocol_submitShare), the
 > COMPUTE_DEADLINE is checked before the effect; once the effect is applied, its result is answered.
 
+## P4. Methods outside the classification table (network.md:210)
+
+Added in round 3, after the second review of round 2 (finding RG2-M4).
+
+### What the approved text says, and what pocold does
+
+> الطريقة غير المدرجة: −32601 قبل القبول، وإضافتها تتطلب سطرًا في الجدول واجتياز RG13.
+
+"An unlisted method: −32601 before admission; adding one requires a line in the table and passing
+RG13."
+
+The table (network.md (ب)) lists the light and heavy methods. pocold differs in two ways.
+
+1. **It serves nine methods that are not in the table**, on the heavy lane (anything not light is
+   heavy), after admission, with a RESP_MAX reservation and the heavy COMPUTE_DEADLINE:
+
+   | method | who relies on it |
+   |---|---|
+   | pocol_status | the extension's service worker (pocol-extension/src/sw.js, `rpc('pocol_status')`), scripts/devnet.py, tests/e2e_devnet.py, tests/e2e_site.py, the pocold test suites |
+   | pocold_rpcCounters | the pocold test suites (pocold's own counters, a superset of pocol_getRpcStats) |
+   | pocol_getBlockRlp | tests/e2e_devnet.py |
+   | pocol_getMiners | no caller in the repository (a devnet inspection method) |
+   | net_listening, net_peerCount, eth_syncing, eth_mining, eth_accounts | none in the repository; standard Ethereum JSON-RPC methods that generic tools probe (the extension answers eth_accounts itself and never forwards it) |
+
+2. **A method it does not know is −32601 after admission, not before.** The same holds for the
+   listed methods pocold does not implement: eth_getProof, and pocol_getTiming, pocol_getTarget,
+   pocol_getCaps, pocol_syncStatus, pocol_getPot, pocol_getSettlement, pocol_getBurnTotals,
+   pocol_getEscrow, pocol_getRetention, pocol_getClosing, pocol_getAssignment, pocol_getMinerSet
+   (pocol_submitShare is not an RPC method in pocold; its miner submits in process). The answer is
+   the right code; what differs is that the request waits for admission (and can be answered busy
+   instead) and holds a reservation while it is answered.
+
+Round 3 changes neither: refusing the methods in point 1 would break the extension, the devnet
+scripts and the tests, and moving the −32601 before admission changes what a client sees under load.
+RPCGUARD.md marks the two classification rows PARTIAL for this reason.
+
+### Options
+
+| option | rule | effect on pocold's tools | RPC-visible change |
+|---|---|---|---|
+| A (current) | serve the nine methods as heavy; −32601 for unknown methods after admission | none | none |
+| B | add a table line for each served method (network.md (ب)), with its class and its worst encoded answer, and pass RG13 for the light ones; −32601 before admission for every other method | none, once the lines exist | an unknown method is −32601 at once, never busy |
+| C | a pocold-local "inspection" class, outside RpcGuard's table, served only without an Origin header (as ORIGIN_DENY), so a site cannot reach it; −32601 before admission otherwise | the extension's pocol_status call needs a table line or must move to an approved method | sites lose pocol_status and the pocold_* methods |
+| D | refuse every unlisted method (the literal reading) | breaks the extension, scripts/devnet.py, tests/e2e_devnet.py, tests/e2e_site.py and the test suites | the nine methods disappear |
+
+### Proposed table lines, if B is chosen
+
+The worst encoded answers below are pocold's, by inspection of rpc.rs; RG13 would measure them.
+
+- light (≤ 4 KiB): net_listening, net_peerCount, eth_syncing, eth_mining, eth_accounts (pocold
+  answers `[]`);
+- heavy: pocol_status (its answer includes the admission report and peer list), pocold_rpcCounters,
+  pocol_getBlockRlp (≤ 2 × the block's encoding + 1 KiB), pocol_getMiners (one entry per registry record).
+
+Tests it would need: every listed method answers with its class's lane and limits; an unknown method
+is −32601 without waiting for admission (while the consensus thread is held, it is answered at once,
+never busy); the extension's e2e and tests/e2e_devnet.py stay green.
