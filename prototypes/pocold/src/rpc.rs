@@ -137,19 +137,6 @@ pub mod sockbuf{
         let r=unsafe{getsockopt(s.as_raw_socket() as usize,SOL_SOCKET,SO_SNDBUF,&mut v as *mut i32 as *mut u8,&mut len)};
         if r==0{Ok(v.max(0) as usize)}else{Err(std::io::Error::last_os_error())}
     }
-    /// SO_RCVBUF, for clients (tests): it bounds the receive window, which Windows loopback otherwise
-    /// grows to hold a whole unread answer (Windows runs 3 and 5).
-    #[cfg(unix)] pub fn set_recv(s:&TcpStream,n:usize)->std::io::Result<()>{
-        use std::os::unix::io::AsRawFd;let v=n as libc::c_int;
-        let r=unsafe{libc::setsockopt(s.as_raw_fd(),libc::SOL_SOCKET,libc::SO_RCVBUF,&v as *const libc::c_int as *const libc::c_void,std::mem::size_of::<libc::c_int>() as libc::socklen_t)};
-        if r==0{Ok(())}else{Err(std::io::Error::last_os_error())}
-    }
-    #[cfg(windows)] pub fn set_recv(s:&TcpStream,n:usize)->std::io::Result<()>{
-        use std::os::windows::io::AsRawSocket;use windows_sys::Win32::Networking::WinSock::{setsockopt,SOL_SOCKET,SO_RCVBUF};let v=n as i32;
-        let r=unsafe{setsockopt(s.as_raw_socket() as usize,SOL_SOCKET,SO_RCVBUF,&v as *const i32 as *const u8,std::mem::size_of::<i32>() as i32)};
-        if r==0{Ok(())}else{Err(std::io::Error::last_os_error())}
-    }
-    #[cfg(not(any(unix,windows)))] pub fn set_recv(_:&TcpStream,_:usize)->std::io::Result<()>{Err(std::io::Error::new(std::io::ErrorKind::Unsupported,"SO_RCVBUF"))}
     #[cfg(not(any(unix,windows)))] pub fn set(_:&TcpStream,_:usize)->std::io::Result<()>{Err(std::io::Error::new(std::io::ErrorKind::Unsupported,"SO_SNDBUF"))}
     #[cfg(not(any(unix,windows)))] pub fn get(_:&TcpStream)->std::io::Result<usize>{Err(std::io::Error::new(std::io::ErrorKind::Unsupported,"SO_SNDBUF"))}
 }
@@ -243,7 +230,11 @@ fn pace_write(s:&mut TcpStream,body:&[u8],l:&Limits,batch_from:Option<Instant>)-
     let fail=|m:&'static str|Err(std::io::Error::new(std::io::ErrorKind::TimedOut,m));
     while a<size{
         while pi<2&&off>=parts[pi].len(){pi+=1;off=0;}
-        let blocked=match s.write(&parts[pi][off..]){
+        // At most SEND_SOCK_BUF per write: Windows takes a whole send() whenever its buffer is not yet
+        // full when the call starts (an unread 14 MiB answer in one call, Windows runs 3, 5 and 7), so
+        // SO_SNDBUF bounds the kernel's share only if no single write exceeds it.
+        let end=parts[pi].len().min(off+SEND_SOCK_BUF);
+        let blocked=match s.write(&parts[pi][off..end]){
             Ok(0)=>return Err(std::io::Error::new(std::io::ErrorKind::WriteZero,"peer closed")),
             Ok(n)=>{a+=n;off+=n;false}
             Err(e) if e.kind()==std::io::ErrorKind::WouldBlock=>true,

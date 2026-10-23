@@ -230,3 +230,28 @@ Change in the next commit:
 - A new measurement, `unread_default_client_absorption`, records the default-window behavior on every
   platform (ABSORB line, `kernelTookWholeAnswer`) without asserting it. The Windows runs keep the
   limitation visible.
+
+### Run 6: 2a226d8 (evidence-only commit, code as in be95e26)
+- Run: https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/39995905345.
+- Same code as Run 5. Not counted as new verification, and its artifact is not copied.
+
+### Run 7: 49508a5 (client SO_RCVBUF = 64 KiB in the three tests): FAIL, the same 3 tests
+- Run: https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40000115736.
+- Artifact zip SHA-256 `53916781c1b8cef6a7c58e0cb20a98e7150d8f034520c31a0e82d88b80065be6`, copied to
+  `evidence/windows-49508a5/`.
+- lp1 (12 + 150), lp4 (168) and the extension PASS. pocold 149 passed, 3 failed: the same three, with
+  the same messages.
+- **This refutes Run 5's diagnosis.** Bounding the client's receive window did not stop the absorption,
+  so the receive window is not where the answer goes.
+- Corrected cause: Windows (AFD) accepts a whole `send()` whenever the socket's buffer is not yet full
+  when the call starts, so SO_SNDBUF is checked before the copy, not against its size. pocold's pacer
+  passed the whole remaining answer (~14 MiB) to one `write`.
+- Fix (next commit):
+  - `pace_write` writes at most SEND_SOCK_BUF per call.
+  - The tests go back to clients with default socket options, which is the realistic case. The
+    client-side SO_RCVBUF helper is removed.
+  - `unread_default_client_absorption` now writes its ABSORB line straight to stdout, so it reaches the
+    log of a passing run (libtest captures `println!` output for passing tests).
+- Linux after the fix: the five affected tests pass 3 times out of 3
+  (`evidence/rpcguard-integration/write-cap-tests-3x-linux.log`), with ABSORB `kernelTookWholeAnswer:false`.
+  Windows: the next run.

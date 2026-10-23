@@ -57,15 +57,12 @@ fn rpc(port:u16,body:&str,origin:bool)->(u16,String){
     let mut out=String::new();let _=s.read_to_string(&mut out);
     let code=out.get(9..12).and_then(|c|c.parse().ok()).unwrap_or(0);(code,out.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
 }
-/// A client that does not read and whose kernel does not take the answer for it: SO_RCVBUF bounds its
-/// receive window. With the default window, Windows loopback takes a whole ~14 MiB unread answer
-/// within a second (Windows runs 3 and 5), so an unread client cannot be told from a fast one there
-/// by the bytes the server's socket accepted. These tests check pocold's pacer, wall and
-/// reservations, so they need the bounded window; the default is measured, not asserted
-/// (`unread_default_client_absorption`).
-fn unread_client(port:u16)->TcpStream{
-    let s=TcpStream::connect(("127.0.0.1",port)).unwrap();pocold::rpc::sockbuf::set_recv(&s,64*1024).unwrap();let _=s.set_nodelay(true);s
-}
+/// A client that does not read, with the default socket options. pocold must bound what the kernel
+/// takes for it: SO_SNDBUF (SEND_SOCK_BUF) and writes of at most SEND_SOCK_BUF. Before the write cap,
+/// Windows loopback took a whole ~14 MiB unread answer within a second (Windows runs 3, 5 and 7), so
+/// an unread client could not be told from a fast one by the bytes the server's socket accepted.
+/// `unread_default_client_absorption` measures it on every platform.
+fn unread_client(port:u16)->TcpStream{let s=TcpStream::connect(("127.0.0.1",port)).unwrap();let _=s.set_nodelay(true);s}
 fn small()->Limits{
     let mut l=Limits::default();
     l.net=net::Limits{peers_max:6,handshaking_max:3,hello_deadline:Duration::from_millis(500),frame_deadline:Duration::from_millis(500),
@@ -746,9 +743,8 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     let want=if cfg!(target_os="linux"){2*pocold::rpc::SEND_SOCK_BUF}else{pocold::rpc::SEND_SOCK_BUF};
     assert_eq!(st["sendSockBuf"],want,"the RPC connection's kernel send buffer is SEND_SOCK_BUF");
 }
-/// Measurement only (no assertion on the platform): how much of an unread ~14 MiB answer the kernel
-/// takes for a client with the default receive window, one second after the answer is built. The
-/// server's SO_SNDBUF is set (SEND_SOCK_BUF); what remains is the client's receive window. Printed
+/// Measurement only (no assertion on the platform): whether the kernel takes a whole unread ~14 MiB
+/// answer for a client with default socket options, one second after the answer is built. Printed
 /// as ABSORB for the evidence; the answer is then read in full, and the pool must return to baseline.
 #[test] fn unread_default_client_absorption(){let _g=serial();
     let mut l=small();l.rpc.write_deadline=Duration::from_secs(30);l.rpc.work_deadline=Duration::from_secs(60);let r=start("absorb",l);
@@ -761,6 +757,8 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     std::thread::sleep(Duration::from_secs(1));let after=stats(r.rpc)["heavyReserved"].as_u64().unwrap_or(0);
     let mut out=Vec::new();s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();let _=s.read_to_end(&mut out);
     assert!(wait_until(10_000,||stats(r.rpc)["heavyReserved"].as_u64()==Some(base)),"the reservation is released after the answer");
-    println!("ABSORB {}",serde_json::json!({"os":std::env::consts::OS,"answerBytes":out.len(),"peakReserved":peak.saturating_sub(base),
+    // Written to stdout directly, not through println!, so the line reaches the log of a passing run too.
+    let line=format!("ABSORB {}\n",serde_json::json!({"os":std::env::consts::OS,"answerBytes":out.len(),"peakReserved":peak.saturating_sub(base),
         "reservedOneSecondLater":after.saturating_sub(base),"kernelTookWholeAnswer":peak>base+(12<<20)&&after<=base}));
+    let _=std::io::Write::write_all(&mut std::io::stdout(),line.as_bytes());
 }
