@@ -666,6 +666,13 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     let l=pocold::single_host_local();
     let d=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits::default(),2).unwrap();
     assert_eq!(d.items.iter().map(|x|x.1).sum::<u128>(),d.total);
+    // RpcGuard review 2 (m2): the total is pinned, so a term cannot change unnoticed (round 3: the
+    // small-answer term counts SMALL_REPLY_PEAK per connection, +4,082,688 B). Some terms are type sizes
+    // (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
+    // target checks that it boots within the budget with its reserve.
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,5_581_426_268,"the A13 model total changed");}
+    assert!(pocold::resources::budget_required(d.total).unwrap()<=u128::from(pocold::node::MEM_BUDGET));
+    assert_eq!(d.items.iter().find(|x|x.0.starts_with("rpc/small answers")).map(|x|x.1),Some(32*pocold::rpc::SMALL_REPLY_PEAK as u128));
     println!("A13-BREAKDOWN {}",serde_json::json!({"total":d.total.to_string(),"items":d.items.iter().map(|(k,v)|serde_json::json!([k,v.to_string()])).collect::<Vec<_>>()}));
 }
 

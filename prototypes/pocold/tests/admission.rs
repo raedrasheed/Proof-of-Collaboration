@@ -71,12 +71,30 @@ fn base()->DevnetConfig{DevnetConfig::new(777930,1_700_000_000,&["a","b","c"])}
     assert_eq!(v.send_sock_buf,pocold::rpc::SEND_SOCK_BUF as u64,"SO_SNDBUF is set on every RPC connection");
     assert_eq!((v.heavy_resp_mem,v.rate,v.bucket_cap,v.min_send_rate,v.timer_eps_ms,v.queue_wait_ms),(48<<20,20,20,65536,1,2000),"enforced fields carry their running values");
     assert_eq!((v.req_buf,v.conn_buf),(pocold::rpc::REQ_BUF as u64,pocold::rpc::SMALL_REPLY_MAX as u64));
+    // Review 2 (NF1): every enforced fact is its running value, field by field, against the limits the
+    // node runs with (written out here, not taken from rpc_facts), and the rows are RPC_ENFORCED.
+    use pocold::rpc as r;let l=r::Limits::default();let ms=|d:std::time::Duration|d.as_millis() as u64;
+    assert_eq!(pocold::node::Limits::default().rpc,l,"the node runs the default RPC limits");
+    let rows:[(&str,u64,u64);25]=[("conn_max",v.conn_max,l.conn_max as u64),("req_buf",v.req_buf,r::REQ_BUF as u64),("conn_buf",v.conn_buf,r::SMALL_REPLY_MAX as u64),
+        ("send_sock_buf",v.send_sock_buf,r::SEND_SOCK_BUF as u64),("heavy_active",v.heavy_active,1),("light_active",v.light_active,1),("light_queue",v.light_queue,l.light_queue as u64),
+        ("heavy_resp_mem",v.heavy_resp_mem,r::HEAVY_RESP_POOL as u64),("light_resp_mem",v.light_resp_mem,((l.conn_max+1)*r::LIGHT_RESP_MAX) as u64),("resp_max",v.resp_max,r::RESP_MAX as u64),
+        ("light_resp_max",v.light_resp_max,r::LIGHT_RESP_MAX as u64),("batch_resp_max",v.batch_resp_max,r::BATCH_RESP_MAX as u64),("batch_max",v.batch_max,r::BATCH_MAX as u64),
+        ("err_item_max",v.err_item_max,r::ERR_ITEM_MAX as u64),("logs_count_max",v.logs_count_max,r::LOGS_COUNT_MAX as u64),("logs_scan_bytes",v.logs_scan_bytes,r::LOGS_SCAN_BYTES as u64),
+        ("rate",v.rate,u64::from(l.rate)),("bucket_cap",v.bucket_cap,u64::from(l.bucket_cap)),("queue_wait_ms",v.queue_wait_ms,ms(l.queue_wait)),("compute_heavy_ms",v.compute_heavy_ms,ms(l.compute_heavy)),
+        ("grace_ms",v.grace_ms,ms(l.grace)),("min_send_rate",v.min_send_rate,l.min_send_rate),("batch_wall_ms",v.batch_wall_ms,ms(l.batch_wall)),
+        ("enforce_slack_ms",v.enforce_slack_ms,ms(l.enforce_slack)),("timer_eps_ms",v.timer_eps_ms,ms(l.timer_eps))];
+    assert_eq!(rows.map(|x|x.0),pocold::RPC_ENFORCED,"one row per enforced fact, in order");
+    for (k,fact,running) in rows{assert_eq!(fact,running,"{k}: the fact is the running value");}
+    // Review 2 (m1): rate is equivalent and vacuous per connection, and the notes say so.
+    let j=pocold::admission_json(a);let notes:Vec<&str>=j["notes"].as_array().unwrap().iter().filter_map(|x|x.as_str()).collect();
+    for (f,_) in pocold::RPC_EQUIVALENT{assert!(pocold::RPC_ENFORCED.contains(f)&&notes.iter().any(|n|n.starts_with(&format!("R26 {f}: equivalent"))),"{f}: {notes:?}");}
+    assert!(notes.iter().any(|n|n.starts_with("R26 rate: equivalent, vacuous per connection")),"{notes:?}");
     // 15 of the 18 R26 predicates read only enforced fields and are checked (all pass, sendSockBuf<=64KiB
     // among them); 3 read an absent field and are waived: derive and batchWallMin<=batchWallMs
     // (scratch, cancel_max), memoryRequired<=memTotal.
     let w=&a.report().waivers;assert_eq!(w.len(),1);assert_eq!(w[0].checked.len(),15);assert!(w[0].checked.iter().any(|c|*c=="sendSockBuf<=64KiB"));
     let mut waived=w[0].waived.clone();waived.sort();assert_eq!(waived,["batchWallMin<=batchWallMs","derive","memoryRequired<=memTotal"]);
-    let j=pocold::admission_json(a);assert_eq!(j["scope"],"experimental-devnet");assert_eq!(j["specificationCompliant"],false);
+    assert_eq!(j["scope"],"experimental-devnet");assert_eq!(j["specificationCompliant"],false);
     assert!(j["conditions"].as_array().unwrap().iter().any(|c|c["id"]=="rpc-absent"));
     // Specification scope on the same artifacts and local facts.
     let n=devnet::build(&base()).unwrap();let t=admission::measure(&n.spec_bytes,&n.alloc,1).unwrap();let local=pocold::single_host_local();

@@ -20,10 +20,10 @@ pub const READ_CHUNK:usize=8192;
 /// before parsing, so a request's parse tree stays within `parse_bytes_max` (A13; local limit,
 /// D-A13-RPC). A larger request is -32600 without being parsed.
 pub const JSON_VALUES_MAX:usize=4096;
-/// RpcGuard RESP_MAX and LOGS_SCAN_BYTES (governance.md): a larger response is replaced
-/// by -32008; eth_getLogs stops after scanning this many log data bytes, or once its result
-/// would exceed RESP_MAX or LOGS_COUNT_MAX logs: -32020 {reason, fromBlock, lastCompleteBlock,
-/// nextFromBlock} (network.md:298), so it never builds more.
+/// RpcGuard RESP_MAX and LOGS_SCAN_BYTES (governance.md): a larger response is replaced by -32020
+/// {resultBytes} (network.md:210); eth_getLogs stops after scanning this many log data bytes, or once
+/// its result would exceed RESP_MAX or LOGS_COUNT_MAX logs: -32020 {reason, fromBlock,
+/// lastCompleteBlock, nextFromBlock} (network.md:298), so it never builds more.
 pub const RESP_MAX:usize=8*1024*1024;pub const LOGS_SCAN_BYTES:usize=32*1024*1024;pub const LOGS_COUNT_MAX:usize=10000;
 /// Batches (network.md): at most BATCH_MAX members; the member that makes the delivered bytes
 /// exceed BATCH_RESP_MAX, and every later one, is answered -32020 {batchBytes} without running.
@@ -62,10 +62,9 @@ pub struct Limits{
     pub scratch_heavy:usize,
     /// COMPUTE_DEADLINE (network.md:235): from admission, including encoding, 5 s heavy, 500 ms light.
     pub compute_heavy:Duration,pub compute_light:Duration,
-    /// SendPacer (network.md:237-256): MIN_SEND_RATE B/s, GRACE, ENFORCE_SLACK, TIMER_EPS, and the
-    /// interval at which a blocked (non-blocking) write is retried and the rule re-checked (the
-    /// backstop; the spec's is 50 ms).
-    pub min_send_rate:u64,pub grace:Duration,pub enforce_slack:Duration,pub timer_eps:Duration,pub pacer_poll:Duration,
+    /// SendPacer (network.md:237-256): MIN_SEND_RATE B/s, GRACE, ENFORCE_SLACK and TIMER_EPS (the
+    /// backstop is PACER_BACKSTOP).
+    pub min_send_rate:u64,pub grace:Duration,pub enforce_slack:Duration,pub timer_eps:Duration,
     /// BATCH_WALL (network.md:282): from read-end to sendDone; reaching it closes the connection.
     pub batch_wall:Duration,
 }
@@ -73,7 +72,7 @@ impl Default for Limits{
     fn default()->Self{Self{conn_max:32,read_deadline:Duration::from_secs(10),write_deadline:Duration::from_secs(10),work_deadline:Duration::from_secs(30),
         heavy_queue:16,light_queue:32,queue_wait:Duration::from_secs(2),rate:20,bucket_cap:20,
         scratch_heavy:16<<20,compute_heavy:Duration::from_secs(5),compute_light:Duration::from_millis(500),
-        min_send_rate:65536,grace:Duration::from_secs(2),enforce_slack:Duration::from_millis(200),timer_eps:Duration::from_millis(1),pacer_poll:Duration::from_millis(1),
+        min_send_rate:65536,grace:Duration::from_secs(2),enforce_slack:Duration::from_millis(200),timer_eps:Duration::from_millis(1),
         batch_wall:Duration::from_secs(420)}}
 }
 /// SEND_MAX(size) = GRACE + size/R + ENFORCE_SLACK, the longest a response of `size` bytes may hold
@@ -94,19 +93,20 @@ pub fn send_max_ms(l:&Limits,size:u64)->u128{
 /// answers and the largest lateness of one past its deadline (ms), getLogs SCRATCH hits and the
 /// largest getLogs working set (bytes), per-block log limits, ORIGIN_DENY answers, sendDone events,
 /// the largest send overrun past GRACE+size/R (ms; i64::MIN until a sendDone), BATCH_WALL hits and
-/// the largest batch send time and read-end-to-sendDone time (ms).
+/// the largest batch send time and read-end-to-sendDone time (ms); connections refused because their
+/// SO_SNDBUF could not be set to SEND_SOCK_BUF (`sockbuf_ok`).
 #[derive(Debug,Default)]
 pub struct RpcCounters{pub refused:AtomicUsize,pub active:AtomicUsize,pub expired:AtomicUsize,pub expired_members:AtomicUsize,pub queue_full:AtomicUsize,pub too_complex:AtomicUsize,pub busy:AtomicUsize,
     pub queued:AtomicUsize,pub light_queued:AtomicUsize,pub heavy_active:AtomicUsize,pub light_active:AtomicUsize,pub wakes:AtomicUsize,pub light_pushed:AtomicUsize,
     pub queue_wait:AtomicUsize,pub light_full:AtomicUsize,pub rate:AtomicUsize,pub pacer_closed:AtomicUsize,pub pacer_late_max_ms:AtomicUsize,pub deadline_hits:AtomicUsize,pub cancel_late_max_ms:AtomicUsize,
     pub scratch_hits:AtomicUsize,pub scratch_heavy_max:AtomicUsize,pub limit_hits:AtomicUsize,pub origin_denied:AtomicUsize,pub send_done:AtomicUsize,pub send_overrun_max_ms:AtomicI64,
-    pub batch_wall_hits:AtomicUsize,pub batch_send_max_ms:AtomicUsize,pub batch_wall_max_ms:AtomicUsize}
+    pub batch_wall_hits:AtomicUsize,pub batch_send_max_ms:AtomicUsize,pub batch_wall_max_ms:AtomicUsize,pub sockbuf_refused:AtomicUsize}
 pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0),active:AtomicUsize::new(0),expired:AtomicUsize::new(0),expired_members:AtomicUsize::new(0),
     queue_full:AtomicUsize::new(0),too_complex:AtomicUsize::new(0),busy:AtomicUsize::new(0),queued:AtomicUsize::new(0),light_queued:AtomicUsize::new(0),heavy_active:AtomicUsize::new(0),
     light_active:AtomicUsize::new(0),wakes:AtomicUsize::new(0),light_pushed:AtomicUsize::new(0),queue_wait:AtomicUsize::new(0),light_full:AtomicUsize::new(0),rate:AtomicUsize::new(0),
     pacer_closed:AtomicUsize::new(0),pacer_late_max_ms:AtomicUsize::new(0),deadline_hits:AtomicUsize::new(0),cancel_late_max_ms:AtomicUsize::new(0),scratch_hits:AtomicUsize::new(0),
     scratch_heavy_max:AtomicUsize::new(0),limit_hits:AtomicUsize::new(0),origin_denied:AtomicUsize::new(0),send_done:AtomicUsize::new(0),send_overrun_max_ms:AtomicI64::new(i64::MIN),
-    batch_wall_hits:AtomicUsize::new(0),batch_send_max_ms:AtomicUsize::new(0),batch_wall_max_ms:AtomicUsize::new(0)};
+    batch_wall_hits:AtomicUsize::new(0),batch_send_max_ms:AtomicUsize::new(0),batch_wall_max_ms:AtomicUsize::new(0),sockbuf_refused:AtomicUsize::new(0)};
 /// SEND_SOCK_BUF (RpcGuard SO_SNDBUF): the kernel send buffer of every RPC connection. Set explicitly
 /// it also stops the kernel from growing it (Linux locks it against autotuning; Windows stops its
 /// ideal-send-backlog tuning), so an unread answer holds at most this much kernel memory beyond the
@@ -140,8 +140,36 @@ pub mod sockbuf{
     #[cfg(not(any(unix,windows)))] pub fn set(_:&TcpStream,_:usize)->std::io::Result<()>{Err(std::io::Error::new(std::io::ErrorKind::Unsupported,"SO_SNDBUF"))}
     #[cfg(not(any(unix,windows)))] pub fn get(_:&TcpStream)->std::io::Result<usize>{Err(std::io::Error::new(std::io::ErrorKind::Unsupported,"SO_SNDBUF"))}
 }
+/// Waiting for a socket to become readable or writable with a timeout, through poll(2) (Unix) or
+/// WSAPoll (Windows); std has neither. Ok(true): ready (data, space, EOF or an error the next read or
+/// write reports); Ok(false): the timeout passed (or a signal interrupted the wait). The timeout is
+/// rounded up to whole milliseconds, so on Unix a wait does not end before it (Windows waits run on
+/// its timer tick). The socket's blocking mode is not changed (the P2P reader shares its socket with
+/// a blocking writer thread).
+pub mod sockwait{
+    use std::{net::TcpStream,time::Duration};
+    fn ms(t:Duration)->i32{t.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32}
+    #[cfg(unix)] fn wait(s:&TcpStream,write:bool,t:Duration)->std::io::Result<bool>{
+        use std::os::unix::io::AsRawFd;let mut p=libc::pollfd{fd:s.as_raw_fd(),events:if write{libc::POLLOUT}else{libc::POLLIN},revents:0};
+        match unsafe{libc::poll(&mut p,1,ms(t))}{n if n>0=>Ok(true),0=>Ok(false),_=>{let e=std::io::Error::last_os_error();if e.kind()==std::io::ErrorKind::Interrupted{Ok(false)}else{Err(e)}}}
+    }
+    #[cfg(windows)] fn wait(s:&TcpStream,write:bool,t:Duration)->std::io::Result<bool>{
+        use std::os::windows::io::AsRawSocket;use windows_sys::Win32::Networking::WinSock::{WSAPoll,WSAPOLLFD,POLLRDNORM,POLLWRNORM};
+        let mut p=WSAPOLLFD{fd:s.as_raw_socket() as usize,events:if write{POLLWRNORM}else{POLLRDNORM},revents:0};
+        match unsafe{WSAPoll(&mut p,1,ms(t))}{n if n>0=>Ok(true),0=>Ok(false),_=>Err(std::io::Error::last_os_error())}
+    }
+    #[cfg(not(any(unix,windows)))] fn wait(_:&TcpStream,_:bool,t:Duration)->std::io::Result<bool>{std::thread::sleep(t.min(Duration::from_millis(1)));Ok(true)}
+    pub fn writable(s:&TcpStream,t:Duration)->std::io::Result<bool>{wait(s,true,t)}
+    pub fn readable(s:&TcpStream,t:Duration)->std::io::Result<bool>{wait(s,false,t)}
+}
 /// The SO_SNDBUF read back from the last accepted RPC connection (pocol_getRpcStats sendSockBuf).
 pub static SEND_SOCK_BUF_SEEN:AtomicUsize=AtomicUsize::new(0);
+/// An accepted SO_SNDBUF read-back: SEND_SOCK_BUF (Windows) or the doubled value Linux reports. Any
+/// other value (the setting failed or was clamped) refuses the connection (network.md:190).
+pub fn sockbuf_ok(n:usize)->bool{(SEND_SOCK_BUF..=2*SEND_SOCK_BUF).contains(&n)}
+/// Test hook (fault injection): nonzero makes every accepted RPC connection read back this value as
+/// its SO_SNDBUF (usize::MAX: the setting fails), so the refusal path can be exercised. 0 in the node.
+pub static SOCKBUF_FAULT:AtomicUsize=AtomicUsize::new(0);
 /// The last SendPacer close: (sendTime µs, A bytes) (network.md:252 CloseOK record).
 pub static LAST_PACER_CLOSE:Mutex<Option<(u64,usize)>>=Mutex::new(None);
 fn bump_max(a:&AtomicUsize,v:usize){a.fetch_max(v,Ordering::SeqCst);}
@@ -162,7 +190,7 @@ fn hold(c:&Arc<AtomicUsize>,max:usize,gauge:&'static AtomicUsize)->Option<Held>{
 }
 /// Admission states (network.md:232-234): waiting in its queue, taken by the consensus thread with
 /// its reservation, or gone (not admitted within QUEUE_WAIT, or its connection stopped waiting).
-const QUEUED:u8=0;const ADMITTED:u8=1;const GONE:u8=2;
+pub const QUEUED:u8=0;pub const ADMITTED:u8=1;pub const GONE:u8=2;
 /// A request for the consensus thread: its body (shared with its connection, which answers busy from
 /// it when the request is not admitted in time; never a second copy), reply, whether it carried an
 /// Origin header (a site), the instant after which nobody waits for the answer, the end of its
@@ -187,9 +215,10 @@ impl Request{
 /// (network.md:220, :235, :286). The deadline runs from admission and includes encoding: it is
 /// checked at the handler's entry, inside long loops (eth_getLogs every 16 blocks; eth_call and
 /// eth_estimateGas before each simulation and through its stop hook, native::STOP_GAS) and once the
-/// answer is encoded, when -32020 {deadline} replaces a read-only answer completed after it (never a
-/// late success). eth_getLogs/pocol_getLogs charge the bytes they materialize; an overflow is -32020
-/// {scratch}. `walled`: a batch reached BATCH_WALL and its connection is closed.
+/// answer is encoded, when -32020 {deadline} replaces any answer of a method without an effect that
+/// completed after it, result or error (`member`). eth_getLogs/pocol_getLogs charge the bytes they
+/// materialize; an overflow is -32020 {scratch}. `walled`: a batch reached BATCH_WALL and its
+/// connection is closed.
 pub struct Budget{pub compute_by:Instant,pub scratch_max:usize,pub scratch_used:usize,pub walled:bool}
 impl Budget{
     pub fn expired(&self)->bool{Instant::now()>=self.compute_by}
@@ -208,17 +237,21 @@ impl Budget{
 pub fn rate_refused(k:u32,l:&Limits)->Option<u64>{
     (k>l.bucket_cap).then(||(u64::from(k-l.bucket_cap)*1000).div_ceil(u64::from(l.rate.max(1))).max(1))
 }
+/// The SendPacer's backstop check (network.md:249: "فحص احتياطي كل 50 ms").
+pub const PACER_BACKSTOP:Duration=Duration::from_millis(50);
 /// SendPacer (network.md:237-256). The answer is written in chunks on a non-blocking socket (a write
 /// that would block sends nothing, on every platform). A is the bytes the socket has accepted, size
 /// the response length, sendTime the wall time since the first byte while A < size (P jumps to size
 /// at once, so the server is pending until sendDone). The one binding rule: close if sendTime > GRACE
 /// and A < MIN_SEND_RATE·sendTime, evaluated with the exact values after every write attempt. A
-/// blocked write is retried after `pacer_poll`, or at the violation instant s_v + TIMER_EPS (s_v =
-/// max(GRACE, A/R)) when that is sooner, so the timer is re-armed on every change of A and the close
-/// lateness (pacerLateMaxMs) is TIMER_EPS plus scheduling. On A = size it is sendDone: the
-/// reservation (in `Reply`) drops at return. A response of `size` bytes cannot hold its reservation
-/// longer than SEND_MAX(size). `batch_from`: a batch's read-end; BATCH_WALL from it closes the
-/// connection (network.md:282).
+/// blocked write waits for the socket to become writable (`sockwait`, poll/WSAPoll), at most until
+/// the violation instant s_v + TIMER_EPS (s_v = max(GRACE, A/R)), the BATCH_WALL instant or
+/// PACER_BACKSTOP, whichever is first: the timer is re-armed on every change of A, the close
+/// lateness (pacerLateMaxMs) is TIMER_EPS plus scheduling (ms rounding included), and a connection
+/// whose client does not read costs one wakeup per backstop, not a poll loop. On A = size it is
+/// sendDone: the reservation (in `Reply`) drops at return. A response of `size` bytes cannot hold its
+/// reservation longer than SEND_MAX(size). `batch_from`: a batch's read-end; BATCH_WALL from it
+/// closes the connection (network.md:282).
 fn pace_write(s:&mut TcpStream,body:&[u8],l:&Limits,batch_from:Option<Instant>)->std::io::Result<()>{
     let (r,grace,eps)=(l.min_send_rate.max(1) as f64,l.grace.as_secs_f64(),l.timer_eps.as_secs_f64());
     // The answer is written straight from its reservation-backed String; only the small header is
@@ -250,7 +283,11 @@ fn pace_write(s:&mut TcpStream,body:&[u8],l:&Limits,batch_from:Option<Instant>)-
             return fail("send pacer: below MIN_SEND_RATE after GRACE")
         }
         if batch_from.is_some_and(|f|f.elapsed()>=l.batch_wall){COUNTERS.batch_wall_hits.fetch_add(1,Ordering::SeqCst);return fail("batch wall")}
-        if blocked{let s_v=grace.max(a as f64/r);std::thread::sleep(l.pacer_poll.min(Duration::from_secs_f64((s_v+eps-st).max(1e-4))));}
+        if blocked{
+            // Here sendTime <= s_v (the rule did not fire), so the timer is at least TIMER_EPS away.
+            let s_v=grace.max(a as f64/r);let wall=batch_from.map_or(PACER_BACKSTOP,|f|(f+l.batch_wall).saturating_duration_since(Instant::now()));
+            sockwait::writable(s,PACER_BACKSTOP.min(wall).min(Duration::from_secs_f64((s_v+eps-st).max(0.0))))?;
+        }
     }
     // sendDone (network.md:258); sendOverrun = sendTime − (GRACE + size/R) (network.md:348).
     let st=t0.elapsed();COUNTERS.send_done.fetch_add(1,Ordering::SeqCst);
@@ -268,7 +305,7 @@ fn pace_write(s:&mut TcpStream,body:&[u8],l:&Limits,batch_from:Option<Instant>)-
 /// on slow readers hold at most the pools, whatever conn_max is (A13 rpc term).
 /// - Light: (conn_max + 1) x LIGHT_RESP_MAX, one per connection plus the one being computed for a
 ///   connection that already left, so a light reservation never fails (network.md S1). A light
-///   response larger than LIGHT_RESP_MAX is answered -32008.
+///   response larger than LIGHT_RESP_MAX is answered -32020 {resultBytes} (network.md:210).
 /// - Heavy: HEAVY_RESP_POOL. A full pool answers -32021 {busy, retryAfterMs} before anything
 ///   runs (each batch member gets its own busy item), so a state-changing call never loses its
 ///   answer. The request is not held for the pool: it is answered busy at once.
@@ -281,6 +318,17 @@ pub const BATCH_BYTES_HARD:usize=BATCH_RESP_MAX+BATCH_MAX*ERR_ITEM_MAX+64;
 /// and the HTTP literals. It is pocold's CONN_BUF: the per-connection buffer the spec writes a
 /// batch's k error items from (network.md:217, :221), smaller than the spec's 64 KiB.
 pub const SMALL_REPLY_MAX:usize=BATCH_MAX*ERR_ITEM_MAX+64;
+/// The heap a connection thread takes while it builds and writes a busy or rate answer (A13 rpc term,
+/// per connection): the k kept id encodings (<= ID_ECHO_MAX each, `scan_ids`), the answer
+/// (SMALL_REPLY_MAX, one buffer), its HTTP header, and one transient id parse (ID_PARSE_PEAK).
+/// `a_busy_answer_allocates_no_parse_tree` measures adversarial shapes against it.
+pub const SMALL_REPLY_PEAK:usize=BATCH_MAX*(ID_ECHO_MAX+24)+SMALL_REPLY_MAX+512+ID_PARSE_PEAK;
+/// One id parse within `id_encoding`'s filter (<= ID_RAW_MAX bytes, <= ID_ECHO_MAX/2 containers,
+/// <= 2·(1+ID_ECHO_MAX) values, so <= 1+ID_ECHO_MAX object keys): B-tree nodes of <= 1 KiB, one per
+/// object plus one per 5 keys (a non-root node holds >= 5); two 32-byte Vec slots per value (growth by
+/// doubling) and 4 per array; the decoded strings and the parser's scratch (2·ID_RAW_MAX); the
+/// re-encoding, grown by doubling (6·ID_RAW_MAX).
+pub const ID_PARSE_PEAK:usize=(ID_ECHO_MAX/2+(ID_ECHO_MAX+1)/5)*1024+2*(1+ID_ECHO_MAX)*2*32+ID_ECHO_MAX/2*4*32+2*ID_RAW_MAX+6*ID_RAW_MAX;
 pub fn light_pool(l:&Limits)->usize{(l.conn_max+1)*LIGHT_RESP_MAX}
 type Pool=(Arc<AtomicUsize>,usize);
 #[derive(Clone)]
@@ -325,11 +373,16 @@ pub fn answer(n:&mut Node,q:&Request)->Reply{
     let (pool,need)=if q.light{(n.resp_pools().light,LIGHT_RESP_MAX)}else if batch{(n.resp_pools().heavy,BATCH_BYTES_HARD)}else{(n.resp_pools().heavy,RESP_MAX)};
     let Some(mut resv)=RespPools::take(&pool,need) else{COUNTERS.busy.fetch_add(1,Ordering::SeqCst);return Reply::small(busy(&q.body))};
     let _active=Active::new(if q.light{&COUNTERS.light_active}else{&COUNTERS.heavy_active});
-    let mut budget=Budget{compute_by:Instant::now()+if q.light{lr.compute_light}else{lr.compute_heavy},scratch_max:lr.scratch_heavy,scratch_used:0,walled:false};
+    // The class's deadline by method (network.md (ب), :235), as for batch members: a light-table method
+    // whose body exceeds LIGHT_BODY_MAX runs on the heavy lane (and reservation) under the light deadline.
+    let light=q.light||(!batch&&light_method(&q.body));
+    let mut budget=Budget{compute_by:Instant::now()+if light{lr.compute_light}else{lr.compute_heavy},scratch_max:lr.scratch_heavy,scratch_used:0,walled:false};
     let wall_by=batch.then(||q.queued+lr.batch_wall);
     let mut body=handle_until_budgeted(n,&q.body,q.site,Some(q.deadline),wall_by,&mut budget);
     if budget.walled{return Reply{body:String::new(),_resv:None,close:true,batch_from:None}}
-    if body.len()>need{body=err(&request_id(&q.body),-32008,"response too large").to_string();}
+    // Over the class's reservation: -32020 {resultBytes}, and the reservation shrinks to the error
+    // (network.md:210, RG12).
+    if body.len()>need{body=result_bytes(&request_id(&q.body));}
     body.shrink_to_fit();resv.shrink(body.capacity());
     Reply{body,_resv:Some(resv),close:false,batch_from:batch.then_some(q.queued)}
 }
@@ -343,12 +396,21 @@ fn busy(body:&[u8])->String{reply_32021(body,"busy",250)}
 /// echoing the member id; nothing runs. The reason is "busy" (a full pool, no HEAVY_QUEUE place, a
 /// full light lane, or not admitted within QUEUE_WAIT) or "rate" (the per-connection token bucket).
 /// Connection threads build it too, so the request is never parsed into a tree here (A13: only the
-/// consensus thread holds one): `scan_ids` reads the members' ids. The k items are each <=
-/// ERR_ITEM_MAX, so the answer is <= SMALL_REPLY_MAX (network.md:217).
+/// consensus thread holds one): `scan_ids` reads the members' ids, each kept as its encoding. The k
+/// items are each <= ERR_ITEM_MAX, so the answer is <= SMALL_REPLY_MAX (network.md:217); the heap it
+/// takes to build is <= SMALL_REPLY_PEAK.
 fn reply_32021(body:&[u8],reason:&'static str,retry:u64)->String{
-    let e=|id:&Value|json!({"jsonrpc":"2.0","id":id,"error":{"code":-32021,"message":reason,"data":{"reason":reason,"retryAfterMs":retry}}}).to_string();
-    if json_values(body)>JSON_VALUES_MAX{return e(&Value::Null)}
-    match scan_ids(body){Ok(ids)=>format!("[{}]",ids.iter().map(e).collect::<Vec<_>>().join(",")),Err(id)=>e(&id)}
+    use std::fmt::Write as _;
+    // The encoding of json!({"jsonrpc","id","error":{"code","message","data":{"reason","retryAfterMs"}}})
+    // (serde_json objects are sorted maps), written into one buffer.
+    let e=|o:&mut String,id:&str|{let _=write!(o,r#"{{"error":{{"code":-32021,"data":{{"reason":"{reason}","retryAfterMs":{retry}}},"message":"{reason}"}},"id":{id},"jsonrpc":"2.0"}}"#);};
+    let mut o=String::with_capacity(SMALL_REPLY_MAX);
+    if json_values(body)>JSON_VALUES_MAX{e(&mut o,"null");return o}
+    match scan_ids(body){
+        Ok(ids)=>{o.push('[');for (k,id) in ids.iter().enumerate(){if k>0{o.push(',')}e(&mut o,id)}o.push(']');}
+        Err(id)=>e(&mut o,&id),
+    }
+    o
 }
 fn ws(b:&[u8],mut i:usize)->usize{while i<b.len()&&b[i].is_ascii_whitespace(){i+=1}i}
 /// One past the closing quote of the string at b[i] (b.len() if unterminated).
@@ -367,39 +429,52 @@ fn value_end(b:&[u8],i:usize)->usize{
         _=>{let mut j=i;while j<b.len()&&!matches!(b[j],b','|b'}'|b']')&&!b[j].is_ascii_whitespace(){j+=1}j}
     }
 }
-/// The id the object at b[i] carries: its last top-level "id" member (serde_json keeps the last),
-/// parsed alone (at most 1 KiB of input) and kept when its encoding is <= 128 bytes; else null.
-fn obj_id(b:&[u8],i:usize)->Value{
-    let (mut id,mut j)=(Value::Null,ws(b,i+1));
+/// The id the object at b[i] carries: its last top-level "id" member (serde_json keeps the last), as
+/// `id_encoding` gives it.
+fn obj_id(b:&[u8],i:usize)->String{
+    let (mut id,mut j)=(String::from("null"),ws(b,i+1));
     while b.get(j)==Some(&b'"'){
         let k=str_end(b,j);let key=&b[j..k];j=ws(b,k);if b.get(j)!=Some(&b':'){break}
         j=ws(b,j+1);let e=value_end(b,j);
-        if key==b"\"id\""{let raw=&b[j..e];
-            id=if raw.len()<=1024{serde_json::from_slice::<Value>(raw).ok().filter(|v|v.to_string().len()<=128).unwrap_or(Value::Null)}else{Value::Null};}
+        if key==b"\"id\""{id=id_encoding(&b[j..e]);}
         j=ws(b,e);if b.get(j)==Some(&b','){j=ws(b,j+1)}else{break}
     }
     id
+}
+/// The longest id encoding a busy or rate item echoes (a longer id is echoed as null), and the
+/// longest raw id parsed for it.
+pub const ID_ECHO_MAX:usize=128;pub const ID_RAW_MAX:usize=1024;
+/// An id's encoding as serde_json writes its parsed value, kept when <= ID_ECHO_MAX bytes; else "null".
+/// The parse tree is transient (dropped at once), and only a raw id of at most ID_RAW_MAX bytes, at
+/// most ID_ECHO_MAX/2 containers and 2·(1+ID_ECHO_MAX) values (`json_values`) is parsed. An id whose
+/// encoding fits ID_ECHO_MAX has no more (each container takes two encoded bytes, and the structural
+/// bytes outside strings are the raw id's), so the filter drops no id that would be echoed.
+fn id_encoding(raw:&[u8])->String{
+    let containers=||{let (mut n,mut q,mut esc)=(0usize,false,false);
+        for &c in raw{if q{if esc{esc=false}else if c==b'\\'{esc=true}else if c==b'"'{q=false}}else if c==b'"'{q=true}else if c==b'{'||c==b'['{n+=1}}n};
+    if raw.len()>ID_RAW_MAX||json_values(raw)>2*(1+ID_ECHO_MAX)||containers()>ID_ECHO_MAX/2{return "null".into()}
+    serde_json::from_slice::<Value>(raw).ok().map(|v|v.to_string()).filter(|e|e.len()<=ID_ECHO_MAX).unwrap_or_else(||"null".into())
 }
 /// The ids a -32021 answer echoes, scanned without building a tree: Ok(one per member) for a batch of
 /// 1..=BATCH_MAX members, Err(id) for one error object (a singleton object's id, null otherwise). It
 /// checks the framing (members start a value, no trailing comma, nothing after the closing bracket),
 /// not full JSON validity; a key spelled with escapes is not recognised, so its id is echoed as null.
 /// Either way the answer is an error, never a result.
-fn scan_ids(b:&[u8])->Result<Vec<Value>,Value>{
-    let i=ws(b,0);
+fn scan_ids(b:&[u8])->Result<Vec<String>,String>{
+    let i=ws(b,0);let null=||String::from("null");
     match b.get(i){
-        Some(b'{')=>Err(if ws(b,value_end(b,i))==b.len(){obj_id(b,i)}else{Value::Null}),
+        Some(b'{')=>Err(if ws(b,value_end(b,i))==b.len(){obj_id(b,i)}else{null()}),
         Some(b'[')=>{
-            let (mut v,mut j)=(Vec::new(),ws(b,i+1));
+            let (mut v,mut j)=(Vec::with_capacity(BATCH_MAX),ws(b,i+1));
             if b.get(j)!=Some(&b']'){loop{
-                if v.len()==BATCH_MAX||!matches!(b.get(j),Some(b'{'|b'['|b'"'|b'-'|b'0'..=b'9'|b't'|b'f'|b'n')){return Err(Value::Null)}
-                v.push(if b[j]==b'{'{obj_id(b,j)}else{Value::Null});
+                if v.len()==BATCH_MAX||!matches!(b.get(j),Some(b'{'|b'['|b'"'|b'-'|b'0'..=b'9'|b't'|b'f'|b'n')){return Err(null())}
+                v.push(if b[j]==b'{'{obj_id(b,j)}else{null()});
                 j=ws(b,value_end(b,j));if b.get(j)==Some(&b','){j=ws(b,j+1)}else{break}
             }}
-            if v.is_empty()||b.get(j)!=Some(&b']')||ws(b,j+1)!=b.len(){return Err(Value::Null)}
+            if v.is_empty()||b.get(j)!=Some(&b']')||ws(b,j+1)!=b.len(){return Err(null())}
             Ok(v)
         }
-        _=>Err(Value::Null),
+        _=>Err(null()),
     }
 }
 /// The token cost of a request without parsing a tree: 1 for a singleton, else the number of
@@ -450,10 +525,11 @@ pub const LIGHT_METHODS:&[&str]=&["eth_chainId","net_version","web3_clientVersio
 /// The probe borrows the method name and skips every other field, so classification allocates
 /// nothing in proportion to the body (A13); any parse error (duplicate keys included) is heavy.
 pub const LIGHT_BODY_MAX:usize=4096;
-pub fn is_light(body:&[u8])->bool{
+pub fn is_light(body:&[u8])->bool{body.len()<=LIGHT_BODY_MAX&&light_method(body)}
+/// A single object whose method is light in the classification table (its class, whatever its size).
+pub fn light_method(body:&[u8])->bool{
     #[derive(serde::Deserialize)] struct Probe<'a>{#[serde(borrow,default)] method:Option<std::borrow::Cow<'a,str>>}
-    if body.len()>LIGHT_BODY_MAX||body.iter().find(|b|!b.is_ascii_whitespace())!=Some(&b'{'){return false}
-    matches!(serde_json::from_slice::<Probe>(body),Ok(Probe{method:Some(m)}) if LIGHT_METHODS.contains(&m.as_ref()))
+    body.iter().find(|b|!b.is_ascii_whitespace())==Some(&b'{')&&matches!(serde_json::from_slice::<Probe>(body),Ok(Probe{method:Some(m)}) if LIGHT_METHODS.contains(&m.as_ref()))
 }
 /// Shared across one server's connections: the heavy admission queue depth (an abandoned heavy
 /// body stays here until the node dequeues it) and the light lane's (bounded by its capacity).
@@ -471,10 +547,12 @@ pub fn serve(addr:SocketAddr,node:SyncSender<Event>,light:LightLane,limits:Limit
             // about 200 ms for the first part's ACK.
             let Ok(mut s)=s else{continue};let _=s.set_nodelay(true);next+=1;let id=next;
             // A connection whose send buffer cannot be bounded is not served (SEND_SOCK_BUF holds for
-            // every answer written).
-            match sockbuf::set(&s,SEND_SOCK_BUF).and_then(|_|sockbuf::get(&s)){
-                Ok(n)=>SEND_SOCK_BUF_SEEN.store(n,Ordering::SeqCst),
-                Err(_)=>{COUNTERS.refused.fetch_add(1,Ordering::SeqCst);let _=s.shutdown(std::net::Shutdown::Both);continue}
+            // every answer written): the setting fails, or its read-back is not SEND_SOCK_BUF.
+            let got=sockbuf::set(&s,SEND_SOCK_BUF).and_then(|_|sockbuf::get(&s));
+            let got=match SOCKBUF_FAULT.load(Ordering::SeqCst){0=>got,usize::MAX=>Err(std::io::Error::other("SO_SNDBUF (test hook)")),n=>Ok(n)};
+            match got{
+                Ok(n) if sockbuf_ok(n)=>SEND_SOCK_BUF_SEEN.store(n,Ordering::SeqCst),
+                _=>{COUNTERS.sockbuf_refused.fetch_add(1,Ordering::SeqCst);let _=s.shutdown(std::net::Shutdown::Both);continue}
             }
             crate::threads::reap(&mut conns);
             if conns.len()>=limits.conn_max{
@@ -497,12 +575,9 @@ fn read_until(s:&mut TcpStream,tmp:&mut [u8],deadline:Instant)->std::io::Result<
     s.set_read_timeout(Some(left.max(Duration::from_millis(1))))?;s.read(tmp)
 }
 fn conn(mut s:TcpStream,node:SyncSender<Event>,light:LightLane,l:&Limits,srv:&Server)->std::io::Result<()>{
-    // SO_SNDBUF (network.md:190) is not set: std::net has no portable setsockopt. The kernel then
-    // sizes the send buffer itself (Linux autotunes it up to net.ipv4.tcp_wmem max), so A, the bytes
-    // the socket has accepted, can run that far ahead of the client's reads, and the kernel holds that
-    // much per connection outside the process heap. The SendPacer still bounds how long an answer
-    // holds its reservation (it counts accepted bytes), but its slack against the client is the
-    // kernel's send buffer, not 32 KiB (RPCGUARD.md).
+    // SO_SNDBUF (network.md:190) is SEND_SOCK_BUF, set by the acceptor (`serve`) before this thread
+    // starts, and the SendPacer writes at most SEND_SOCK_BUF per call: A, the bytes the socket has
+    // accepted, runs at most the send buffer plus the client's receive window ahead of its reads.
     let deadline=Instant::now()+l.read_deadline;s.set_write_timeout(Some(l.write_deadline))?;
     // Request memory (A13 rpc term): this header buffer, never reallocated (it stops past
     // HEAD_MAX, at most one read later), then a body buffer of exactly Content-Length bytes.
@@ -604,8 +679,15 @@ fn parse_u256(v:&Value)->Option<U256>{v.as_str().and_then(|s|U256::from_str_radi
 /// used where the caller is a test or an in-process consumer, not a network client).
 fn unbounded()->Budget{Budget{compute_by:Instant::now()+Duration::from_secs(365*24*3600),scratch_max:usize::MAX,scratch_used:0,walled:false}}
 pub fn handle(n:&mut Node,body:&[u8])->String{handle_until_budgeted(n,body,false,None,None,&mut unbounded())}
-/// One response, or -32008 with the request's id when it exceeds RESP_MAX.
-fn capped(v:Value,id:&Value)->String{let s=v.to_string();if s.len()<=RESP_MAX{s}else{err(id,-32008,"response too large").to_string()}}
+/// One response, or -32020 {resultBytes} with the request's id when it exceeds RESP_MAX.
+fn capped(v:Value,id:&Value)->String{let s=v.to_string();if s.len()<=RESP_MAX{s}else{result_bytes(id)}}
+/// "Exceeding the limit while encoding: -32020 {resultBytes} with a clean release" (network.md:210;
+/// the reason is in network.md's error list). The answer built so far is dropped by the caller; the
+/// id is echoed while its encoding is <= 128 bytes (an inflating id cannot inflate the error too).
+fn result_bytes(id:&Value)->String{
+    let id=if id.to_string().len()<=128{id}else{&Value::Null};
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32020,"message":"response too large","data":{"reason":"resultBytes"}}}).to_string()
+}
 fn id_of(v:&Value)->Value{v.get("id").cloned().unwrap_or(Value::Null)}
 /// `site`: the request carried an Origin header. ORIGIN_DENY is decided for the request
 /// and for every batch member before any member executes; a denied member is answered
@@ -680,17 +762,20 @@ fn item_err(i:&Value,code:i64,m:&str,reason:&str)->String{
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":m,"data":{"reason":reason}}}).to_string()
 }
 /// Methods whose effect happens when they run: their answer is returned even when it completes past
-/// the deadline (a late -32020 would hide an accepted transaction or share).
+/// the deadline (a late -32020 would hide an accepted transaction or share). This is the running
+/// reading of network.md:235 pending a decision (proposals/RPCGUARD-R2-PROPOSALS.md P3, option A).
 const EFFECTFUL:&[&str]=&["eth_sendRawTransaction","pocol_submitShare"];
 /// The log handlers: they check COMPUTE_DEADLINE themselves, so their -32020 carries resume data.
 const LOGS:&[&str]=&["eth_getLogs","pocol_getLogs"];
-/// One request or batch member, encoded. COMPUTE_DEADLINE includes encoding (network.md:235): a
-/// result completed after the deadline is replaced by -32020 {deadline} (the log handlers' with
-/// resume data), never a late success, except for EFFECTFUL methods, whose answer is never lost.
+/// One request or batch member, encoded. COMPUTE_DEADLINE includes encoding (network.md:235): any
+/// answer completed after the deadline, a result or an error (an eth_call that reverts or halts
+/// after an uninterruptible precompile run), is replaced by -32020 {deadline} (the log handlers' with
+/// resume data). Kept: a -32020 {deadline} the handler produced itself (it carries its own resume
+/// data), and the answers of EFFECTFUL methods, which are never lost.
 fn member(n:&mut Node,v:&Value,b:&mut Budget)->String{
-    let id=id_of(v);let r=one(n,v,b);let ok=r.get("result").is_some();let s=capped(r,&id);
+    let id=id_of(v);let r=one(n,v,b);let own=r["error"]["code"]==-32020&&r["error"]["data"]["reason"]=="deadline";let s=capped(r,&id);
     let m=v.get("method").and_then(|m|m.as_str()).unwrap_or("");
-    if ok&&b.expired()&&!EFFECTFUL.contains(&m){b.late();return fail_json(&id,deadline_fail(n,m,v)).to_string()}
+    if !own&&b.expired()&&!EFFECTFUL.contains(&m){b.late();return fail_json(&id,deadline_fail(n,m,v)).to_string()}
     s
 }
 /// -32020 {deadline}; for a log handler with the resume data of no progress (network.md:300:
@@ -852,7 +937,7 @@ fn rpc_stats(n:&Node)->Value{
         "batchWallHits":g(&c.batch_wall_hits),"traceDropped":Value::Null});
     let own=json!({"refused":g(&c.refused),"active":g(&c.active),"expired":g(&c.expired),"expiredMembers":g(&c.expired_members),"queueFull":g(&c.queue_full),"queueWait":g(&c.queue_wait),
         "lightFull":g(&c.light_full),"tooComplex":g(&c.too_complex),"busy":g(&c.busy),"queued":g(&c.queued),"wakes":g(&c.wakes),"lightPushed":g(&c.light_pushed),
-        "heavyReserved":h,"lightReserved":l,"deadlineHits":g(&c.deadline_hits),"scratchHits":g(&c.scratch_hits),"sendSockBuf":g(&SEND_SOCK_BUF_SEEN)});
+        "heavyReserved":h,"lightReserved":l,"deadlineHits":g(&c.deadline_hits),"scratchHits":g(&c.scratch_hits),"sendSockBuf":g(&SEND_SOCK_BUF_SEEN),"sockbufRefused":g(&c.sockbuf_refused)});
     if let (Some(m),Value::Object(o))=(v.as_object_mut(),own){m.extend(o);}
     v
 }
@@ -971,13 +1056,32 @@ fn logs_from(n:&Node,m:&str,f:&Value)->Option<u64>{
 
 #[cfg(test)]
 mod tests{
+    /// Review 2 (M4): an answer over RESP_MAX is -32020 {resultBytes} (network.md:210), not -32008.
     #[test] fn responses_above_resp_max_become_an_error(){
         let id=serde_json::json!(7);
         let small=super::capped(serde_json::json!({"jsonrpc":"2.0","id":7,"result":"0x1"}),&id);assert!(small.contains("\"result\""));
         let big=super::capped(serde_json::json!({"jsonrpc":"2.0","id":7,"result":"a".repeat(super::RESP_MAX)}),&id);
-        assert!(big.contains("-32008")&&big.len()<200,"{}",&big[..big.len().min(200)]);
+        assert!(big.len()<200,"{}",&big[..big.len().min(200)]);
         // The error answers the request (A14 clients require the request id).
         let v:serde_json::Value=serde_json::from_str(&big).unwrap();assert_eq!(v["id"],7);
+        assert_eq!((v["error"]["code"].as_i64(),v["error"]["data"]["reason"].as_str()),(Some(-32020),Some("resultBytes")),"{v}");
+    }
+    /// The wait helper behind the SendPacer and the P2P reader (poll/WSAPoll): a socket without data is
+    /// not readable, and the wait lasts at least its timeout; data makes it readable at once; a socket
+    /// with room is writable; one whose send buffer is full is not, until its peer reads.
+    #[test] fn sockwait_reports_readiness_within_its_timeout(){
+        use std::io::{Read,Write};use std::time::{Duration,Instant};use super::sockwait::{readable,writable};
+        let l=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let mut c=std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();let (mut s,_)=l.accept().unwrap();
+        // Windows waits run on its timer tick and may end up to a tick early: the exact bounds are Unix's.
+        let t=Instant::now();assert!(!readable(&s,Duration::from_millis(30)).unwrap());assert!(t.elapsed()>=Duration::from_millis(if cfg!(unix){30}else{10}),"{:?}",t.elapsed());
+        let t=Instant::now();assert!(!readable(&s,Duration::from_micros(300)).unwrap());assert!(!cfg!(unix)||t.elapsed()>=Duration::from_micros(300),"rounded up, never down");
+        c.write_all(b"x").unwrap();let t=Instant::now();assert!(readable(&s,Duration::from_secs(5)).unwrap());assert!(t.elapsed()<Duration::from_secs(2));
+        let mut b=[0u8;1];s.read_exact(&mut b).unwrap();assert!(writable(&s,Duration::from_secs(5)).unwrap());
+        super::sockbuf::set(&s,super::SEND_SOCK_BUF).unwrap();s.set_nonblocking(true).unwrap();let chunk=vec![0u8;super::SEND_SOCK_BUF];
+        let mut sent=0usize;while let Ok(n)=s.write(&chunk){sent+=n;assert!(sent<64<<20,"the send buffer never filled");}
+        assert!(!writable(&s,Duration::from_millis(30)).unwrap(),"full after {sent} B");
+        let r=std::thread::spawn(move||{let mut b=vec![0u8;1<<16];let mut n=0;c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();while n<sent{match c.read(&mut b){Ok(0)|Err(_)=>break,Ok(k)=>n+=k}}n});
+        assert!(writable(&s,Duration::from_secs(5)).unwrap(),"writable once the peer reads");drop(s);r.join().unwrap();
     }
     /// Response pools: a reservation is refused once the pool would exceed its size; shrinking
     /// returns the difference; dropping returns the rest; light holds conn_max+1 class maxima.
@@ -1015,15 +1119,35 @@ mod tests{
         let esc=|s:&str|s.replace('X',&char::from(92u8).to_string());
         for c in [esc(r#"{"id":"aXu00e9Xn","method":"m"}"#),esc(r#"[{"id":"Xu0041"},{"id":"qX"]X"q"}]"#)]{assert_eq!(super::busy(c.as_bytes()),reference(c.as_bytes()),"{c}");}
         let v:Value=serde_json::from_str(&super::busy(esc(r#"{"Xu0069d":5}"#).as_bytes())).unwrap();assert_eq!(v["id"],Value::Null,"an escaped key is not recognised");
+        // Round 3: ids are kept as their encodings, and `id_encoding` parses only ids that can fit
+        // ID_ECHO_MAX; at the filter's limits the answers are still the parse's. (A body serde_json
+        // refuses as a whole, such as a batch nesting past its depth limit, is framed by the scan only.)
+        for (name,id) in adversarial_ids(){
+            for c in [format!(r#"{{"id":{id},"method":"m"}}"#),format!(r#"[{{"id":{id}}},{{"id":1}}]"#)]{
+                if serde_json::from_str::<Value>(&c).is_ok(){assert_eq!(super::busy(c.as_bytes()),reference(c.as_bytes()),"{name}");}}
+        }
     }
     /// A13 / CONN_BUF: a busy answer to a 20-member batch carrying 800 KiB of parameters allocates a few
-    /// KiB (the answer and the ids), not a parse tree; it fits SMALL_REPLY_MAX.
+    /// KiB (the answer and the ids), not a parse tree; it fits SMALL_REPLY_MAX. Review 2 (m2): the heap
+    /// a connection thread takes for a busy answer, for every adversarial id shape as a singleton and in a
+    /// 20-member batch, is within SMALL_REPLY_PEAK (the A13 term per connection).
     #[test] fn a_busy_answer_allocates_no_parse_tree(){
         let body=format!("[{}]",(0..20).map(|i|format!(r#"{{"jsonrpc":"2.0","id":"{}{i:03}","method":"eth_call","params":["{}"]}}"#,"i".repeat(117),"ab".repeat(20_000))).collect::<Vec<_>>().join(","));
         assert!(super::json_values(body.as_bytes())<=super::JSON_VALUES_MAX);
         let (a,peak)=crate::alloc_meter::peak(||super::busy(body.as_bytes()));
         let v:serde_json::Value=serde_json::from_str(&a).unwrap();assert_eq!(v.as_array().unwrap().len(),20);assert_eq!(v[19]["id"],format!("{}019","i".repeat(117)));
         assert!(a.len()<=super::SMALL_REPLY_MAX,"{} B",a.len());assert!(peak<64*1024,"the busy path requested {peak} B");
+        let mut worst=(0isize,"");
+        for (name,id) in adversarial_ids(){
+            let member=format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"eth_call","params":[]}}"#);
+            for body in [member.clone(),format!("[{}]",vec![member.as_str();20].join(","))]{
+                let (a,peak)=crate::alloc_meter::peak(||super::busy(body.as_bytes()));
+                assert!(serde_json::from_str::<serde_json::Value>(&a).is_ok()&&a.len()<=super::SMALL_REPLY_MAX,"{name}: {} B",a.len());
+                assert!(peak>=0&&peak as usize<=super::SMALL_REPLY_PEAK,"{name}: the busy path requested {peak} B > SMALL_REPLY_PEAK {}",super::SMALL_REPLY_PEAK);
+                if peak>worst.0{worst=(peak,name)}
+            }
+        }
+        println!("BUSY-PEAK {}",serde_json::json!({"worstBytes":worst.0,"shape":worst.1,"smallReplyPeak":super::SMALL_REPLY_PEAK,"idParsePeak":super::ID_PARSE_PEAK}));
     }
     /// CONN_BUF (network.md:217, :221) as pocold bounds it: every error item stays within ERR_ITEM_MAX
     /// with a 128-byte id, so a batch of BATCH_MAX of them is within SMALL_REPLY_MAX.
@@ -1046,6 +1170,20 @@ mod tests{
         for (c,b,k) in [(777001,0x11,"0xacfd846cb4e99df47de0b04af39136202c3d466fdcdd2b1ad7a6a8586b01d044"),(777940,0xab,"0xe8677898e49937cb1b94f29f50d90e54eaef8f91b580fa052f54f0e19b7405a1"),
             (0,0x00,"0xed9c0c48a180be3b26eaa18815306fab3af2e3978f6af428fd3c84f25eef4b72"),(127,0x7f,"0x83e5a43d431ff83f16ee09cbf3c5638baba94d62cfe838a6697217bb023acb60")]{
             assert_eq!(crate::types::hex(&super::net_key(c,&[b;32])),k,"chainId {c}");}
+    }
+    /// Ids of adversarial shapes (review 2, m2): echoed ones at the limits of `id_encoding`'s filter
+    /// (64 nested arrays, 63 elements, 21 keys, 25 nested objects, whitespace), and dropped ones whose
+    /// parse tree is the largest the filter lets through (63 objects, 64 nested objects, 128 keys, 1 KiB
+    /// of escapes) or that the filter refuses unparsed (1 KiB arrays and objects, 127 nested objects).
+    fn adversarial_ids()->Vec<(&'static str,String)>{
+        let keys=|n:usize,k:fn(usize)->String|format!("{{{}}}",(0..n).map(|i|format!("\"{}\":0",k(i))).collect::<Vec<_>>().join(","));
+        let two=|i:usize|format!("{}{}",(b'a'+(i/26) as u8) as char,(b'a'+(i%26) as u8) as char);
+        vec![("string128",format!("\"{}\"","i".repeat(126))),("nestedArrays64",format!("{}{}","[".repeat(64),"]".repeat(64))),
+            ("array63",format!("[{}]",vec!["0";63].join(","))),("keys21",keys(21,|i|((b'a'+i as u8) as char).to_string())),
+            ("nestedObjects25",format!("{}0{}","{\"\":".repeat(25),"}".repeat(25))),("spacedArray",format!("[{}0]","0  ,  ".repeat(62))),
+            ("objects63",format!("[{}]",vec!["{\"a\":0}";63].join(","))),("nestedObjects64",format!("{}0{}","{\"\":".repeat(64),"}".repeat(64))),
+            ("keys128",keys(128,two)),("escapes1k",format!("\"{}\"",format!("{}u0041",char::from(92u8)).repeat(170))),
+            ("array1k",format!("[{}0]","0,".repeat(511))),("keys120",keys(120,|i|format!("k{i:03}"))),("nestedObjects127",format!("{}0{}","{\"\":".repeat(127),"}".repeat(127)))]
     }
     #[test] fn batch_members_beyond_the_byte_limit_are_not_run(){
         let items:Vec<serde_json::Value>=(0..5).map(|i|serde_json::json!({"jsonrpc":"2.0","id":i,"method":"m"})).collect();let mut ran=vec![];

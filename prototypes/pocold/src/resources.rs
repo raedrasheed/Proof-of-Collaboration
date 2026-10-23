@@ -139,9 +139,10 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // RPC (rpc::conn): per connection its header buffer (HEAD_MAX+READ_CHUNK, and its lossy UTF-8
     // copy, up to 3 bytes per input byte) and a body of exactly Content-Length <= REQ_BUF bytes. Answers held
     // by connections are within the response pools (rpc::answer: light (conn_max+1) x
-    // LIGHT_RESP_MAX, heavy HEAVY_RESP_POOL), except small busy answers and HTTP literals
-    // (SMALL_REPLY_MAX each). A heavy body can outlive its connection in the main queue: at most
-    // queued_max of them (rpc::Held). The light lane holds <= conn_max bodies of <=
+    // LIGHT_RESP_MAX, heavy HEAVY_RESP_POOL), except small busy answers and HTTP literals (each
+    // <= SMALL_REPLY_MAX, built within SMALL_REPLY_PEAK of heap: ids, answer, header and one
+    // transient id parse; the round-2 term counted the answer only). A heavy body can outlive its
+    // connection in the main queue: at most queued_max of them (rpc::Held). The light lane holds <= conn_max bodies of <=
     // LIGHT_BODY_MAX. The consensus thread handles one request at a time: its parse tree
     // (rpc::parse_bytes_max, enforced by JSON_VALUES_MAX) and the answer being built: the batch
     // so far (a growing String: VEC x BATCH_BYTES_HARD) plus one member (its JSON tree and
@@ -150,12 +151,12 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // (each body is shared with its connection through an Arc, never copied; the Arc and the
     // admission state fit the +256 per body); the per-connection token bucket keeps no state. Busy
     // and rate answers on connection threads scan the members' ids without parsing a tree
-    // (rpc::scan_ids) and are SMALL_REPLY_MAX each. The SendPacer writes the answer straight from its
+    // (rpc::scan_ids) and take SMALL_REPLY_PEAK each. The SendPacer writes the answer straight from its
     // reservation (only a small response header is allocated).
-    let r=&limits.rpc;use crate::rpc::{REQ_BUF,HEAD_MAX,READ_CHUNK,RESP_MAX,LIGHT_BODY_MAX,HEAVY_RESP_POOL,BATCH_BYTES_HARD,SMALL_REPLY_MAX};
+    let r=&limits.rpc;use crate::rpc::{REQ_BUF,HEAD_MAX,READ_CHUNK,RESP_MAX,LIGHT_BODY_MAX,HEAVY_RESP_POOL,BATCH_BYTES_HARD,SMALL_REPLY_PEAK};
     let rq=[("rpc/connection requests (conn_max)",mul(r.conn_max as u128,(4*(HEAD_MAX+READ_CHUNK)+REQ_BUF) as u128)?),
         ("rpc/heavy response pool",HEAVY_RESP_POOL as u128),("rpc/light response pool ((conn_max+1) x LIGHT_RESP_MAX)",crate::rpc::light_pool(r) as u128),
-        ("rpc/small answers outside the pools (conn_max)",mul(r.conn_max as u128,SMALL_REPLY_MAX as u128)?),
+        ("rpc/small answers outside the pools (conn_max x SMALL_REPLY_PEAK)",mul(r.conn_max as u128,SMALL_REPLY_PEAK as u128)?),
         ("rpc/queued heavy bodies (HEAVY_QUEUE)",mul(crate::rpc::queued_max(r) as u128,REQ_BUF as u128+256)?),("rpc/light lane (LIGHT_QUEUE)",mul(r.light_queue as u128,LIGHT_BODY_MAX as u128+256)?),
         ("rpc/request parse tree",crate::rpc::parse_bytes_max(REQ_BUF)),("rpc/answer being built",memory::VEC*(BATCH_BYTES_HARD as u128)+4*(RESP_MAX as u128))];
     let rpc=add(&rq.map(|x|x.1))?;items.extend(rq);
