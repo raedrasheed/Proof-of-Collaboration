@@ -86,7 +86,8 @@ POCOLD=<bins>/<build>/pocold flock <scratch>/e2e.lock flock <scratch>/cpu.lock \
 ```
 
 - **Harness timeout:** 1800 s. A run stopped by it counts as INCOMPLETE, never as caught or as pass.
-  No run reached it: every exit code is 0 or 1 (`summary-*.jsonl`).
+  No run reached it: every exit code is 0 or 1 (`summary-new-test.txt`, `summary-pre-change-test.txt`:
+  one JSON line per run, as the runner wrote it).
 - **Bounded waits:** a "timeout waiting for …" verdict is the test's own named wait failing (exit 1).
 - **Old-test runs:** the pre-change test (`git show 3c3792e:prototypes/pocold/tests/e2e_devnet.py`,
   sha256 `83b4ca4d…bd20d`) was run the same way from a scratch copy.
