@@ -157,13 +157,19 @@ fn next_frame(out:&Outbox,between:&dyn Fn())->Option<Vec<u8>>{
     }
 }
 static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
-/// Reads exactly `buf` before `deadline`; false on EOF, error or deadline.
-fn read_by(r:&mut TcpStream,buf:&mut [u8],deadline:Instant)->bool{
+/// The longest single blocking read. A closed peer's reader notices `closed` within it: shutdown
+/// wakes a blocked read on Linux but not on Windows, where the reader would otherwise hold its slot
+/// until the idle deadline.
+const READ_POLL:Duration=Duration::from_millis(100);
+/// Reads exactly `buf` before `deadline`; false on EOF, error, deadline or once `closed` is set.
+fn read_by(r:&mut TcpStream,buf:&mut [u8],deadline:Instant,closed:&AtomicBool)->bool{
     let mut got=0;
     while got<buf.len(){
+        if closed.load(Ordering::SeqCst){return false}
         let left=deadline.saturating_duration_since(Instant::now());if left.is_zero(){return false}
-        if r.set_read_timeout(Some(left.max(Duration::from_millis(1)))).is_err(){return false}
-        match r.read(&mut buf[got..]){Ok(0)=>return false,Ok(n)=>got+=n,Err(e) if e.kind()==std::io::ErrorKind::Interrupted=>{},Err(_)=>return false}
+        if r.set_read_timeout(Some(left.min(READ_POLL).max(Duration::from_millis(1)))).is_err(){return false}
+        match r.read(&mut buf[got..]){Ok(0)=>return false,Ok(n)=>got+=n,
+            Err(e) if matches!(e.kind(),std::io::ErrorKind::Interrupted|std::io::ErrorKind::WouldBlock|std::io::ErrorKind::TimedOut)=>{},Err(_)=>return false}
     }
     true
 }
@@ -208,11 +214,11 @@ fn spawn_peer(stream:TcpStream,outbound:bool,events:SyncSender<NetEvent>,net:Net
         let mut r=reader;let l=net.limits.clone();let mut hello=false;let mut last=Instant::now();let started=Instant::now();
         loop{
             let wait=if hello{last+l.idle_deadline}else{started+l.hello_deadline};
-            let mut len=[0u8;4];if !read_by(&mut r,&mut len,wait){break}
+            let mut len=[0u8;4];if !read_by(&mut r,&mut len,wait,&rpeer.out.closed){break}
             let n=u32::from_be_bytes(len) as usize;if n==0||n>MAX_FRAME{break}
             // Before the Hello the whole handshake frame must also meet the Hello deadline.
             let frame_by=Instant::now()+l.frame_deadline;let frame_by=if hello{frame_by}else{frame_by.min(wait)};
-            let mut buf=vec![0u8;n];if !read_by(&mut r,&mut buf,frame_by){break}
+            let mut buf=vec![0u8;n];if !read_by(&mut r,&mut buf,frame_by,&rpeer.out.closed){break}
             let Ok(m)=Msg::decode(&buf) else{break};
             if !hello{
                 // Nothing but a Hello is accepted before the handshake.
@@ -278,6 +284,17 @@ mod tests{
         // The previous Hello (no work field) is refused by arity, never read with a default work.
         let mut p=Vec::new();u64b(0,&mut p);u64b(7,&mut p);rlp::encode_bytes(&[1;32],&mut p);rlp::encode_bytes(&[2;32],&mut p);u64b(9,&mut p);rlp::encode_bytes(b"n",&mut p);
         let mut o=Vec::new();rlp::encode_list_payload(&p,&mut o);assert!(Msg::decode(&o).is_err());
+    }
+    /// Windows run 2: shutdown does not wake a blocked read there, so a dropped peer's reader must
+    /// see its closed flag. Here only the flag is set (no shutdown, the peer stays open and silent):
+    /// the read returns within READ_POLL plus margin, not at its 10 s deadline.
+    #[test] fn a_reader_sees_its_closed_flag_without_a_shutdown(){
+        let l=TcpListener::bind("127.0.0.1:0").unwrap();let _c=TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (mut r,_)=l.accept().unwrap();let closed=Arc::new(AtomicBool::new(false));
+        let c=closed.clone();std::thread::spawn(move||{std::thread::sleep(Duration::from_millis(50));c.store(true,Ordering::SeqCst);});
+        let t=Instant::now();let mut b=[0u8;4];
+        assert!(!read_by(&mut r,&mut b,Instant::now()+Duration::from_secs(10),&closed));
+        assert!(t.elapsed()<Duration::from_secs(2),"the reader waited {:?} after its peer was closed",t.elapsed());
     }
     /// Review F1: a close that lands after the writer found the outbox open and before it waits
     /// must still wake it. The hook holds the writer exactly there (with the queue lock) while the

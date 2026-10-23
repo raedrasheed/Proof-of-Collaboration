@@ -185,7 +185,9 @@ pub fn serve(addr:SocketAddr,node:SyncSender<Event>,light:LightLane,limits:Limit
     crate::threads::spawn("rpc",crate::threads::IO_STACK,move||{
         let mut next=0u64;let mut conns:Vec<std::thread::JoinHandle<()>>=Vec::new();
         for s in l.incoming(){
-            let Ok(mut s)=s else{continue};next+=1;let id=next;
+            // No Nagle delay: with delayed ACKs (Windows) a reply written in two parts would wait
+            // about 200 ms for the first part's ACK.
+            let Ok(mut s)=s else{continue};let _=s.set_nodelay(true);next+=1;let id=next;
             crate::threads::reap(&mut conns);
             if conns.len()>=limits.conn_max{
                 COUNTERS.refused.fetch_add(1,Ordering::SeqCst);
@@ -254,7 +256,9 @@ fn conn(mut s:TcpStream,node:SyncSender<Event>,light:LightLane,l:&Limits,queued:
 }
 fn respond(s:&mut TcpStream,code:u16,body:&str)->std::io::Result<()>{
     let reason=match code{200=>"OK",204=>"No Content",405=>"Method Not Allowed",413=>"Payload Too Large",431=>"Request Header Fields Too Large",503=>"Service Unavailable",_=>"Error"};
-    write!(s,"HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type\r\nConnection: close\r\n\r\n{body}",body.len())?;s.flush()
+    // One write for the header and one for the body (write! would issue a write per piece).
+    let head=format!("HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type\r\nConnection: close\r\n\r\n",body.len());
+    s.write_all(head.as_bytes())?;s.write_all(body.as_bytes())?;s.flush()
 }
 
 fn qty(v:u64)->String{format!("0x{v:x}")}

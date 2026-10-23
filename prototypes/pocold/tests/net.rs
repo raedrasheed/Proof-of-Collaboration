@@ -48,10 +48,12 @@ fn threads()->usize{
 }
 fn wait_until(ms:u64,f:impl Fn()->bool)->bool{let t=Instant::now();while t.elapsed()<Duration::from_millis(ms){if f(){return true}std::thread::sleep(Duration::from_millis(20));}f()}
 fn rpc(port:u16,body:&str,origin:bool)->(u16,String){
-    let mut s=TcpStream::connect(("127.0.0.1",port)).unwrap();s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut s=TcpStream::connect(("127.0.0.1",port)).unwrap();s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();let _=s.set_nodelay(true);
     let o=if origin{"Origin: https://site.example\r\n"}else{""};
     // A refused connection is closed unread (RPC_CONN_MAX): the write or the read may then see a reset (code 0).
-    let _=write!(s,"POST / HTTP/1.1\r\nHost: x\r\n{o}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len());
+    // One write: write! would send a write per piece, and Nagle plus delayed ACKs (Windows) adds about
+    // 200 ms to the measured times.
+    let _=s.write_all(format!("POST / HTTP/1.1\r\nHost: x\r\n{o}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes());
     let mut out=String::new();let _=s.read_to_string(&mut out);
     let code=out.get(9..12).and_then(|c|c.parse().ok()).unwrap_or(0);(code,out.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
 }
@@ -438,7 +440,7 @@ fn hex(b:&[u8])->String{b.iter().map(|x|format!("{x:02x}")).collect()}
     // The first sample can land just after the answer is built; the reservation must still be there
     // a second later, while the write waits for the client.
     std::thread::sleep(Duration::from_secs(1));let during=stats(r.rpc)["heavyReserved"].as_u64().unwrap();
-    assert!(built&&during>=want,"while the client does not read, the pool holds its answer: {during} B reserved");
+    assert!(built&&during>=want,"while the client does not read, the pool holds its answer: built={built}, {during} B reserved");
     let mut out=Vec::new();s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();let _=s.read_to_end(&mut out);
     assert!(out.len()>(12<<20),"the client reads the whole answer: {} B",out.len());
     assert!(wait_until(10_000,||stats(r.rpc)["heavyReserved"].as_u64()==Some(pocold::rpc::RESP_MAX as u64)),"after the write the reservation is released (only the stats request's own remains)");

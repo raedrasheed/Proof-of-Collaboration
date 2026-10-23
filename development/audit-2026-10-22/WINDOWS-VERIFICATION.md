@@ -120,3 +120,24 @@ Durability note:
 - A crash right after the rename can leave the old value. The old value is never smaller than the one
   used by the records written before it, because the file is raised before replay and never lowered.
   So the worst case is that the next open rewrites the file.
+
+### Run 2: 5d25fae (the retention.rkeep fix): FAIL, with 3 tests left
+- Run: https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/39951153803.
+- Artifact `audit-r2-windows-5d25faecdb25776c068b86adb3d5ab2a63b8920a`, zip SHA-256
+  `97767fff26350f6136d3ccb274368fb9fbf14fb4528ad53470ebf4b0208eeec7`. Copied unchanged to
+  `evidence/windows-5d25fae/`.
+- lp1-store-journal 12/12, lp1-node-all 150/150, lp4-execution 162/162 and the extension (234 unit tests)
+  PASS again.
+- pocold: **120 passed, 3 failed**. The retention.rkeep fix is verified on Windows: none of the 48
+  earlier failures recur.
+
+The 3 failures are all in `tests/net.rs`. Diagnosis from the code and the messages:
+
+| test | Windows message | cause | fix (next commit) |
+|---|---|---|---|
+| `a_peer_that_stops_reading_is_dropped_and_consensus_keeps_serving` | `wait_until(1000, live==0)` false | The drop calls `shutdown(Both)`, which wakes the reader's blocked `read` on Linux but not on Windows. The dropped peer's reader then held its slot and thread until the idle deadline (60 s in the test, 300 s by default). **A real defect on Windows**: dropped peers kept inbound slots. | `read_by` blocks at most `READ_POLL` = 100 ms per read and returns once the peer's closed flag is set. New unit test `a_reader_sees_its_closed_flag_without_a_shutdown` sets only the flag (Windows semantics on any OS): with the flag ignored it waits 10.006 s and fails (`evidence/windows-fixes/read-poll-mutant-flag-ignored.log`); with the fix it passes. |
+| `rpc_work_deadline_skips_expired_work_and_releases_resources` | heavy call answered 200, expected 504 | The test sets the deadline to a quarter of the measured end-to-end time of the heavy call. On Windows the measured time included Nagle plus delayed-ACK stalls (about 200 ms): `write!` on an unbuffered `TcpStream` issues one write per formatted piece, on both the test client and pocold's `respond`. So the deadline exceeded the real work. The same stall added about 200 ms to every RPC answer on Windows. | pocold sets `TCP_NODELAY` on accepted RPC sockets and writes the header and the body in two writes. The test client sets `TCP_NODELAY` and sends its request in one write. |
+| `an_answer_is_reserved_until_its_connection_has_written_it` | `during` = 8388608 (only the stats request's own reservation) | Not determined. Either the 14 MiB answer was absorbed by the Windows loopback buffers while unread (then the test's premise does not hold there), or it was never observed above the threshold. | The message now reports `built` separately. Run 3 decides; the assertion is unchanged. |
+
+Linux after the fixes: `cargo test --release --locked --lib --test net` → 39 + 20 passed
+(`evidence/windows-fixes/linux-lib-net-after-fix.log`). The Windows result is Run 3.
