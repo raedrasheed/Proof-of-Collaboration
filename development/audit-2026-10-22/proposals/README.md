@@ -29,7 +29,7 @@ effects. It is PROPOSED, not approved, and LOG-CAP-AGGREGATE stays unapproved.
 [CAPS-SUSTAINABILITY.md](CAPS-SUSTAINABILITY.md) studies LOG_CAP, TX_CAP and TXBYTES_CAP together
 (reachability before H_END, effects at exhaustion, genesisHash, an integrated recommendation); it is
 PROPOSED, not approved. Its conformance items (the builder's skip, execution.md:83; template locking,
-consensus.md:136; the caps-test build, validation.md:2065) are implemented. The storage repair
+consensus.md:101; the caps-test build constant LOG_CAP, validation.md:2065) are implemented. The storage repair
 D-REORG-REDB is owner-approved and implemented; it is not one of the six
 ([D-REORG-REDB.md](D-REORG-REDB.md), [design and proofs](D-REORG-REDB-DESIGN-FREEZE.md)).
 

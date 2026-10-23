@@ -46,7 +46,7 @@
    "pass": true
   },
   {
-   "check": "permutation = hashlib SHA3-256 for lengths 0..700 (5 rate blocks)",
+   "check": "permutation = hashlib SHA3-256 for lengths 0..700 (up to 6 rate blocks with padding)",
    "detail": [],
    "pass": true
   },
@@ -309,6 +309,7 @@
     "value": 20000
    },
    "T_blk": 10,
+   "emptyBlocksFromBaseFee0ToIdle": 145,
    "logFill": {
     "LOG0dataBytes": 32732,
     "gas": 288349
@@ -390,6 +391,7 @@
     "value": 20000
    },
    "T_blk": 10,
+   "emptyBlocksFromBaseFee0ToIdle": 145,
    "logFill": {
     "LOG0dataBytes": 32732,
     "gas": 288349
@@ -471,6 +473,7 @@
     "value": 20000
    },
    "T_blk": 4,
+   "emptyBlocksFromBaseFee0ToIdle": 145,
    "logFill": {
     "LOG0dataBytes": 32732,
     "gas": 288349
@@ -558,6 +561,7 @@
     "value": 10000000
    },
    "T_blk": 60,
+   "emptyBlocksFromBaseFee0ToIdle": 145,
    "logFill": {
     "LOG0dataBytes": 32732,
     "gas": 288349

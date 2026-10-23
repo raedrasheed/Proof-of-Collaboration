@@ -327,6 +327,10 @@ def reach(p):
     base = IDLE_BASE; n = 0
     while base * tx_gas * G_TX < 2 * 10**18 and n < 10**6: base = next_base(base, tx_gas * G_TX, p["GAS_LIMIT"]); n += 1
     out["TX_CAP"]["fullBlocksUntilOneBlockCostsASubsidy"] = n
+    # A patient attacker first lets the base fee decay: empty blocks are free (review CV-7).
+    base = 10**9; n = 0
+    while base > IDLE_BASE: base = next_base(base, 0, p["GAS_LIMIT"]); n += 1
+    out["emptyBlocksFromBaseFee0ToIdle"] = n
     out["minTxBytes"] = min_tx; out["txBytesBlock"] = {"rawLengths": lens, "gas": bgas}
     out["logFill"] = {"LOG0dataBytes": ldata, "gas": lgas}
     return out
@@ -352,7 +356,7 @@ def main():
     for name, m, want in std: check("Keccak-256 " + name, keccak256(m).hex() == want, want)
     pattern = bytes((i * 7 + 3) & 0xff for i in range(700))
     bad = [n for n in range(len(pattern) + 1) if sha3_256(pattern[:n]) != hashlib.sha3_256(pattern[:n]).digest()]
-    check("permutation = hashlib SHA3-256 for lengths 0..700 (5 rate blocks)", not bad, bad[:5])
+    check("permutation = hashlib SHA3-256 for lengths 0..700 (up to 6 rate blocks with padding)", not bad, bad[:5])
     check("round constant 23", ROUND_CONSTANTS[23] == 0x8000000080008008, hex(ROUND_CONSTANTS[23]))
 
     # 2. GSV1.
