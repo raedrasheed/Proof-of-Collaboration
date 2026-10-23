@@ -106,10 +106,10 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
     for b in &bs{n.import(b.clone(),None).unwrap();}
     assert_eq!(n.chain.head,tip,"reorganized to B");assert_eq!(n.chain.head().cum_txs,0);
     assert_eq!(n.pool.txs.iter().map(|x|x.1.clone()).collect::<Vec<_>>(),t,"A's transactions are detached back into the pool (A11)");
-    // On B the builder fills B's room (3) and skips the fourth; a block with all four is invalid on B.
+    // On B the builder fills B's room (3) and skips the fourth, which is then past the cap on B too.
     let head=n.chain.head().meta_clone();assert_eq!(n.template_txs(&head),t[..3].to_vec());
-    assert!(matches!(hb.chain.validate(&signed(&hb,tip,t.clone()),None,0),Err(Reject::Block(ref w)) if w=="16 caps"));
     let sizes=mine_templates(&mut n,&mut hb,3);assert_eq!(sizes,vec![3,0,0]);assert_within_caps(&n);
+    let over=signed(&hb,n.chain.head,vec![t[3].clone()]);assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"));
     let _=std::fs::remove_dir_all(&dir);
 }
 

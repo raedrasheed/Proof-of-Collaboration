@@ -445,16 +445,22 @@ impl Node{
         for raw in detached{let _=self.submit_tx(raw,false);}
         for (_,raw) in old{let _=self.submit_tx(raw,false);}
     }
-    /// Pool transactions that still execute in order (for a signed template on `p`).
+    /// Pool transactions that still execute in order (for a signed template on `p`). execution.md:83: a
+    /// transaction that would pass TX_CAP or TXBYTES_CAP on p's branch (item 16, the accounting of
+    /// `Chain::within_caps`) is skipped, and so are its sender's later ones (their nonces follow it).
     pub fn template_txs(&self,p:&Entry)->Vec<Vec<u8>>{
-        let _=p;let cp=self.chain.spec.cp();let mut out=Vec::new();let mut gas=0u64;let mut bytes=0usize;
+        let cp=self.chain.spec.cp();let mut out=Vec::new();let mut gas=0u64;let mut bytes=0usize;
+        let (mut room_txs,mut room_bytes)=self.chain.caps_room(p);let mut skipped=HashSet::new();
         // Encoded item length (RLP string header included); the three list headers take <= 12 bytes.
         let enc=|n:usize|n+1+if n<56{0}else if n<256{1}else if n<65536{2}else{3};
         for (_,raw) in &self.pool.txs{
-            let Ok(env)=wire::decode_for_profile(raw,self.chain.spec.profile()) else{continue};let g=env.tx_env().gas_limit;
-            if gas+g>cp.GAS_LIMIT||bytes+enc(raw.len())>cp.BODY_MAX as usize-12{break}
-            gas+=g;bytes+=enc(raw.len());out.push(raw.clone());
+            let Ok(env)=wire::decode_for_profile(raw,self.chain.spec.profile()) else{continue};let tx=env.tx_env();
+            if skipped.contains(&tx.caller){continue}
+            if room_txs==0||raw.len() as u64>room_bytes{skipped.insert(tx.caller);continue}
+            if gas+tx.gas_limit>cp.GAS_LIMIT||bytes+enc(raw.len())>cp.BODY_MAX as usize-12{break}
+            gas+=tx.gas_limit;bytes+=enc(raw.len());room_txs-=1;room_bytes-=raw.len() as u64;out.push(raw.clone());
         }
+        debug_assert!(self.chain.within_caps(p,&out));
         out
     }
 
@@ -547,6 +553,8 @@ impl Node{
         let tid=template_id(&shell.ut_raw);
         let ok_sig=matches!(hashes::recover_address(&hashes::sig_msg(&tid),&shell.sig),Ok(a) if a[..]==shell.proposer[..]);
         if !ok_sig||shell.proposer[..]!=ctx.proposer[..]||!ctx.window.contains(shell.ts)||crate::timing::is_future(shell.ts,now_s(),self.capital_phi()){return false}
+        // consensus.md:136: a template whose block would fail item 16 is as if absent (no lock).
+        if !self.chain.within_caps(&p,&body.txs){return false}
         let Ok(effects)=self.chain.evidence_effects(&p,&body,shell.h) else{return false};
         let rebuilt=self.chain.rebuild_signed(&p,&ctx,shell.ts,Address::from_slice(&shell.proposer),&body,effects);
         match rebuilt{Ok(ut) if ut==shell.ut_raw=>{self.lock(shell,body,false);true},_=>false}
