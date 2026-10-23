@@ -179,12 +179,34 @@ impl Journal{
         self.commit.seek(SeekFrom::Start(off))?;self.commit.write_all(&slot_bytes(&self.binding,self.seq,self.records,self.end))?;self.commit.sync_data()?;Ok(())
     }
     /// Appends one record, fsyncs it, then records it in the commit file (fsynced) before returning.
-    pub fn append(&mut self,payload:&[u8])->Result<(),StoreError>{
+    /// Returns the record's frame offset (the start of its `len` field), so the caller can index it
+    /// by block hash for a later `read_at` (D-REORG-REDB off-heap block store).
+    pub fn append(&mut self,payload:&[u8])->Result<u64,StoreError>{
         if payload.len()>MAX_RECORD{return Err(StoreError::TooLarge)}
         let rec=encode_frame(payload);
+        let off=self.end;
         self.file.write_all(&rec)?;self.file.sync_data()?;self.records+=1;self.end+=rec.len() as u64;
-        self.write_commit()
+        self.write_commit()?;Ok(off)
     }
+    /// Reads the record at `offset` (a value returned by `append`, or recomputed on replay), verifying
+    /// its length check, payload digest and marker exactly as replay does, then decodes it into
+    /// (headerBytes, bodyBytes, parentResultBytes). A failed check is a hard error, never an empty
+    /// body: an off-heap body is thus never silently wrong (D-REORG-REDB acceptance test 6).
+    pub fn read_at(&self,offset:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8>),StoreError>{
+        let mut f=File::open(&self.path)?;
+        f.seek(SeekFrom::Start(offset))?;
+        let mut hdr=[0u8;HDR];f.read_exact(&mut hdr)?;
+        let len=u32::from_be_bytes(hdr[..4].try_into().unwrap());
+        if hdr[4..8]!=len_check(len)[..]{return Err(StoreError::Corrupt(offset))}
+        let len=len as usize;if len>MAX_RECORD{return Err(StoreError::Corrupt(offset))}
+        let mut rest=vec![0u8;32+len+1];f.read_exact(&mut rest)?;
+        let (digest,payload,marker)=(&rest[..32],&rest[32..32+len],rest[32+len]);
+        if marker!=1||sha(payload)[..]!=digest[..]{return Err(StoreError::Corrupt(offset))}
+        decode_record(payload).map_err(StoreError::Io)
+    }
+    /// The frame offset of the record that a fresh `append` of `payload_len` bytes would occupy, i.e.
+    /// the current end; used on replay to index each payload by hash as it is read in order.
+    pub fn end_offset(&self)->u64{self.end}
     pub fn path(&self)->&Path{&self.path}
 }
 

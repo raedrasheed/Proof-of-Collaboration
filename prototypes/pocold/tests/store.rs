@@ -175,3 +175,32 @@ fn three_records(name:&str)->(PathBuf,Vec<u8>){
     let mut l=v1(&recs);l[40]^=0x01;let d=tmp("a04-v1l");fs::create_dir_all(&d).unwrap();fs::write(d.join("blocks.journal"),&l).unwrap();
     assert_eq!(store::open(&d,&B).err(),Some(StoreError::LegacyNeedsReview));assert_eq!(fs::read(d.join("blocks.journal")).unwrap(),l);
 }
+
+/// D-REORG-REDB: append returns each record's frame offset, and read_at reads it back by offset,
+/// verifying the length check, payload digest and marker (a bad offset is a hard error, never an
+/// empty body). This is the off-heap block-store primitive.
+#[test] fn append_returns_offsets_and_read_at_round_trips(){
+    let dir=tmp("readat");
+    let mut offs=vec![];
+    {
+        let mut r=store::open(&dir,&B).unwrap();
+        for i in 0..5u8{
+            let p=store::encode_record(&[i;20],&[i;100],&[i;4]);
+            offs.push(r.journal.append(&p).unwrap());
+        }
+    }
+    // Reopen (fresh handle) and read every record back by its recorded offset.
+    let r=store::open(&dir,&B).unwrap();
+    assert_eq!(r.payloads.len(),5);
+    for (i,off) in offs.iter().enumerate(){
+        let (h,b,res)=r.journal.read_at(*off).expect("read_at a committed offset");
+        assert_eq!(h,vec![i as u8;20],"header bytes at record {i}");
+        assert_eq!(b,vec![i as u8;100],"body bytes at record {i}");
+        assert_eq!(res,vec![i as u8;4],"result bytes at record {i}");
+    }
+    // The first record's offset is 40 (after MAGIC(8) + binding(32)).
+    assert_eq!(offs[0],40);
+    // A bad offset (into the middle of a record) is a hard error, not an empty read.
+    assert!(r.journal.read_at(50).is_err(),"a mid-record offset must not decode");
+    let _=fs::remove_dir_all(&dir);
+}
