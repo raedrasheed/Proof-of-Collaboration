@@ -1546,12 +1546,14 @@ name = "pocold"
 version = "0.1.0"
 dependencies = [
  "k256",
+ "libc",
  "pocol-lp4-execution",
  "revm",
  "serde",
  "serde_json",
  "sha2 0.9.9",
  "sha3 0.9.1",
+ "windows-sys",
 ]
 
 [[package]]

@@ -107,6 +107,41 @@ pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0),active:A
     pacer_closed:AtomicUsize::new(0),pacer_late_max_ms:AtomicUsize::new(0),deadline_hits:AtomicUsize::new(0),cancel_late_max_ms:AtomicUsize::new(0),scratch_hits:AtomicUsize::new(0),
     scratch_heavy_max:AtomicUsize::new(0),limit_hits:AtomicUsize::new(0),origin_denied:AtomicUsize::new(0),send_done:AtomicUsize::new(0),send_overrun_max_ms:AtomicI64::new(i64::MIN),
     batch_wall_hits:AtomicUsize::new(0),batch_send_max_ms:AtomicUsize::new(0),batch_wall_max_ms:AtomicUsize::new(0)};
+/// SEND_SOCK_BUF (RpcGuard SO_SNDBUF): the kernel send buffer of every RPC connection. Set explicitly
+/// it also stops the kernel from growing it (Linux locks it against autotuning; Windows stops its
+/// ideal-send-backlog tuning), so an unread answer holds at most this much kernel memory beyond the
+/// client's receive window, and the SendPacer's accepted count A stays close to what the client read.
+/// Windows run 3 (a39379b) showed the default: a 14 MiB unread answer taken by the kernel within a
+/// second. Linux doubles the value it is given (bookkeeping) and reads back 2·SEND_SOCK_BUF.
+pub const SEND_SOCK_BUF:usize=32*1024;
+/// SO_SNDBUF through the platform's setsockopt/getsockopt (std has neither).
+pub mod sockbuf{
+    use std::net::TcpStream;
+    #[cfg(unix)] pub fn set(s:&TcpStream,n:usize)->std::io::Result<()>{
+        use std::os::unix::io::AsRawFd;let v=n as libc::c_int;
+        let r=unsafe{libc::setsockopt(s.as_raw_fd(),libc::SOL_SOCKET,libc::SO_SNDBUF,&v as *const libc::c_int as *const libc::c_void,std::mem::size_of::<libc::c_int>() as libc::socklen_t)};
+        if r==0{Ok(())}else{Err(std::io::Error::last_os_error())}
+    }
+    #[cfg(unix)] pub fn get(s:&TcpStream)->std::io::Result<usize>{
+        use std::os::unix::io::AsRawFd;let mut v:libc::c_int=0;let mut len=std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let r=unsafe{libc::getsockopt(s.as_raw_fd(),libc::SOL_SOCKET,libc::SO_SNDBUF,&mut v as *mut libc::c_int as *mut libc::c_void,&mut len)};
+        if r==0{Ok(v.max(0) as usize)}else{Err(std::io::Error::last_os_error())}
+    }
+    #[cfg(windows)] pub fn set(s:&TcpStream,n:usize)->std::io::Result<()>{
+        use std::os::windows::io::AsRawSocket;use windows_sys::Win32::Networking::WinSock::{setsockopt,SOL_SOCKET,SO_SNDBUF};let v=n as i32;
+        let r=unsafe{setsockopt(s.as_raw_socket() as usize,SOL_SOCKET,SO_SNDBUF,&v as *const i32 as *const u8,std::mem::size_of::<i32>() as i32)};
+        if r==0{Ok(())}else{Err(std::io::Error::last_os_error())}
+    }
+    #[cfg(windows)] pub fn get(s:&TcpStream)->std::io::Result<usize>{
+        use std::os::windows::io::AsRawSocket;use windows_sys::Win32::Networking::WinSock::{getsockopt,SOL_SOCKET,SO_SNDBUF};let (mut v,mut len)=(0i32,std::mem::size_of::<i32>() as i32);
+        let r=unsafe{getsockopt(s.as_raw_socket() as usize,SOL_SOCKET,SO_SNDBUF,&mut v as *mut i32 as *mut u8,&mut len)};
+        if r==0{Ok(v.max(0) as usize)}else{Err(std::io::Error::last_os_error())}
+    }
+    #[cfg(not(any(unix,windows)))] pub fn set(_:&TcpStream,_:usize)->std::io::Result<()>{Err(std::io::Error::new(std::io::ErrorKind::Unsupported,"SO_SNDBUF"))}
+    #[cfg(not(any(unix,windows)))] pub fn get(_:&TcpStream)->std::io::Result<usize>{Err(std::io::Error::new(std::io::ErrorKind::Unsupported,"SO_SNDBUF"))}
+}
+/// The SO_SNDBUF read back from the last accepted RPC connection (pocol_getRpcStats sendSockBuf).
+pub static SEND_SOCK_BUF_SEEN:AtomicUsize=AtomicUsize::new(0);
 /// The last SendPacer close: (sendTime µs, A bytes) (network.md:252 CloseOK record).
 pub static LAST_PACER_CLOSE:Mutex<Option<(u64,usize)>>=Mutex::new(None);
 fn bump_max(a:&AtomicUsize,v:usize){a.fetch_max(v,Ordering::SeqCst);}
@@ -431,6 +466,12 @@ pub fn serve(addr:SocketAddr,node:SyncSender<Event>,light:LightLane,limits:Limit
             // No Nagle delay: with delayed ACKs (Windows) a reply written in two parts would wait
             // about 200 ms for the first part's ACK.
             let Ok(mut s)=s else{continue};let _=s.set_nodelay(true);next+=1;let id=next;
+            // A connection whose send buffer cannot be bounded is not served (SEND_SOCK_BUF holds for
+            // every answer written).
+            match sockbuf::set(&s,SEND_SOCK_BUF).and_then(|_|sockbuf::get(&s)){
+                Ok(n)=>SEND_SOCK_BUF_SEEN.store(n,Ordering::SeqCst),
+                Err(_)=>{COUNTERS.refused.fetch_add(1,Ordering::SeqCst);let _=s.shutdown(std::net::Shutdown::Both);continue}
+            }
             crate::threads::reap(&mut conns);
             if conns.len()>=limits.conn_max{
                 COUNTERS.refused.fetch_add(1,Ordering::SeqCst);
@@ -777,12 +818,12 @@ pub fn net_key(chain_id:u64,genesis:&[u8;32])->[u8;32]{
 }
 fn ms(d:Duration)->u64{d.as_millis().min(u64::MAX as u128) as u64}
 /// pocol_getParams.rpcLimits: the running RpcGuard limits (network.md:184), byte and ms integers. A
-/// limit pocold does not enforce is null, never nominal (RPCGUARD.md): SEND_SOCK_BUF, SCRATCH (only
+/// limit pocold does not enforce is null, never nominal (RPCGUARD.md): SCRATCH (only
 /// the log handlers are charged: logsScratch), CANCEL_MAX and RPC_MEM_TOTAL. CONN_BUF is pocold's
 /// structural bound on a connection's small answers (SMALL_REPLY_MAX); heavyActive and lightActive
 /// the single consensus thread's 1.
 fn rpc_limits_json(l:&Limits)->Value{
-    json!({"connMax":l.conn_max,"reqBuf":REQ_BUF,"connBuf":SMALL_REPLY_MAX,"sendSockBuf":Value::Null,
+    json!({"connMax":l.conn_max,"reqBuf":REQ_BUF,"connBuf":SMALL_REPLY_MAX,"sendSockBuf":SEND_SOCK_BUF,
         "heavyActive":1,"lightActive":1,"heavyQueue":l.heavy_queue,"lightQueue":l.light_queue,"queueWaitMs":ms(l.queue_wait),
         "heavyRespMem":HEAVY_RESP_POOL,"lightRespMem":light_pool(l),"respMax":RESP_MAX,"lightRespMax":LIGHT_RESP_MAX,"batchRespMax":BATCH_RESP_MAX,
         "scratchHeavy":Value::Null,"scratchLight":Value::Null,"logsScratch":l.scratch_heavy,"memTotal":Value::Null,"batchMax":BATCH_MAX,"errItemMax":ERR_ITEM_MAX,
@@ -807,7 +848,7 @@ fn rpc_stats(n:&Node)->Value{
         "batchWallHits":g(&c.batch_wall_hits),"traceDropped":Value::Null});
     let own=json!({"refused":g(&c.refused),"active":g(&c.active),"expired":g(&c.expired),"expiredMembers":g(&c.expired_members),"queueFull":g(&c.queue_full),"queueWait":g(&c.queue_wait),
         "lightFull":g(&c.light_full),"tooComplex":g(&c.too_complex),"busy":g(&c.busy),"queued":g(&c.queued),"wakes":g(&c.wakes),"lightPushed":g(&c.light_pushed),
-        "heavyReserved":h,"lightReserved":l,"deadlineHits":g(&c.deadline_hits),"scratchHits":g(&c.scratch_hits)});
+        "heavyReserved":h,"lightReserved":l,"deadlineHits":g(&c.deadline_hits),"scratchHits":g(&c.scratch_hits),"sendSockBuf":g(&SEND_SOCK_BUF_SEEN)});
     if let (Some(m),Value::Object(o))=(v.as_object_mut(),own){m.extend(o);}
     v
 }

@@ -482,7 +482,10 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
 /// pacerLateMaxMs and lastPacerClose); an honest reader gets the whole answer, byte for byte, with no
 /// pacer close. MIN_SEND_RATE is raised and GRACE shortened so the bound is reached quickly.
 #[test] fn send_pacer_closes_a_slow_reader_after_grace(){let _g=serial();
-    let mut l=small();l.rpc.min_send_rate=100<<20;l.rpc.grace=Duration::from_millis(500);l.rpc.enforce_slack=Duration::from_millis(200);
+    // R = 1 MiB/s: with SO_SNDBUF set (SEND_SOCK_BUF) a non-reading client takes only the kernel send
+    // buffer plus its receive window (well under R·GRACE = 512 KiB), so the pacer closes it at GRACE;
+    // an honest reader is far above R (the pacer moves about one send buffer per pacer_poll).
+    let mut l=small();l.rpc.min_send_rate=1<<20;l.rpc.grace=Duration::from_millis(500);l.rpc.enforce_slack=Duration::from_millis(200);
     l.rpc.work_deadline=Duration::from_secs(60);l.rpc.write_deadline=Duration::from_secs(60);
     let r=start("pacer",l);let c=&pocold::rpc::COUNTERS;let p0=counter(&c.pacer_closed);c.pacer_late_max_ms.store(0,Ordering::SeqCst);
     // ~14 MiB heavy batch (each member reverts with 1 MiB), larger than the socket buffers, so a
@@ -501,7 +504,7 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     assert!(late<=200,"pacer lateness {late} ms > ENFORCE_SLACK");
     let st=rpc_json(r.rpc,r#"{"jsonrpc":"2.0","id":2,"method":"pocol_getRpcStats","params":[]}"#)["result"].clone();
     let (send_time,accepted)=(st["lastPacerClose"]["sendTime"].as_f64().unwrap(),st["lastPacerClose"]["accepted"].as_u64().unwrap());
-    assert!(send_time>0.5&&(accepted as f64)<(100u64<<20) as f64*send_time,"CloseOK: sendTime > GRACE and A < R·sendTime: {send_time} s, {accepted} B");
+    assert!(send_time>0.5&&(accepted as f64)<(1u64<<20) as f64*send_time,"CloseOK: sendTime > GRACE and A < R·sendTime: {send_time} s, {accepted} B");
     s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();assert!(closed(&mut s),"the slow reader's connection is closed");
     println!("PACER {}",serde_json::json!({"closedMs":closed_at.as_millis() as u64,"pacerLateMaxMs":late,"lastPacerClose":st["lastPacerClose"]}));
     // Honest reader: a client that reads promptly gets the whole ~14 MiB answer (sendDone, no close),
@@ -718,7 +721,8 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     assert_eq!(lim["respMax"],8<<20);assert_eq!(lim["batchRespMax"],16<<20);assert_eq!(lim["logsScratch"],16<<20);assert_eq!(lim["rate"],20);assert_eq!(lim["bucketCap"],20);
     assert_eq!(lim["minSendRate"],65536);assert_eq!(lim["graceMs"],2000);assert_eq!(lim["enforceSlackMs"],200);assert_eq!(lim["timerEpsMs"],1);assert_eq!(lim["batchWallMs"],420000);
     assert_eq!(lim["computeHeavyMs"],5000);assert_eq!(lim["computeLightMs"],500);assert_eq!(lim["queueWaitMs"],2000);assert_eq!(lim["heavyRespMem"],48<<20);
-    for k in ["sendSockBuf","scratchHeavy","scratchLight","cancelMaxMs","memTotal"]{assert!(lim[k].is_null(),"{k} is not enforced: null, never nominal");}
+    for k in ["scratchHeavy","scratchLight","cancelMaxMs","memTotal"]{assert!(lim[k].is_null(),"{k} is not enforced: null, never nominal");}
+    assert_eq!(lim["sendSockBuf"],pocold::rpc::SEND_SOCK_BUF);
     let res=&p["result"];assert!(res["genesisHash"].is_string()&&res["chainId"].as_u64().is_some());
     assert_eq!(res["netKey"],pocold::types::hex(&pocold::rpc::net_key(r.chain_id,&r.genesis)));assert_eq!(res["forkSchedule"],serde_json::json!([[1,0]]));
     let st=rpc_json(r.rpc,r#"{"jsonrpc":"2.0","id":2,"method":"pocol_getRpcStats","params":[]}"#);let st=st["result"].as_object().unwrap().clone();
@@ -727,4 +731,9 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     for k in ["batchSendMaxS","batchWallMaxS"]{assert!(st[k].as_f64().is_some(),"{k}");}
     for k in ["scratchLightMax","snapshotsOpen","anchorRejects","traceDropped","lastPacerClose","sendOverrunMaxMs"]{assert!(st.contains_key(k),"pocol_getRpcStats has {k}");}
     assert_eq!(st["lightActive"],1,"the stats request itself is the light request running");
+    // SO_SNDBUF was set on the stats request's own connection: Linux reads back twice the value it was
+    // given, Windows the value itself; a connection left at the default reads back something else
+    // (Linux 16 KiB before autotuning, Windows 64 KiB).
+    let want=if cfg!(target_os="linux"){2*pocold::rpc::SEND_SOCK_BUF}else{pocold::rpc::SEND_SOCK_BUF};
+    assert_eq!(st["sendSockBuf"],want,"the RPC connection's kernel send buffer is SEND_SOCK_BUF");
 }

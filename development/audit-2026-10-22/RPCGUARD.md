@@ -38,7 +38,7 @@ keep-alive. pocold differs:
 | HTTP/1.1 on 127.0.0.1, no HTTP/2, no pipelining | `serve` binds loopback only, otherwise it refuses. `respond`/`pace_write` write HTTP/1.1 with `Connection: close` | ENFORCED | existing `rpc_*` tests | — |
 | One request at a time; the next is not read before sendDone | The connection closes after one response, so it never has a next request | EQUIVALENT (stronger) | every `rpc_*` test | — |
 | S1: at most 1 reservation and 1 waiting request per connection | One `conn` thread handles one request, with one `Reply` reservation | ENFORCED | `an_answer_is_reserved_until_its_connection_has_written_it` | — |
-| SO_SNDBUF = 32 KiB per connection (network.md:190) | Not set. `std::net` has no portable `setsockopt`, and adding a dependency (libc, windows-sys or socket2) was not done in this round. Consequence: the kernel sizes the send buffer itself (Linux autotunes up to `net.ipv4.tcp_wmem` max). A (the bytes the socket accepted) can therefore run that far ahead of the client's reads. The SendPacer still bounds how long an answer holds its reservation, because it counts accepted bytes, but its slack against the client is the kernel buffer, not 32 KiB. The kernel also holds that much per connection, outside the process heap and the A13 model. (Correcting stage A: D93's "enters no criterion" refers to the accept/read gap, not to SO_SNDBUF; R26 has `sendSockBuf<=64KiB`, now waived.) | NOT ENFORCED (`send_sock_buf` absent; rpcLimits.sendSockBuf = null) | — | — |
+| SO_SNDBUF = 32 KiB per connection (network.md:190) | **Integration (after round 2):** `rpc::sockbuf` sets SO_SNDBUF = `SEND_SOCK_BUF` (32 KiB) on every accepted RPC connection, through `libc` (Unix) or `windows-sys` WinSock (Windows). Both crates and versions were already in the lock; the lock change is only the two dependency edges. A connection whose buffer cannot be set is not served (counted as refused). Set explicitly, the buffer is also excluded from autotuning: Linux locks it, and Windows stops its ideal-send-backlog tuning. So an unread answer holds at most the send buffer plus the client's receive window in the kernel. Measured on Linux: 226,476 B for a non-reading client, against an autotuned 3,939,840 B send buffer without the setting. Windows run 3 showed the default there: a 14 MiB unread answer taken by the kernel within a second. Linux reads back 2·32 KiB (bookkeeping), Windows 32 KiB. pocol_getRpcStats.sendSockBuf reports the value read back from the last connection. The pacer moves about one send buffer per `pacer_poll` (1 ms), far above MIN_SEND_RATE. | ENFORCED (`send_sock_buf` = 32768 at its running value; `sendSockBuf<=64KiB` checked) | `get_params_and_rpc_stats_report_the_limits` (read-back equals 2·32 KiB on Linux, 32 KiB on Windows); `send_pacer_closes_a_slow_reader_after_grace` (R = 1 MiB/s) | no-set mutant: read-back 3,939,840 ≠ 65,536, caught (`evidence/rpcguard-integration/mutant-no-set.log`) |
 
 ## 2. Classification (ب) and response limits (ج)
 
@@ -113,32 +113,30 @@ keep-alive. pocold differs:
 
 | spec item | pocold mechanism | status | test | mutant |
 |---|---|---|---|---|
-| pocol_getParams → {profileKind, nodeKind, nonceMode, chainId, genesisHash, genesisPre, netKey, forkSchedule, activeVersion, rpcLimits} (network.md:336) | Every field (round 2 adds `netKey` = keccak256(RLP(['PoCol-net-v1', chainId, genesisHash])), checked against the extension's derivation, and `forkSchedule`). rpcLimits holds the running values, and null for SEND_SOCK_BUF, SCRATCH, CANCEL_MAX and RPC_MEM_TOTAL | ENFORCED | `get_params_and_rpc_stats_report_the_limits`, rpc unit test `net_key_matches_the_extension` | RGM7 |
+| pocol_getParams → {profileKind, nodeKind, nonceMode, chainId, genesisHash, genesisPre, netKey, forkSchedule, activeVersion, rpcLimits} (network.md:336) | Every field (round 2 adds `netKey` = keccak256(RLP(['PoCol-net-v1', chainId, genesisHash])), checked against the extension's derivation, and `forkSchedule`). rpcLimits holds the running values (sendSockBuf = 32768 since the integration), and null for SCRATCH, CANCEL_MAX and RPC_MEM_TOTAL | ENFORCED | `get_params_and_rpc_stats_report_the_limits`, rpc unit test `net_key_matches_the_extension` | RGM7 |
 | pocol_getRpcStats → the 27-field record (network.md:347) | Every field. Null for the mechanisms pocold does not have: scratchLightMax, snapshotsOpen, anchorRejects, traceDropped. sendOverrunMaxMs is null until the first sendDone | ENFORCED (the record; the four null fields are not tracked) | `get_params_and_rpc_stats_report_the_limits` | — |
 
 ## 8. Admission (R26) and the A13 RPC memory term
 
-`pocold::RPC_ENFORCED` names 24 fields, at their running values:
+`pocold::RPC_ENFORCED` names 25 fields at integration (24 in round 2, plus send_sock_buf), at their running values:
 
-- conn_max, req_buf, conn_buf (5184), heavy_active (1), light_active (1), light_queue;
+- conn_max, req_buf, conn_buf (5184), send_sock_buf (32768), heavy_active (1), light_active (1), light_queue;
 - heavy_resp_mem, light_resp_mem, resp_max, light_resp_max, batch_resp_max, batch_max, err_item_max;
 - logs_count_max, logs_scan_bytes, rate (20), bucket_cap (20), queue_wait_ms (2000), compute_heavy_ms (5000);
 - grace_ms, min_send_rate, batch_wall_ms, enforce_slack_ms, timer_eps_ms (1).
 
-Five fields are absent, never nominal:
+Four fields are absent, never nominal (send_sock_buf was the fifth until the integration):
 
-- `send_sock_buf`;
 - `scratch_heavy` and `scratch_light` (only the log handlers are charged);
 - `mem_total`;
 - `cancel_max_ms` (precompile runs are uninterruptible).
 
-Under the experimental-devnet scope, 14 of the 18 R26 predicates read only present fields; they are
-checked and all pass. Four are waived and reported:
+Under the experimental-devnet scope, 15 of the 18 R26 predicates read only present fields; they are
+checked and all pass, `sendSockBuf<=64KiB` among them. Three are waived and reported:
 
 - `derive` (reads scratch and cancel_max);
 - `memoryRequired<=memTotal`;
-- `batchWallMin<=batchWallMs` (derive);
-- `sendSockBuf<=64KiB`.
+- `batchWallMin<=batchWallMs` (derive).
 
 The specification scope refuses (`specification:rpc-absent`). Test:
 `pocold_admission_is_an_experimental_devnet_with_absent_rpc_mechanisms`.
