@@ -1,9 +1,13 @@
-# RpcGuard in pocold: two open limits that need a normative decision
+# RpcGuard in pocold: three items that need a normative decision
 
-**Status: PROPOSED — not approved.** Nothing in this document is implemented. Both items concern
-RpcGuard, a local service policy (D87, consensus.md §13): neither touches validity, fork choice,
-GenesisSpec, CP values or any protocol constant. Both would still change RPC-visible behaviour
-beyond what network.md:182–330 says, so under the audit rules they are proposals only.
+**Status: PROPOSED — not approved.** Nothing in this document is implemented. P1 and P2 are open
+limits. P3 records how pocold reads a gap in the text: pocold keeps its pre-existing behaviour there
+and introduces nothing new.
+
+All three concern RpcGuard, a local service policy (D87, consensus.md §13). None touches validity,
+fork choice, GenesisSpec, CP values or any protocol constant. Each option would still fix
+RPC-visible behaviour beyond what network.md:182–330 says, so under the audit rules each is a
+proposal only.
 
 Context: development/audit-2026-10-22/RPCGUARD.md (per-item status), the round-2 review of
 wf/rpcguard (findings M1, M2, B3) and the fix round on wf/rpcguard-r2.
@@ -90,3 +94,36 @@ pocold therefore reports `cancel_max_ms` absent.
 If B or C is chosen, the deciding vectors are: BLAKE2F at 29.9M rounds, MODEXP at its worst
 EIP-2565 pricing within 30M gas, and BN254 pairing with 880 pairs. Each is measured on the reference
 host and on the Windows CI host.
+
+## P3. An effectful method that completes after its COMPUTE_DEADLINE (network.md:235)
+
+### What the approved text says, and what pocold does
+
+> COMPUTE_DEADLINE من القبول شاملًا الترميز: 5s ثقيل و500 ms خفيف، وانتهاؤها −32020 {deadline}.
+
+"COMPUTE_DEADLINE runs from admission, including encoding: 5 s heavy and 500 ms light, and its expiry is
+−32020 {deadline}."
+
+The text does not say what to answer when a method's effect has already happened before the deadline
+expired. eth_sendRawTransaction (a light method) pools a transaction; pocol_submitShare (not served by
+pocold) submits a share.
+
+pocold checks the deadline before such a method runs; past the deadline, the method does not run and
+the answer is −32020. For every read-only method, pocold also checks once the answer is encoded and
+replaces a late result with −32020. That check is not applied to the two effectful methods. A late
+answer to an effectful method therefore keeps its result. This is the behaviour pocold had before
+RpcGuard (no deadline at all) and under stage A (entry check only), so the fix round introduces no new
+semantics for these methods.
+
+### Options
+
+| option | answer when the effect has happened and the deadline expires before the answer is encoded | client sees |
+|---|---|---|
+| A (current) | the result (for example the transaction hash) | the truth; the deadline is enforced before the effect |
+| B (literal reading) | −32020 {deadline} | an error for a transaction that was pooled; a retry is then rejected as a duplicate |
+
+### Proposed clarifying text, if A is chosen
+
+> For a method whose effect is applied when it runs (eth_sendRawTransaction, pocol_submitShare), the
+> COMPUTE_DEADLINE is checked before the effect; once the effect is applied, its result is answered.
+
