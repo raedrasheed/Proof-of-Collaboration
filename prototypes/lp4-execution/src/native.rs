@@ -46,6 +46,42 @@ pub fn execute_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockConte
     crate::code_caps::validate_snapshot(snapshot,limits).map_err(EVMError::Custom)?;
     execute_on_chain(snapshot,tx,block,profile.spec().chain_id,Some(limits))
 }
+/// The EVMError::Custom text of a simulation that `stop` ended.
+pub const SIMULATION_STOPPED:&str="rpc simulation stopped";
+/// The gas of one frame between two polls of a simulation's `stop` (network.md RpcGuard (و): the
+/// cancellation token is checked every 10^6 gas).
+pub const STOP_GAS:u64=1_000_000;
+/// RPC simulation only (eth_call/eth_estimateGas, network.md RpcGuard (و)): `execute_for_profile` with
+/// `stop` polled before every CALL/CREATE-family instruction, at every 64th JUMP/JUMPI, and at the
+/// first JUMP/JUMPI or data-sized instruction (KECCAK256, the *COPY family, LOG0-4) once the frame has
+/// spent STOP_GAS since the last poll. Between two polls a frame therefore runs at most STOP_GAS gas
+/// plus one straight-line run of fixed-cost instructions (bounded by the code size) and one data-sized
+/// instruction. A precompile call is not interpreted: it runs to its end (up to the call's gas), so
+/// the cancellation gap is not bounded by STOP_GAS there. When `stop` returns true the execution ends
+/// with EVMError::Custom(SIMULATION_STOPPED). Block validation, SYSTEM and USER never use it.
+pub fn simulate_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity,stop:std::rc::Rc<dyn Fn()->bool>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+    let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
+    crate::code_caps::validate_snapshot(snapshot,limits).map_err(EVMError::Custom)?;
+    validate_nonce(snapshot,tx.caller,tx.nonce)?;
+    build_engine(snapshot,tx,block,profile.spec().chain_id,Some(limits)).modify()
+        .append_handler_register_box(Box::new(move|h|stop_register(h,stop.clone()))).build().transact()
+}
+fn stop_register<EXT:'static>(h:&mut revm::handler::register::EvmHandler<'_,EXT,InMemoryDB>,stop:std::rc::Rc<dyn Fn()->bool>){
+    use revm::interpreter::{opcode::*,InstructionResult};
+    // `n` counts hooked instructions; `mark` is the frame gas remaining at the last poll (a frame
+    // switch changes it abruptly, which only adds a poll).
+    let (n,mark)=(std::rc::Rc::new(std::cell::Cell::new(0u32)),std::rc::Rc::new(std::cell::Cell::new(u64::MAX)));
+    for (op,every) in [(JUMP,64),(JUMPI,64),(KECCAK256,0),(CALLDATACOPY,0),(CODECOPY,0),(EXTCODECOPY,0),(RETURNDATACOPY,0),(MCOPY,0),
+        (LOG0,0),(LOG1,0),(LOG2,0),(LOG3,0),(LOG4,0),(CALL,1),(CALLCODE,1),(DELEGATECALL,1),(STATICCALL,1),(CREATE,1),(CREATE2,1)]{
+        let (stop,n,mark)=(stop.clone(),n.clone(),mark.clone());
+        h.instruction_table.update_boxed(op,move|prev,interp,host|{
+            let k=n.get().wrapping_add(1);n.set(k);let g=interp.gas.remaining();
+            if (every!=0&&k%every==0)||mark.get().abs_diff(g)>=STOP_GAS{mark.set(g);
+                if stop(){host.evm.error=Err(EVMError::Custom(SIMULATION_STOPPED.into()));interp.instruction_result=InstructionResult::FatalExternalError;return}}
+            prev(interp,host)
+        });
+    }
+}
 fn execute_on_chain(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     validate_nonce(snapshot,tx.caller,tx.nonce)?;
     build_engine(snapshot,tx,block,chain_id,limits).transact()

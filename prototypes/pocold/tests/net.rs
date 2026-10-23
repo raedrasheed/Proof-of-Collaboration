@@ -249,7 +249,7 @@ fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id
 #[test] fn rpc_work_deadline_skips_expired_work_and_releases_resources(){let _g=serial();
     let c=&pocold::rpc::COUNTERS;let d=heavy_duration();let dl=(d/4).max(Duration::from_millis(2));
     let mut l=small();l.rpc.work_deadline=dl;let r=start("deadline",l);
-    let base=threads();let (e0,m0)=(counter(&c.expired),counter(&c.expired_members));
+    let base=threads();let (e0,m0)=(counter(&c.expired),counter(&c.expired_members));let (ha0,lq0)=(counter(&c.heavy_active),counter(&c.light_queued));
     let stop=Arc::new(AtomicBool::new(false));
     let h=std::thread::spawn({let p=r.rpc;move||timed(p,HEAVY)});
     let lights:Vec<_>=(0..8).map(|_|{let (p,stop)=(r.rpc,stop.clone());std::thread::spawn(move||{let mut v=vec![];while !stop.load(Ordering::SeqCst){v.push(rpc(p,LIGHT,false).0)}v})}).collect();
@@ -259,8 +259,13 @@ fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id
     // 503: the light lane is full of requests that expired behind the heavy call and are not yet
     // skipped; they were never queued.
     assert!(codes.iter().all(|c|matches!(*c,200|503|504)),"{codes:?}");let late=codes.iter().filter(|c|**c==504).count();
-    assert!(wait_until(10_000,||rpc(r.rpc,LIGHT,false).0==200),"the node serves again");
+    // Review B5: the skipped count covers exactly the window of `codes`. Wait until the heavy call has
+    // finished and every light request of the window has left the lane (run or skipped), sending
+    // nothing meanwhile; only then snapshot, before the serve-again polling below (whose own requests
+    // could expire and inflate the count past `late`).
+    assert!(wait_until(30_000,||counter(&c.heavy_active)<=ha0&&counter(&c.light_queued)<=lq0),"the window's requests are all run or skipped");
     let skipped=counter(&c.expired)-e0;
+    assert!(wait_until(10_000,||rpc(r.rpc,LIGHT,false).0==200),"the node serves again");
     assert!(late>=1&&skipped>=1&&skipped<=late,"light 504s {late}, skipped {skipped} (of {} light requests)",codes.len());
     // A batch: the first member runs past the deadline; the 19 after it are not started.
     let mut b=vec![HEAVY.to_string()];b.extend((0..19).map(|_|LIGHT.to_string()));let body=format!("[{}]",b.join(","));
@@ -273,11 +278,13 @@ fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id
         "lightRequests":codes.len(),"light504":late,"light503":codes.iter().filter(|c|**c==503).count(),"skipped":skipped,"batchMembersNotRun":counter(&c.expired_members)-m0}));
 }
 /// Review F4: the body of a heavy request whose caller already got 504 stays queued until the
-/// node reaches it. At most queued_max (2·conn_max) are held at any moment, a further heavy
-/// request is 503 (counted), and every held body is released when the node skips it.
+/// node reaches it. At most queued_max (HEAVY_QUEUE) are held at any moment, a further heavy
+/// request is -32021 busy (counted), and every held body is released when the node skips it.
 #[test] fn abandoned_queued_bodies_are_capped_and_released(){let _g=serial();
     let c=&pocold::rpc::COUNTERS;let d=heavy_duration();
-    let mut l=small();l.rpc.conn_max=2;l.rpc.work_deadline=(d/8).max(Duration::from_millis(1));let qmax=pocold::rpc::queued_max(&l.rpc);let r=start("queued",l);
+    // A small HEAVY_QUEUE and a short QUEUE_WAIT so a full-for-QUEUE_WAIT queue reliably answers busy
+    // while the consensus thread is stalled on the first heavy call (network.md:214, :234).
+    let mut l=small();l.rpc.conn_max=2;l.rpc.heavy_queue=4;l.rpc.queue_wait=Duration::from_millis(20);l.rpc.work_deadline=(d/8).max(Duration::from_millis(1));let qmax=pocold::rpc::queued_max(&l.rpc);let r=start("queued",l);
     let (f0,q0)=(counter(&c.queue_full),counter(&c.queued));
     let stop=Arc::new(AtomicBool::new(false));let peak=Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sampler={let (stop,peak)=(stop.clone(),peak.clone());std::thread::spawn(move||while !stop.load(Ordering::SeqCst){peak.fetch_max(counter(&pocold::rpc::COUNTERS.queued).saturating_sub(q0),Ordering::SeqCst);std::thread::yield_now();})};
@@ -292,10 +299,10 @@ fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id
     }
     stop.store(true,Ordering::SeqCst);sampler.join().unwrap();
     let full=counter(&c.queue_full)-f0;let peak=peak.load(Ordering::SeqCst);
-    assert!(full>=1,"queued_max was reached and a heavy request refused 503 ({rounds} rounds, peak {peak})");
-    assert!(peak<=qmax,"at most queued_max ({qmax}) bodies are held: {peak}");
+    assert!(full>=1,"HEAVY_QUEUE was reached and a heavy request answered -32021 busy ({rounds} rounds, peak {peak})");
+    assert!(peak<=qmax,"at most HEAVY_QUEUE ({qmax}) bodies are held: {peak}");
     assert_eq!(stats(r.rpc)["queued"],1,"only the stats request itself");
-    println!("QUEUED {}",serde_json::json!({"queuedMax":qmax,"peakQueued":peak,"refused503":full,"rounds":rounds}));
+    println!("QUEUED {}",serde_json::json!({"queuedMax":qmax,"peakQueued":peak,"refusedBusy":full,"rounds":rounds}));
 }
 /// Response pools on a node: with the heavy pool held full, a heavy batch carrying a transaction
 /// is answered -32021 busy for every member and nothing runs (the transaction is not pooled);
@@ -308,7 +315,7 @@ fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id
     let mut n=Node::open(cfg,spec()).unwrap();let pools=n.resp_pools();
     let tx=Tx{chain_id:777940,nonce:0,max_priority:U256::from(1u64),max_fee:U256::from(10_000_000_000u64),gas:21000,to:Some(revm::primitives::Address::ZERO),value:U256::ZERO,data:Default::default()}.sign_1559(&devnet::account_key("alice"));
     let body=format!(r#"[{{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["0x{}"]}},{{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}}]"#,hex(&tx));
-    let req=|b:&str|{let (t,_r)=std::sync::mpsc::channel();Request{body:b.as_bytes().to_vec(),reply:t,site:false,deadline:Instant::now()+Duration::from_secs(30),light:false,held:None}};
+    let req=|b:&str|{let (t,_r)=std::sync::mpsc::channel();Request::local(b.as_bytes().to_vec(),t,Instant::now()+Duration::from_secs(30),false)};
     let held=pools.hold_heavy(HEAVY_RESP_POOL-1024).unwrap();
     let busy=answer(&mut n,&req(&body));let v:serde_json::Value=serde_json::from_str(&busy.body).unwrap();
     assert!(v.as_array().map_or(false,|a|a.len()==2&&a.iter().all(|i|i["error"]["code"]==-32021)),"every member is busy: {v}");
@@ -329,7 +336,7 @@ fn hex(b:&[u8])->String{b.iter().map(|x|format!("{x:02x}")).collect()}
     let cfg=Config{dir,name:"turn".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()};
     let mut n=Node::open(cfg,spec()).unwrap();let lane=n.light_lane();
     let (t,r)=std::sync::mpsc::channel();let queued=20;
-    for _ in 0..queued{lane.tx.try_send(Event::Rpc(Request{body:LIGHT.as_bytes().to_vec(),reply:t.clone(),site:false,deadline:Instant::now()+Duration::from_secs(30),light:true,held:None})).unwrap();}
+    for _ in 0..queued{lane.tx.try_send(Event::Rpc(Request::local(LIGHT.as_bytes().to_vec(),t.clone(),Instant::now()+Duration::from_secs(30),true))).unwrap();}
     let w0=counter(&pocold::rpc::COUNTERS.wakes);
     n.drain_light();let first=r.try_iter().count();
     assert_eq!(first,LIGHT_TURN,"one turn runs LIGHT_TURN light requests");
@@ -445,4 +452,279 @@ fn hex(b:&[u8])->String{b.iter().map(|x|format!("{x:02x}")).collect()}
     assert!(out.len()>(12<<20),"the client reads the whole answer: {} B",out.len());
     assert!(wait_until(10_000,||stats(r.rpc)["heavyReserved"].as_u64()==Some(pocold::rpc::RESP_MAX as u64)),"after the write the reservation is released (only the stats request's own remains)");
     println!("RESERVED {}",serde_json::json!({"reservedWhileUnread":during,"answerBytes":out.len()}));
+}
+
+// ---------------- round 2 (rpcguard track): the RpcGuard mechanisms, on real loopback sockets ----------------
+/// Reads the whole JSON-RPC body of one request and parses it.
+fn rpc_json(port:u16,body:&str)->serde_json::Value{let (_,b)=rpc(port,body,false);serde_json::from_str::<serde_json::Value>(&b).unwrap_or(serde_json::Value::Null)}
+/// An eth_call (or eth_estimateGas) to the BLAKE2F precompile (0x09) with `rounds` rounds: one
+/// precompile run that no stop hook can cut short, of a length set by its gas (1 gas per round).
+fn blake(rounds:u32,method:&str)->String{
+    let input=format!("{rounds:08x}{}01","00".repeat(64+128+16));
+    format!(r#"{{"jsonrpc":"2.0","id":5,"method":"{method}","params":[{{"to":"0x0000000000000000000000000000000000000009","data":"0x{input}","gas":"0x1c9c380"}},"latest"]}}"#)
+}
+/// The longest single uninterruptible heavy request here: eth_call BLAKE2F with 29.9M rounds (30M gas).
+fn blake_max()->String{blake(29_900_000,"eth_call")}
+/// How long `body` holds the consensus thread on this host and build: the shorter of two warm runs on
+/// a node with wide limits. Timings under test are fractions of it.
+fn duration_of(tag:&str,body:&str)->Duration{
+    let mut wide=small();wide.rpc.work_deadline=Duration::from_secs(60);wide.rpc.compute_heavy=Duration::from_secs(60);let w=start(tag,wide);
+    (0..2).map(|_|{let t=Instant::now();let v=rpc_json(w.rpc,body);assert!(v["result"].is_string(),"{v}");t.elapsed()}).min().unwrap()
+}
+/// Starts `body` on a thread and returns once the consensus thread is running it (the heavyActive gauge).
+fn hold_with(port:u16,body:&str)->std::thread::JoinHandle<serde_json::Value>{
+    let (b0,body)=(counter(&pocold::rpc::COUNTERS.heavy_active),body.to_string());let h=std::thread::spawn(move||rpc_json(port,&body));
+    assert!(wait_until(10_000,||counter(&pocold::rpc::COUNTERS.heavy_active)>b0),"the holder runs");h
+}
+fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["data"]["reason"]=="busy"&&(250..=2000).contains(&v["error"]["data"]["retryAfterMs"].as_u64().unwrap_or(0))}
+/// SendPacer (network.md:237-256): a client that does not read is closed after GRACE (A below
+/// MIN_SEND_RATE·sendTime), within ENFORCE_SLACK of the violation instant (CloseOK, recorded in
+/// pacerLateMaxMs and lastPacerClose); an honest reader gets the whole answer, byte for byte, with no
+/// pacer close. MIN_SEND_RATE is raised and GRACE shortened so the bound is reached quickly.
+#[test] fn send_pacer_closes_a_slow_reader_after_grace(){let _g=serial();
+    let mut l=small();l.rpc.min_send_rate=100<<20;l.rpc.grace=Duration::from_millis(500);l.rpc.enforce_slack=Duration::from_millis(200);
+    l.rpc.work_deadline=Duration::from_secs(60);l.rpc.write_deadline=Duration::from_secs(60);
+    let r=start("pacer",l);let c=&pocold::rpc::COUNTERS;let p0=counter(&c.pacer_closed);c.pacer_late_max_ms.store(0,Ordering::SeqCst);
+    // ~14 MiB heavy batch (each member reverts with 1 MiB), larger than the socket buffers, so a
+    // non-reading client's write blocks and A stays far below the response size.
+    let member=r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"data":"0x621000006000fd","gas":"0x1c9c380"},"latest"]}"#;
+    let body=format!("[{}]",vec![member;10].join(","));
+    let mut s=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();
+    write!(s,"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
+    // Do not read. Poll pacer_closed and record when the pacer fires.
+    let t=Instant::now();while counter(&c.pacer_closed)==p0&&t.elapsed()<Duration::from_secs(5){std::thread::sleep(Duration::from_millis(10));}
+    let closed_at=t.elapsed();let late=counter(&c.pacer_late_max_ms);
+    assert!(counter(&c.pacer_closed)>p0,"the pacer closed the non-reading client");
+    assert!(closed_at>=Duration::from_millis(400),"not before GRACE: {closed_at:?}");
+    assert!(closed_at<Duration::from_secs(4),"after GRACE, promptly: {closed_at:?}");
+    // ENFORCE_SLACK: the close came within 200 ms of the violation instant s_v (TIMER_EPS + scheduling).
+    assert!(late<=200,"pacer lateness {late} ms > ENFORCE_SLACK");
+    let st=rpc_json(r.rpc,r#"{"jsonrpc":"2.0","id":2,"method":"pocol_getRpcStats","params":[]}"#)["result"].clone();
+    let (send_time,accepted)=(st["lastPacerClose"]["sendTime"].as_f64().unwrap(),st["lastPacerClose"]["accepted"].as_u64().unwrap());
+    assert!(send_time>0.5&&(accepted as f64)<(100u64<<20) as f64*send_time,"CloseOK: sendTime > GRACE and A < R·sendTime: {send_time} s, {accepted} B");
+    s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();assert!(closed(&mut s),"the slow reader's connection is closed");
+    println!("PACER {}",serde_json::json!({"closedMs":closed_at.as_millis() as u64,"pacerLateMaxMs":late,"lastPacerClose":st["lastPacerClose"]}));
+    // Honest reader: a client that reads promptly gets the whole ~14 MiB answer (sendDone, no close),
+    // and it is the complete answer: ten members, each a 1 MiB revert payload.
+    let (p1,sd0)=(counter(&c.pacer_closed),counter(&c.send_done));
+    let mut s2=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();s2.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    write!(s2,"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
+    let mut out=Vec::new();let _=s2.read_to_end(&mut out);
+    let at=out.windows(4).position(|w|w==b"\r\n\r\n").expect("an HTTP answer")+4;
+    let len:usize=String::from_utf8_lossy(&out[..at]).lines().find_map(|h|h.strip_prefix("Content-Length: ").map(|x|x.trim().parse().unwrap())).unwrap();
+    assert_eq!(out.len()-at,len,"every byte of the answer arrived");
+    let v:serde_json::Value=serde_json::from_slice(&out[at..]).expect("the answer is complete JSON");let a=v.as_array().unwrap();
+    assert_eq!(a.len(),10);let first=a[0]["error"]["message"].as_str().unwrap().to_string();assert_eq!(first.len(),"execution reverted:0x".len()+2*(1<<20));
+    assert!(a.iter().filter(|m|m["error"]["message"].as_str()==Some(first.as_str())).count()>=6,"the members are the identical revert payload (the tail may be batchBytes)");
+    assert_eq!(counter(&c.pacer_closed),p1,"the honest reader is not closed by the pacer");
+    assert!(counter(&c.send_done)>sd0,"sendDone recorded for the honest reader");
+}
+/// The per-connection token bucket (network.md:215-218): a connection carries one request, which
+/// takes k tokens from a full bucket of bucket_cap; more than that is -32021 {rate, retryAfterMs}
+/// for every member without running. With bucket_cap 5 (the spec's is 20 = BATCH_MAX, which no
+/// batch within BATCH_MAX exceeds): 6 members are refused, 5 are served; a batch over BATCH_MAX is
+/// -32600, not rate.
+#[test] fn the_per_connection_bucket_charges_k_tokens_per_request(){let _g=serial();
+    let mut l=small();l.rpc.rate=20;l.rpc.bucket_cap=5;let r=start("rate",l);let c=&pocold::rpc::COUNTERS;let r0=counter(&c.rate);
+    let batch=|k:usize|format!("[{}]",(0..k).map(|i|format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"eth_chainId","params":[]}}"#)).collect::<Vec<_>>().join(","));
+    let v=rpc_json(r.rpc,&batch(6));let a=v.as_array().unwrap();assert_eq!(a.len(),6);
+    for (i,x) in a.iter().enumerate(){assert_eq!(x["error"]["code"],-32021,"{x}");assert_eq!(x["error"]["data"]["reason"],"rate");assert_eq!(x["error"]["data"]["retryAfterMs"],50);assert_eq!(x["id"],i as u64);}
+    assert_eq!(counter(&c.rate)-r0,1,"one rate-limited request");
+    let v=rpc_json(r.rpc,&batch(5));assert!(v.as_array().unwrap().iter().all(|x|x["result"].is_string()),"5 tokens fit: {v}");
+    assert!(rpc_json(r.rpc,LIGHT)["result"].is_string(),"a singleton takes one token");
+    assert_eq!(rpc_json(r.rpc,&batch(21))["error"]["code"],-32600,"a batch over BATCH_MAX is -32600, never rate");
+}
+/// COMPUTE_DEADLINE, light lane (network.md:235): a light request admitted past its (here zero)
+/// light deadline is -32020 {deadline} without running its method. Deterministic (no timing margin).
+#[test] fn light_compute_deadline_fires(){let _g=serial();
+    let mut l=small();l.rpc.compute_light=Duration::ZERO;let r=start("lightdl",l);
+    let v=rpc_json(r.rpc,LIGHT);// eth_blockNumber is a light method
+    assert_eq!(v["error"]["code"],-32020,"the light deadline fires: {v}");assert_eq!(v["error"]["data"]["reason"],"deadline");
+    // A heavy method on the same node (COMPUTE_HEAVY is the default 5 s) still answers.
+    assert!(rpc_json(r.rpc,r#"{"jsonrpc":"2.0","id":1,"method":"pocol_status","params":[]}"#)["result"].is_object(),"heavy methods are unaffected");
+}
+/// COMPUTE_DEADLINE, heavy (network.md:235, :286): an eth_call that runs past COMPUTE_HEAVY is ended
+/// by the simulation stop hook and answered -32020 {deadline}. The infinite-loop call runs for ~d;
+/// the deadline is a fraction of it, so it always fires with a wide margin.
+#[test] fn heavy_compute_deadline_cancels_eth_call(){let _g=serial();
+    let d=heavy_duration();let dl=(d/8).max(Duration::from_millis(3));let mut l=small();l.rpc.compute_heavy=dl;l.rpc.work_deadline=Duration::from_secs(30);
+    let r=start("heavydl",l);
+    let v=rpc_json(r.rpc,HEAVY);// 30M-gas JUMP loop
+    assert_eq!(v["error"]["code"],-32020,"eth_call past COMPUTE_HEAVY is -32020: {v}");assert_eq!(v["error"]["data"]["reason"],"deadline");
+    println!("HEAVYDL {}",serde_json::json!({"heavyMs":d.as_millis() as u64,"computeHeavyMs":dl.as_millis() as u64}));
+}
+/// Review B3: a precompile run is not interruptible, so the stop hook cannot end it at the deadline;
+/// the answer is still -32020 {deadline}, never a late success (the deadline is checked again once
+/// the answer is encoded). cancelMaxMs records how late the -32020 came: the uninterruptible span
+/// pocold does not bound (CANCEL_MAX is reported absent).
+#[test] fn a_precompile_call_past_its_deadline_is_32020_not_a_late_success(){let _g=serial();
+    let mut l=small();l.rpc.compute_heavy=Duration::from_millis(20);l.rpc.work_deadline=Duration::from_secs(60);let r=start("blakedl",l);
+    let c=&pocold::rpc::COUNTERS;c.cancel_late_max_ms.store(0,Ordering::SeqCst);
+    let t=Instant::now();let v=rpc_json(r.rpc,&blake_max());let took=t.elapsed();
+    assert_eq!(v["error"]["code"],-32020,"a late precompile result is -32020: {v}");assert_eq!(v["error"]["data"]["reason"],"deadline");assert!(v.get("result").is_none());
+    let late=counter(&c.cancel_late_max_ms);
+    assert_eq!(rpc_json(r.rpc,r#"{"jsonrpc":"2.0","id":2,"method":"pocol_getRpcStats","params":[]}"#)["result"]["cancelMaxMs"],late as u64);
+    println!("BLAKEDL {}",serde_json::json!({"answeredMs":took.as_millis() as u64,"computeHeavyMs":20,"cancelLateMs":late}));
+}
+/// Review B1: COMPUTE_DEADLINE runs from admission, not from arrival (network.md:235), and QUEUE_WAIT
+/// bounds the wait before admission (network.md:234). In process, deterministically: a light and a
+/// heavy request that waited longer than their compute deadline but less than QUEUE_WAIT are
+/// answered with their results; one that waited past QUEUE_WAIT is -32021 busy without running (a
+/// transaction is not pooled).
+#[test] fn compute_deadline_runs_from_admission_and_queue_wait_bounds_admission(){let _g=serial();
+    use pocold::rpc::{answer,Request};
+    let dir=std::env::temp_dir().join(format!("pocold-net-admit-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let mut l=Limits::default();l.rpc.compute_light=Duration::from_millis(50);l.rpc.compute_heavy=Duration::from_millis(50);l.rpc.queue_wait=Duration::from_millis(1500);
+    let cfg=Config{dir,name:"admit".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:l};
+    let mut n=Node::open(cfg,spec()).unwrap();
+    let req=|b:&str,light:bool|{let (t,_r)=std::sync::mpsc::channel();Request::local(b.as_bytes().to_vec(),t,Instant::now()+Duration::from_secs(30),light)};
+    let (lq,hq)=(req(LIGHT,true),req(r#"{"jsonrpc":"2.0","id":3,"method":"pocol_status","params":[]}"#,false));
+    std::thread::sleep(Duration::from_millis(250));// 5x the compute deadlines, a sixth of QUEUE_WAIT
+    let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&lq).body).unwrap();assert!(v["result"].is_string(),"a light request queued past its compute deadline runs: {v}");
+    let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&hq).body).unwrap();assert!(v["result"].is_object(),"so does a heavy one: {v}");
+    let tx=Tx{chain_id:777940,nonce:0,max_priority:U256::from(1u64),max_fee:U256::from(10_000_000_000u64),gas:21000,to:Some(revm::primitives::Address::ZERO),value:U256::ZERO,data:Default::default()}.sign_1559(&devnet::account_key("alice"));
+    let late=req(&format!(r#"{{"jsonrpc":"2.0","id":4,"method":"eth_sendRawTransaction","params":["0x{}"]}}"#,hex(&tx)),true);
+    let w0=counter(&pocold::rpc::COUNTERS.queue_wait);std::thread::sleep(Duration::from_millis(1600));
+    let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&late).body).unwrap();
+    assert!(busy_of(&v)&&v["id"]==4,"not admitted within QUEUE_WAIT: -32021 busy: {v}");assert_eq!(n.pool.txs.len(),0,"and it never ran");
+    assert_eq!(counter(&pocold::rpc::COUNTERS.queue_wait)-w0,1);
+}
+/// COMPUTE_DEADLINE at the handler entry (network.md:235): a request whose deadline has passed when
+/// its handler starts is -32020 {deadline} and its method never runs. A transaction (a method whose
+/// effect would make its late answer be kept) is not pooled; with time left it is. In process.
+#[test] fn a_request_reaching_its_handler_past_the_deadline_never_runs(){let _g=serial();
+    use pocold::rpc::{answer,Request};
+    let dir=std::env::temp_dir().join(format!("pocold-net-entry-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let mut l=Limits::default();l.rpc.compute_light=Duration::ZERO;
+    let cfg=Config{dir,name:"entry".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:l};
+    let mut n=Node::open(cfg,spec()).unwrap();
+    let tx=Tx{chain_id:777940,nonce:0,max_priority:U256::from(1u64),max_fee:U256::from(10_000_000_000u64),gas:21000,to:Some(revm::primitives::Address::ZERO),value:U256::ZERO,data:Default::default()}.sign_1559(&devnet::account_key("alice"));
+    let body=format!(r#"{{"jsonrpc":"2.0","id":6,"method":"eth_sendRawTransaction","params":["0x{}"]}}"#,hex(&tx));
+    let req=||{let (t,_r)=std::sync::mpsc::channel();Request::local(body.as_bytes().to_vec(),t,Instant::now()+Duration::from_secs(30),true)};
+    let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&req()).body).unwrap();
+    assert_eq!(v["error"]["code"],-32020,"{v}");assert_eq!(v["error"]["data"]["reason"],"deadline");assert_eq!(n.pool.txs.len(),0,"the method never ran");
+    n.cfg.limits.rpc.compute_light=Duration::from_secs(5);
+    let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&req()).body).unwrap();assert!(v["result"].is_string(),"{v}");assert_eq!(n.pool.txs.len(),1);
+}
+/// Review B1, end to end at the default limits: a light request that waits behind more heavy work
+/// than its 500 ms compute deadline is answered with its result (or busy past QUEUE_WAIT), never
+/// -32020. The holder is an eth_estimateGas over BLAKE2F (about a dozen uninterruptible runs).
+#[test] fn light_requests_behind_long_heavy_work_are_answered_never_deadline(){let _g=serial();
+    let holder=blake(5_400_000,"eth_estimateGas");let hd=duration_of("behind-d",&holder);
+    let mut l=small();l.rpc.compute_light=(hd/4).min(Duration::from_millis(500));let r=start("behind",l);
+    let h=hold_with(r.rpc,&holder);let t=Instant::now();let v=rpc_json(r.rpc,LIGHT);let waited=t.elapsed();
+    assert!(v["result"].is_string()||busy_of(&v),"answered (or busy past QUEUE_WAIT), never -32020: {v}");
+    assert!(h.join().unwrap()["result"].is_string(),"the holder is answered too");
+    println!("BEHIND {}",serde_json::json!({"holderMs":hd.as_millis() as u64,"lightWaitedMs":waited.as_millis() as u64,"answer":v}));
+}
+/// Review B2: QUEUE_WAIT bounds the wait of a request that holds a queue place (network.md:234). While
+/// an uninterruptible heavy request holds the consensus thread, a queued heavy and a queued light
+/// request are each answered -32021 {busy, retryAfterMs in [250,2000]} at QUEUE_WAIT, long before the
+/// holder ends, and never run; their bodies are released when the node reaches them.
+#[test] fn queued_requests_are_busy_at_queue_wait(){let _g=serial();
+    let b=duration_of("qwait-d",&blake_max());let qw=(b/6).max(Duration::from_millis(20));
+    let mut l=small();l.rpc.queue_wait=qw;l.rpc.work_deadline=Duration::from_secs(60);let r=start("qwait",l);let c=&pocold::rpc::COUNTERS;
+    let (w0,q0)=(counter(&c.queue_wait),counter(&c.queued));
+    let h=hold_with(r.rpc,&blake_max());
+    let reqs:Vec<_>=[HEAVY,LIGHT].iter().map(|body|{let (p,body)=(r.rpc,body.to_string());std::thread::spawn(move||{let t=Instant::now();let v=rpc_json(p,&body);(v,t.elapsed())})}).collect();
+    let res:Vec<(serde_json::Value,Duration)>=reqs.into_iter().map(|x|x.join().unwrap()).collect();
+    for (v,t) in &res{assert!(busy_of(v),"busy at QUEUE_WAIT: {v}");assert!(*t>=qw&&*t<b*3/4,"answered at QUEUE_WAIT ({qw:?}), before the holder ends ({b:?}): {t:?}");}
+    assert!(counter(&c.queue_wait)-w0>=2,"both counted");assert!(h.join().unwrap()["result"].is_string(),"the holder is answered");
+    assert!(wait_until(10_000,||counter(&c.queued)==q0),"the queued heavy body is released when the node reaches it");
+    assert!(rpc_json(r.rpc,LIGHT)["result"].is_string(),"the node serves again");
+    println!("QWAIT {}",serde_json::json!({"holderMs":b.as_millis() as u64,"queueWaitMs":qw.as_millis() as u64,"answeredMs":res.iter().map(|x|x.1.as_millis() as u64).collect::<Vec<_>>()}));
+}
+/// LIGHT_QUEUE (network.md:214): with the consensus thread held, light requests beyond the lane's
+/// places are answered -32021 {busy} at once (HTTP 200, never 503); the queued ones are answered
+/// when the node reaches them.
+#[test] fn a_full_light_lane_answers_busy(){let _g=serial();
+    let mut l=small();l.rpc.light_queue=2;l.rpc.queue_wait=Duration::from_secs(60);l.rpc.work_deadline=Duration::from_secs(60);let r=start("lane",l);
+    let c=&pocold::rpc::COUNTERS;let f0=counter(&c.light_full);
+    let h=hold_with(r.rpc,&blake_max());
+    let ls:Vec<_>=(0..6).map(|i|{let p=r.rpc;std::thread::spawn(move||rpc(p,&format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"eth_blockNumber","params":[]}}"#),false))}).collect();
+    let res:Vec<(u16,String)>=ls.into_iter().map(|x|x.join().unwrap()).collect();h.join().unwrap();
+    assert!(res.iter().all(|x|x.0==200),"every answer is HTTP 200: {res:?}");
+    let vs:Vec<serde_json::Value>=res.iter().map(|x|serde_json::from_str(&x.1).unwrap()).collect();
+    let busy=vs.iter().filter(|v|busy_of(v)).count();let ok=vs.iter().filter(|v|v["result"].is_string()).count();
+    assert!(busy>=1&&ok>=1&&busy+ok==6,"busy beyond the lane, results for the queued: {vs:?}");assert!(counter(&c.light_full)-f0>=1);
+    println!("LANE {}",serde_json::json!({"busy":busy,"ok":ok}));
+}
+/// Heavy admission queue overflow (network.md:214, :234): with the consensus thread stalled on one
+/// 30M-gas call, a small HEAVY_QUEUE filled beyond its depth answers -32021 {busy, retryAfterMs}.
+#[test] fn heavy_queue_overflow_answers_busy_with_retry_after(){let _g=serial();
+    let d=heavy_duration();let mut l=small();l.rpc.heavy_queue=2;l.rpc.queue_wait=Duration::from_millis(50);l.rpc.work_deadline=Duration::from_secs(60);
+    let r=start("busyq",l);let c=&pocold::rpc::COUNTERS;let b0=counter(&c.busy);
+    // Hold the consensus thread with one heavy call for ~d; it occupies no queue place once running.
+    let holder={let p=r.rpc;std::thread::spawn(move||rpc(p,HEAVY,false).0)};std::thread::sleep(d/8);
+    // While it runs, fire several more heavy calls; with a queue of 2 and a 50 ms wait, some are busy.
+    let hs:Vec<_>=(0..6).map(|_|{let p=r.rpc;std::thread::spawn(move||rpc_json(p,HEAVY))}).collect();
+    let res:Vec<serde_json::Value>=hs.into_iter().map(|h|h.join().unwrap()).collect();holder.join().unwrap();
+    let busy:Vec<&serde_json::Value>=res.iter().filter(|v|v["error"]["code"]==-32021).collect();
+    assert!(!busy.is_empty(),"a full heavy queue answers -32021 busy: {res:?}");
+    for v in &busy{assert!(busy_of(v),"{v}");}
+    assert!(counter(&c.busy)>=b0+busy.len(),"busy answers are counted");
+    assert!(wait_until(10_000,||rpc(r.rpc,LIGHT,false).0==200),"the node serves again once the stall clears");
+    println!("BUSYQ {}",serde_json::json!({"busy":busy.len(),"of":res.len()}));
+}
+/// BATCH_WALL (network.md:282), from read-end to sendDone: reaching it closes the connection without
+/// a complete answer and counts batchWallHits, whether it is reached while members run (A) or while
+/// the answer is sent to a client that does not read (B; the pacer is set not to fire first).
+#[test] fn batch_wall_closes_the_batch(){let _g=serial();
+    let c=&pocold::rpc::COUNTERS;let d=heavy_duration();
+    let mut l=small();l.rpc.batch_wall=(d/2).max(Duration::from_millis(2));l.rpc.work_deadline=Duration::from_secs(60);let r=start("wall",l);
+    let w0=counter(&c.batch_wall_hits);let (code,b)=rpc(r.rpc,&format!("[{HEAVY},{HEAVY},{LIGHT}]"),false);
+    assert!(code==0&&b.is_empty(),"closed without an answer: {code} {b}");assert_eq!(counter(&c.batch_wall_hits)-w0,1);
+    let mut l=small();l.rpc.batch_wall=Duration::from_secs(2);l.rpc.min_send_rate=1;l.rpc.grace=Duration::from_secs(600);l.rpc.work_deadline=Duration::from_secs(60);let r=start("wall2",l);
+    let member=r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"data":"0x621000006000fd","gas":"0x1c9c380"},"latest"]}"#;let body=format!("[{}]",vec![member;10].join(","));
+    let (w1,p0,s0)=(counter(&c.batch_wall_hits),counter(&c.pacer_closed),counter(&c.send_done));
+    let mut s=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();let t=Instant::now();
+    write!(s,"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
+    assert!(wait_until(20_000,||counter(&c.batch_wall_hits)>w1),"the wall closes the send");let at=t.elapsed();
+    assert!(at>=Duration::from_millis(1900)&&at<Duration::from_secs(15),"at BATCH_WALL from read-end: {at:?}");
+    assert_eq!((counter(&c.pacer_closed),counter(&c.send_done)),(p0,s0),"not the pacer, and no sendDone");
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();let mut out=Vec::new();let _=s.read_to_end(&mut out);
+    // The bytes the socket had accepted may still arrive; the answer itself is cut short.
+    let hd=out.windows(4).position(|w|w==b"\r\n\r\n").map_or(out.len(),|i|i+4);
+    let len:usize=String::from_utf8_lossy(&out[..hd]).lines().find_map(|h|h.strip_prefix("Content-Length: ").map(|x|x.trim().parse().unwrap())).unwrap_or(usize::MAX);
+    assert!(out.len()-hd<len,"the answer is incomplete: {} of {len} B",out.len()-hd);
+    println!("WALL {}",serde_json::json!({"computeWallMs":(d/2).as_millis() as u64,"sendWallClosedMs":at.as_millis() as u64,"bytesBeforeClose":out.len()}));
+}
+/// Review V7: eth_estimateGas stops its search at the first simulation the deadline stops (one
+/// -32020, no further simulations). The initcode loops 250k times (6.5M gas) and succeeds, so the
+/// search runs about a dozen simulations; the deadline is three of them.
+#[test] fn estimate_gas_stops_its_search_at_the_deadline(){let _g=serial();
+    const LOOP:&str=r#"{"jsonrpc":"2.0","id":8,"method":"%M","params":[{"data":"0x6203d0905b600190038060045700","gas":"0x7a1200"},"latest"]}"#;
+    let (call,est)=(LOOP.replace("%M","eth_call"),LOOP.replace("%M","eth_estimateGas"));
+    let mut wide=small();wide.rpc.work_deadline=Duration::from_secs(60);wide.rpc.compute_heavy=Duration::from_secs(60);let w=start("estimate-wide",wide);
+    let t1=(0..3).map(|_|{let t=Instant::now();let v=rpc_json(w.rpc,&call);assert!(v["result"].is_string(),"{v}");t.elapsed()}).min().unwrap();
+    let te=(0..2).map(|_|{let t=Instant::now();assert!(rpc_json(w.rpc,&est)["result"].is_string(),"with wide limits the estimate is answered");t.elapsed()}).min().unwrap();
+    // The deadline falls inside the search: after the first simulation, before the estimate ends.
+    let dl=(t1*3).min(te/3).max(Duration::from_millis(3));
+    let mut l=small();l.rpc.compute_heavy=dl;l.rpc.work_deadline=Duration::from_secs(60);let r=start("estimate",l);
+    let c=&pocold::rpc::COUNTERS;let h0=counter(&c.deadline_hits);
+    let v=rpc_json(r.rpc,&est);
+    assert_eq!(v["error"]["code"],-32020,"{v}");assert_eq!(v["error"]["data"]["reason"],"deadline");
+    assert_eq!(counter(&c.deadline_hits)-h0,1,"one stopped simulation, no further ones");
+    println!("ESTIMATE {}",serde_json::json!({"callMs":t1.as_millis() as u64,"estimateMs":te.as_millis() as u64,"computeHeavyMs":dl.as_millis() as u64}));
+}
+/// pocol_getParams (network.md:336) and pocol_getRpcStats (network.md:347) are served as light
+/// methods: rpcLimits carries the running RpcGuard limits, with null for the limits pocold does not
+/// enforce (never nominal), and the stat record carries every field of the spec record.
+#[test] fn get_params_and_rpc_stats_report_the_limits(){let _g=serial();
+    let r=start("params",small());
+    let p=rpc_json(r.rpc,r#"{"jsonrpc":"2.0","id":1,"method":"pocol_getParams","params":[]}"#);
+    let lim=&p["result"]["rpcLimits"];
+    assert_eq!(lim["connMax"],32);assert_eq!(lim["heavyQueue"],16);assert_eq!(lim["lightQueue"],32);assert_eq!(lim["reqBuf"],1<<20);assert_eq!(lim["connBuf"],pocold::rpc::SMALL_REPLY_MAX);
+    assert_eq!(lim["respMax"],8<<20);assert_eq!(lim["batchRespMax"],16<<20);assert_eq!(lim["logsScratch"],16<<20);assert_eq!(lim["rate"],20);assert_eq!(lim["bucketCap"],20);
+    assert_eq!(lim["minSendRate"],65536);assert_eq!(lim["graceMs"],2000);assert_eq!(lim["enforceSlackMs"],200);assert_eq!(lim["timerEpsMs"],1);assert_eq!(lim["batchWallMs"],420000);
+    assert_eq!(lim["computeHeavyMs"],5000);assert_eq!(lim["computeLightMs"],500);assert_eq!(lim["queueWaitMs"],2000);assert_eq!(lim["heavyRespMem"],48<<20);
+    for k in ["sendSockBuf","scratchHeavy","scratchLight","cancelMaxMs","memTotal"]{assert!(lim[k].is_null(),"{k} is not enforced: null, never nominal");}
+    let res=&p["result"];assert!(res["genesisHash"].is_string()&&res["chainId"].as_u64().is_some());
+    assert_eq!(res["netKey"],pocold::types::hex(&pocold::rpc::net_key(r.chain_id,&r.genesis)));assert_eq!(res["forkSchedule"],serde_json::json!([[1,0]]));
+    let st=rpc_json(r.rpc,r#"{"jsonrpc":"2.0","id":2,"method":"pocol_getRpcStats","params":[]}"#);let st=st["result"].as_object().unwrap().clone();
+    for k in ["conns","heavyActive","heavyQueued","lightActive","lightQueued","heavyResv","lightResv","scratchHeavyMax","maxResPerConn","cancelled","cancelMaxMs","busyCount",
+        "rateCount","limitCount","originDenied","pacerClosed","pacerLateMaxMs","sendDoneCount","batchWallHits"]{assert!(st[k].as_u64().is_some(),"pocol_getRpcStats has {k}: {st:?}");}
+    for k in ["batchSendMaxS","batchWallMaxS"]{assert!(st[k].as_f64().is_some(),"{k}");}
+    for k in ["scratchLightMax","snapshotsOpen","anchorRejects","traceDropped","lastPacerClose","sendOverrunMaxMs"]{assert!(st.contains_key(k),"pocol_getRpcStats has {k}");}
+    assert_eq!(st["lightActive"],1,"the stats request itself is the light request running");
 }

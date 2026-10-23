@@ -229,7 +229,7 @@ impl Node{
         // Canonical blocks offloaded while they were non-canonical are made whole (RPC and serving).
         let restored=chain.restore_canonical(0,&rec.journal).map_err(|e|format!("replay: restore canonical {e:?}"))?;
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
-        let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.conn_max);let resp=crate::rpc::RespPools::new(&cfg.limits.rpc);
+        let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.light_queue);let resp=crate::rpc::RespPools::new(&cfg.limits.rpc);
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
         let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());
         let net=net::Net::new(cfg.limits.net.clone());
