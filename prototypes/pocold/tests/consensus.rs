@@ -1094,3 +1094,18 @@ fn wait_for(secs:u64,f:&dyn Fn()->bool)->bool{let t=std::time::Instant::now();wh
     assert_eq!(unprotected(&n),0);
     let _=std::fs::remove_dir_all(&dir);
 }
+/// The R_keep boundary in retain(): a side block imported inside the window stays while it is less
+/// than R_keep below the head and is removed (with its descendants) once it is exactly R_keep below.
+/// Independent of the import-time refusal of new blocks below the window.
+#[test] fn the_r_keep_boundary_removes_a_side_block_exactly_r_keep_below_the_head(){
+    let rk=8u64;let mut a=net();let g=a.chain.head;let ours=grow(&mut a,g,rk as usize+1,&|n,p|signed(n,p,Body::default(),0));
+    let side=fallback(&a,g,1);
+    let (mut n,dir,_)=rnode("boundary",rk,64);n.import(ours[0].clone(),None).unwrap();n.import(side.clone(),None).unwrap();
+    assert!(!n.chain.is_canonical(&side.hash()),"a side block at height 1");
+    for x in &ours[1..rk as usize]{n.import(x.clone(),None).unwrap();}
+    assert_eq!(n.chain.head().height,rk);assert!(n.chain.blocks.contains_key(&side.hash()),"R_keep-1 below the head: kept");
+    n.import(ours[rk as usize].clone(),None).unwrap();
+    assert!(!n.chain.blocks.contains_key(&side.hash()),"exactly R_keep below the head: removed by retention");
+    assert!(!n.chain.invalid.contains_key(&side.hash()),"removed locally, never invalid");
+    let _=std::fs::remove_dir_all(&dir);
+}
