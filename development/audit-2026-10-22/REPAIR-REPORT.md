@@ -190,7 +190,7 @@ weakened a consensus rule, and no review constitutes acceptance.
     competing branch must be fully resident to be adopted: the one-shot adoption depth IS
     SIDE_BLOCKS_MAX, raised 256 → 320 in round 2 (the budget maximum, via the tested path). A deeper
     branch is preserved in the journal (lossless), not refused; the node stays on the valid lighter
-    chain (D118 "fetched by sync", §11 manual checkpoint). Reaching R_keep needs block bodies off the
+    chain (D118 "fetched by sync", governance.md:200 manual checkpoint). Reaching R_keep needs block bodies off the
     heap (~0.85 GB otherwise): proposals/D-REORG-REDB.md, PROPOSED, needs owner approval. No consensus
     rule is weakened (an invalid chain is never adopted).
 - **A05:** RpcGuard is implemented only in part. Not implemented:

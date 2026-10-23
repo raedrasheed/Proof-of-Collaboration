@@ -136,7 +136,7 @@ Derived from the accepted text; a retention/storage limit is never turned into a
    ancestor at depth 2048, deliver its blocks, assert the node adopts it (head = the heavy branch tip)
    and serves/produces on it. Memory stays within the A13 budget (asserted via the model).
 2. **2049 behaviour from the text, not a new validity rule.** A heavier branch forked 2049 deep:
-   network.md:143 adopts "at depth ≤ R_keep"; consensus.md §11 routes deeper rollbacks to a manual
+   network.md:143 adopts "at depth ≤ R_keep"; governance.md:200 routes deeper rollbacks to a manual
    checkpoint, and D118 keeps retention "local, not validity". So at 2049 the node **does not adopt in
    one shot and does not mark the branch invalid** — it stays on the valid lighter chain; the deeper
    branch is preserved in the journal. The test asserts: head unchanged, the 2049-branch blocks are
@@ -171,3 +171,103 @@ This frozen design is sent to an independent reviewer (a separate agent instance
 claim (metadata suffices), the crash invariant, the D118-per-height count bound, and the 2049 "not a
 validity rule" reading. Implementation begins only after that review; its result is recorded in the
 repair history.
+
+---
+
+## Revision 1 (after the independent adversarial review)
+
+An independent agent instance tried to refute the four load-bearing claims. Result: CLAIM 1 (D133 on
+metadata) CONFIRMED, CLAIM 2 (journaled-before-offload crash invariant) CONFIRMED, CLAIM 4 (2049 is not
+a validity rule) CONFIRMED in substance, **CLAIM 3 (the §4 count bound) REFUTED on two points**, plus a
+miscitation and a broader-than-stated rewiring. All verified against the code and spec. The frozen
+design above is superseded by this revision where they conflict; it is kept for the record.
+
+### R1. Canonical metadata is resident for the whole chain (≈ H_END+1), not R_keep (fixes §3.3/§4)
+
+`retain` removes only non-canonical blocks: `gone` is built from `side(self) = !is_canonical`
+(chain.rs:405-407), and `rebuild_canonical`/`canonical: Vec`/`is_canonical`/`canonical_at` and the
+`better` LCA walk all require the full head→genesis chain. **Canonical metadata is therefore never
+evicted** and scales with H_END (= 129600, governance.md:16; already the model's
+`history/blocks (H_END+1)` term), not R_keep. The "≤ 2·R_keep+1 ≈ 4097 entries" bound in §4 is wrong
+(≈ 63× undercount); removing canonical metadata to make it true would panic `rebuild_canonical` and
+break `is_canonical`, `GetRange` history and the LCA walk, so it must not be attempted.
+
+**Corrected accounting.** This change does **not** reduce the canonical metadata count; that term
+(history/blocks ≈ H_END+1 entries) is unchanged from today and already in the A13 model. The memory
+**win** is elsewhere: offloading each block's **body, receipts and log bytes** beyond the K_hist
+window moves the large *aggregate* resident terms — `history/logs (LOG_CAP)` ≈ 1.03 GiB,
+`history/transaction bytes` and `history/.../receipts` — down to the K_hist window only (they are read
+on demand from the journal outside it). Net resident drops ≈ 1 GiB. A13 is re-derived with: the
+metadata term on H_END (unchanged), the offloaded byte terms on the K_hist window, and the side term
+on the metadata cap below.
+
+### R2. One-per-height + the evicted refusal loses a valid heavier branch (fixes §3.3; the core bug)
+
+`retain` adds **every** removed hash (including a per-height-losing non-canonical branch dropped with
+its descendants) to the `evicted` set (chain.rs:425); `import` (node.rs:227) and `replay` (node.rs:141)
+then **refuse** any evicted hash. Counterexample: two side branches A, B fork from a canonical ancestor
+within R_keep; A is marginally heavier per height, so retain keeps A and removes all of B → B's hashes
+are evicted. B later gets a heavy extension and becomes the single heaviest valid branch; on
+re-delivery its blocks are refused by `was_evicted` until the 1024-entry FIFO drains
+(adversarially controllable). A **valid heavier branch within R_keep is not adopted** — defeating the
+Goal and contradicting the proposal's "holding R_keep metadata removes the eviction within R_keep."
+D118 explicitly expects the dropped branch to be "يُعاد جلبه بالمزامنة إن صار أثقل" (re-fetched by sync
+if it becomes heavier); the refusal blocks exactly that path.
+
+**Fix (two parts, both within D118/D133):**
+1. **Retain competing-branch metadata under a generous cap**, not just one per height. Raise retention
+   from `SIDE_BLOCKS_MAX = 320` full entries to `SIDE_META_MAX` *metadata* entries (each ~1–2 KB vs
+   ~0.42 MiB), evicting the lowest-work leaf first only past the cap (the existing `retain` leaf
+   algorithm, now on metadata). With a cap well above the realistic number of competing valid
+   branches, two branches within R_keep are both retained and `better` adopts the heavier **directly,
+   with no re-fetch**. D118 mandates *at least* canonical + 1 non-canonical per height; keeping more is
+   a local retention choice that only improves liveness and changes no rule.
+2. **Scope the evicted refusal to beyond R_keep**, so D118 re-fetch works when the cap is exceeded. A
+   re-delivered block is refused only when it cannot lead to an adoptable branch, i.e. when it is
+   beyond the window (`height + R_KEEP <= head_height`); within the window it is accepted and
+   re-validated (D118 re-fetch). Replay stays correct because a re-fetched branch is journaled
+   parent-before-child (orphan resolution fetches the parent first), so on replay its records are in
+   ascending height and no record hits UnknownParent; the replay `was_evicted` skip is scoped the same
+   way. The original purpose of the refusal — stopping an *unadoptable* (beyond-R_keep) branch from
+   being re-fetched/re-executed/re-journaled every sync turn — is preserved.
+
+New acceptance test (added to §5): **two competing branches.** A and B fork within R_keep; A leads, so
+retain may drop B; B then becomes heaviest. Assert B is adopted (head = B tip) — directly if under the
+metadata cap, or via re-fetch if B was evicted — and never permanently refused within R_keep. Positive
+control: the adopted-B path executes.
+
+### R3. Offload rewiring is broader than §3.2 stated (acknowledged, scoped)
+
+- `ensure_state` is a `Chain` method but the journal lives in `Node`; its signature and every call
+  site must thread a journal reader, including the **replay** loop (node.rs:136-150) which runs before
+  the `Node` exists and must read through `rec.journal`. Borrow-checker-feasible (disjoint fields),
+  but a real refactor, not a one-liner.
+- `detached_txs` (A11, node.rs:317) reads `e.body.txs` and `e.tx_hashes` of abandoned blocks that may
+  be offloaded; `tx_hashes` is **not** in the journal record (record = header/body/result), so it is
+  re-derived by re-hashing the fetched body (keccak per tx).
+- `GetBlock`/`GetRange` (node.rs:544-548) and `eth_getBlockByHash` (rpc.rs:431) send
+  `header.encoded`/`body.encode()`, empty when offloaded — they must read from the journal. Serving
+  peers is the very mechanism the D118 re-fetch in R2 relies on, so this must land.
+
+### R4. Genesis-never-offloaded invariant (documented, guarded)
+
+The offload invariant ("offloaded ⇒ bytes in the journal") holds because genesis is created in
+`Chain::new` (never journaled, chain.rs:141-144) **and** is never offloaded: `retain` excludes height
+0 from state pruning (chain.rs:404), and offload is gated on pruned state. The implementation asserts
+`height > 0 && body_off.is_some()` before offloading, so a future change that pruned genesis would fail
+loudly rather than create an offloaded entry with no journal backing.
+
+### R5. Citation fix (both files)
+
+The manual-checkpoint-beyond-R_keep text is **governance.md:200** ("تراجع أعمق من R_keep: checkpoint
+يدوي"), and the rollback-to-R_keep-then-TrieRebuild text is **consensus.md §10 (التعافي, lines
+227-231)** — not "consensus.md §11", which is "التقدم (مشروط)". Fixed here and in D-REORG-REDB.md.
+
+### Net effect on the plan
+
+The design remains storage-only in its rules (D133 and validity unchanged) and still reaches R_keep.
+The corrections are: count the canonical metadata on H_END (not R_keep) in A13; retain competing side
+metadata under `SIDE_META_MAX` and scope the evicted refusal to beyond R_keep so D118 re-fetch works;
+thread the journal reader through `ensure_state`/`detached_txs`/serving and re-derive `tx_hashes`;
+guard the genesis invariant; and the two-branch test is added. Implementation proceeds on this revised
+design.

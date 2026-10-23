@@ -26,7 +26,7 @@ item 18), memory-bound, because:
 A branch deeper than 320 is **preserved in the journal (lossless) and not refused**, but the node
 stays on the valid lighter chain until the heavier branch is delivered within the cap or a manual
 checkpoint is applied (consensus.md D118: "a branch that becomes heavier later is fetched by sync";
-consensus.md §11: "a rollback deeper than R_keep: manual checkpoint"). This is a liveness gap, not a
+governance.md:200: "a rollback deeper than R_keep: manual checkpoint"). This is a liveness gap, not a
 safety break: the node never adopts an invalid chain.
 
 ### A second, related gap this design closes (evicted-block refusal vs D118)
