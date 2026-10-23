@@ -94,19 +94,19 @@ pub fn send_max_ms(l:&Limits,size:u64)->u128{
 /// largest getLogs working set (bytes), per-block log limits, ORIGIN_DENY answers, sendDone events,
 /// the largest send overrun past GRACE+size/R (ms; i64::MIN until a sendDone), BATCH_WALL hits and
 /// the largest batch send time and read-end-to-sendDone time (ms); connections refused because their
-/// SO_SNDBUF could not be set to SEND_SOCK_BUF (`sockbuf_ok`).
+/// SO_SNDBUF could not be set to SEND_SOCK_BUF (`sockbuf_ok`), and the SendPacer's blocked waits.
 #[derive(Debug,Default)]
 pub struct RpcCounters{pub refused:AtomicUsize,pub active:AtomicUsize,pub expired:AtomicUsize,pub expired_members:AtomicUsize,pub queue_full:AtomicUsize,pub too_complex:AtomicUsize,pub busy:AtomicUsize,
     pub queued:AtomicUsize,pub light_queued:AtomicUsize,pub heavy_active:AtomicUsize,pub light_active:AtomicUsize,pub wakes:AtomicUsize,pub light_pushed:AtomicUsize,
     pub queue_wait:AtomicUsize,pub light_full:AtomicUsize,pub rate:AtomicUsize,pub pacer_closed:AtomicUsize,pub pacer_late_max_ms:AtomicUsize,pub deadline_hits:AtomicUsize,pub cancel_late_max_ms:AtomicUsize,
     pub scratch_hits:AtomicUsize,pub scratch_heavy_max:AtomicUsize,pub limit_hits:AtomicUsize,pub origin_denied:AtomicUsize,pub send_done:AtomicUsize,pub send_overrun_max_ms:AtomicI64,
-    pub batch_wall_hits:AtomicUsize,pub batch_send_max_ms:AtomicUsize,pub batch_wall_max_ms:AtomicUsize,pub sockbuf_refused:AtomicUsize}
+    pub batch_wall_hits:AtomicUsize,pub batch_send_max_ms:AtomicUsize,pub batch_wall_max_ms:AtomicUsize,pub sockbuf_refused:AtomicUsize,pub pacer_waits:AtomicUsize}
 pub static COUNTERS:RpcCounters=RpcCounters{refused:AtomicUsize::new(0),active:AtomicUsize::new(0),expired:AtomicUsize::new(0),expired_members:AtomicUsize::new(0),
     queue_full:AtomicUsize::new(0),too_complex:AtomicUsize::new(0),busy:AtomicUsize::new(0),queued:AtomicUsize::new(0),light_queued:AtomicUsize::new(0),heavy_active:AtomicUsize::new(0),
     light_active:AtomicUsize::new(0),wakes:AtomicUsize::new(0),light_pushed:AtomicUsize::new(0),queue_wait:AtomicUsize::new(0),light_full:AtomicUsize::new(0),rate:AtomicUsize::new(0),
     pacer_closed:AtomicUsize::new(0),pacer_late_max_ms:AtomicUsize::new(0),deadline_hits:AtomicUsize::new(0),cancel_late_max_ms:AtomicUsize::new(0),scratch_hits:AtomicUsize::new(0),
     scratch_heavy_max:AtomicUsize::new(0),limit_hits:AtomicUsize::new(0),origin_denied:AtomicUsize::new(0),send_done:AtomicUsize::new(0),send_overrun_max_ms:AtomicI64::new(i64::MIN),
-    batch_wall_hits:AtomicUsize::new(0),batch_send_max_ms:AtomicUsize::new(0),batch_wall_max_ms:AtomicUsize::new(0),sockbuf_refused:AtomicUsize::new(0)};
+    batch_wall_hits:AtomicUsize::new(0),batch_send_max_ms:AtomicUsize::new(0),batch_wall_max_ms:AtomicUsize::new(0),sockbuf_refused:AtomicUsize::new(0),pacer_waits:AtomicUsize::new(0)};
 /// SEND_SOCK_BUF (RpcGuard SO_SNDBUF): the kernel send buffer of every RPC connection. Set explicitly
 /// it also stops the kernel from growing it (Linux locks it against autotuning; Windows stops its
 /// ideal-send-backlog tuning), so an unread answer holds at most this much kernel memory beyond the
@@ -285,7 +285,7 @@ fn pace_write(s:&mut TcpStream,body:&[u8],l:&Limits,batch_from:Option<Instant>)-
         if batch_from.is_some_and(|f|f.elapsed()>=l.batch_wall){COUNTERS.batch_wall_hits.fetch_add(1,Ordering::SeqCst);return fail("batch wall")}
         if blocked{
             // Here sendTime <= s_v (the rule did not fire), so the timer is at least TIMER_EPS away.
-            let s_v=grace.max(a as f64/r);let wall=batch_from.map_or(PACER_BACKSTOP,|f|(f+l.batch_wall).saturating_duration_since(Instant::now()));
+            COUNTERS.pacer_waits.fetch_add(1,Ordering::SeqCst);let s_v=grace.max(a as f64/r);let wall=batch_from.map_or(PACER_BACKSTOP,|f|(f+l.batch_wall).saturating_duration_since(Instant::now()));
             sockwait::writable(s,PACER_BACKSTOP.min(wall).min(Duration::from_secs_f64((s_v+eps-st).max(0.0))))?;
         }
     }
@@ -937,7 +937,7 @@ fn rpc_stats(n:&Node)->Value{
         "batchWallHits":g(&c.batch_wall_hits),"traceDropped":Value::Null});
     let own=json!({"refused":g(&c.refused),"active":g(&c.active),"expired":g(&c.expired),"expiredMembers":g(&c.expired_members),"queueFull":g(&c.queue_full),"queueWait":g(&c.queue_wait),
         "lightFull":g(&c.light_full),"tooComplex":g(&c.too_complex),"busy":g(&c.busy),"queued":g(&c.queued),"wakes":g(&c.wakes),"lightPushed":g(&c.light_pushed),
-        "heavyReserved":h,"lightReserved":l,"deadlineHits":g(&c.deadline_hits),"scratchHits":g(&c.scratch_hits),"sendSockBuf":g(&SEND_SOCK_BUF_SEEN),"sockbufRefused":g(&c.sockbuf_refused)});
+        "heavyReserved":h,"lightReserved":l,"deadlineHits":g(&c.deadline_hits),"scratchHits":g(&c.scratch_hits),"sendSockBuf":g(&SEND_SOCK_BUF_SEEN),"sockbufRefused":g(&c.sockbuf_refused),"pacerWaits":g(&c.pacer_waits)});
     if let (Some(m),Value::Object(o))=(v.as_object_mut(),own){m.extend(o);}
     v
 }

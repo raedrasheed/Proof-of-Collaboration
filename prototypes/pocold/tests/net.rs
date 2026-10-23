@@ -493,7 +493,7 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     // an honest reader is far above R (the pacer waits for writability, then writes the next chunk).
     let mut l=small();l.rpc.min_send_rate=1<<20;l.rpc.grace=Duration::from_millis(500);l.rpc.enforce_slack=Duration::from_millis(200);
     l.rpc.work_deadline=Duration::from_secs(60);l.rpc.write_deadline=Duration::from_secs(60);
-    let r=start("pacer",l);let c=&pocold::rpc::COUNTERS;let p0=counter(&c.pacer_closed);c.pacer_late_max_ms.store(0,Ordering::SeqCst);
+    let r=start("pacer",l);let c=&pocold::rpc::COUNTERS;let (p0,w0)=(counter(&c.pacer_closed),counter(&c.pacer_waits));c.pacer_late_max_ms.store(0,Ordering::SeqCst);
     // ~14 MiB heavy batch (each member reverts with 1 MiB), larger than the socket buffers, so a
     // non-reading client's write blocks and A stays far below the response size.
     let member=r#"{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"data":"0x621000006000fd","gas":"0x1c9c380"},"latest"]}"#;
@@ -502,8 +502,12 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     write!(s,"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
     // Do not read. Poll pacer_closed and record when the pacer fires.
     let t=Instant::now();while counter(&c.pacer_closed)==p0&&t.elapsed()<Duration::from_secs(5){std::thread::sleep(Duration::from_millis(10));}
-    let closed_at=t.elapsed();let late=counter(&c.pacer_late_max_ms);
+    let closed_at=t.elapsed();let (late,waits)=(counter(&c.pacer_late_max_ms),counter(&c.pacer_waits)-w0);
     assert!(counter(&c.pacer_closed)>p0,"the pacer closed the non-reading client");
+    // Review 2 (RG2-M2): a blocked write waits for writability, waking only at the backstop and at the
+    // violation instant: about GRACE/PACER_BACKSTOP waits for this client, not one per millisecond.
+    let bound=2*(500/pocold::rpc::PACER_BACKSTOP.as_millis() as usize)+10;
+    assert!(waits<=bound,"the pacer waited {waits} times for a client that does not read (bound {bound})");
     assert!(closed_at>=Duration::from_millis(400),"not before GRACE: {closed_at:?}");
     assert!(closed_at<Duration::from_secs(4),"after GRACE, promptly: {closed_at:?}");
     // ENFORCE_SLACK: the close came within 200 ms of the violation instant s_v (TIMER_EPS + scheduling).
@@ -512,7 +516,7 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     let (send_time,accepted)=(st["lastPacerClose"]["sendTime"].as_f64().unwrap(),st["lastPacerClose"]["accepted"].as_u64().unwrap());
     assert!(send_time>0.5&&(accepted as f64)<(1u64<<20) as f64*send_time,"CloseOK: sendTime > GRACE and A < R·sendTime: {send_time} s, {accepted} B");
     s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();assert!(closed(&mut s),"the slow reader's connection is closed");
-    println!("PACER {}",serde_json::json!({"closedMs":closed_at.as_millis() as u64,"pacerLateMaxMs":late,"lastPacerClose":st["lastPacerClose"]}));
+    println!("PACER {}",serde_json::json!({"closedMs":closed_at.as_millis() as u64,"pacerLateMaxMs":late,"pacerWaits":waits,"lastPacerClose":st["lastPacerClose"]}));
     // Honest reader: a client that reads promptly gets the whole ~14 MiB answer (sendDone, no close),
     // and it is the complete answer: ten members, each a 1 MiB revert payload.
     let (p1,sd0)=(counter(&c.pacer_closed),counter(&c.send_done));
