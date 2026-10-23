@@ -332,7 +332,7 @@ impl Chain{
         // 15. evidence validity (roots were bound above). 16. cumulative caps.
         let effects=if signed{self.evidence_effects(p,&b.body,x.h)?}else{vec![]};
         let tx_bytes:u64=b.body.txs.iter().map(|t|t.len() as u64).sum();
-        if p.cum_txs+b.body.txs.len() as u64>cp.TX_CAP||p.cum_tx_bytes+tx_bytes>cp.TXBYTES_CAP{return blk("16 caps")}
+        if !self.within_caps(p,&b.body.txs){return blk("16 caps")}
         // 17. apply.
         let out=match fb_out{Some(o)=>o,None=>self.execute(p,&ctx,x.ts,Proposer::Signed(Address::from_slice(&x.proposer)),&b.body,effects)?};
         if out.state_root.0!=x.state_root{return blk("17 stateRoot")}
@@ -345,6 +345,15 @@ impl Chain{
             ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect(),body_off:None,offloaded:false};
         Ok((entry,ctx))
     }
+
+    /// Item 16 (consensus.md:170): the transaction count and raw bytes (D49: len(rawTx)) of p's branch plus
+    /// `txs` within TX_CAP and TXBYTES_CAP. The one definition validation, the builder and template locking use.
+    pub fn within_caps(&self,p:&Entry,txs:&[Vec<u8>])->bool{
+        let cp=self.spec.cp();let bytes=txs.iter().try_fold(p.cum_tx_bytes,|n,t|n.checked_add(t.len() as u64));
+        p.cum_txs.checked_add(txs.len() as u64).map_or(false,|n|n<=cp.TX_CAP)&&bytes.map_or(false,|n|n<=cp.TXBYTES_CAP)
+    }
+    /// What item 16 leaves for a child of p: (transactions, raw bytes).
+    pub fn caps_room(&self,p:&Entry)->(u64,u64){let cp=self.spec.cp();(cp.TX_CAP.saturating_sub(p.cum_txs),cp.TXBYTES_CAP.saturating_sub(p.cum_tx_bytes))}
 
     /// Evidence (incentives.md "الأدلة"). Type 1: RLP([1, ST1, ST2]); type 2:
     /// RLP([2, TemplateID, nonce, shareRoot1, sig1, shareRoot2, sig2]). Invalid

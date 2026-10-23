@@ -50,6 +50,7 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
     let mut sizes=vec![];
     for _ in 0..count{
         let head=n.chain.head().meta_clone();let txs=n.template_txs(&head);sizes.push(txs.len());
+        assert!(n.chain.within_caps(&head,&txs),"h={}: the builder offers {} transactions past the room {:?}",head.height+1,txs.len(),n.chain.caps_room(&head));
         let b=signed(h,head.hash,txs);
         match n.import(b.clone(),None){Ok(true)=>{},r=>panic!("h={}: the builder's template must be a valid new head, got {r:?}",b.header.h)}
         import(h,&b);
@@ -129,21 +130,31 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
     }
 }
 
-#[test] fn a_mining_devnet_node_keeps_producing_signed_blocks_past_tx_cap(){
-    // The whole production path (pool, build_signed_template, miner, import) on a single-miner devnet whose
-    // genesis is now. Before the conformance fix the proposer's template carried the pooled transactions
-    // past TX_CAP, its own block was rejected ("16 caps"), and each height waited for the attempt to expire
-    // (D_att+Γ = 78 s) before a fallback block.
-    let g=pocold::node::now_s();let mut c=DevnetConfig::new(CHAIN,g,&["a"]);c.hash_rate=1024;c.d_att=73;c.tau=40;c.c=8;c.tx_cap=3;
-    let (mut n,dir)=node(&c,"live",Some(devnet::miner_identity("a").key),Some(8));let alice=devnet::account_key("alice");
-    for i in 0..6{n.submit_tx(pay(&alice,i,0),false).unwrap();}
+/// A single-miner devnet whose genesis is now, mined through the whole production path (pool,
+/// build_signed_template, miner, import) until `stop_at`, or for at most 240 s.
+fn live(tag:&str,tx_cap:u64,txbytes_cap:u64,pool:u64,stop_at:u64)->Node{
+    let g=pocold::node::now_s();let mut c=DevnetConfig::new(CHAIN,g,&["a"]);c.hash_rate=1024;c.d_att=73;c.tau=40;c.c=8;c.tx_cap=tx_cap;c.txbytes_cap=txbytes_cap;
+    let (mut n,dir)=node(&c,tag,Some(devnet::miner_identity("a").key),Some(stop_at));let alice=devnet::account_key("alice");
+    for i in 0..pool{n.submit_tx(pay(&alice,i,0),false).unwrap();}
     let t=Instant::now();let run=std::thread::spawn(move||{n.run();n});
     while !run.is_finished()&&t.elapsed()<Duration::from_secs(240){std::thread::sleep(Duration::from_millis(100));}
-    assert!(run.is_finished(),"the node did not reach height 8 within 240 s (production stalled at the cap)");
-    let n=run.join().unwrap();let took=t.elapsed().as_secs_f64();
+    assert!(run.is_finished(),"{tag}: the node did not reach height {stop_at} within 240 s (production stalled)");
+    let n=run.join().unwrap();let _=std::fs::remove_dir_all(&dir);
     let signed:Vec<bool>=(1..=n.chain.head().height).map(|h|n.chain.canonical_at(h).unwrap().signed).collect();
-    println!("CAPS {}",serde_json::json!({"profile":"live tx_cap=3","head":n.chain.head().height,"cumTxs":n.chain.head().cum_txs,"signed":signed,"seconds":took,"rejects":n.rejects.iter().map(|r|r.1.clone()).collect::<Vec<_>>()}));
-    assert_eq!(n.chain.head().cum_txs,3,"TX_CAP reached exactly");assert_within_caps(&n);
-    assert!(n.rejects.iter().all(|r|!r.1.contains("16 caps")),"no own block was rejected for the caps: {:?}",n.rejects);
-    let _=std::fs::remove_dir_all(&dir);
+    println!("CAPS {}",serde_json::json!({"profile":format!("live {tag}"),"head":n.chain.head().height,"cumTxs":n.chain.head().cum_txs,"cumTxBytes":n.chain.head().cum_tx_bytes,
+        "signed":signed,"seconds":t.elapsed().as_secs_f64(),"rejects":n.rejects.iter().map(|r|r.1.clone()).collect::<Vec<_>>()}));
+    assert_within_caps(&n);assert!(n.rejects.iter().all(|r|!r.1.contains("16 caps")),"{tag}: an own block was rejected for the caps: {:?}",n.rejects);n
+}
+#[test] fn a_mining_devnet_node_includes_up_to_tx_cap_and_keeps_producing(){
+    // Six pooled transfers, TX_CAP = 3. Before the fix the template carried all six, apply_block refused more
+    // than TX_CAP transactions in one block, and the builder fell back to an empty body every time: nothing
+    // was ever included although the cap had room.
+    let n=live("txcap",3,1<<24,6,8);assert_eq!(n.chain.head().cum_txs,3,"TX_CAP reached exactly");
+}
+#[test] fn a_mining_devnet_node_keeps_producing_past_txbytes_cap(){
+    // Six pooled transfers, room for two and a half by TXBYTES_CAP. Before the fix the template carried all
+    // six, the node's own block was invalid (item 16), and every height waited for the attempt to expire
+    // (D_att+Γ = 78 s) before a fallback block.
+    let t=pay(&devnet::account_key("alice"),0,0);let room=(5*t.len()/2) as u64;
+    let n=live("txbytes",1000,room,6,8);assert_eq!(n.chain.head().cum_txs,2,"two transfers fit TXBYTES_CAP");
 }
