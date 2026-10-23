@@ -770,12 +770,13 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
 /// so the session branch D133 prefers is adopted; on restart replay protects every block a later record
 /// builds on, so it reproduces the same head with no record skipped.
 #[test] fn a_session_branch_is_adopted_through_a_flood_of_competing_side_branches(){
-    // R_keep 16: protect_max 32. The flood (siblings of a canonical block, each heavier than any
-    // not-yet-adopted session block) plus the session branch exceed cap + protect_max = 36, which is
-    // the bound replay applies, so replay must evict and must spare the session branch.
+    // R_keep 16: protect_max 32. The flood is siblings of the head (equal work to the head, losing its
+    // tie by importSeq), so each is heavier than any not-yet-adopted session block and the session tip
+    // is always the lowest-work leaf. Flood plus session branch exceed cap + protect_max = 36, the
+    // bound replay applies, so replay must evict, and only its child-record protection spares the tip.
     let (rk,cap)=(16u64,4usize);let mut a=net();let g=a.chain.head;
-    let ours=grow(&mut a,g,12,&|n,p|fallback(n,p,1));
-    let mut noise:Vec<Block>=vec![];for att in 1..44u32{let y=fallback(&a,ours[9].hash(),att);if !noise.iter().any(|z|z.hash()==y.hash()){noise.push(y);}}
+    let ours=grow(&mut a,g,12,&|n,p|fallback(n,p,1));let parent=ours[ours.len()-2].hash();
+    let mut noise:Vec<Block>=vec![];for att in 1..44u32{let y=fallback(&a,parent,att);if !noise.iter().any(|z|z.hash()==y.hash()){noise.push(y);}}
     let mut b=net();let theirs=heavier(&mut b,g,a.chain.head().total_work,1);
     let (mut n,dir,conf)=rnode("flood",rk,cap);
     for x in &ours{n.import(x.clone(),None).unwrap();}
