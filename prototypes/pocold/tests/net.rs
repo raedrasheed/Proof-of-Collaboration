@@ -825,7 +825,10 @@ fn blake_then(rounds:u32,tail:&str)->String{
     let mut l=small();l.rpc.conn_max=n+8;l.rpc.heavy_queue=4*n;l.rpc.queue_wait=qw;l.rpc.work_deadline=Duration::from_secs(60);l.mem_budget=64<<30;let r=start("mainq",l);
     let c=&pocold::rpc::COUNTERS;let f0=counter(&c.queue_full);
     let holder=format!("[{},{},{}]",blake_max(),blake_max(),blake_max());let h=hold_with(r.rpc,&holder);
-    let hs:Vec<_>=(0..n).map(|i|{let p=r.rpc;std::thread::spawn(move||{let t=Instant::now();let v=rpc_json(p,&format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"pocol_status","params":[]}}"#));(v,t.elapsed())})}).collect();
+    // One client per millisecond: a burst of 150 connects can overflow the listen backlog (128), and a
+    // dropped SYN is retried only after a second, which would time the retry, not QUEUE_WAIT.
+    let hs:Vec<_>=(0..n).map(|i|{let p=r.rpc;std::thread::sleep(Duration::from_millis(1));
+        std::thread::spawn(move||{let t=Instant::now();let v=rpc_json(p,&format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"pocol_status","params":[]}}"#));(v,t.elapsed())})}).collect();
     let res:Vec<(serde_json::Value,Duration)>=hs.into_iter().map(|x|x.join().unwrap()).collect();let full=counter(&c.queue_full)-f0;
     let worst=res.iter().map(|x|x.1).max().unwrap();
     assert!(res.iter().all(|(v,_)|busy_of(v)),"every request is busy at QUEUE_WAIT: {:?}",res.iter().find(|(v,_)|!busy_of(v)));
