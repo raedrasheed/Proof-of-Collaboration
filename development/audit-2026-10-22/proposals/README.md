@@ -25,7 +25,11 @@ relative to a literal reading of the M1 reference. None is approved.
 Related reviews (not decisions): [INDEPENDENT-REVIEW-SIX-PROPOSALS.md](INDEPENDENT-REVIEW-SIX-PROPOSALS.md)
 frames the six for an independent reviewer. [LOG-CAP-AGGREGATE-ALTERNATIVES.md](LOG-CAP-AGGREGATE-ALTERNATIVES.md)
 compares the ways to avoid a permanent LOG_CAP exhaustion and their consensus, storage and compatibility
-effects. It is PROPOSED, not approved, and LOG-CAP-AGGREGATE stays unapproved. The storage repair
+effects. It is PROPOSED, not approved, and LOG-CAP-AGGREGATE stays unapproved.
+[CAPS-SUSTAINABILITY.md](CAPS-SUSTAINABILITY.md) studies LOG_CAP, TX_CAP and TXBYTES_CAP together
+(reachability before H_END, effects at exhaustion, genesisHash, an integrated recommendation); it is
+PROPOSED, not approved. Its conformance items (the builder's skip, execution.md:83; template locking,
+consensus.md:101; the caps-test build constant LOG_CAP, validation.md:2065) are implemented. The storage repair
 D-REORG-REDB is owner-approved and implemented; it is not one of the six
 ([D-REORG-REDB.md](D-REORG-REDB.md), [design and proofs](D-REORG-REDB-DESIGN-FREEZE.md)).
 
@@ -55,6 +59,9 @@ proposal:
 - `model/consensus_model.py` (Python stdlib only, run with `python3 -I`) restates each rule and
   every alternative from the normative text. It does not read the Rust implementation.
 - `vectors/*.json` holds its expected results for every alternative.
+- `model/caps_model.py` (also stdlib only) has its own Keccak-256 and GenesisSpec encoder. It writes
+  `vectors/caps-sustainability.json`: the GSV1, devnet and cap-variant genesis hashes and the cap
+  reachability. `lp4-execution/tests/caps_identity.rs` replays those vectors.
 - The Rust tests replay the scenarios against the implementation and compare with the recommended
   alternative only:
   - `lp4-execution` `apply::tests::a03::proposals::{log_acct_01_vectors, d_a03_dirty_vectors,

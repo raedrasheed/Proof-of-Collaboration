@@ -108,7 +108,9 @@ fn sh()->NodeLocal{NodeLocal::single_host()}
 }
 #[test] fn identity_rules_r22_to_r26(){
     let (n,t)=base();let tt=rebound(&t,&n.spec_bytes);
-    assert_eq!(rules(admit(&Request{node:NodeKind::Node,..n.request(&sh(),Some(&tt))})),v(&["R22"]),"simnet profile on a node: [R22] (governance.md)");
+    // The caps-test build refuses every non-simnet request first (validation.md:2065).
+    let r22=if cfg!(feature="caps-test"){"caps-test"}else{"R22"};
+    assert_eq!(rules(admit(&Request{node:NodeKind::Node,..n.request(&sh(),Some(&tt))})),v(&[r22]),"simnet profile on a node: [R22] (governance.md)");
     assert_eq!(rules(admit(&Request{forks:&[(1,0),(2,50)],..n.request(&sh(),Some(&tt))})),v(&["R24"]),"TestFork-v2 is not implemented");
     let mut alloc=n.alloc.clone();let a=devnet::account_key("alice").address();alloc.accounts.get_mut(&a).unwrap().info.balance+=revm::primitives::U256::from(1);
     assert_eq!(rules(admit(&Request{alloc:&alloc,..n.request(&sh(),Some(&tt))})),v(&["R24"]),"alloc does not match allocRoot");
@@ -196,9 +198,21 @@ fn scope_slot<'a>(l:&'a mut RpcLimits,f:&str)->&'a mut u64{
     // Fixture values are evaluated in full and reported as a fixture.
     let a=admit(&n.request(&sh(),Some(&tt))).unwrap();assert!(a.report().waivers.is_empty());assert!(a.report().conditions.iter().any(|c|c.id=="rpc-fixture"));
     // The scope is restricted to a simnet profile on a simnet node.
-    let e=admit(&Request{node:NodeKind::Node,..n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&["R22"]));
+    let r22=if cfg!(feature="caps-test"){"caps-test"}else{"R22"};
+    let e=admit(&Request{node:NodeKind::Node,..n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&[r22]));
     // Review F5: a Synthetic (or Network) profile on a simnet node does not get the waiver.
     for kind in [ProfileKind::Synthetic,ProfileKind::Network]{
-        let e=admit(&Request{kind,..n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&["R22"]),"{kind:?}");
+        let e=admit(&Request{kind,..n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&[r22]),"{kind:?}");
+    }
+}
+/// validation.md:2065: the caps-test build (LOG_CAP=2^24) admits simnet profiles on simnet nodes only.
+#[cfg(feature="caps-test")]
+#[test] fn the_caps_test_build_admits_only_simnet(){
+    let (n,t)=base();assert!(run(&n,&t,&sh()).is_ok(),"a simnet devnet boots the caps-test build");
+    for (kind,node) in [(ProfileKind::Network,NodeKind::Node),(ProfileKind::Network,NodeKind::Simnet),(ProfileKind::Simnet,NodeKind::Node),(ProfileKind::Synthetic,NodeKind::Simnet)]{
+        for scope in [Scope::Specification,Scope::ExperimentalDevnet]{
+            let tt=rebound(&t,&n.spec_bytes);let e=admit(&Request{kind,node,scope,..n.request(&sh(),Some(&tt))}).err().expect("refused");
+            assert_eq!(e.rules,v(&["caps-test"]),"{kind:?} on {node:?}, {scope:?}");
+        }
     }
 }

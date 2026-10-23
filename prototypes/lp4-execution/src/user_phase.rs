@@ -18,8 +18,11 @@ pub mod caps{
     pub const LOG_BLOCK_MAX:u64=32*1024;
     /// Logs per block (LG2: 546 succeed, 547 halt; lemma P1).
     pub const LOG_COUNT_MAX:u64=546;
-    /// Aggregate charged log bytes over the canonical chain.
-    pub const LOG_CAP:u64=1<<30;
+    /// Aggregate charged log bytes over the canonical chain (execution.md:82: 1 GiB). Not a CP field: it
+    /// enters neither GenesisSpec nor genesisHash. The caps-test build (validation.md:2065, simnet only,
+    /// absent from the release) sets 2^24 so that T18b L6 reaches it.
+    #[cfg(not(feature="caps-test"))] pub const LOG_CAP:u64=1<<30;
+    #[cfg(feature="caps-test")] pub const LOG_CAP:u64=1<<24;
     /// Distinct storage keys and distinct accounts changed by USER transactions in a block.
     pub const DIRTY_BLOCK_MAX:usize=4096;
     pub const ACCT_DIRTY_BLOCK_MAX:usize=2048;

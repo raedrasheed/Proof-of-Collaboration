@@ -388,6 +388,9 @@ mod a03{
                 let got=if o.halts.iter().any(|(_,h)|*h==Halt::SlotCap){"halt SlotCap"}else{"ok"};assert_eq!(got,e["userTx"],"{}",s["id"]);
             }
         }
+        /// The vectors' cumulative counts are absolute for the release LOG_CAP (2^30); the caps-test build
+        /// (LOG_CAP = 2^24) is checked by pocold tests/log_cap.rs instead.
+        #[cfg(not(feature="caps-test"))]
         #[test] fn log_cap_aggregate_vectors(){
             let v=vectors(include_str!("../../../../development/audit-2026-10-22/proposals/vectors/log-cap-aggregate.json"));let rec=v["recommended"].as_str().unwrap();
             let f=fx(&cfg(),&[(addr(0x41),LOGN)]);
