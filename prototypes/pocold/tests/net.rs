@@ -558,13 +558,17 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
 }
 /// COMPUTE_DEADLINE, heavy (network.md:235, :286): an eth_call that runs past COMPUTE_HEAVY is ended
 /// by the simulation stop hook and answered -32020 {deadline}. The infinite-loop call runs for ~d;
-/// the deadline is a fraction of it, so it always fires with a wide margin.
+/// the deadline is a fraction of it, so it always fires with a wide margin. Round 3: a late answer of
+/// any kind is also -32020 (`member`), so the test checks that the stop hook ended the run: the answer
+/// comes long before the run would have ended.
 #[test] fn heavy_compute_deadline_cancels_eth_call(){let _g=serial();
     let d=heavy_duration();let dl=(d/8).max(Duration::from_millis(3));let mut l=small();l.rpc.compute_heavy=dl;l.rpc.work_deadline=Duration::from_secs(30);
     let r=start("heavydl",l);
-    let v=rpc_json(r.rpc,HEAVY);// 30M-gas JUMP loop
+    let t=Instant::now();let v=rpc_json(r.rpc,HEAVY);let took=t.elapsed();// 30M-gas JUMP loop
     assert_eq!(v["error"]["code"],-32020,"eth_call past COMPUTE_HEAVY is -32020: {v}");assert_eq!(v["error"]["data"]["reason"],"deadline");
-    println!("HEAVYDL {}",serde_json::json!({"heavyMs":d.as_millis() as u64,"computeHeavyMs":dl.as_millis() as u64}));
+    // d is the shorter of two whole runs (with their HTTP round trip); a run that is not stopped takes it.
+    assert!(took<d*3/4,"the stop hook ended the run at its deadline ({dl:?}), not at its end ({d:?}): {took:?}");
+    println!("HEAVYDL {}",serde_json::json!({"heavyMs":d.as_millis() as u64,"computeHeavyMs":dl.as_millis() as u64,"answeredMs":took.as_millis() as u64}));
 }
 /// Review B3: a precompile run is not interruptible, so the stop hook cannot end it at the deadline;
 /// the answer is still -32020 {deadline}, never a late success (the deadline is checked again once
