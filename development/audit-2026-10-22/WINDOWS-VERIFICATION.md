@@ -1,7 +1,9 @@
 # Windows verification of the repair scope (round 2)
 
-Status (2026-10-23): **running through a pull_request trigger; no passing run yet.** See "Runs" at the
-end. The sections before "Runs" are the original preparation record and are kept as they were.
+Status (2026-10-23): **Run 9 (29fd44a) PASS on every check** of the repair scope. That covers the
+integrated caps-r2 and rpcguard-r2 code and the Windows fixes found by Runs 1–7. Not covered: the e2e
+fix round, merged after 29fd44a, which changes only the Python e2e test that this workflow does not
+run. Any later code commit needs its own run. See "Runs" at the end. The sections before "Runs" are the original preparation record and are kept as they were.
 
 ## The existing workflows (inspected)
 
@@ -255,3 +257,43 @@ Change in the next commit:
 - Linux after the fix: the five affected tests pass 3 times out of 3
   (`evidence/rpcguard-integration/write-cap-tests-3x-linux.log`), with ABSORB `kernelTookWholeAnswer:false`.
   Windows: the next run.
+
+### Run 8: ecf8f2a (evidence-only commit, code as in 49508a5)
+- Run: https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40000455354. Same code as Run 7.
+- Not counted, and its artifact is not copied.
+
+### Run 9: 29fd44a (pacer writes at most SEND_SOCK_BUF per call): **PASS**
+- Run: https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40003897313.
+- Artifact zip SHA-256 `04bc0d5bdef900301077e4f4d152471fd49bc9ecd3a58b343705b7c5458dd1ec`, copied unchanged to
+  `evidence/windows-29fd44a/`.
+- Windows Server 2022, Rust 1.58.1 / 1.99.1, Node 22.22.0.
+
+| check | status | detail |
+|---|---|---|
+| lp1-store-journal | PASS | 12 passed (Windows-only journal) |
+| lp1-node-all | PASS | 150 passed |
+| lp4-execution | PASS | 168 passed, 21 binaries: caps identity, simulate stop hook, admission |
+| pocold | PASS | 152 passed, 0 failed, 2 ignored (the spec-depth tests, ignored by design), 14 binaries |
+| extension npm ci / build / unit | PASS | unit 234 passed |
+
+pocold binaries in this run:
+- journal v2 store, P2P and RPC sockets;
+- RpcGuard round 2 with SO_SNDBUF and the write cap;
+- caps (tests/caps.rs), log_cap with its feature off (compiled, no tests run), admission and consensus.
+
+ABSORB on Windows (`unread_default_client_absorption`):
+`{"os":"windows","answerBytes":14681122,"peakReserved":14680950,"reservedOneSecondLater":14680950,"kernelTookWholeAnswer":false}`
+- With SO_SNDBUF and writes of at most SEND_SOCK_BUF, the kernel no longer takes a whole unread answer.
+  The reservation stays held while the client does not read, as on Linux.
+- This closes the gap that Runs 3, 5 and 7 showed, and it corrects Run 5's diagnosis (Run 7).
+
+Not measured on Windows:
+- Thread-count assertions read /proc and are skipped there. Their THREADS-NOT-MEASURED line is captured by
+  libtest in a passing run, so the summary no longer mentions it; the assertions were still not measured.
+- The real-Chrome and live-devnet suites, and the Python e2e tests, are not in this workflow.
+
+Windows defects found and fixed by this verification:
+1. `retention.rkeep`: a directory fsync that Windows refuses (Run 1, 48 tests).
+2. A dropped P2P peer's reader that `shutdown` does not wake on Windows (Run 2).
+3. Nagle plus delayed-ACK stalls of about 200 ms on every RPC answer (Run 2).
+4. Kernel absorption of unread RPC answers (Runs 3, 5, 7): SO_SNDBUF plus the write cap.
