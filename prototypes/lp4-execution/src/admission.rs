@@ -204,6 +204,9 @@ fn digest(tag:&str,parts:&[&[u8]])->[u8;32]{
 
 /// Runs the full gate on the actual artifacts and, only if it accepts, builds the genesis.
 pub fn admit(r:&Request<'_>)->Result<Admitted,Rejection>{
+    // validation.md:2065: the caps-test build constants are simnet only.
+    if cfg!(feature="caps-test")&&(r.kind!=ProfileKind::Simnet||r.node!=NodeKind::Simnet){
+        return Err(terminal("caps-test","the caps-test build (validation.md:2065) admits only a simnet profile on a simnet node".into()))}
     // Decode, hash binding and CP schema (R24a/e). Without them nothing else is evaluable.
     if r.spec_bytes.len()>gs::MAX_SPEC_BYTES{return Err(terminal("R24","GenesisSpec exceeds MAX_SPEC_BYTES".into()))}
     let hash=gs::genesis_hash(r.spec_bytes);

@@ -199,6 +199,17 @@ fn scope_slot<'a>(l:&'a mut RpcLimits,f:&str)->&'a mut u64{
     let e=admit(&Request{node:NodeKind::Node,..n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&["R22"]));
     // Review F5: a Synthetic (or Network) profile on a simnet node does not get the waiver.
     for kind in [ProfileKind::Synthetic,ProfileKind::Network]{
-        let e=admit(&Request{kind,..n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&["R22"]),"{kind:?}");
+        let e=admit(&Request{kind,..n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))}).err().unwrap();assert_eq!(e.rules,v(&[if cfg!(feature="caps-test"){"caps-test"}else{"R22"}]),"{kind:?}");
+    }
+}
+/// validation.md:2065: the caps-test build (LOG_CAP=2^24) admits simnet profiles on simnet nodes only.
+#[cfg(feature="caps-test")]
+#[test] fn the_caps_test_build_admits_only_simnet(){
+    let (n,t)=base();assert!(run(&n,&t,&sh()).is_ok(),"a simnet devnet boots the caps-test build");
+    for (kind,node) in [(ProfileKind::Network,NodeKind::Node),(ProfileKind::Network,NodeKind::Simnet),(ProfileKind::Simnet,NodeKind::Node),(ProfileKind::Synthetic,NodeKind::Simnet)]{
+        for scope in [Scope::Specification,Scope::ExperimentalDevnet]{
+            let tt=rebound(&t,&n.spec_bytes);let e=admit(&Request{kind,node,scope,..n.request(&sh(),Some(&tt))}).err().expect("refused");
+            assert_eq!(e.rules,v(&["caps-test"]),"{kind:?} on {node:?}, {scope:?}");
+        }
     }
 }

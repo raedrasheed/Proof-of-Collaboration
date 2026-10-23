@@ -17,5 +17,9 @@ sha3 = "=0.9.1"
 # k256 (as in lp4-execution) replaces the unmaintained libsecp256k1 0.5.0 behind the shared hashes.rs (secp_backend, audit 2026-10-22).
 k256 = { version = "=0.13.4", features = ["ecdsa"] }
 
+[features]
+# validation.md:2065 caps-test build constants (simnet only, absent from the release); see lp4-execution.
+caps-test = ["pocol-lp4-execution/caps-test"]
+
 [profile.release]
 debug = 1
