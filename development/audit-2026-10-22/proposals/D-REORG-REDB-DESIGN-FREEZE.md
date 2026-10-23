@@ -274,41 +274,219 @@ design.
 
 ---
 
-## Implementation status (incremental, tested milestones)
+## Revision 2 (final design, implemented; supersedes §3.3, §4, R1 and R2 where they conflict)
 
-Implemented so far on the repair branch, each a green build with no fork-choice/validity change:
-- **Step 1 (`66d69c6`): journal by-hash read primitive.** `Journal::append` returns each record's
-  frame offset; `Journal::read_at(offset)` reads a record back, verifying lenCheck/digest/marker (a bad
-  offset is a hard error, never an empty body). Test `append_returns_offsets_and_read_at_round_trips`;
-  all 12 store tests pass. Consensus-neutral.
-- **Step 2 (`f7c345b`): off-heap plumbing (dormant).** `Entry` gains `body_off` (set by the node on
-  live append and recomputed per record on replay) and `offloaded`; `chain::BlockBytes` +
-  `ensure_state_with(src)` re-execute an offloaded block from its journal record; the node impls
-  `BlockBytes` for the journal and threads it through import and replay. Nothing offloads yet, so
-  behaviour is unchanged: lib 37, admission 3, net 20 pass.
+Owner direction (2026-10-23): before fixing the final design, address that a metadata cap >= R_keep
+alone does not cover multiple branches, and prove that eviction and re-fetch cannot prevent adopting
+the branch D133 selects within the required depth. Everything below changes **local storage, retention
+and sync only**: D133 (`better`/`key`), block validity, state roots, receipts and genesisHash are
+untouched, and no retention limit becomes a validity rule.
 
-**Step 3 (next, atomic): the behaviour change.** Offloading plus serving plus the A13 model must land
-together (the boot gate ties the cap to the memory model), and it is consensus-critical, so it is
-implemented and fully tested as one reviewed change, not rushed:
-- `retain` keeps full bytes only for the **canonical K_hist window** (canonical AND height > cut) and
-  offloads every other journaled block's body/encoded-header/receipts/tx_hashes (metadata + ParentResult
-  stay resident). Offload keyed to the window (not just height) gives a tight A13 bound; a reorg that
-  brings former-side blocks into the window triggers `restore_canonical_window(src)` (bounded by
-  K_hist) to re-fetch + re-execute them full. This refines Revision 1 R2: competing branches within
-  R_keep are retained as cheap metadata (cap `SIDE_BLOCKS_MAX` ≥ R_keep), so the two-branch
-  counterexample is adopted directly without eviction; eviction (lowest work first) and the
-  `was_evicted` churn-guard apply only beyond the cap or beyond R_keep (D118 re-fetch; governance.md:200
-  manual checkpoint deeper).
-- Serving fetches a block's body/header from the journal when offloaded (GetBlock, GetRange,
-  eth_getBlockByHash); RPC history scans are floored at the K_hist trie window (consensus.md §10,
-  −32017 beyond), so they never read an offloaded block; `detached_txs` re-derives tx_hashes from the
-  fetched body.
-- The A13 model is re-derived: full-resident bytes = the canonical K_hist window only; the
-  `history/logs`, tx-bytes and receipts terms drop to the window; the side term becomes metadata; the
-  `history/blocks` metadata term stays on H_END. 6 GiB budget kept, proven bounds separated from
-  measurement.
-- Acceptance tests (§5, incl. the two-branch test and the crash/2048/tie-break/2049 set) run on the
-  final code; any TIMEOUT stays incomplete.
+### R2.0 Citation fix
 
-Until step 3 lands and passes its tests, PR #27 stays Draft and D-REORG-REDB is NOT claimed complete;
-the committed steps 1–2 are inert plumbing that changes no behaviour.
+"Adoption at depth <= R_keep" is **network.md:144** (`4. التبني بعمق ≤ R_keep.`), not :143 as written
+above and in earlier documents. The sync stage bound is **network.md:27** (`≤ 4096 لكل فرع و≤ 16384
+إجمالًا`). The re-import rule is **consensus.md:205** (`الكتلة المحذوفة بـD118 ثم المستوردة ثانية تأخذ
+رقمًا جديدًا`), and the re-fetch rule is **consensus.md:235** (`الفرع الذي يصير أثقل لاحقًا يُجلب
+بالمزامنة عبر Status`).
+
+### R2.1 Why a metadata cap alone is not enough
+
+Any finite cap can be exceeded by competing side blocks (many peers, many short forks). The cap evicts
+the **lowest cumulative work** leaf first, and a deep fork's early blocks have the lowest cumulative
+work of all, so under pressure a deep competing branch is eaten first, exactly the branch a deep
+reorg needs. D118 itself keeps only one non-canonical block per height and relies on re-fetch ("a
+branch that later becomes heavier is fetched by sync via Status"). So the guarantee cannot come from
+the cap. It comes from **re-fetch by a sync session whose blocks are protected from the cap**, plus a
+re-fetch that the evicted-hash guard does not block.
+
+### R2.2 Mechanism (as implemented)
+
+- **Retention (`Chain::retain`):** (1) state pruned at height <= head-K_hist (unchanged); (2) a
+  non-canonical block with `height + r_keep <= head height` is removed with its descendants (the R_keep
+  boundary, unchanged); (3) at most `side_cap` (= `SIDE_BLOCKS_MAX` = R_keep = 2048, D118's
+  one-per-height count over the window) **unprotected** non-canonical blocks: the lowest-work
+  unprotected leaf is evicted first, repeatedly; protected blocks are exempt from (3) only;
+  (4) every journaled non-canonical block is **offloaded** (body, receipts, tx hashes, encoded header
+  dropped; read back from the journal by `body_off`); (5) at most `side_max` side states, unprotected
+  and lowest-work first. **Canonical blocks are never evicted and never offloaded by `retain`.**
+- **Status:** `Hello` carries the head's cumulative work (network.md:7 `totalWork`); a node
+  re-announces its Status on every new head.
+- **Sync session (`Node::sync_tick`, one at a time):** started when a peer announces work >= ours with
+  a head we do not store (immediately on its Hello, otherwise round-robin among such peers, at most one
+  start per second). Round 1 sends `GetFrom{locator, 512}`. The locator (<= 32 hashes, network.md:8)
+  holds our head and the 9 blocks below it, doubling steps, **the canonical block at depth R_keep**,
+  and genesis. The responder serves its canonical blocks after the highest locator hash on its
+  canonical chain. Later rounds put the last delivered block first in the locator. The session ends
+  when the peer's head is stored or our work exceeds its claim (success), when the peer is silent for
+  3 s, or when the protected branch reaches `protect_max` (the claim is then set aside until the peer's
+  next Hello).
+- **Solicited import (`Node::import_with`):** a block from the session peer bypasses the
+  evicted-hash refusal (that refusal remains for unsolicited copies as a churn guard), and while it is
+  **non-canonical** it is protected from the side cap. At most `protect_max` = 2·R_keep = 4096
+  protected blocks, the per-branch sync figure of network.md:27. Adopted blocks are canonical and need
+  no protection, so a linear catch-up of any length is not bounded by it.
+- **Restore (`Chain::restore_canonical`):** after an adoption, every adopted block that was offloaded
+  while non-canonical is made whole again: encoded header and body from the journal, receipts and tx
+  hashes by re-executing the adopted suffix in order from the fork point (a rolling state), each block
+  checked against stateRoot, receiptsRoot, gasUsed and ParentResult. Order in `import`: insert,
+  detached transactions (A11), `retain` (offloads the abandoned branch), restore. The two branches'
+  bytes are never resident together.
+
+### R2.3 Theorem (adoption is not prevented by eviction or re-fetch)
+
+Let node N have head H. Let a connected peer P have canonical tip T with T ≻ H under D133. Let L be
+the highest block on both N's and P's canonical chains, and let d = height(H) − height(L).
+Preconditions:
+(P1) d <= R_keep at every moment until adoption (the depth network.md:144 requires);
+(P2) P keeps T, or a successor at least as heavy, as its canonical chain and answers each `GetFrom`
+     within 3 s of quiet time;
+(P3) the prefix of P's chain above L, up to its first block heavier than N's head at that time, has at
+     most `protect_max` blocks;
+(P4) N's clock admits P's timestamps (no `Future` rejection beyond the retry queue).
+Claim: N's head becomes a block with work >= W(T), whose chain is P's canonical chain. If W(T) = W(H),
+N's head becomes the D133 maximum of N's stored set including P's branch, with importSeq assigned as
+consensus.md:205 prescribes.
+
+Proof.
+1. *Trigger.* T is not stored at N: a stored T with T ≻ H would be N's head, since the head is the
+   D133 maximum of the stored set and `insert` keeps it so. P's Hello announces W(T) >= W(H) with an
+   unknown head, so a session starts at once if none runs. A running session ends within bounded time
+   (success, 3 s of silence, or the protect bound), and N then asks claimants round-robin.
+2. *Common point within the window.* The locator holds N's canonical block at height(H) − R_keep,
+   which is <= height(L) by P1, so it lies on P's canonical chain. P answers from F + 1, where F, the
+   highest locator hash on P's canonical chain, satisfies height(H) − R_keep <= height(F) <= height(L).
+   The blocks F+1..L are N's canonical blocks (duplicates). L+1 onward are P's branch.
+3. *Every delivered block's parent is present.* Each served block is the child of F or of the
+   previous served block. Canonical blocks are never removed. A non-canonical session block is
+   (a) protected from the cap, (b) not removed by the R_keep boundary, since its height is > height(L)
+   >= height(H) − R_keep by P1, (c) not refused as evicted, since it is solicited. Its ancestors are
+   canonical or earlier session blocks, so the same holds for them (removal by descent cannot apply).
+   Validation is deterministic, so a block valid at P is valid at N (P4). A pruned parent state is
+   rebuilt from the journal (`ensure_state_with`).
+4. *Progress.* Each round delivers up to 512 blocks (fewer when P's send queue is half full); the
+   next round continues after the last delivered block, which lies on P's canonical chain (P2). The
+   prefix of P3 is protected throughout (<= `protect_max`), so it is not lost to any number of
+   competing side blocks: only unprotected leaves are evicted.
+5. *Adoption.* `insert` compares each new block with the head by `better`, which reads only metadata
+   (W, parent, height, key). This is unchanged and valid on offloaded entries. At the first delivered
+   block heavier than N's head, that block becomes the head. Later session blocks extend the canonical
+   chain. The session ends once T is stored or N's work exceeds P's claim. At most
+   ⌈(height(T) − height(F)) / 512⌉ + 1 rounds are needed when every response is full.
+6. *Equal work.* At W(T) = W(H), D133 compares the children of the fork point by
+   (signed, importSeq, hash). P's blocks, being new or re-imported at N, take new importSeq values
+   (consensus.md:205; FINAL_DESIGN.md:6246 notes that this local preference may change "without
+   affecting work"). Signed-before-fallback does not depend on importSeq. So the head after re-fetch
+   is D133's maximum over the stored set with the spec-defined importSeq. Eviction never changes the
+   head: only non-canonical blocks are evicted, and a re-imported block's key only gets worse
+   (larger importSeq).
+7. *Depth beyond R_keep.* If P1 fails (d > R_keep), the R_keep boundary removes P's blocks deeper than
+   the window locally. Nothing is marked invalid, no blockReject is issued, and the node stays on its
+   valid chain. Deeper rollback is the manual checkpoint of governance.md:200. Retention never becomes
+   a validity rule.  ∎
+
+Liveness note (not a safety property): a peer can announce a false work claim. Its session ends on
+silence or on reaching its protect bound, its claim is then set aside until its next Hello, and other
+claimants are asked in turn. The cost is bounded per claim (<= `protect_max` protected blocks, 3 s of
+silence).
+
+### R2.4 Canonical residency and the RPC scope (matched to the approved text)
+
+Invariant (checked by `Chain::canonical_resident` in the tests): after every import and after open,
+**every canonical block holds its encoded header, body, receipts and tx hashes in memory**, exactly as
+before this change. storage.md:70 retains "blocks, receipts, logs, code and indexes until the end";
+logs are keyed by (height, blockHash) of the canonical chain (storage.md:61). So every canonical
+RPC read keeps its current scope: `eth_getBlockByNumber`, `eth_getTransactionByHash`/`Receipt`
+(canonical scan), `eth_getLogs`/`pocol_getLogs`, `pocol_getHeaders`, `pocol_getBlockRlp`, and the
+GetRange/GetFrom serving. No RPC answer is restricted to a window, and no new error is introduced for
+canonical history. A non-canonical block remains available exactly while retention keeps it, as
+before: `eth_getBlockByHash` and `GetBlock` materialize an offloaded one from its journal record,
+byte-equal. State reads keep their existing window (consensus.md §10: K_eff <= K_hist, otherwise
+−32017). One pre-existing inconsistency was found and fixed during this check: `eth_call` and
+`eth_estimateGas` on a block whose state is pruned simulated on an empty state. They now answer
+−32017 like the state reads (test `a_call_on_a_pruned_state_is_32017_not_an_empty_state_simulation`).
+
+### R2.5 Crash consistency and replay equivalence
+
+Write ordering is unchanged: validate, append the record, `sync_data`, commit-file update (fsynced),
+then the in-memory insert, retain and restore. Offload and restore only drop or recompute bytes that
+are durably in the journal. Restore is derived state, re-executed and root-checked on every adoption
+and at open. So a crash leaves the journal holding either the old chain or the whole adopted chain, and
+replay rebuilds exactly that chain. Head, canonical chain, state, receipts and indexes are recomputed,
+never read from a partial structure.
+
+Replay is made equal to live without recording live's session decisions:
+(1) Every record is replayed in order, with `retain` after each, as live did.
+(2) A record of a block already present is a re-import. Live journals a block only when it is absent,
+    so live must have removed it. Replay gives it a new importSeq (consensus.md:205), so every block's
+    importSeq is the position of its last record, in live and in replay alike.
+(3) A block whose next journal event is a record of one of its **children** is protected from the cap
+    until then.
+(4) During replay the cap bounds all non-canonical blocks by side_cap + protect_max.
+
+*Lemma.* After every record i, replay's head equals live's head. By induction: a protected block B
+(next event a child record j, no own record before j) was present in live from i to j, since live had
+it at j, validated the child on it, and could not have re-imported it without a record. So replay
+never evicts a block a later record needs. Replay's R_keep removals coincide with live's for every
+block both hold (same head heights and canonical sets by induction). Hence each record's parent is
+present, its validation is identical, and `better` compares the same works and the same order of
+importSeq values, so `insert` makes the same head decision. A re-imported block X was not canonical
+(live did not hold it, and canonical sets coincide), and its importSeq only increases, so it cannot
+become the head by the re-import itself. *Memory:* the replay-protected set is a subset of live's
+non-canonical set at the same record (<= side_cap + protect_max), and (4) evicts unprotected blocks
+past that sum.
+
+Tests: `a_crash_around_an_adoption_reopens_on_one_whole_chain` covers (a) a record fsynced before the
+commit update (reopens on the adopted chain) and (b) a record torn mid-write (reopens on the old chain,
+and the block delivered again adopts). In both, the chain, receipts, transaction index and RPC answers
+are compared. `replay_gives_a_reimported_block_a_new_import_seq` covers (2).
+`a_session_branch_is_adopted_through_a_flood_of_competing_side_branches` covers (3) and asserts
+`replay_skipped == 0`. Every adoption test also restarts and compares.
+
+### R2.6 Resource bounds (proven / measured / assumed kept apart)
+
+Proven by the code (A13 model, `resources::derive`, boot-gated with the 1/8 reserve):
+| item | count bound | size per item | enforced by |
+|---|---|---|---|
+| canonical blocks, resident and whole | <= H_END+1 | per-block term; bodies, receipts and logs under TXBYTES_CAP / TX_CAP / LOG_CAP (chain-cumulative) | validity caps; never evicted (unchanged) |
+| non-canonical metadata | live: <= side_cap unprotected + protect_max protected; replay: <= side_cap + protect_max | per-block term − one header − evidence + protect slot (22,995 B on the devnet profile) | `retain` (cap, R_keep boundary, `replaying`) |
+| one full block in flight | 1 | full side-block term | consensus thread (import then retain, restore rolling) |
+| evicted-hash FIFO | EVICTED_MAX = 1024 | 96 B | `retain` |
+| side states / transient snapshots | side_max / 10 | snapshot term | unchanged |
+| sync session | one; <= 512 blocks per round on the wire | frames within existing peer queues | `sync_tick`, `Peer::offer` |
+Devnet defaults: side metadata (2048 + 4096) × 22,995 = 140,986,368 B, which replaces the former 320 full
+side blocks. Model total 5,627,687,516 B; with the 1/8 reserve it needs 6,431,642,876 B of
+6,442,450,944 B (10,808,068 B unused). Measured RSS is reported separately in A13-DERIVATION §2b.
+Assumed, not bounded by this model: the open-time transient (`store::open` holds the whole journal,
+plus two replay-index entries per record; condition `open-replay-transient`); CPU time of deep
+rebuilds and restores (condition `cpu-and-timing`).
+Disk: the journal is append-only. A re-fetch appends the block again, which the re-import rule above
+accounts for. Compaction remains a documented follow-up (local, no validity effect).
+
+### R2.7 Acceptance tests (final names) and controls
+
+| frozen test | test | build |
+|---|---|---|
+| 1 depth 2048 adopted | `adoption_at_the_spec_depth_2048_and_not_at_2049` (defaults) | release, `--ignored` |
+| 1/2 boundary, fast | `r_keep_boundary_adopts_at_depth_r_keep_and_keeps_the_valid_chain_beyond` (R_keep 24) | all |
+| 2 depth 2049 not adopted, not invalid | both of the above | |
+| 3 D133 tie-break at depth | `d133_tie_break_at_depth_400_holds_through_eviction_and_refetch` (release, `--ignored`); `d133_tie_break_at_depth_holds_through_eviction_and_refetch` (depth 40) | |
+| 4 evicted branch re-fetched | `side_cap_holds_after_a_reorg_and_only_a_session_takes_an_evicted_block_again`; `a_sync_session_refetches_an_evicted_branch_and_serves_it` (3 TCP nodes, RPC compared) | |
+| multi-branch (owner) | `a_session_branch_is_adopted_through_a_flood_of_competing_side_branches` | |
+| 5 crash consistency | `a_crash_around_an_adoption_reopens_on_one_whole_chain` | |
+| 6 off-heap fidelity | `an_offloaded_block_is_served_viewed_and_re_executed_from_the_journal` | |
+| 7 budget | `a13_bound_breakdown`, `a13_boot_refuses_a_bound_above_the_memory_budget` | |
+| 8 positive controls | asserted inside each test (eviction happened, refetched > 0, restored > 0, flood exceeded the cap) | |
+| sync liveness | `a_long_catch_up_is_not_bounded_by_the_protected_branch_size`, `range_sync_reaches_the_peer_head_through_truncated_responses` | |
+| replay rule | `replay_gives_a_reimported_block_a_new_import_seq` | |
+Mutation controls (each must fail at least one test) are recorded in evidence/MUTATIONS-REDB.md.
+
+## Implementation status
+
+Steps 1–2 (`66d69c6`, `f7c345b`) added the journal read primitive and the off-heap plumbing. Step 3
+(this revision) is implemented: retention with protection and offload, restore, sync sessions over
+Status work and locators, solicited re-fetch, journal-backed serving, the replay rules, and the
+re-derived A13 side term. The earlier step-3 plan to offload canonical blocks outside the K_hist window
+and floor RPC history at that window is **withdrawn**. It would have narrowed RPC scope against
+storage.md:70, so canonical blocks stay whole (R2.4). Verification results on the final commit are in
+evidence/ and REPAIR-REPORT.md. PR #27 stays Draft.

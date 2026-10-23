@@ -402,7 +402,7 @@ fn call(n:&mut Node,m:&str,p:&[Value])->R{
             n.submit_tx(raw,true).map(|h|json!(format!("{h}"))).map_err(|e|{let code=e.split(' ').next().and_then(|c|c.parse().ok()).unwrap_or(-32000);Fail(code,e,None)})}
         "eth_getBlockByNumber"=>{let e=block_by_tag(n,p.first().unwrap_or(&Value::Null));Ok(e.map(|e|block_json(n,e,p.get(1).and_then(|x|x.as_bool()).unwrap_or(false))).unwrap_or(Value::Null))}
         "eth_getBlockByHash"=>{let h=p.first().and_then(|x|x.as_str()).and_then(|s|unhex(s).ok()).ok_or(bad("hash"))?;
-            Ok(h.try_into().ok().and_then(|h:[u8;32]|n.chain.get(&h)).map(|e|block_json(n,e,p.get(1).and_then(|x|x.as_bool()).unwrap_or(false))).unwrap_or(Value::Null))}
+            Ok(h.try_into().ok().and_then(|h:[u8;32]|n.block_view(&h)).map(|e|block_json(n,&e,p.get(1).and_then(|x|x.as_bool()).unwrap_or(false))).unwrap_or(Value::Null))}
         "eth_getTransactionByHash"=>{let h=p.first().and_then(|x|x.as_str()).and_then(|s|s.parse::<B256>().ok()).ok_or(bad("hash"))?;
             Ok(find_tx(n,&h).map(|(e,i)|tx_json(n,e,i)).unwrap_or(Value::Null))}
         "eth_getTransactionReceipt"=>{let h=p.first().and_then(|x|x.as_str()).and_then(|s|s.parse::<B256>().ok()).ok_or(bad("hash"))?;
@@ -438,6 +438,9 @@ fn call(n:&mut Node,m:&str,p:&[Value])->R{
 fn next_base(n:&Node)->U256{let h=n.chain.head();if h.height==0{chain::from_fixed_lp4(&n.chain.spec.cp().baseFee0)}else{pocol_lp4_execution::fees::next_base_fee(h.base_fee,h.gas_used,h.header.gas_limit).unwrap_or(h.base_fee)}}
 fn simulate(n:&Node,o:&Value,tag:&Value,gas:Option<u64>)->Result<ExecutionResult,(i64,String)>{
     let cp=n.chain.spec.cp();let e=block_by_tag(n,tag).ok_or((-32001,"unknown block".to_string()))?;
+    // As state_for: a pruned state (outside the trie window, or a block adopted after its state was
+    // pruned as a side block) is -32017 (consensus.md §10), never a simulation on an empty state.
+    if e.pruned{return Err((-32017,"state outside the retained trie window (K_hist)".into()))}
     let to=o["to"].as_str().and_then(|s|s.parse::<Address>().ok());
     let data=o.get("data").or_else(||o.get("input")).and_then(|x|x.as_str()).map(|s|unhex(s)).transpose().map_err(|_|bad("data"))?.unwrap_or_default();
     let tx=TxEnv{caller:o["from"].as_str().and_then(|s|s.parse().ok()).unwrap_or(Address::ZERO),transact_to:to.map(TxKind::Call).unwrap_or(TxKind::Create),

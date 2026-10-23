@@ -61,10 +61,13 @@ tip). The total is monotone — it only grows as the canonical chain extends; no
     network chain **reaches the cap before its own end** and then hits the permanent cliff. This is the
     case the owner should weigh; the reviewer should redo this arithmetic for the exact profile.
   - the simnet caps-test lowers `LOG_CAP` to `2^24 = 16 MiB` precisely so a test can reach it.
-- The A13 history bound **depends on this reading**: `history/logs (LOG_CAP)` counts `LOG_CAP` worth of
-  log bytes as the resident history term. Under "block" (vacuous) the term would be unbounded over
-  H_END; under "retained" it would track a local window (not consensus-safe, differs per node). So
-  "chain" is also the only reading under which the memory bound is both finite and node-consistent.
+- The A13 history bound **uses this reading**: `history/logs (LOG_CAP)` counts `LOG_CAP` worth of
+  log bytes as the resident history term. *(Corrected 2026-10-23, after the alternatives review:)* the
+  term is finite under any reading. A canonical chain has at most H_END blocks (storage.md:73), each
+  with at most LOG_BLOCK_MAX charged log bytes, so logs ≤ H_END·LOG_BLOCK_MAX: 3.955 GiB on network,
+  625 MiB on the devnet. LOG_CAP lowers that bound on network; on the devnet it does not bind. The
+  earlier "unbounded under 'block'" was imprecise. Under "retained" the term would track a local window,
+  which is not consensus-safe and differs per node.
 
 **The reviewer's decision.** "chain" is almost certainly the intended reading (it is the only one that
 is node-consistent, makes the caps-test reachable, and bounds A13). The open question the owner should
@@ -72,7 +75,10 @@ weigh is **not** which alternative, but whether the **cumulative-forever cliff**
 protocol property, or whether a future amendment should add an in-protocol escape (e.g. a cap scaled to
 `H_END` so it is provably unreachable within the chain's life, or an explicit epoch reset). That is a
 new normative question beyond the current six proposals and is flagged here, **not** decided or
-implemented.
+implemented. The alternatives that avoid permanent exhaustion are reviewed, with their consensus,
+storage and compatibility effects, in `LOG-CAP-AGGREGATE-ALTERNATIVES.md` (PROPOSED, not approved).
+That review also flags TX_CAP and TXBYTES_CAP: both are chain-cumulative and reachable before H_END on
+the network profile, and reaching either makes blocks invalid. This is not decided here.
 
 ## Independent vectors (already present, for the reviewer to re-run)
 

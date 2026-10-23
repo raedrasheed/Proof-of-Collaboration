@@ -61,26 +61,33 @@ impl Net{
 
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub enum Msg{
-    Hello{chain_id:u64,genesis:[u8;32],head:[u8;32],height:u64,node:String},
+    /// Status (network.md:7): chainId, genesisHash, headHash, height, totalWork (32 B big-endian), name.
+    Hello{chain_id:u64,genesis:[u8;32],head:[u8;32],height:u64,work:[u8;32],node:String},
     Block{header:Vec<u8>,body:Vec<u8>},
     Template{shell:Vec<u8>,body:Vec<u8>},
     Share{tid:[u8;32],nonce:u64},
     GetBlock{hash:[u8;32]},
     GetRange{start:u64,count:u64},
     Tx{raw:Vec<u8>},
+    /// GetHeaders-like range by locator (network.md:8: locator <= 32, count <= 512): the answer is the
+    /// responder's canonical blocks after the highest locator hash on its canonical chain.
+    GetFrom{locator:Vec<[u8;32]>,count:u64},
 }
+/// Locator hashes per GetFrom (network.md:8).
+pub const LOCATOR_MAX:usize=32;
 fn u64b(v:u64,o:&mut Vec<u8>){let b=v.to_be_bytes();let f=b.iter().position(|x|*x!=0).unwrap_or(8);rlp::encode_bytes(&b[f..],o)}
 impl Msg{
     pub fn encode(&self)->Vec<u8>{
         let mut p=Vec::new();
         match self{
-            Msg::Hello{chain_id,genesis,head,height,node}=>{u64b(0,&mut p);u64b(*chain_id,&mut p);rlp::encode_bytes(genesis,&mut p);rlp::encode_bytes(head,&mut p);u64b(*height,&mut p);rlp::encode_bytes(node.as_bytes(),&mut p);}
+            Msg::Hello{chain_id,genesis,head,height,work,node}=>{u64b(0,&mut p);u64b(*chain_id,&mut p);rlp::encode_bytes(genesis,&mut p);rlp::encode_bytes(head,&mut p);u64b(*height,&mut p);rlp::encode_bytes(work,&mut p);rlp::encode_bytes(node.as_bytes(),&mut p);}
             Msg::Block{header,body}=>{u64b(1,&mut p);rlp::encode_bytes(header,&mut p);rlp::encode_bytes(body,&mut p);}
             Msg::Template{shell,body}=>{u64b(2,&mut p);rlp::encode_bytes(shell,&mut p);rlp::encode_bytes(body,&mut p);}
             Msg::Share{tid,nonce}=>{u64b(3,&mut p);rlp::encode_bytes(tid,&mut p);rlp::encode_bytes(&nonce.to_be_bytes(),&mut p);}
             Msg::GetBlock{hash}=>{u64b(4,&mut p);rlp::encode_bytes(hash,&mut p);}
             Msg::GetRange{start,count}=>{u64b(5,&mut p);u64b(*start,&mut p);u64b(*count,&mut p);}
             Msg::Tx{raw}=>{u64b(6,&mut p);rlp::encode_bytes(raw,&mut p);}
+            Msg::GetFrom{locator,count}=>{u64b(7,&mut p);rlp::encode_bytes(&locator.concat(),&mut p);u64b(*count,&mut p);}
         }
         let mut o=Vec::new();rlp::encode_list_payload(&p,&mut o);o
     }
@@ -91,13 +98,15 @@ impl Msg{
         let h32=|i:usize|->Result<[u8;32],String>{bytes(i)?.try_into().map_err(|_|"hash".to_string())};
         let n=|k:usize|->Result<(),String>{if f.len()==k{Ok(())}else{Err("arity".into())}};
         let m=match num(0)?{
-            0=>{n(6)?;Msg::Hello{chain_id:num(1)?,genesis:h32(2)?,head:h32(3)?,height:num(4)?,node:String::from_utf8(bytes(5)?).map_err(|_|"utf8")?}}
+            0=>{n(7)?;Msg::Hello{chain_id:num(1)?,genesis:h32(2)?,head:h32(3)?,height:num(4)?,work:h32(5)?,node:String::from_utf8(bytes(6)?).map_err(|_|"utf8")?}}
             1=>{n(3)?;Msg::Block{header:bytes(1)?,body:bytes(2)?}}
             2=>{n(3)?;Msg::Template{shell:bytes(1)?,body:bytes(2)?}}
             3=>{n(3)?;let nb=bytes(2)?;if nb.len()!=8{return Err("nonce".into())}Msg::Share{tid:h32(1)?,nonce:u64::from_be_bytes(nb.try_into().unwrap())}}
             4=>{n(2)?;Msg::GetBlock{hash:h32(1)?}}
             5=>{n(3)?;Msg::GetRange{start:num(1)?,count:num(2)?}}
             6=>{n(2)?;Msg::Tx{raw:bytes(1)?}}
+            7=>{n(3)?;let l=bytes(1)?;if l.is_empty()||l.len()%32!=0||l.len()>32*LOCATOR_MAX{return Err("locator".into())}
+                Msg::GetFrom{locator:l.chunks(32).map(|c|c.try_into().unwrap()).collect(),count:num(2)?}}
             _=>return Err("type".into())
         };
         if m.encode()!=b{return Err("noncanonical".into())}
@@ -258,6 +267,18 @@ pub fn dial(addr:SocketAddr,events:SyncSender<NetEvent>,connected:Arc<Mutex<std:
 mod tests{
     use super::*;
     use std::sync::mpsc;
+    /// D-REORG-REDB wire: Status carries the 32-byte totalWork, GetFrom a locator of 1..=32 hashes;
+    /// both round-trip, and a locator that is empty, ragged or longer than 32 hashes is refused.
+    #[test] fn status_work_and_locator_requests_round_trip_within_bounds(){
+        let h=Msg::Hello{chain_id:7,genesis:[1;32],head:[2;32],height:9,work:[3;32],node:"n".into()};assert_eq!(Msg::decode(&h.encode()).unwrap(),h);
+        let g=Msg::GetFrom{locator:vec![[4;32],[5;32]],count:512};assert_eq!(Msg::decode(&g.encode()).unwrap(),g);
+        let full=Msg::GetFrom{locator:vec![[6;32];LOCATOR_MAX],count:1};assert_eq!(Msg::decode(&full.encode()).unwrap(),full);
+        let raw=|loc:Vec<u8>|{let mut p=Vec::new();u64b(7,&mut p);rlp::encode_bytes(&loc,&mut p);u64b(1,&mut p);let mut o=Vec::new();rlp::encode_list_payload(&p,&mut o);o};
+        for bad in [vec![],vec![0u8;31],vec![0u8;33],vec![0u8;32*(LOCATOR_MAX+1)]]{assert!(Msg::decode(&raw(bad)).is_err());}
+        // The previous Hello (no work field) is refused by arity, never read with a default work.
+        let mut p=Vec::new();u64b(0,&mut p);u64b(7,&mut p);rlp::encode_bytes(&[1;32],&mut p);rlp::encode_bytes(&[2;32],&mut p);u64b(9,&mut p);rlp::encode_bytes(b"n",&mut p);
+        let mut o=Vec::new();rlp::encode_list_payload(&p,&mut o);assert!(Msg::decode(&o).is_err());
+    }
     /// Review F1: a close that lands after the writer found the outbox open and before it waits
     /// must still wake it. The hook holds the writer exactly there (with the queue lock) while the
     /// close is issued; the writer must then return within the timeout. Deterministic: the close

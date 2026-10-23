@@ -35,8 +35,12 @@ pub struct Config{
 #[derive(Clone,Debug)]
 pub struct Limits{pub net:net::Limits,pub rpc:crate::rpc::Limits,
     /// Node memory budget for the A13 resident bound (resources::check at open).
-    pub mem_budget:u64}
-impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET}}}
+    pub mem_budget:u64,
+    /// Local retention (consensus.md:29, governance.md:15; never validity): R_keep and the cap on
+    /// unprotected non-canonical metadata (chain::R_KEEP, chain::SIDE_BLOCKS_MAX). Live import and
+    /// replay must use the same values; tests lower them to reach the boundaries quickly.
+    pub r_keep:u64,pub side_cap:usize}
+impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX}}}
 /// Default memory budget of one single-host devnet node.
 pub const MEM_BUDGET:u64=6<<30;
 /// Blocks waiting for their timestamp, buffered templates, equivocation observations,
@@ -51,6 +55,20 @@ pub const ORPHAN_PARENTS_MAX:usize=64;pub const ORPHANS_PER_PARENT:usize=16;pub 
 pub const REORG_RESTORE_MAX:usize=1024;
 /// Receipt times kept for production (only recent parents matter).
 pub const RECEIVED_MAX:usize=1024;
+/// Sync sessions (network.md D38: Status, locator <= 32, count <= 512): blocks asked per round, the
+/// quiet time that ends a round (the next round is asked), the silence that ends a session (the peer's
+/// claim is then set aside until its next Hello), and the gap between session starts.
+pub const SYNC_COUNT:u64=512;pub const ROUND_IDLE_MS:u128=250;pub const SESSION_STALL_MS:u128=3000;pub const SESSION_GAP_MS:u128=1000;
+
+/// A peer's announced Status (Hello): head, height and cumulative work. Unverified until its blocks
+/// arrive; `stale` once a session with it ended without reaching that head (cleared by its next Hello).
+#[derive(Clone,Debug)]
+pub struct PeerStatus{pub work:U256,pub head:[u8;32],pub height:u64,pub stale:bool}
+/// One sync session with one peer (D-REORG-REDB re-fetch): the blocks it delivers are solicited
+/// (accepted even if retention removed them before) and protected from the side cap; `tip` is the
+/// last block it delivered, the locator head of the next round.
+#[derive(Clone,Debug)]
+pub struct Session{pub peer:PeerId,pub tip:Option<[u8;32]>,pub asked_ms:u128,pub last_ms:u128,pub got:u64,pub got_round:u64,pub rounds:u64}
 
 /// Rpc: a request for the consensus thread (rpc::Request).
 /// Wake: light RPC requests are waiting in the light lane (at most one Wake is pending).
@@ -85,9 +103,9 @@ pub struct Node{
     pub chain:Chain,
     journal:Journal,
     peers:HashMap<PeerId,Peer>,
-    /// Range sync: the height each peer announced (Hello) or relayed, our head height and when it
-    /// last changed, and when a range was last requested.
-    peer_heights:HashMap<PeerId,u64>,sync_mark:(u64,u128),sync_ask_ms:u128,sync_turn:usize,
+    /// Sync: each peer's announced Status, the live session (at most one), when a session last
+    /// started and the round-robin turn among peers announcing more work.
+    pub peer_status:HashMap<PeerId,PeerStatus>,pub session:Option<Session>,sync_ask_ms:u128,sync_turn:usize,
     outbound:Arc<Mutex<HashSet<String>>>,
     pub tx:SyncSender<Event>,
     rx:Receiver<Event>,
@@ -118,7 +136,10 @@ pub struct Node{
     pub evidence_pool:Vec<Vec<u8>>,
 }
 #[derive(Default,Clone,Debug)]
-pub struct Stats{pub imported:u64,pub mined:u64,pub signed_templates:u64,pub fallback_templates:u64,pub shares_seen:u64,pub hashes:u64,pub reorgs:u64}
+pub struct Stats{pub imported:u64,pub mined:u64,pub signed_templates:u64,pub fallback_templates:u64,pub shares_seen:u64,pub hashes:u64,pub reorgs:u64,
+    /// Sync sessions started and rounds asked; solicited imports of blocks retention had removed
+    /// (re-fetch); canonical blocks made whole after adoptions (restore); journal records replay skipped.
+    pub sync_sessions:u64,pub sync_rounds:u64,pub refetched:u64,pub restored:u64,pub replay_skipped:u64}
 
 fn orphan_size(b:&Block)->usize{b.header.encoded.len()+b.body.txs.iter().chain(b.body.evidence.iter()).map(|x|x.len()).sum::<usize>()}
 fn result_bytes(r:&Option<ParentResult>)->Vec<u8>{
@@ -135,39 +156,62 @@ impl Node{
         crate::resources::check(spec.cp(),spec.local().k_hist,spec.local().side_max,&cfg.limits,cfg.peers.len())?;
         let binding=spec.genesis_hash();
         let rec=store::open(&cfg.dir,&binding).map_err(|e|format!("store: {e:?}"))?;
-        let mut chain=Chain::new(spec);
+        let mut chain=Chain::new(spec);chain.r_keep=cfg.limits.r_keep;chain.side_cap=cfg.limits.side_cap;chain.replaying=true;
+        // D-REORG-REDB replay. Every record is replayed in journal order with retain() after each, as
+        // live import did. Live journals a block only after validating it on a present parent, and
+        // only when it is absent, so: (1) a block whose NEXT journal event is a child record is
+        // protected from the side cap until then (live had it present throughout, so the protected set
+        // never exceeds live's resident side set, and replay bounds all side blocks by side_cap +
+        // protect_max), which guarantees every record's parent is present;
+        // (2) a record of a block already present is a re-import after live removed it, so it takes a
+        // new importSeq (consensus.md:205). With the same R_keep boundary, every replayed head equals
+        // the live head after the same record (D-REORG-REDB-DESIGN-FREEZE.md Revision 2).
+        let mut events:HashMap<[u8;32],VecDeque<(usize,bool)>>=HashMap::new(); // (record, is_child)
+        for (i,payload) in rec.payloads.iter().enumerate(){
+            let (hb,_,_)=store::decode_record(payload).map_err(|e|format!("record {i}: {e}"))?;
+            let header=decode_header(&hb).map_err(|e|format!("record {i}: {e}"))?;
+            events.entry(block_hash(&header)).or_default().push_back((i,false));events.entry(header.parent_hash).or_default().push_back((i,true));
+        }
         let mut rec_off=40u64; // first record frame starts after MAGIC(8)+binding(32)
+        let mut skipped=0u64;
         for (i,payload) in rec.payloads.iter().enumerate(){
             let this_off=rec_off; rec_off+=(payload.len()+store::OVERHEAD) as u64;
             let (hb,bb,rb)=store::decode_record(payload).map_err(|e|format!("record {i}: {e}"))?;
             let header=decode_header(&hb).map_err(|e|format!("record {i}: {e}"))?;
             let body=Body::decode(&bb,chain.spec.cp().BODY_MAX as usize).map_err(|e|format!("record {i}: {e}"))?;
-            let block=Block{header,body};
+            let block=Block{header,body};let hash=block.hash();let parent=block.header.parent_hash;
             // Same rules as live import: a journaled fork child of a block below the K_hist window
             // needs the TrieRebuild that import performed before journaling it.
-            // Replay retains after every record, as live import does, so it removes the same blocks.
-            // A record of a block retention removed, or of its descendant, is skipped (live import
-            // refused it or kept it only until then); a duplicate is the same block again.
-            if chain.was_evicted(&block.hash())||chain.was_evicted(&block.header.parent_hash){continue}
-            let (mut entry,_)=match chain.validate(&block,None,0){
-                Err(Reject::Duplicate)=>continue,
-                Err(Reject::NeedsRebuild(p))=>{chain.ensure_state_with(&p,Some(&rec.journal)).map_err(|e|format!("replay {i}: rebuild {e:?}"))?;chain.validate(&block,None,0).map_err(|e|format!("replay {i}: {e:?}"))?}
-                r=>r.map_err(|e|format!("replay {i}: {e:?}"))?,
-            };
-            if result_bytes(&entry.result)!=rb{return Err(format!("parentResultMismatch at record {i}"))}
-            entry.body_off=Some(this_off);
-            chain.insert(entry);chain.retain();
+            match chain.validate(&block,None,0){
+                Err(Reject::Duplicate)=>chain.reimport(&hash),
+                // Unreachable by (1); counted (Stats::replay_skipped) rather than refusing to open.
+                Err(Reject::UnknownParent)=>{skipped+=1;}
+                r=>{
+                    let (mut entry,_)=match r{
+                        Err(Reject::NeedsRebuild(p))=>{chain.ensure_state_with(&p,Some(&rec.journal)).map_err(|e|format!("replay {i}: rebuild {e:?}"))?;chain.validate(&block,None,0).map_err(|e|format!("replay {i}: {e:?}"))?}
+                        r=>r.map_err(|e|format!("replay {i}: {e:?}"))?,
+                    };
+                    if result_bytes(&entry.result)!=rb{return Err(format!("parentResultMismatch at record {i}"))}
+                    entry.body_off=Some(this_off);
+                    chain.insert(entry);
+                }
+            }
+            for b in [hash,parent]{if let Some(q)=events.get_mut(&b){while q.front().map_or(false,|x|x.0<=i){q.pop_front();}
+                if q.front().map_or(false,|x|x.1){chain.protect.insert(b);}else{chain.protect.remove(&b);}if q.is_empty(){events.remove(&b);}}}
+            chain.retain();
         }
-        chain.retain();
+        drop(events);chain.protect.clear();chain.replaying=false;chain.retain();
+        // Canonical blocks offloaded while they were non-canonical are made whole (RPC and serving).
+        let restored=chain.restore_canonical(0,&rec.journal).map_err(|e|format!("replay: restore canonical {e:?}"))?;
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
         let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.conn_max);let resp=crate::rpc::RespPools::new(&cfg.limits.rpc);
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
         let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());
         let net=net::Net::new(cfg.limits.net.clone());
-        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_heights:HashMap::new(),sync_mark:(0,0),sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
+        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
             pool:Pool{txs:vec![],pending_state:head_state,bytes:0,meter},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
-        node.stats.imported=rec.payloads.len() as u64;
+        node.stats.imported=rec.payloads.len() as u64;node.stats.replay_skipped=skipped;node.stats.restored=restored as u64;
         if rec.torn_tail{node.log("recovered torn journal tail into a new journal");}
         if rec.migrated_v1{node.log("migrated a fully verified v1 journal to format v2 (original kept as blocks.journal.v1-n)");}
         Ok(node)
@@ -221,21 +265,27 @@ impl Node{
                 else{let r=crate::rpc::answer(self,&q);let _=q.reply.send(r);}
             }
             Event::Net(NetEvent::Connected(id,peer))=>{let hello=self.hello();peer.send(&hello);self.peers.insert(id,peer);}
-            Event::Net(NetEvent::Closed(id))=>{self.peer_heights.remove(&id);if let Some(p)=self.peers.remove(&id){if p.outbound{if let Ok(mut s)=self.outbound.lock(){s.remove(&p.addr);}}}}
+            Event::Net(NetEvent::Closed(id))=>{self.peer_status.remove(&id);if self.session.as_ref().map_or(false,|s|s.peer==id){self.end_session(false);}
+                if let Some(p)=self.peers.remove(&id){if p.outbound{if let Ok(mut s)=self.outbound.lock(){s.remove(&p.addr);}}}}
             Event::Net(NetEvent::Message(id,m))=>self.on_msg(id,m),
         }
     }
     /// Φ = 2φ from the admitted local parameters (future-timestamp slack).
     fn capital_phi(&self)->u64{u64::from(self.chain.spec.local().capital_phi())}
-    fn hello(&self)->Msg{let h=self.chain.head();Msg::Hello{chain_id:self.chain.spec.chain_id(),genesis:self.chain.spec.genesis_hash(),head:h.hash,height:h.height,node:self.cfg.name.clone()}}
+    fn hello(&self)->Msg{let h=self.chain.head();Msg::Hello{chain_id:self.chain.spec.chain_id(),genesis:self.chain.spec.genesis_hash(),head:h.hash,height:h.height,work:h.total_work.to_be_bytes::<32>(),node:self.cfg.name.clone()}}
     fn broadcast(&self,m:&Msg,except:Option<PeerId>){for (id,p) in &self.peers{if Some(*id)!=except{p.send(m);}}}
 
     // ---------------- import ----------------
     /// Validates, journals (fsync) and inserts a block. Returns Ok(true) if new head.
-    pub fn import(&mut self,b:Block,from:Option<PeerId>)->Result<bool,Reject>{
+    pub fn import(&mut self,b:Block,from:Option<PeerId>)->Result<bool,Reject>{self.import_with(b,from,false)}
+    /// As `import`; `solicited` marks a block a sync session asked for (D-REORG-REDB re-fetch). An
+    /// unsolicited block retention removed is not validated, journaled or requested again
+    /// (chain::EVICTED_MAX, a churn guard); a solicited one is taken again (consensus.md §10: a branch
+    /// that becomes heavier is fetched by sync) and, while non-canonical, protected from the side cap.
+    pub fn import_with(&mut self,b:Block,from:Option<PeerId>,solicited:bool)->Result<bool,Reject>{
         let hash=b.hash();
-        // A block retention removed is not validated, journaled or requested again (chain::EVICTED_MAX).
-        if self.chain.was_evicted(&hash){return Err(Reject::Evicted)}
+        let was_evicted=self.chain.was_evicted(&hash);
+        if was_evicted&&!solicited{return Err(Reject::Evicted)}
         let mut res=self.chain.validate(&b,Some(now_s()),self.capital_phi());
         if let Err(Reject::NeedsRebuild(p))=&res{let p=*p;self.log("TrieRebuild for a fork below the K_hist window");
             if let Err(e)=self.chain.ensure_state_with(&p,Some(&self.journal)){return Err(e)}res=self.chain.validate(&b,Some(now_s()),self.capital_phi());}
@@ -248,6 +298,7 @@ impl Node{
                 return Err(Reject::UnknownParent);
             }
             Err(Reject::Future)=>{if self.future.len()<FUTURE_MAX{self.future.push(b);}return Err(Reject::Future)}
+            Err(Reject::Duplicate)=>{if solicited&&!self.chain.is_canonical(&hash){self.protect(hash);}return Err(Reject::Duplicate)}
             Err(Reject::Block(why))=>{self.chain.mark_invalid(hash,why.clone());self.reject(hash,&why);return Err(Reject::Block(why))}
             Err(e)=>{if let Reject::Envelope(w)=&e{self.reject(hash,w);}return Err(e)}
         };
@@ -255,18 +306,28 @@ impl Node{
         let record=store::encode_record(&b.header.encoded,&b.body.encode(),&result_bytes(&entry.result));
         // D-REORG-REDB: record the journal frame offset so this block's body can be read back off-heap.
         match self.journal.append(&record){Ok(off)=>entry.body_off=Some(off),Err(e)=>{self.log(&format!("FATAL journal append: {e:?}"));std::process::exit(70);}}
+        if solicited&&was_evicted{self.stats.refetched+=1;}
         self.received.insert(hash,now_ms());
         if self.received.len()>RECEIVED_MAX{let keep=self.chain.head().height.saturating_sub(8);let blocks=&self.chain.blocks;self.received.retain(|h,_|blocks.get(h).map_or(false,|e|e.height>=keep));}
         let old_head=self.chain.head;
         let new_head=self.chain.insert(entry);self.stats.imported+=1;
-        // A11: the detached transactions are read before retain() may prune the abandoned branch.
+        // A session's block is protected from the side cap while it is non-canonical (before retain()).
+        if solicited&&!self.chain.is_canonical(&hash){self.protect(hash);}
+        // A11: the detached transactions are read before retain() offloads the abandoned branch.
         let detached=if new_head{self.detached_txs(old_head)}else{vec![]};
+        let fork_h=if new_head{self.chain.lca_height(&old_head,&self.chain.head).unwrap_or(0)}else{0};
         self.chain.retain();
+        // D-REORG-REDB: the adopted blocks that were offloaded as non-canonical are made whole again
+        // (after retain offloaded the abandoned branch, so the two are never resident together).
+        if new_head{match self.chain.restore_canonical(fork_h,&self.journal){Ok(n)=>self.stats.restored+=n as u64,
+            Err(e)=>{self.log(&format!("FATAL restore of the adopted branch: {e:?}"));std::process::exit(70);}}}
         self.broadcast(&Msg::Block{header:b.header.encoded.clone(),body:b.body.encode()},from);
         if new_head{
             if self.chain.get(&self.chain.head).and_then(|e|e.parent)!=Some(old_head){self.stats.reorgs+=1;}
             self.log(&format!("head h={} {} signed={} txs={}",self.chain.head().height,&hex(&hash)[..14],self.chain.head().signed,b.body.txs.len()));
             self.on_new_head(detached);
+            // Status refresh (network.md:7): peers learn the new head and its cumulative work.
+            let hello=self.hello();self.broadcast(&hello,None);
         }
         // Orphans waiting for this block.
         // A copy whose body does not match its header is only an envelope fault: ask the peers for
@@ -333,10 +394,19 @@ impl Node{
             if a==b{break}
             let (Some(ha),Some(hb))=(height(&a),height(&b)) else{break};
             if ha>=hb{let Some(e)=self.chain.get(&a) else{break};gone.push(a);match e.parent{Some(p)=>a=p,None=>break}}
-            else{let Some(e)=self.chain.get(&b) else{break};kept.extend(e.tx_hashes.iter().copied());match e.parent{Some(p)=>b=p,None=>break}}
+            else{let Some(e)=self.chain.get(&b) else{break};kept.extend(self.tx_hashes_of(e));match e.parent{Some(p)=>b=p,None=>break}}
         }
-        gone.iter().rev().filter_map(|h|self.chain.get(h)).flat_map(|e|e.body.txs.iter().zip(e.tx_hashes.iter()))
-            .filter(|(_,h)|!kept.contains(*h)).map(|(raw,_)|raw.clone()).collect()
+        let mut out=Vec::new();
+        for h in gone.iter().rev(){let Some(e)=self.chain.get(h) else{continue};
+            // The abandoned branch was canonical, hence resident; an offloaded one is read back.
+            let txs=if e.offloaded{match self.chain.body_of(e,Some(&self.journal)){Ok(b)=>b.txs,Err(_)=>continue}}else{e.body.txs.clone()};
+            for raw in txs{if !kept.contains(&revm::primitives::keccak256(&raw)){out.push(raw);}}}
+        out
+    }
+    /// Transaction hashes of a stored block; an offloaded block's are re-derived from its journaled body.
+    fn tx_hashes_of(&self,e:&Entry)->Vec<B256>{
+        if !e.offloaded{return e.tx_hashes.clone()}
+        match self.chain.body_of(e,Some(&self.journal)){Ok(b)=>b.txs.iter().map(|t|revm::primitives::keccak256(t)).collect(),Err(err)=>{self.log(&format!("journal read for {}: {err:?}",&hex(&e.hash)[..14]));vec![]}}
     }
     fn rebuild_pool(&mut self,detached:Vec<Vec<u8>>){
         let old=std::mem::take(&mut self.pool.txs);self.pool.bytes=0;self.pool.pending_state=self.chain.head().state.clone();
@@ -452,22 +522,61 @@ impl Node{
         let rebuilt=self.chain.rebuild_signed(&p,&ctx,shell.ts,Address::from_slice(&shell.proposer),&body,effects);
         match rebuilt{Ok(ut) if ut==shell.ut_raw=>{self.lock(shell,body,false);true},_=>false}
     }
-    /// Range responses stop when the requester's queue is half full (Peer::offer). A head that has
-    /// not moved for a second while a peer announced a higher block asks that peer for the next
-    /// range, at most once a second (review finding: the rest used to come only by orphan walk-back).
-    fn sync_ranges(&mut self,now:u128){
-        let ours=self.chain.head().height;
-        if ours!=self.sync_mark.0{self.sync_mark=(ours,now);return}
-        if now.saturating_sub(self.sync_mark.1)<1000||now.saturating_sub(self.sync_ask_ms)<1000{return}
-        // Peers announcing more blocks are asked in turn, so one that lies about its height (Hello
-        // heights are unverified) gets only its share of the requests.
-        let mut ahead:Vec<(PeerId,u64)>=self.peer_heights.iter().filter(|(_,h)|**h>ours).map(|(i,h)|(*i,*h)).collect();ahead.sort();
+    // ---------------- sync sessions (network.md D38; D-REORG-REDB re-fetch) ----------------
+    /// Locator (network.md:8, <= 32 hashes, highest first): the head and the 9 blocks below it, then
+    /// doubling steps, the canonical block at depth R_keep (so a peer whose chain forks within R_keep
+    /// always answers from a point within the window) and genesis.
+    pub fn locator(&self,tip:Option<[u8;32]>)->Vec<[u8;32]>{
+        let head=self.chain.head().height;let mut hs=Vec::new();
+        let (mut h,mut step)=(head,1u64);
+        while hs.len()<net::LOCATOR_MAX-3{hs.push(h);if h==0{break}if hs.len()>=10{step=step.saturating_mul(2);}h=h.saturating_sub(step);}
+        hs.push(head.saturating_sub(self.chain.r_keep));hs.push(0);hs.sort_unstable_by(|a,b|b.cmp(a));hs.dedup();
+        let mut out:Vec<[u8;32]>=tip.into_iter().collect();
+        out.extend(hs.into_iter().filter_map(|h|self.chain.canonical.get(h as usize).copied()));out.truncate(net::LOCATOR_MAX);out
+    }
+    fn protect(&mut self,hash:[u8;32]){if self.chain.protect.len()<self.chain.protect_max(){self.chain.protect.insert(hash);}}
+    /// Whether a peer's announced Status calls for a session: its head is not stored here and its
+    /// work is at least ours (an equal-work head may still win D133's tie-break at the fork point).
+    fn wants(&self,st:&PeerStatus)->bool{!st.stale&&!self.chain.blocks.contains_key(&st.head)&&st.work>=self.chain.head().total_work&&st.head!=self.chain.head}
+    fn start_session(&mut self,peer:PeerId,now:u128){
+        let Some(p)=self.peers.get(&peer) else{return};
+        p.send(&Msg::GetFrom{locator:self.locator(None),count:SYNC_COUNT});
+        self.session=Some(Session{peer,tip:None,asked_ms:now,last_ms:now,got:0,got_round:0,rounds:1});self.sync_ask_ms=now;
+        self.stats.sync_sessions+=1;self.stats.sync_rounds+=1;
+    }
+    /// Ends the session; its blocks lose their protection (adopted ones are canonical by now). A session
+    /// that did not reach the peer's head sets that claim aside until the peer's next Hello.
+    fn end_session(&mut self,reached:bool){
+        if let Some(s)=self.session.take(){if !reached{if let Some(st)=self.peer_status.get_mut(&s.peer){st.stale=true;}}}
+        self.chain.protect.clear();
+    }
+    /// Session progress on every tick: done when the peer's announced head is stored or our work exceeds
+    /// its claim; the next round (locator from the last delivered block) once a round has gone quiet;
+    /// given up when the peer stays silent or the protected branch reaches its bound. Without a session,
+    /// peers announcing at least our work with an unknown head are asked in turn (round-robin, so a peer
+    /// that lies in its Status gets only its share), at most one start per SESSION_GAP_MS.
+    fn sync_tick(&mut self,now:u128){
+        if let Some(s)=self.session.clone(){
+            let claim=self.peer_status.get(&s.peer).cloned();
+            let reached=claim.as_ref().map_or(true,|c|self.chain.blocks.contains_key(&c.head)||self.chain.head().total_work>c.work);
+            if !self.peers.contains_key(&s.peer)||reached{self.end_session(reached);return}
+            if self.chain.protect.len()>=self.chain.protect_max(){self.log("sync session: protected branch bound reached");self.end_session(false);return}
+            if now.saturating_sub(s.last_ms)>=SESSION_STALL_MS{self.log("sync session: peer silent; claim set aside");self.end_session(false);return}
+            if s.got_round>0&&now.saturating_sub(s.last_ms)>=ROUND_IDLE_MS{
+                let loc=self.locator(s.tip);
+                if let Some(p)=self.peers.get(&s.peer){p.send(&Msg::GetFrom{locator:loc,count:SYNC_COUNT});}
+                if let Some(x)=&mut self.session{x.got_round=0;x.asked_ms=now;x.last_ms=now;x.rounds+=1;}self.stats.sync_rounds+=1;
+            }
+            return
+        }
+        if now.saturating_sub(self.sync_ask_ms)<SESSION_GAP_MS{return}
+        let mut ahead:Vec<PeerId>=self.peer_status.iter().filter(|(_,st)|self.wants(st)).map(|(i,_)|*i).collect();ahead.sort();
         if ahead.is_empty(){return}
-        let (id,h)=ahead[self.sync_turn%ahead.len()];self.sync_turn=self.sync_turn.wrapping_add(1);
-        if let Some(p)=self.peers.get(&id){p.send(&Msg::GetRange{start:ours+1,count:(h-ours).min(512)});self.sync_ask_ms=now;}
+        let id=ahead[self.sync_turn%ahead.len()];self.sync_turn=self.sync_turn.wrapping_add(1);
+        self.start_session(id,now);
     }
     fn tick(&mut self){
-        self.sync_ranges(now_ms());
+        self.sync_tick(now_ms());
         // Retry future blocks.
         if !self.future.is_empty(){let f=std::mem::take(&mut self.future);for b in f{let h=b.hash();if self.import(b,None).is_ok()&&self.own_future.remove(&h){self.stats.mined+=1;}}
             let waiting:HashSet<[u8;32]>=self.future.iter().map(|b|b.hash()).collect();self.own_future.retain(|h|waiting.contains(h));}
@@ -512,26 +621,24 @@ impl Node{
     }
     fn on_msg(&mut self,from:PeerId,m:Msg){
         match m{
-            Msg::Hello{chain_id,genesis,head,height,node}=>{
+            Msg::Hello{chain_id,genesis,head,height,work,node}=>{
                 if chain_id!=self.chain.spec.chain_id()||genesis!=self.chain.spec.genesis_hash(){
                     self.log(&format!("peer {node}: wrong network; closing"));if let Some(p)=self.peers.get(&from){p.close();}return;
                 }
-                self.peer_heights.insert(from,height);
-                if !self.chain.blocks.contains_key(&head)&&height>0{
-                    let ours=self.chain.head().height;
-                    if let Some(p)=self.peers.get(&from){
-                        if height>ours{p.send(&Msg::GetRange{start:ours+1,count:(height-ours).min(512)});}
-                        p.send(&Msg::GetBlock{hash:head});
-                    }
-                }
+                let st=PeerStatus{work:U256::from_be_bytes(work),head,height,stale:false};
+                let start=self.session.is_none()&&height>0&&self.wants(&st);
+                self.peer_status.insert(from,st);
+                if start{self.start_session(from,now_ms());}
             }
             Msg::Block{header,body}=>{
                 let Ok(h)=decode_header(&header) else{return};
                 let Ok(b)=Body::decode(&body,self.chain.spec.cp().BODY_MAX as usize) else{return};
-                // Relayed heights are unverified (a block ahead of us is an orphan here); sync_ranges
-                // asks the peers in turn, so an inflated height cannot monopolize the requests.
-                if let Some(x)=self.peer_heights.get_mut(&from){*x=(*x).max(h.h);}
-                let _=self.import(Block{header:h,body:b},Some(from));
+                let solicited=self.session.as_ref().map_or(false,|s|s.peer==from);
+                let b=Block{header:h,body:b};let hash=b.hash();
+                let r=self.import_with(b,Some(from),solicited);
+                if solicited&&matches!(r,Ok(_)|Err(Reject::Duplicate)){
+                    if let Some(s)=&mut self.session{s.tip=Some(hash);s.got+=1;s.got_round+=1;s.last_ms=now_ms();}
+                }
             }
             Msg::Template{shell,body}=>{
                 let Ok(h)=decode_header(&shell) else{return};
@@ -553,7 +660,14 @@ impl Node{
                 if !le_target(&pow_hash(&tid,nonce),&l.ctx.t_share){return}
                 pr.shares.insert(nonce);self.stats.shares_seen+=1;
             }
-            Msg::GetBlock{hash}=>{if let Some(e)=self.chain.get(&hash){if e.height>0{if let Some(p)=self.peers.get(&from){p.send(&Msg::Block{header:e.header.encoded.clone(),body:e.body.encode()});}}}}
+            Msg::GetBlock{hash}=>{if let Some(m)=self.block_msg(&hash){if let Some(p)=self.peers.get(&from){p.send(&m);}}}
+            Msg::GetFrom{locator,count}=>{
+                let Some(p)=self.peers.get(&from) else{return};
+                // The highest locator hash on our canonical chain (genesis always is); answers stop when
+                // the peer's queue is half full (offer) and the peer asks again from its last block.
+                let Some(start)=locator.iter().find(|h|self.chain.is_canonical(h)).and_then(|h|self.chain.get(h)).map(|e|e.height+1) else{return};
+                for hgt in start..start.saturating_add(count.min(SYNC_COUNT)){match self.chain.canonical_at(hgt){Some(e)=>{if !p.offer(&Msg::Block{header:e.header.encoded.clone(),body:e.body.encode()}){break}}None=>break}}
+            }
             Msg::GetRange{start,count}=>{
                 let Some(p)=self.peers.get(&from) else{return};
                 // Responses stop when the peer's queue is half full (offer); the peer asks again.
@@ -564,6 +678,28 @@ impl Node{
     }
 }
 impl Node{
+    /// The Block message for a stored block (genesis excluded); an offloaded non-canonical block is
+    /// served from its journal record, byte-equal to what was imported (VA-SPEC §4).
+    pub fn block_msg(&self,hash:&[u8;32])->Option<Msg>{
+        let e=self.chain.get(hash).filter(|e|e.height>0)?;
+        if !e.offloaded{return Some(Msg::Block{header:e.header.encoded.clone(),body:e.body.encode()})}
+        match self.journal.read_at(e.body_off?){Ok((hb,bb,_))=>Some(Msg::Block{header:hb,body:bb}),Err(err)=>{self.log(&format!("journal read for {}: {err:?}",&hex(hash)[..14]));None}}
+    }
+    /// A stored block for RPC (eth_getBlockByHash): as stored when resident; an offloaded non-canonical
+    /// block is materialized from its journal record (encoded header, body, tx hashes), so the answer is
+    /// the same as before D-REORG-REDB for every block still retained. None if it is not stored.
+    pub fn block_view(&self,hash:&[u8;32])->Option<std::borrow::Cow<'_,Entry>>{
+        let e=self.chain.get(hash)?;
+        if !e.offloaded{return Some(std::borrow::Cow::Borrowed(e))}
+        let (hb,bb,_)=self.journal.read_at(e.body_off?).map_err(|err|self.log(&format!("journal read for {}: {err:?}",&hex(hash)[..14]))).ok()?;
+        let body=Body::decode(&bb,self.chain.spec.cp().BODY_MAX as usize).ok()?;
+        let mut v=e.meta_clone();v.tx_hashes=body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();v.body=body;v.header.encoded=hb;v.offloaded=false;
+        Some(std::borrow::Cow::Owned(v))
+    }
+    /// TrieRebuild of a stored block's state through the journal (offloaded bodies read back).
+    pub fn rebuild_state(&mut self,hash:&[u8;32])->Result<(),Reject>{self.chain.ensure_state_with(hash,Some(&self.journal))}
+    /// A stored block's committed body (resident or from the journal).
+    pub fn body_of(&self,hash:&[u8;32])->Result<Body,Reject>{let e=self.chain.get(hash).ok_or(Reject::UnknownParent)?;self.chain.body_of(e,Some(&self.journal))}
     pub fn pool_state(&self)->&InMemoryDB{&self.pool.pending_state}
     /// The pool meter's (user slots, user accounts, system slots).
     pub fn pool_live(&self)->(u64,u64,u64){self.pool.meter.live()}
@@ -578,7 +714,9 @@ impl Node{
             "admission":crate::admission_json(self.chain.spec.admission()),
             "a13":crate::resources::derive(self.chain.spec.cp(),self.chain.spec.local().k_hist,self.chain.spec.local().side_max,&self.cfg.limits,self.cfg.peers.len()).map(|b|serde_json::json!({
                 "boundBytes":b.total.to_string(),"budgetBytes":self.cfg.limits.mem_budget,"conditions":crate::resources::CONDITIONS.iter().map(|(id,d)|serde_json::json!({"id":id,"detail":d})).collect::<Vec<_>>()})),
-            "stats":{"imported":self.stats.imported,"mined":self.stats.mined,"signedTemplates":self.stats.signed_templates,"fallbackTemplates":self.stats.fallback_templates,"sharesSeen":self.stats.shares_seen,"hashesInExhaustedRanges":self.stats.hashes,"reorgs":self.stats.reorgs}})
+            "stats":{"imported":self.stats.imported,"mined":self.stats.mined,"signedTemplates":self.stats.signed_templates,"fallbackTemplates":self.stats.fallback_templates,"sharesSeen":self.stats.shares_seen,"hashesInExhaustedRanges":self.stats.hashes,"reorgs":self.stats.reorgs,
+                "syncSessions":self.stats.sync_sessions,"syncRounds":self.stats.sync_rounds,"refetched":self.stats.refetched,"restored":self.stats.restored,"replaySkipped":self.stats.replay_skipped},
+            "retention":{"rKeep":self.chain.r_keep,"sideCap":self.chain.side_cap,"side":self.chain.side_counts().0,"protected":self.chain.protect.len(),"evicted":self.chain.evicted_total}})
     }
     pub fn template_json(&self)->serde_json::Value{
         match &self.prod{Some(Production{mode:Mode::Locked(l),..})=>serde_json::json!({"templateId":hex(&l.tid),"header":hex(&l.header.encoded),"fallback":l.fallback,"nonceMax":l.ctx.assignment.nonce_max().to_string()}),_=>serde_json::Value::Null}

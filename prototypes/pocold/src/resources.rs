@@ -58,6 +58,7 @@ pub const CONDITIONS:&[(&str,&str)]=&[
     ("main-thread","the main thread's stack is reserved by the platform; counted at 1 MiB because it only spawns and joins"),
     ("revm-representation","the execution term relies on revm 19.7 behaviour checked by source inspection (iterative frames, SharedMemory truncation, fixed stack capacity) and by measured adversarial peaks"),
     ("cpu-and-timing","CPU costs (world-root rebuild, chain scans, pool re-execution, deep-fork rebuild) are not memory terms; worst-case timing is not bounded"),
+    ("open-replay-transient","Node::open holds the whole journal's payloads (store::open, pre-existing) and a replay index of two entries per record while replaying; this open-time transient grows with the journal and is not part of the steady-state bound"),
 ];
 /// The model total and its parts. `items` itemizes every group term ("group/item", bytes); the
 /// group fields are the sums of their items and `total` is the sum of all items.
@@ -105,11 +106,21 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let hist=[("history/blocks (H_END+1)",mul(u128::from(cp.H_END)+1,per_block)?),("history/transaction bytes (TXBYTES_CAP)",u128::from(cp.TXBYTES_CAP)),
         ("history/transaction index and receipts (TX_CAP)",mul(u128::from(cp.TX_CAP),24+24+32+RECEIPT_BASE)?),("history/logs (LOG_CAP)",u128::from(caps::LOG_CAP)/32*33),("history/evidence",evidence)];
     let history=add(&hist.map(|x|x.1))?;items.extend(hist);
-    // Side blocks: <= SIDE_BLOCKS_MAX (Chain::retain, after every import), each a full, validated
-    // block of its own: its transactions are bounded by its body and by its gas.
+    // Side blocks (D-REORG-REDB): every journaled non-canonical block is offloaded to metadata at the
+    // retain() that follows its import (Chain::retain): its encoded header and body (evidence included),
+    // receipts and tx hashes are dropped, so an entry is the per-block term less one header and the
+    // evidence, plus its protect-set slot. Live: <= side_cap unprotected + protect_max (2·r_keep) held
+    // by a sync session. Replay: all <= side_cap + protect_max (Chain::replaying). One full block is
+    // resident between its insert and that retain (or while restore_canonical re-executes it): its
+    // transactions are bounded by its body and by its gas.
     let side_txs=(u128::from(cp.BODY_MAX)/MIN_TX_BYTES).min(u128::from(cp.GAS_LIMIT)/TX_GAS_MIN);
     let side_block=add(&[per_block,mul(u128::from(cp.E_max),u128::from(cp.EVID_BYTES_MAX))?,u128::from(cp.BODY_MAX),mul(side_txs,24+24+32+RECEIPT_BASE)?,u128::from(caps::LOG_BLOCK_MAX)/32*33])?;
-    let side_blocks=mul(chain::SIDE_BLOCKS_MAX as u128,side_block)?;items.push(("side/SIDE_BLOCKS_MAX stored side blocks",side_blocks));
+    let side_entries=add(&[limits.side_cap as u128,mul(2,u128::from(limits.r_keep))?])?;
+    let side_entry=per_block.checked_sub(hdr)?.checked_sub(mul(u128::from(cp.E_max),24)?)?.checked_add(32+16)?;
+    let side_meta=mul(side_entries,side_entry)?;let side_full=side_block;
+    let evicted=mul(chain::EVICTED_MAX as u128,2*(32+16))?;
+    let side_blocks=add(&[side_meta,side_full,evicted])?;
+    items.extend([("side/offloaded side-block metadata (side_cap + 2·r_keep entries)",side_meta),("side/one full block before offload or during restore",side_full),("side/evicted-hash FIFO (EVICTED_MAX)",evicted)]);
     // Queues and caches (node.rs, net.rs constants).
     let frame=net::MAX_FRAME as u128;let block=size_of::<Block>() as u128;let l=&limits.net;
     let pool=add(&[node::POOL_MAX_BYTES as u128,mul(node::POOL_MAX_BYTES as u128/MIN_TX_BYTES,32+24+24)?])?;
