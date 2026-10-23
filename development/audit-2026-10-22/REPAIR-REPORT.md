@@ -186,7 +186,7 @@ weakened a consensus rule, and no review constitutes acceptance.
   - Inspection-only items remain.
   - There is no guaranteed process-memory ceiling. The measured RSS of a run is not the bound.
   - **Architectural blocker:** adoption of a heavier branch at any depth ≤ R_keep = 2048
-    (network.md:143). Fork choice walks resident ancestors and retention drops only leaves, so a
+    (network.md:144). Fork choice walks resident ancestors and retention drops only leaves, so a
     competing branch must be fully resident to be adopted: the one-shot adoption depth IS
     SIDE_BLOCKS_MAX, raised 256 → 320 in round 2 (the budget maximum, via the tested path). A deeper
     branch is preserved in the journal (lossless), not refused; the node stays on the valid lighter

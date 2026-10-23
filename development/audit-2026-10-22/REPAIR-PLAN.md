@@ -487,7 +487,7 @@ returns 404 until the file is on `main`, so it has not run.
   Summary of the changes:
   - side_max 8 → 2;
   - SIDE_BLOCKS_MAX 256 → 64, **reverted to 256** after the second review showed that 64 made a heavier
-    branch longer than about 64 blocks unadoptable (network.md:143: adoption ≤ R_keep). Its term is
+    branch longer than about 64 blocks unadoptable (network.md:144: adoption ≤ R_keep). Its term is
     instead tightened by proof: a validated block holds at most GAS_LIMIT/21,000 transactions;
   - POOL_MAX_BYTES 64 → 32 MiB;
   - inbound peers_max 32 → 8;

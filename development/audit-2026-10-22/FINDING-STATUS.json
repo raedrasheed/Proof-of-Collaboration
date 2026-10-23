@@ -643,7 +643,7 @@
     "INSPECTION only: transient-snapshot inventory, one EVM execution at a time, the answer-being-built tree ratio (§4.11, §4.13, §4.16)",
     "DERIVED with stated revm 19.7 facts: execution memory, operation classes (§4.4, §3a)",
     "No guaranteed process-memory ceiling exists (§2b)",
-    "OPEN (architectural): adoption of a heavier branch at depth <= R_keep (2048, network.md:143) is met only to SIDE_BLOCKS_MAX = 320 (raised from 256; a deeper branch is preserved in the journal, not adopted in one shot); full R_keep needs block bodies off the heap, proposed as D-REORG-REDB (§4.18)"
+    "OPEN (architectural): adoption of a heavier branch at depth <= R_keep (2048, network.md:144) is met only to SIDE_BLOCKS_MAX = 320 (raised from 256; a deeper branch is preserved in the journal, not adopted in one shot); full R_keep needs block bodies off the heap, proposed as D-REORG-REDB (§4.18)"
    ],
    "blocked": {
     "environment": [

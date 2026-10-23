@@ -1,8 +1,15 @@
-# D-REORG-REDB — off-heap block store for full R_keep-depth adoption (PROPOSED, needs owner approval)
+# D-REORG-REDB — off-heap block store for full R_keep-depth adoption
 
-Status: **PROPOSED. Not implemented. Needs explicit owner approval** before implementation, because
-it adds consensus-critical code (a bespoke reorganization path). It is recorded here per the standing
-rule that any new normative/consensus-adjacent mechanism needs explicit sign-off.
+Status: **APPROVED by the owner (2026-10-23) as a storage repair for the R_keep requirement, with D133
+and the validity/consensus rules fully preserved; IMPLEMENTED** (`66d69c6`, `f7c345b`, `54b2da1`,
+`9ce5a7c`). The final design, with the multi-branch adoption proof, replay equivalence, RPC scope and
+resource bounds, is **D-REORG-REDB-DESIGN-FREEZE.md, Revision 2**, which supersedes the design sketched
+below where they differ. Verification on the final code is recorded in REPAIR-REPORT.md. This approval
+does not cover the six consensus proposals.
+
+History (the proposal as first written, before approval):
+Status then: PROPOSED, not implemented, needing explicit owner approval because it adds consensus-
+critical code (a bespoke reorganization path), per the standing rule on new consensus-adjacent mechanisms.
 
 > Round-2 correction (this revision). The earlier draft said the design would "adopt only on strictly
 > greater total work (no equal-work deep reorg), which sidesteps the D133 tie-break entirely." That
@@ -14,7 +21,7 @@ rule that any new normative/consensus-adjacent mechanism needs explicit sign-off
 
 ## Problem
 
-network.md:143 requires a node to adopt a heavier valid branch at any fork depth ≤ R_keep = 2048
+network.md:144 requires a node to adopt a heavier valid branch at any fork depth ≤ R_keep = 2048
 (governance.md). pocold's one-shot adoption depth is **SIDE_BLOCKS_MAX = 320** (A13-DERIVATION §4
 item 18), memory-bound, because:
 - fork choice (`chain::better`, `rebuild_canonical`) walks a branch's ancestors through resident

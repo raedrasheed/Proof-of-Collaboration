@@ -129,7 +129,9 @@ pub enum Reject{
     NeedsRebuild([u8;32]),
     Future,
     Duplicate,
-    /// Removed by local retention (SIDE_BLOCKS_MAX or R_keep) and not taken again (EVICTED_MAX).
+    /// Removed by local retention (SIDE_BLOCKS_MAX or R_keep) and not taken again (EVICTED_MAX), or a new
+    /// block at or below head-R_keep, which retention would remove at once (it cannot be canonical or win
+    /// D133 there; deeper rollback is the manual checkpoint of governance.md:200). Never a validity verdict.
     Evicted,
 }
 fn blk<T>(s:impl Into<String>)->Result<T,Reject>{Err(Reject::Block(s.into()))}
@@ -500,8 +502,11 @@ impl Chain{
     /// a block only when it is absent, so a second record means live had removed it by retention and
     /// imported it again: consensus.md:205 gives such a block a NEW importSeq, so replay does the same
     /// (keeping live and replayed D133 keys order-equal). The head stays the D133 maximum.
-    pub fn reimport(&mut self,hash:&[u8;32]){
+    pub fn reimport(&mut self,hash:&[u8;32],header:Header,body_off:Option<u64>){
+        // Live builds the re-imported entry from that copy (its envelope bytes may differ: the block hash
+        // does not commit sig/winnerSig) and serves it from that record, so replay keeps the same copy.
         let Some(e)=self.blocks.get_mut(hash) else{return};e.import_seq=self.next_seq;self.next_seq+=1;
+        let resident=!e.offloaded;e.header=header;if !resident{e.header.encoded=Vec::new();}if body_off.is_some(){e.body_off=body_off;}
         if self.is_canonical(hash){self.recompute_head();}
         else if self.better(hash,&self.head.clone()){self.head=*hash;self.rebuild_canonical();}
     }

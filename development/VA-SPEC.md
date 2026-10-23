@@ -49,14 +49,16 @@ closed (wrong network). activeVersion is checked per header (H-pre 1b).
 (D-REORG-REDB revision; network.md D38: Status, locator <= 32, count <= 512, <= 4096 per branch.)
 - On connect, and on every new head, a node sends Hello (its Status, with the head's cumulative
   work).
-- A peer announcing work >= ours with a head we do not store starts a sync session (one at a time;
-  otherwise such peers are asked in turn). `GetFrom(locator, 512)`: the locator is our head and the 9
+- A peer announcing work >= ours with a head we do not store starts a sync session at its first Hello
+  (one session at a time; later Hellos only update its Status, and claimants are asked in turn). `GetFrom(locator, 512)`: the locator is our head and the 9
   blocks below it, doubling steps, our canonical block at depth R_keep, and genesis. The responder
   answers its canonical blocks after the highest locator hash on its canonical chain, in height order,
   stopping when the requester's queue is half full. The next round puts the last delivered block first
-  in the locator. The session ends when the peer's head is stored or our work exceeds its claim, after
-  3 s of silence, or at the protected-branch bound. The last two set the peer's claim aside until its
-  next Hello.
+  in the locator. Only a stored block that is new, or a stored copy at a new height inside the R_keep window, is
+  progress; the next round follows a round with progress. The session ends when the peer's head is
+  stored or our work exceeds its claim, after 3 s without progress, or at the protected-branch bound.
+  The last two set the peer's claim aside until its announced head changes.
+- A new block at or below head-R_keep is refused before validation (local retention; never invalid).
 - Blocks a session delivers are solicited: they are taken even if retention removed them before (an
   unsolicited copy of such a block is refused before validation), and while non-canonical they are
   protected from the side cap (at most 2·R_keep).

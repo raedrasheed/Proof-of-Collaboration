@@ -68,7 +68,11 @@ pub struct PeerStatus{pub work:U256,pub head:[u8;32],pub height:u64,pub stale:bo
 /// (accepted even if retention removed them before) and protected from the side cap; `tip` is the
 /// last block it delivered, the locator head of the next round.
 #[derive(Clone,Debug)]
-pub struct Session{pub peer:PeerId,pub tip:Option<[u8;32]>,pub asked_ms:u128,pub last_ms:u128,pub got:u64,pub got_round:u64,pub rounds:u64}
+pub struct Session{pub peer:PeerId,pub tip:Option<[u8;32]>,pub asked_ms:u128,pub last_ms:u128,pub got:u64,pub got_round:u64,pub rounds:u64,
+    /// Highest height the session has delivered a stored block at: a copy of a block already stored
+    /// counts as progress only above it and inside the R_keep window, so replayed or junk blocks cannot
+    /// keep a session alive (`last_ms` is the time of the last progress).
+    pub best_h:u64}
 
 /// Rpc: a request for the consensus thread (rpc::Request).
 /// Wake: light RPC requests are waiting in the light lane (at most one Wake is pending).
@@ -149,6 +153,21 @@ fn result_bytes(r:&Option<ParentResult>)->Vec<u8>{
     let mut o=Vec::new();crate::rlp::encode_list_payload(&p,&mut o);o
 }
 
+/// The largest R_keep this data directory has used (`retention.rkeep`), raised to `configured` and
+/// written durably (temporary file, fsync, rename, directory fsync) before replay starts.
+fn retention_rkeep(dir:&std::path::Path,configured:u64)->std::io::Result<u64>{
+    use std::io::Write;
+    let path=dir.join("retention.rkeep");
+    let stored=std::fs::read_to_string(&path).ok().and_then(|s|s.trim().parse::<u64>().ok());
+    let rk=stored.map_or(configured,|x|x.max(configured));
+    if stored!=Some(rk){
+        let tmp=dir.join("retention.rkeep.tmp");
+        {let mut f=std::fs::File::create(&tmp)?;f.write_all(rk.to_string().as_bytes())?;f.sync_all()?;}
+        std::fs::rename(&tmp,&path)?;std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(rk)
+}
+
 impl Node{
     /// Opens the journal, replays and re-executes every committed block.
     pub fn open(cfg:Config,spec:Spec)->Result<Self,String>{
@@ -156,7 +175,11 @@ impl Node{
         crate::resources::check(spec.cp(),spec.local().k_hist,spec.local().side_max,&cfg.limits,cfg.peers.len())?;
         let binding=spec.genesis_hash();
         let rec=store::open(&cfg.dir,&binding).map_err(|e|format!("store: {e:?}"))?;
-        let mut chain=Chain::new(spec);chain.r_keep=cfg.limits.r_keep;chain.side_cap=cfg.limits.side_cap;chain.replaying=true;
+        // Replay must not use a smaller R_keep than live used for any record (it would drop a parent live
+        // kept); a larger one only keeps blocks that were below the head when imported. The largest value
+        // this data directory has used is kept durably beside the journal and replay uses it.
+        let rk_replay=retention_rkeep(&cfg.dir,cfg.limits.r_keep).map_err(|e|format!("retention.rkeep: {e}"))?;
+        let mut chain=Chain::new(spec);chain.r_keep=rk_replay;chain.side_cap=cfg.limits.side_cap;chain.replaying=true;
         // D-REORG-REDB replay. Every record is replayed in journal order with retain() after each, as
         // live import did. Live journals a block only after validating it on a present parent, and
         // only when it is absent, so: (1) a block whose NEXT journal event is a child record is
@@ -183,7 +206,7 @@ impl Node{
             // Same rules as live import: a journaled fork child of a block below the K_hist window
             // needs the TrieRebuild that import performed before journaling it.
             match chain.validate(&block,None,0){
-                Err(Reject::Duplicate)=>chain.reimport(&hash),
+                Err(Reject::Duplicate)=>chain.reimport(&hash,block.header.clone(),Some(this_off)),
                 // Unreachable by (1); counted (Stats::replay_skipped) rather than refusing to open.
                 Err(Reject::UnknownParent)=>{skipped+=1;}
                 r=>{
@@ -200,7 +223,7 @@ impl Node{
                 if q.front().map_or(false,|x|x.1){chain.protect.insert(b);}else{chain.protect.remove(&b);}if q.is_empty(){events.remove(&b);}}}
             chain.retain();
         }
-        drop(events);chain.protect.clear();chain.replaying=false;chain.retain();
+        drop(events);chain.protect.clear();chain.replaying=false;chain.r_keep=cfg.limits.r_keep;chain.retain();
         // Canonical blocks offloaded while they were non-canonical are made whole (RPC and serving).
         let restored=chain.restore_canonical(0,&rec.journal).map_err(|e|format!("replay: restore canonical {e:?}"))?;
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
@@ -286,6 +309,10 @@ impl Node{
         let hash=b.hash();
         let was_evicted=self.chain.was_evicted(&hash);
         if was_evicted&&!solicited{return Err(Reject::Evicted)}
+        // A new block at or below head-R_keep is removed by the next retain() and cannot become canonical
+        // (its work is at most the canonical block's at that height): refused before validation or
+        // journaling, as local retention (governance.md:200), never as invalid.
+        if !self.chain.blocks.contains_key(&hash)&&b.header.h.saturating_add(self.chain.r_keep)<=self.chain.head().height{return Err(Reject::Evicted)}
         let mut res=self.chain.validate(&b,Some(now_s()),self.capital_phi());
         if let Err(Reject::NeedsRebuild(p))=&res{let p=*p;self.log("TrieRebuild for a fork below the K_hist window");
             if let Err(e)=self.chain.ensure_state_with(&p,Some(&self.journal)){return Err(e)}res=self.chain.validate(&b,Some(now_s()),self.capital_phi());}
@@ -332,7 +359,9 @@ impl Node{
         // Orphans waiting for this block.
         // A copy whose body does not match its header is only an envelope fault: ask the peers for
         // the real block under that hash (the junk copy may have taken its orphan slot).
-        if let Some(children)=self.take_orphans(&hash){for c in children{let h=c.hash();if matches!(self.import(c,None),Err(Reject::Envelope(_))){self.broadcast(&Msg::GetBlock{hash:h},None);}}}
+        // Children that arrived first keep the solicited status of their parent's import (a session's
+        // blocks arriving out of order stay protected and re-fetchable).
+        if let Some(children)=self.take_orphans(&hash){for c in children{let h=c.hash();if matches!(self.import_with(c,None,solicited),Err(Reject::Envelope(_))){self.broadcast(&Msg::GetBlock{hash:h},None);}}}
         Ok(new_head)
     }
     /// Bounded orphan store (A05): per parent, parent keys and bytes; the oldest parent goes first.
@@ -541,7 +570,7 @@ impl Node{
     fn start_session(&mut self,peer:PeerId,now:u128){
         let Some(p)=self.peers.get(&peer) else{return};
         p.send(&Msg::GetFrom{locator:self.locator(None),count:SYNC_COUNT});
-        self.session=Some(Session{peer,tip:None,asked_ms:now,last_ms:now,got:0,got_round:0,rounds:1});self.sync_ask_ms=now;
+        self.session=Some(Session{peer,tip:None,asked_ms:now,last_ms:now,got:0,got_round:0,rounds:1,best_h:0});self.sync_ask_ms=now;
         self.stats.sync_sessions+=1;self.stats.sync_rounds+=1;
     }
     /// Ends the session; its blocks lose their protection (adopted ones are canonical by now). A session
@@ -625,8 +654,13 @@ impl Node{
                 if chain_id!=self.chain.spec.chain_id()||genesis!=self.chain.spec.genesis_hash(){
                     self.log(&format!("peer {node}: wrong network; closing"));if let Some(p)=self.peers.get(&from){p.close();}return;
                 }
-                let st=PeerStatus{work:U256::from_be_bytes(work),head,height,stale:false};
-                let start=self.session.is_none()&&height>0&&self.wants(&st);
+                // Only a peer's first Hello may start a session at once; later Status updates wait for
+                // sync_tick's round-robin, so a peer re-announcing a false claim cannot hold the session
+                // slot. A claim set aside stays aside until the announced head changes.
+                let prev=self.peer_status.get(&from);let first=prev.is_none();
+                let stale=prev.map_or(false,|p|p.stale&&p.head==head);
+                let st=PeerStatus{work:U256::from_be_bytes(work),head,height,stale};
+                let start=first&&self.session.is_none()&&height>0&&self.wants(&st);
                 self.peer_status.insert(from,st);
                 if start{self.start_session(from,now_ms());}
             }
@@ -634,10 +668,16 @@ impl Node{
                 let Ok(h)=decode_header(&header) else{return};
                 let Ok(b)=Body::decode(&body,self.chain.spec.cp().BODY_MAX as usize) else{return};
                 let solicited=self.session.as_ref().map_or(false,|s|s.peer==from);
-                let b=Block{header:h,body:b};let hash=b.hash();
+                let height=h.h;let b=Block{header:h,body:b};let hash=b.hash();
                 let r=self.import_with(b,Some(from),solicited);
-                if solicited&&matches!(r,Ok(_)|Err(Reject::Duplicate)){
-                    if let Some(s)=&mut self.session{s.tip=Some(hash);s.got+=1;s.got_round+=1;s.last_ms=now_ms();}
+                // Progress: a block stored by this import, or a stored copy at a new height inside the
+                // R_keep window (the honest common point is inside it). Anything else (junk, duplicates
+                // below the frontier, blocks retention removed at once) does not refresh the session.
+                if solicited&&self.chain.blocks.contains_key(&hash){
+                    let window=height.saturating_add(self.chain.r_keep)>self.chain.head().height;
+                    if let Some(s)=&mut self.session{
+                        if matches!(r,Ok(_))||(height>s.best_h&&window){s.tip=Some(hash);s.best_h=s.best_h.max(height);s.got+=1;s.got_round+=1;s.last_ms=now_ms();}
+                    }
                 }
             }
             Msg::Template{shell,body}=>{

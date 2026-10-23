@@ -727,7 +727,8 @@ fn r_keep_boundary(rk:u64,side_cap:usize,tag:&str){
     for x in &theirs{if let Err(Reject::Block(w))=n.import(x.clone(),None){panic!("retention never yields a validity verdict: {w}")}}
     assert_eq!(n.chain.head,ours_tip,"depth R_keep+1 is not adopted (governance.md:200: manual checkpoint)");
     assert!(theirs.iter().all(|x|!n.chain.invalid.contains_key(&x.hash())),"and no block of it is marked invalid");
-    assert!(n.journal_records()>rec0,"its first block was validated and journaled; it is removed locally only");
+    assert!(matches!(n.import(theirs[0].clone(),None),Err(Reject::Evicted)),"a block at or below head-R_keep is refused by local retention");
+    assert_eq!(n.journal_records(),rec0,"before validation or journaling (retention would remove it at once)");
     drop(n);let r=reopen(&conf2);assert_eq!(r.chain.head,ours_tip);assert_eq!(r.stats.replay_skipped,0);
     println!("R_KEEP-BOUNDARY {}",json!({"rKeep":rk,"ourBlocks":ours.len(),"theirBlocks":theirs.len(),"adoptedAtRKeep":true,"adoptedBeyond":false}));
     for d in [dir,dir2]{let _=std::fs::remove_dir_all(&d);}
@@ -1027,5 +1028,69 @@ fn wait_for(secs:u64,f:&dyn Fn()->bool)->bool{let t=std::time::Instant::now();wh
     assert!(theirs.iter().all(|x|!n.chain.is_canonical(&x.hash())),"the branch stays lighter (side)");
     assert!(n.chain.rebuilds-before<=1,"linear import: {} re-executions for {} side blocks",n.chain.rebuilds-before,theirs.len());
     let (_,with_state)=n.chain.side_counts();assert!(with_state<=n.chain.spec.local().side_max as usize);
+    let _=std::fs::remove_dir_all(&dir);
+}
+
+/// A peer cannot hold the sync slot with a false Status: one announcing enormous work that answers with
+/// copies of our own blocks (and re-announces new heads) makes no progress after its first pass, so its
+/// session ends after SESSION_STALL_MS and the round-robin reaches the honest heavier peer, whose branch
+/// is adopted. Local test peers only.
+#[test] fn a_peer_with_a_false_status_cannot_hold_the_sync_session(){
+    use pocold::{node::{Config,Limits,Node},net::Msg};use std::io::{Read,Write};
+    let port=||std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let c=cfg(&["a","b","c"]);let mut a=net();let g=a.chain.head;let ours=grow(&mut a,g,20,&|n,p|signed(n,p,Body::default(),0));
+    let mut b=net();let theirs=heavier(&mut b,g,a.chain.head().total_work,2);
+    let lim=Limits{r_keep:64,side_cap:16,..Default::default()};
+    let (pa,pp,ra)=(port(),port(),port());let tag=std::process::id();
+    let dir=|x:&str|{let d=std::env::temp_dir().join(format!("pocold-liar-{x}-{tag}"));let _=std::fs::remove_dir_all(&d);d};
+    let addr=|p:u16|->std::net::SocketAddr{format!("127.0.0.1:{p}").parse().unwrap()};
+    let mut na=Node::open(Config{dir:dir("a"),name:"a".into(),miner:None,listen:Some(addr(pa)),peers:vec![],rpc:Some(addr(ra)),stop_at:None,log:false,limits:lim.clone()},admitted(&c)).unwrap();
+    for x in &ours{na.import(x.clone(),None).unwrap();}
+    let (chain_id,genesis)=(na.chain.spec.chain_id(),na.chain.spec.genesis_hash());
+    na.start_network().unwrap();std::thread::spawn(move||na.run());
+    // The false peer: Hello with maximal work and an unknown head, then copies of A's own blocks forever.
+    let frame=|m:&Msg|{let e=m.encode();let mut o=(e.len() as u32).to_be_bytes().to_vec();o.extend(e);o};
+    let mut x=std::net::TcpStream::connect(addr(pa)).unwrap();let mut xr=x.try_clone().unwrap();
+    std::thread::spawn(move||{let mut buf=[0u8;65536];while xr.read(&mut buf).map_or(false,|n|n>0){}});
+    let copies:Vec<Vec<u8>>=ours.iter().map(|y|frame(&Msg::Block{header:y.header.encoded.clone(),body:y.body.encode()})).collect();
+    std::thread::spawn(move||{let mut k=0u64;loop{
+        if k%20==0{let head=[(k/20) as u8;32];if x.write_all(&frame(&Msg::Hello{chain_id,genesis,head,height:1_000_000,work:[0xff;32],node:"x".into()})).is_err(){break}}
+        if x.write_all(&copies[(k as usize)%copies.len()]).is_err(){break}k+=1;std::thread::sleep(std::time::Duration::from_millis(50));}});
+    let head=|p:u16|rpc_tcp(p,"eth_getBlockByNumber",json!(["latest",false]))["hash"].clone();
+    assert!(wait_for(20,&||rpc_tcp(ra,"pocol_status",json!([]))["stats"]["syncSessions"].as_u64().unwrap_or(0)>=1),"the false peer's first Hello starts a session");
+    let mut np=Node::open(Config{dir:dir("p"),name:"p".into(),miner:None,listen:Some(addr(pp)),peers:vec![addr(pa)],rpc:None,stop_at:None,log:false,limits:lim},admitted(&c)).unwrap();
+    for y in &theirs{np.import(y.clone(),None).unwrap();}let target=json!(hex(&np.chain.head));
+    np.start_network().unwrap();std::thread::spawn(move||np.run());
+    assert!(wait_for(120,&||head(ra)==target),"A adopts the honest heavier peer's head despite the false peer: {} vs {target}",head(ra));
+    let st=rpc_tcp(ra,"pocol_status",json!([]));assert!(st["stats"]["syncSessions"].as_u64().unwrap_or(0)>=2,"{}",st["stats"]);
+}
+/// Replay never runs with a smaller R_keep than live used: the largest value is kept beside the
+/// journal (retention.rkeep). Reopening with a smaller configured R_keep still replays a branch adopted
+/// at a depth the smaller window would have cut, to the same head with no record skipped.
+#[test] fn replay_uses_the_largest_r_keep_the_data_directory_has_used(){
+    use pocold::node::{Config,Limits,Node};
+    let mut a=net();let g=a.chain.head;let ours=grow(&mut a,g,40,&|n,p|fallback(n,p,1));
+    let mut b=net();let theirs=heavier(&mut b,g,a.chain.head().total_work,1);
+    let dir=std::env::temp_dir().join(format!("pocold-redb-rkmax-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let conf=|rk:u64|Config{dir:dir.clone(),name:"rk".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{r_keep:rk,side_cap:64,..Default::default()}};
+    let mut n=Node::open(conf(64),admitted(&cfg(&["a","b","c"]))).unwrap();
+    for x in ours.iter().chain(theirs.iter()){n.import(x.clone(),None).unwrap();}
+    let tip=theirs.last().unwrap().hash();assert_eq!(n.chain.head,tip,"adopted at depth 40 with R_keep 64");drop(n);
+    let r=Node::open(conf(24),admitted(&cfg(&["a","b","c"]))).unwrap();
+    assert_eq!(r.stats.replay_skipped,0,"replay used R_keep 64, not the configured 24");assert_eq!(r.chain.head,tip);assert_eq!(r.chain.r_keep,24,"the configured value applies after replay");
+    assert_eq!(std::fs::read_to_string(dir.join("retention.rkeep")).unwrap().trim(),"64");
+    let _=std::fs::remove_dir_all(&dir);
+}
+/// A session block that arrives before its parent waits as an orphan and, when the parent arrives, is
+/// imported with the parent's solicited status: protected from the side cap (here 0) like the rest of
+/// the session's branch.
+#[test] fn a_session_block_arriving_before_its_parent_stays_protected(){
+    let mut a=net();let g=a.chain.head;let ours=grow(&mut a,g,6,&|n,p|signed(n,p,Body::default(),0));
+    let mut b=net();let theirs=grow(&mut b,g,3,&|n,p|fallback(n,p,1));
+    let (mut n,dir,_)=rnode("orphan",64,0);for x in &ours{n.import(x.clone(),None).unwrap();}
+    assert!(matches!(n.import_with(theirs[1].clone(),None,true),Err(Reject::UnknownParent)),"the child arrives first");
+    n.import_with(theirs[0].clone(),None,true).unwrap();
+    for x in &theirs[..2]{assert!(n.chain.blocks.contains_key(&x.hash())&&n.chain.protect.contains(&x.hash()),"h={} is stored and protected",x.header.h);}
+    assert_eq!(unprotected(&n),0);
     let _=std::fs::remove_dir_all(&dir);
 }
