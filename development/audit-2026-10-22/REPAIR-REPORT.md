@@ -222,10 +222,14 @@ rests on protected re-fetch (R2.1, R2.3), and the tests below exercise it with a
   kept unchanged as PARTIAL in evidence/debug-complete-687ac38.json):
   - phase A, assert-release (release with debug assertions and overflow checks), each consensus test
     alone including the two spec-depth tests: **44 of 44 PASS**;
-  - phase B, pure debug, each consensus test alone: **in progress**;
-  - phase C, the other pocold binaries in pure debug: **pending**. Until they report, debug
-    verification of the final code is not complete. lp4-execution is unchanged since 687ac38 (its tree
-    is identical), and its full debug run there was 162 PASS.
+  - phase B, pure debug (unoptimized), each consensus test alone including the spec-depth tests, with a
+    3600 s per-test timeout: **44 of 44 PASS**. The spec-depth 2048/2049 test took 1,473 s and the
+    D133 400-deep test 589 s. The 150-deep adoption test took 110.6 s, against 616 s on 687ac38
+    (the side-state prune fix);
+  - phase C, the other pocold binaries in pure debug: **PASS**: lib 38, admission 3, net 20, store 12,
+    site 6, decoder 1, secp 1;
+  - lp4-execution is unchanged since 687ac38 (its tree is identical), and its full debug run there was
+    162 PASS. Summary: evidence/debug-redb/SUMMARY.json.
 
 **Still open around R_keep:**
 - journal compaction;
