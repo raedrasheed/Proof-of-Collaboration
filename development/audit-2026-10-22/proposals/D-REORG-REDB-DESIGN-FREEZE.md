@@ -271,3 +271,44 @@ metadata under `SIDE_META_MAX` and scope the evicted refusal to beyond R_keep so
 thread the journal reader through `ensure_state`/`detached_txs`/serving and re-derive `tx_hashes`;
 guard the genesis invariant; and the two-branch test is added. Implementation proceeds on this revised
 design.
+
+---
+
+## Implementation status (incremental, tested milestones)
+
+Implemented so far on the repair branch, each a green build with no fork-choice/validity change:
+- **Step 1 (`66d69c6`): journal by-hash read primitive.** `Journal::append` returns each record's
+  frame offset; `Journal::read_at(offset)` reads a record back, verifying lenCheck/digest/marker (a bad
+  offset is a hard error, never an empty body). Test `append_returns_offsets_and_read_at_round_trips`;
+  all 12 store tests pass. Consensus-neutral.
+- **Step 2 (`f7c345b`): off-heap plumbing (dormant).** `Entry` gains `body_off` (set by the node on
+  live append and recomputed per record on replay) and `offloaded`; `chain::BlockBytes` +
+  `ensure_state_with(src)` re-execute an offloaded block from its journal record; the node impls
+  `BlockBytes` for the journal and threads it through import and replay. Nothing offloads yet, so
+  behaviour is unchanged: lib 37, admission 3, net 20 pass.
+
+**Step 3 (next, atomic): the behaviour change.** Offloading plus serving plus the A13 model must land
+together (the boot gate ties the cap to the memory model), and it is consensus-critical, so it is
+implemented and fully tested as one reviewed change, not rushed:
+- `retain` keeps full bytes only for the **canonical K_hist window** (canonical AND height > cut) and
+  offloads every other journaled block's body/encoded-header/receipts/tx_hashes (metadata + ParentResult
+  stay resident). Offload keyed to the window (not just height) gives a tight A13 bound; a reorg that
+  brings former-side blocks into the window triggers `restore_canonical_window(src)` (bounded by
+  K_hist) to re-fetch + re-execute them full. This refines Revision 1 R2: competing branches within
+  R_keep are retained as cheap metadata (cap `SIDE_BLOCKS_MAX` ≥ R_keep), so the two-branch
+  counterexample is adopted directly without eviction; eviction (lowest work first) and the
+  `was_evicted` churn-guard apply only beyond the cap or beyond R_keep (D118 re-fetch; governance.md:200
+  manual checkpoint deeper).
+- Serving fetches a block's body/header from the journal when offloaded (GetBlock, GetRange,
+  eth_getBlockByHash); RPC history scans are floored at the K_hist trie window (consensus.md §10,
+  −32017 beyond), so they never read an offloaded block; `detached_txs` re-derives tx_hashes from the
+  fetched body.
+- The A13 model is re-derived: full-resident bytes = the canonical K_hist window only; the
+  `history/logs`, tx-bytes and receipts terms drop to the window; the side term becomes metadata; the
+  `history/blocks` metadata term stays on H_END. 6 GiB budget kept, proven bounds separated from
+  measurement.
+- Acceptance tests (§5, incl. the two-branch test and the crash/2048/tie-break/2049 set) run on the
+  final code; any TIMEOUT stays incomplete.
+
+Until step 3 lands and passes its tests, PR #27 stays Draft and D-REORG-REDB is NOT claimed complete;
+the committed steps 1–2 are inert plumbing that changes no behaviour.
