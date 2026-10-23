@@ -1012,3 +1012,19 @@ fn wait_for(secs:u64,f:&dyn Fn()->bool)->bool{let t=std::time::Instant::now();wh
     assert!(wait_for(300,&||head()==target),"A catches up 60 blocks with protect_max 16: at {}",head());
     let st=rpc_tcp(ra,"pocol_status",json!([]));assert!(st["stats"]["syncRounds"].as_u64().unwrap_or(0)>1,"positive control: truncated rounds were continued: {}",st["stats"]);
 }
+/// R21's K_hist window prunes canonical states only; non-canonical states are bounded by side_max.
+/// A competing branch below the window therefore imports with its tip's state kept, so a deep
+/// adoption needs no rebuild per block (pruning side states too re-executed each block's ancestry
+/// from genesis: quadratic work at depth R_keep).
+#[test] fn a_side_branch_below_the_k_hist_window_imports_without_rebuilding_each_parent(){
+    let mut a=net();let g=a.chain.head;let ours=grow(&mut a,g,24,&|n,p|signed(n,p,Body::default(),0));
+    let mut b=net();let theirs=grow(&mut b,g,16,&|n,p|fallback(n,p,1));
+    let (mut n,dir,_)=rnode("kwin",64,64);n.chain.k_hist=4;
+    for x in &ours{n.import(x.clone(),None).unwrap();}
+    let before=n.chain.rebuilds;
+    for x in &theirs{n.import(x.clone(),None).unwrap();}
+    assert!(theirs.iter().all(|x|!n.chain.is_canonical(&x.hash())),"the branch stays lighter (side)");
+    assert!(n.chain.rebuilds-before<=1,"linear import: {} re-executions for {} side blocks",n.chain.rebuilds-before,theirs.len());
+    let (_,with_state)=n.chain.side_counts();assert!(with_state<=n.chain.spec.local().side_max as usize);
+    let _=std::fs::remove_dir_all(&dir);
+}

@@ -425,7 +425,7 @@ impl Chain{
         if self.invalid.insert(hash,truncate(&why)).is_none(){self.invalid_order.push_back(hash);}
         while self.invalid_order.len()>INVALID_MAX{if let Some(old)=self.invalid_order.pop_front(){self.invalid.remove(&old);}}
     }
-    /// R21 retention: drop states of blocks at height <= head-K_hist (genesis kept).
+    /// R21 retention: drop states of canonical blocks at height <= head-K_hist (genesis kept).
     /// A13 side-branch bounds (local retention, never validity; consensus.md:29, D118):
     /// - a non-canonical block `r_keep` or more below the head is removed with its descendants
     ///   (adoption is owed at depth <= R_keep, network.md:144; deeper is governance.md:200);
@@ -440,7 +440,11 @@ impl Chain{
     ///   are pruned, rebuilt on demand).
     pub fn retain(&mut self){
         let head_h=self.head().height;let cut=head_h.saturating_sub(self.k_hist);
-        for e in self.blocks.values_mut(){ if e.height>0&&e.height<=cut&&!e.pruned{e.state=InMemoryDB::default();e.pruned=true;} }
+        // R21 is the canonical trie window; non-canonical states are bounded by side_max below. (Pruning
+        // a side block below the window made each block of a deep competing branch rebuild its parent
+        // from genesis: quadratic work for an R_keep-deep adoption.)
+        let prune:Vec<[u8;32]>=self.canonical.iter().skip(1).take(cut as usize).copied().collect();
+        for h in prune{if let Some(e)=self.blocks.get_mut(&h){if !e.pruned{e.state=InMemoryDB::default();e.pruned=true;}}}
         let side=|c:&Chain|->Vec<[u8;32]>{c.blocks.values().filter(|e|e.height>0&&!c.is_canonical(&e.hash)).map(|e|e.hash).collect()};
         let r_keep=self.r_keep;
         let mut gone:Vec<[u8;32]>=side(self).into_iter().filter(|h|self.blocks[h].height+r_keep<=head_h).collect();
