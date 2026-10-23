@@ -587,6 +587,23 @@ fn busy_of(v:&serde_json::Value)->bool{v["error"]["code"]==-32021&&v["error"]["d
     assert!(busy_of(&v)&&v["id"]==4,"not admitted within QUEUE_WAIT: -32021 busy: {v}");assert_eq!(n.pool.txs.len(),0,"and it never ran");
     assert_eq!(counter(&pocold::rpc::COUNTERS.queue_wait)-w0,1);
 }
+/// COMPUTE_DEADLINE at the handler entry (network.md:235): a request whose deadline has passed when
+/// its handler starts is -32020 {deadline} and its method never runs. A transaction (a method whose
+/// effect would make its late answer be kept) is not pooled; with time left it is. In process.
+#[test] fn a_request_reaching_its_handler_past_the_deadline_never_runs(){let _g=serial();
+    use pocold::rpc::{answer,Request};
+    let dir=std::env::temp_dir().join(format!("pocold-net-entry-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let mut l=Limits::default();l.rpc.compute_light=Duration::ZERO;
+    let cfg=Config{dir,name:"entry".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:l};
+    let mut n=Node::open(cfg,spec()).unwrap();
+    let tx=Tx{chain_id:777940,nonce:0,max_priority:U256::from(1u64),max_fee:U256::from(10_000_000_000u64),gas:21000,to:Some(revm::primitives::Address::ZERO),value:U256::ZERO,data:Default::default()}.sign_1559(&devnet::account_key("alice"));
+    let body=format!(r#"{{"jsonrpc":"2.0","id":6,"method":"eth_sendRawTransaction","params":["0x{}"]}}"#,hex(&tx));
+    let req=||{let (t,_r)=std::sync::mpsc::channel();Request::local(body.as_bytes().to_vec(),t,Instant::now()+Duration::from_secs(30),true)};
+    let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&req()).body).unwrap();
+    assert_eq!(v["error"]["code"],-32020,"{v}");assert_eq!(v["error"]["data"]["reason"],"deadline");assert_eq!(n.pool.txs.len(),0,"the method never ran");
+    n.cfg.limits.rpc.compute_light=Duration::from_secs(5);
+    let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&req()).body).unwrap();assert!(v["result"].is_string(),"{v}");assert_eq!(n.pool.txs.len(),1);
+}
 /// Review B1, end to end at the default limits: a light request that waits behind more heavy work
 /// than its 500 ms compute deadline is answered with its result (or busy past QUEUE_WAIT), never
 /// -32020. The holder is an eth_estimateGas over BLAKE2F (about a dozen uninterruptible runs).
