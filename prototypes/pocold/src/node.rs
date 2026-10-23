@@ -445,9 +445,9 @@ impl Node{
         for raw in detached{let _=self.submit_tx(raw,false);}
         for (_,raw) in old{let _=self.submit_tx(raw,false);}
     }
-    /// Pool transactions that still execute in order (for a signed template).
-    fn template_txs(&self)->Vec<Vec<u8>>{
-        let cp=self.chain.spec.cp();let mut out=Vec::new();let mut gas=0u64;let mut bytes=0usize;
+    /// Pool transactions that still execute in order (for a signed template on `p`).
+    pub fn template_txs(&self,p:&Entry)->Vec<Vec<u8>>{
+        let _=p;let cp=self.chain.spec.cp();let mut out=Vec::new();let mut gas=0u64;let mut bytes=0usize;
         // Encoded item length (RLP string header included); the three list headers take <= 12 bytes.
         let enc=|n:usize|n+1+if n<56{0}else if n<256{1}else if n<65536{2}else{3};
         for (_,raw) in &self.pool.txs{
@@ -477,7 +477,7 @@ impl Node{
             if me==Some(ctx.proposer){
                 let phi=self.capital_phi();
                 if now_s().saturating_add(phi)<ctx.window.lower(){if let Some(pr)=&mut self.prod{pr.mode=Mode::Propose{at_s:ctx.window.lower()-phi};}return;}
-                let txs=self.template_txs();
+                let txs=self.template_txs(&p);
                 if let Some(t)=self.build_signed_template(&p,txs){
                     self.stats.signed_templates+=1;
                     let shell=t.0.encoded.clone();self.broadcast(&Msg::Template{shell,body:t.1.encode()},None);
