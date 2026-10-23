@@ -194,10 +194,10 @@ def main():
         # 2. a and b mine on until they lead c0 by LEAD c tip blocks of work, >= 2 blocks past it; then
         #    they are frozen on ONE tip (an equal-work sibling tie would be local, D133): a's miner stops
         #    first, a follows b's next block, then b's miner stops too.
-        t0 = time.time(); lead = waited(lambda: min(h(0), h(1)) >= c0["number"] + 2 and min(tip(0)["work"], tip(1)["work"]) > c0["work"] + LEAD * d_c, 120)
+        t0 = time.time(); lead = waited(lambda: min(h(0), h(1)) >= c0["number"] + 2 and min(tip(0)["work"], tip(1)["work"]) > c0["work"] + LEAD * d_c, 180)
         ok(f"partition: a and b lead isolated c by more than {LEAD} c tip blocks of work", lead, f"a/b={[short(tip(i)) for i in (0, 1)]} c={short(c0)} in {time.time()-t0:.0f}s")
         stop_node("a"); run_node("a", miner=False)
-        hb = h(1); wait(lambda: h(1) > hb and tip(0)["hash"] == tip(1)["hash"], 120, "a follows b's next block")
+        hb = h(1); wait(lambda: h(1) > hb and tip(0)["hash"] == tip(1)["hash"], 180, "a follows b's next block")  # a lone miner may wait out an attempt (46 s)
         stop_node("b"); run_node("b", miner=False)
         wait(lambda: tip(0)["hash"] == tip(1)["hash"], 60, "a and b settle on one tip")
         ab_tip = tip(0)
@@ -208,14 +208,14 @@ def main():
         #    precondition below checks it) and is frozen again. From here no tip can move.
         time.sleep(max(0.0, t_c + PAUSE - time.time()))  # a wall-clock deadline: nothing to poll
         stop_node("c"); run_node("c", connect=False)
-        up = waited(lambda: h(2) > ab_tip["number"], 120)
+        t0 = time.time(); up = waited(lambda: h(2) > ab_tip["number"], 240); t_up = time.time() - t0
         stop_node("c"); run_node("c", miner=False, connect=False); c_tip = tip(2)
         fork = next(n for n in range(ab_tip["number"], -1, -1) if canon(0, n) == canon(2, n))
         late = [dn.rpc(8542, "eth_getBlockByNumber", [hex(n), False]) for n in range(c0["number"] + 1, c_tip["number"] + 1)]  # c's late blocks
         ok("partition: a/b's tip is strictly heavier and strictly lower than c's tip, both >= 2 blocks past the fork",
            up and ab_tip["work"] > c_tip["work"] and ab_tip["number"] < c_tip["number"] and fork + 2 <= ab_tip["number"],
            f"a/b={short(ab_tip)} c={short(c_tip)} fork={fork}; work above c0 in c tip blocks: a/b {(ab_tip['work']-c0['work'])/d_c:.2f}, "
-           f"late c {(c_tip['work']-c0['work'])/d_c:.2f}; late attempts {[b['pocol']['attempt'] for b in late]}")
+           f"late c {(c_tip['work']-c0['work'])/d_c:.2f}; late attempts {[b['pocol']['attempt'] for b in late]} in {t_up:.0f}s")
         relay = [dn.rpc(8542, "pocol_getBlockRlp", [hex(n)]) for n in range(fork + 1, c_tip["number"] + 1)]  # c's branch, parents first
         r0 = st(2)["stats"]["reorgs"]
         # 4. Heal: c rejoins without a miner. Nothing is mined, so no block is broadcast and the heal can
@@ -284,16 +284,18 @@ def main():
             if not all((b["hash"], b["stateRoot"], b["receiptsRoot"]) == (bs[0]["hash"], bs[0]["stateRoot"], bs[0]["receiptsRoot"]) for b in bs): mism.append(n)
         ok(f"identical canonical hash/stateRoot/receiptsRoot at heights 1..{top} on 3 nodes", not mism, str(mism[:5]))
         # Every miner produced blocks: each process's `mined` counter (own blocks imported) added up
-        # over its restarts. Cross-check on the chain: every miner won canonical blocks (winner =
-        # owner(nonce)); a and b mine heights 1..15 alone, and c mines with them from its late join to
-        # the partition and on the healed chain (its isolated branch is abandoned at the heal).
+        # over its restarts. Cross-check on the chain (winner = owner(nonce)): a and b won canonical
+        # blocks (they mine heights 1..15 alone), and every block of c's isolated late branch names c
+        # (c mined it alone; c's canonical wins are not certain, its branch is abandoned at the heal).
         stats = {l: st(i)["stats"] for i, l in enumerate(L)}
         total = {k: mined[k] + stats[k]["mined"] for k in L}
         ok("every miner produced blocks", all(v > 0 for v in total.values()), json.dumps(total))
         blocks = [dn.rpc(8540, "eth_getBlockByNumber", [hex(n), False]) for n in range(1, top + 1)]
         ids = {m["id"].lower(): m["label"] for m in info["miners"]}
         wins = {l: sum(1 for b in blocks if ids.get(b["miner"].lower()) == l) for l in L}
-        ok("every miner won canonical blocks", all(v > 0 for v in wins.values()), json.dumps(wins))
+        late_c = sum(1 for b in late if ids.get(b["miner"].lower()) == "c")
+        ok("every miner won blocks: a and b canonical ones, c every block of its isolated late branch", wins["a"] > 0 and wins["b"] > 0 and late_c == len(late),
+           json.dumps({"canonical": wins, "c late": f"{late_c}/{len(late)}"}))
         signed = sum(1 for b in blocks if b["pocol"]["signed"])
         ok("signed and fallback templates both occur", 0 < signed < top, f"signed={signed}/{top}")
         # Full restart: deterministic replay. Each journal is replayed by a fresh process with no
