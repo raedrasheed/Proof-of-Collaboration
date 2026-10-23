@@ -4,7 +4,8 @@
 > - PR #27 is a draft.
 > - No finding is closed. Acceptance belongs to the owner, and none is recorded.
 > - Six consensus proposals are awaiting the owner's decision.
-> - A13 keeps open obligations, including an architectural blocker (§5).
+> - A13 keeps open obligations (§5). The R_keep adoption blocker is addressed by D-REORG-REDB, a storage
+>   repair the owner approved (D133 and validity unchanged; implementation and verification in §3b).
 > - Windows was not run.
 >
 > This report replaces the round-1 report. §7 lists what round 1 overstated.
@@ -41,7 +42,7 @@ accepted. The disposition is the weakest of them.
 | A05 HIGH | partly | partly | RpcGuard partly implemented; no preemption; light methods light by size only | PARTIALLY RESOLVED |
 | A06 HIGH | yes | yes, real Chrome | A request already initiated may be broadcast (reported, never "cancelled") | VERIFIED (Linux), BLOCKED BY ENVIRONMENT |
 | A07–A12, A14 | yes | yes | — | VERIFIED (Linux), BLOCKED BY ENVIRONMENT |
-| A13 HIGH | partly | partly | Open: gas monotonicity, worst-case timing, allocator overhead, CPU costs, RetentionStore, adoption depth (raised 256→320, below R_keep; architectural, D-REORG-REDB proposed); no guaranteed memory ceiling | PARTIALLY RESOLVED |
+| A13 HIGH | partly | partly | Open: gas monotonicity, worst-case timing, allocator overhead, CPU costs (including deep-reorg rebuild and restore), RetentionStore, journal compaction; no guaranteed memory ceiling. R_keep adoption: implemented by D-REORG-REDB (§3b) | PARTIALLY RESOLVED |
 
 ## 2. What was repaired
 
@@ -185,14 +186,14 @@ weakened a consensus rule, and no review constitutes acceptance.
     - RetentionStore and redb.
   - Inspection-only items remain.
   - There is no guaranteed process-memory ceiling. The measured RSS of a run is not the bound.
-  - **Architectural blocker:** adoption of a heavier branch at any depth ≤ R_keep = 2048
-    (network.md:144). Fork choice walks resident ancestors and retention drops only leaves, so a
-    competing branch must be fully resident to be adopted: the one-shot adoption depth IS
-    SIDE_BLOCKS_MAX, raised 256 → 320 in round 2 (the budget maximum, via the tested path). A deeper
-    branch is preserved in the journal (lossless), not refused; the node stays on the valid lighter
-    chain (D118 "fetched by sync", governance.md:200 manual checkpoint). Reaching R_keep needs block bodies off the
-    heap (~0.85 GB otherwise): proposals/D-REORG-REDB.md, PROPOSED, needs owner approval. No consensus
-    rule is weakened (an invalid chain is never adopted).
+  - **R_keep adoption (formerly the architectural blocker):** implemented by the owner-approved
+    D-REORG-REDB and verified as in §3b. Still open around it:
+    - journal compaction (the journal is append-only and grows with imports and re-fetches; local,
+      no validity effect);
+    - CPU cost of a deep reorg: the fork point's state is rebuilt from genesis when it lies below
+      K_hist, because pocold keeps no reverse diffs (consensus.md §10); condition `cpu-and-timing`;
+    - the open-time transient (the whole journal is held while replaying; condition
+      `open-replay-transient`).
 - **A05:** RpcGuard is implemented only in part. Not implemented:
   - HEAVY/LIGHT permits and QUEUE_WAIT;
   - scratch budgets;
@@ -213,6 +214,8 @@ weakened a consensus rule, and no review constitutes acceptance.
 
 - **Approved by the owner:**
   - D-A13-BUDGET (option 1, local);
+  - D-REORG-REDB (2026-10-23), a storage repair for R_keep adoption with D133 and validity fully
+    preserved. It does not cover the six consensus proposals;
   - engineering decisions taken under the standing authorization (REPAIR-PLAN.md).
 - **Proposed, awaiting the owner** (they change roots or validity):
   - LOG-ACCT-01;
@@ -224,6 +227,12 @@ weakened a consensus rule, and no review constitutes acceptance.
 
   The implementation uses the recommended alternatives provisionally. Passing tests do not approve
   them. The historical M1 files are unchanged.
+- **Reviews prepared for the owner (not decisions):**
+  - proposals/INDEPENDENT-REVIEW-SIX-PROPOSALS.md;
+  - proposals/LOG-CAP-AGGREGATE-ALTERNATIVES.md, on ways to avoid permanent exhaustion of LOG_CAP
+    (LOG-CAP-AGGREGATE stays unapproved). It also flags that TX_CAP and TXBYTES_CAP are
+    chain-cumulative and reachable before H_END on the network profile, which would make blocks
+    invalid. That is a further normative question, not decided here.
 
 ## 7. Corrections to round 1
 
