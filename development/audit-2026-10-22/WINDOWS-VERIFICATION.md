@@ -141,3 +141,34 @@ The 3 failures are all in `tests/net.rs`. Diagnosis from the code and the messag
 
 Linux after the fixes: `cargo test --release --locked --lib --test net` → 39 + 20 passed
 (`evidence/windows-fixes/linux-lib-net-after-fix.log`). The Windows result is Run 3.
+
+### Run 3: a39379b (peer read poll, RPC without Nagle stalls): FAIL, with 1 test left
+- Run: https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/39954404741.
+- Artifact `audit-r2-windows-a39379b92fb6ed3b9a3348b05743cd8371d2b882`, zip SHA-256
+  `aa578a8cf576aafe27b49c74d7f332908419cdcd989806ea22f25395c0e33fd0`. Copied unchanged to
+  `evidence/windows-a39379b/`.
+- lp1 (12 + 150), lp4-execution (162) and the extension (234) PASS.
+- pocold: **123 passed, 1 failed**, including the new unit test.
+- Verified on Windows by this run:
+  - `a_peer_that_stops_reading_is_dropped_and_consensus_keeps_serving` passes: the read poll fix.
+  - `rpc_work_deadline_skips_expired_work_and_releases_resources` passes: TCP_NODELAY and whole writes.
+
+The one failure is `an_answer_is_reserved_until_its_connection_has_written_it`, with
+`built=true, 8388608 B reserved`.
+- The answer (about 14 MiB) was built and reserved.
+- Within one second its write had completed into the kernel, although the client never read. Only the
+  stats request's own reservation remained.
+- So the Windows loopback buffers took the whole unread answer. pocold's accounting behaved as specified:
+  a reservation is held until the connection has written the answer.
+- The test's premise ("an answer larger than the socket buffers") does not hold on Windows with default
+  socket options.
+
+This is a real gap, not only a test issue:
+- With default options, kernel buffering per unread RPC connection on Windows is at least about 14 MiB.
+  That is up to conn_max × BATCH_RESP_MAX of kernel memory, outside the A13 resident bound.
+- RpcGuard bounds exactly this with SO_SNDBUF = 32 KiB (network.md), which pocold does not set: std
+  exposes no setsockopt.
+- Status: OPEN, to be resolved together with the RpcGuard integration. Options: set SO_SNDBUF through a
+  small platform shim (libc / windows-sys, both already in the lock), or state the kernel-buffer term
+  explicitly.
+- The test assertion is not weakened.
