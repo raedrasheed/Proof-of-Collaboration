@@ -105,14 +105,31 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
         for t in [&a0,&b0,&b1]{n.submit_tx(t.clone(),false).unwrap();}
         let want=if short==0{vec![a0.clone(),b0.clone()]}else{vec![a0.clone()]};
         let head=n.chain.head().meta_clone();assert_eq!(n.template_txs(&head),want,"TXBYTES_CAP = a0+b0-{short}");
-        let sizes=mine_templates(&mut n,&mut h,3);assert_eq!(sizes,vec![want.len(),0,0]);assert_within_caps(&n);
+        let mut sizes=mine_templates(&mut n,&mut h,1);let fill=n.chain.head;
         let used:u64=want.iter().map(|t|t.len() as u64).sum();assert_eq!(n.chain.head().cum_tx_bytes,used);assert_eq!(cap-used,if short==0{0}else{b0.len() as u64-1});
-        // The next transaction passes the room by its whole length (exact fit) or by one byte.
-        let next=if short==0{b1.clone()}else{b0.clone()};let over=signed(&h,n.chain.head,vec![next]);
-        assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"));
+        // The next transaction passes the room by its whole length (exact fit) or by one byte. It is checked
+        // on the block that used the room (no empty block between: the parent's counter, not the grandparent's).
+        let next=if short==0{b1.clone()}else{b0.clone()};let over=signed(&h,fill,vec![next]);
+        assert!(matches!(h.chain.validate(&over,None,0),Err(Reject::Block(ref w)) if w=="16 caps"));
+        assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"),"item 16 on the block that reached cum_tx_bytes={used}");
+        sizes.extend(mine_templates(&mut n,&mut h,2));assert_eq!(sizes,vec![want.len(),0,0]);assert_within_caps(&n);
         println!("CAPS {}",serde_json::json!({"profile":format!("txbytes_cap=a0+b0-{short}={cap}"),"templateSizes":sizes,"cumTxBytes":used,"roomLeft":cap-used}));
         let _=std::fs::remove_dir_all(&dir);
     }
+    // Across blocks: TXBYTES_CAP = a0+b0 with a0 alone in block 1. Then b0 fills the room exactly as block 2's
+    // first transaction, on a non-zero parent counter (builder and item 16), and b1 is past it on block 2.
+    let cap=(a0.len()+b0.len()) as u64;let c=cfg(1000,cap);let (mut n,dir)=node(&c,"txbytes-cross",None,None);let mut h=net(&c);
+    n.submit_tx(a0.clone(),false).unwrap();let head=n.chain.head().meta_clone();assert_eq!(n.template_txs(&head),vec![a0.clone()]);
+    let mut sizes=mine_templates(&mut n,&mut h,1);
+    for t in [&b0,&b1]{n.submit_tx(t.clone(),false).unwrap();}
+    let head=n.chain.head().meta_clone();assert_eq!(n.chain.caps_room(&head).1,b0.len() as u64);assert_eq!(n.template_txs(&head),vec![b0.clone()],"b0 fits the room left by block 1 exactly");
+    sizes.extend(mine_templates(&mut n,&mut h,1));let fill=n.chain.head;assert_eq!(n.chain.head().cum_tx_bytes,cap,"block 2 reaches TXBYTES_CAP and is a valid head");
+    let over=signed(&h,fill,vec![b1.clone()]);
+    assert!(matches!(h.chain.validate(&over,None,0),Err(Reject::Block(ref w)) if w=="16 caps"));
+    assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"),"b1 on the block that reached TXBYTES_CAP");
+    sizes.extend(mine_templates(&mut n,&mut h,2));assert_eq!(sizes,vec![1,1,0,0]);assert_within_caps(&n);
+    println!("CAPS {}",serde_json::json!({"profile":format!("txbytes_cap=a0+b0={cap}, a0 then b0"),"templateSizes":sizes,"cumTxBytes":n.chain.head().cum_tx_bytes,"roomLeft":0}));
+    let _=std::fs::remove_dir_all(&dir);
 }
 
 #[test] fn counters_are_per_branch_across_a_reorg_at_the_exhaustion_boundary(){
@@ -127,11 +144,34 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
     let mut hb=net(&c);let mut tip=g;let mut bs=vec![];for _ in 0..3{let b=fallback(&hb,tip);import(&mut hb,&b);tip=b.hash();bs.push(b);}
     for b in &bs{n.import(b.clone(),None).unwrap();}
     assert_eq!(n.chain.head,tip,"reorganized to B");assert_eq!(n.chain.head().cum_txs,0);
+    // A's next block, now off the head branch, is still checked against A's count (3+1), not the head's (0+1).
+    assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"),"item 16 on A after the reorg");
     assert_eq!(n.pool.txs.iter().map(|x|x.1.clone()).collect::<Vec<_>>(),t,"A's transactions are detached back into the pool (A11)");
     // On B the builder fills B's room (3) and skips the fourth, which is then past the cap on B too.
     let head=n.chain.head().meta_clone();assert_eq!(n.template_txs(&head),t[..3].to_vec());
     let sizes=mine_templates(&mut n,&mut hb,3);assert_eq!(sizes,vec![3,0,0]);assert_within_caps(&n);
     let over=signed(&hb,n.chain.head,vec![t[3].clone()]);assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"));
+    let _=std::fs::remove_dir_all(&dir);
+    // TXBYTES_CAP = big+b0-1. A (big) is left one byte short of b0; B (empty, b0, empty; heavier) forks at
+    // genesis. Whichever branch is the head, a block is checked against its own branch's byte counter.
+    let (bob,l)=(devnet::account_key("bob"),|t:&Vec<u8>|t.len() as u64);let (big,b0,next)=(pay(&alice,0,600),pay(&bob,0,0),pay(&alice,1,0));
+    let cap=l(&big)+l(&b0)-1;assert!(l(&next)>=l(&b0)&&l(&b0)+l(&next)<=cap);
+    let c=cfg(1000,cap);let (mut n,dir)=node(&c,"reorg-bytes",None,None);let (mut ha,mut hb)=(net(&c),net(&c));let g=ha.chain.head;
+    let a1=signed(&ha,g,vec![big.clone()]);import(&mut ha,&a1);let a2=fallback(&ha,a1.hash());import(&mut ha,&a2);
+    for b in [&a1,&a2]{n.import(b.clone(),None).unwrap();}
+    let head=n.chain.head().meta_clone();assert_eq!(n.chain.caps_room(&head).1,l(&b0)-1);
+    let b1=fallback(&hb,g);import(&mut hb,&b1);let b2=signed(&hb,b1.hash(),vec![b0.clone()]);import(&mut hb,&b2);let b3=fallback(&hb,b2.hash());import(&mut hb,&b3);
+    // A is the head: B's block carrying b0 fits B's room (all of TXBYTES_CAP), not A's (b0-1), and is valid.
+    n.import(b1.clone(),None).unwrap();assert_eq!(n.chain.head,a2.hash());
+    let r=n.import(b2.clone(),None);assert!(r.is_ok(),"b2 is checked against B's counter (0), not the head's ({}): {r:?}",l(&big));
+    n.import(b3.clone(),None).unwrap();assert_eq!(n.chain.head,b3.hash(),"reorganized to B");assert_eq!(n.chain.head().cum_tx_bytes,l(&b0));
+    // B is the head: A's next block fits B's room (big-1), not A's (b0-1), and is "16 caps".
+    let over=signed(&ha,a2.hash(),vec![next.clone()]);assert!(matches!(ha.chain.validate(&over,None,0),Err(Reject::Block(ref w)) if w=="16 caps"));
+    assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"),"item 16 on A reads A's counter ({}), not the head's ({})",l(&big),l(&b0));
+    // On B the builder keeps A's detached transaction pooled: B's room is one byte short of it.
+    assert_eq!(n.pool.txs.iter().map(|x|x.1.clone()).collect::<Vec<_>>(),vec![big.clone()],"detached (A11)");
+    let head=n.chain.head().meta_clone();assert!(n.template_txs(&head).is_empty());assert_within_caps(&n);
+    println!("CAPS {}",serde_json::json!({"profile":format!("reorg txbytes_cap=big+b0-1={cap}"),"cumTxBytesA":l(&big),"cumTxBytesB":l(&b0),"roomA":l(&b0)-1,"roomB":l(&big)-1}));
     let _=std::fs::remove_dir_all(&dir);
 }
 

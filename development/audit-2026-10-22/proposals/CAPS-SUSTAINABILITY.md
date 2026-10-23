@@ -6,7 +6,8 @@
 > (consensus.md:101, §4(a)), and the caps-test build constant LOG_CAP (validation.md:2065; its
 > HIST_TRIE_BUDGET is not, §6).
 >
-> Revised after the independent review (round 2, branch `wf/caps-r2`). The corrections are listed in §7.
+> Revised after the independent review (round 2, branch `wf/caps-r2`; corrections in §7) and after the
+> second review (round 3, branch `wf/caps-r3`; corrections in §7b).
 
 This study builds on [LOG-CAP-AGGREGATE.md](LOG-CAP-AGGREGATE.md) and
 [LOG-CAP-AGGREGATE-ALTERNATIVES.md](LOG-CAP-AGGREGATE-ALTERNATIVES.md). The alternatives file
@@ -16,7 +17,12 @@ gives one integrated recommendation.
 
 Numbers come from the independent model `model/caps_model.py`. It uses Python's standard library only,
 runs with `python3 -I`, and writes deterministic output to `vectors/caps-sustainability.json`. Code
-references are to `wf/caps` at the commits named in §6.
+references are to `wf/caps` at the commits named in §6. At the integrated head fa97594 the chain.rs,
+user_phase.rs, apply.rs and resources.rs lines cited here are unchanged. Those that moved are:
+- node.rs: `submit_tx` at :400, its pool-full check at :406 (cited as :404), `PoolMeter::admit` at
+  :410, and the caps check of `try_lock_signed` at :559 (cited as :557);
+- rpc.rs: `simulate` (eth_call, eth_estimateGas) at :859 (cited as :439), and `find_tx` (the linear
+  scan behind eth_getTransactionByHash) at :887 (cited as :455).
 
 ## 1. The three caps
 
@@ -94,7 +100,9 @@ starting base fee is either the idle 7 wei or baseFee0 = 10^9. 1 coin = 10^18 we
 - On the network profile, each cap is exhausted organically before H_END by a sustained average of
   1.29 transactions per second, 66 KB of transactions per block, or 8.3 KB of logs per block.
 - An attacker exhausts each within 23–37 days, for under 10^-5 coins (about 1.5·10^12 wei for TX_CAP)
-  at the idle base fee. Waiting 145 empty blocks reaches that fee from any starting base fee.
+  at the idle base fee. From baseFee0 = 10^9, 145 empty blocks reach that fee. A higher starting base
+  fee needs about 5.2 more empty blocks per doubling (exact integer simulation: 150 blocks from 2·10^9,
+  162 from 10^10, 196 from 10^12).
 - A target-rate attacker who starts at baseFee0 = 10^9 without waiting pays 12.8 coins (6.4 block
   subsidies) for TX_CAP. That is the cost of a worse strategy, not an upper bound on the attack.
 - On the devnet and caps/64, the TX caps fall to 53 and 86 blocks of full load.
@@ -124,7 +132,7 @@ This section covers a branch whose remaining room fits no pooled transaction.
 | mempool | not specified: network.md:149–153 lists −32014, −32015, and −32016 for "full" and "after F" | accepts; transactions that can never be included stay until POOL_MAX (4,096 or 32 MiB), then −32016 "pool full" | same; proposal N5 |
 | …free pool squatting near the TXBYTES boundary (before full exhaustion) | not specified | — | Once the room left is below TX_MAX (131,072 B), a transaction larger than the room is skipped but stays pooled (`template_txs`). It is never included, so never charged, and the pool has no expiry and no eviction (`submit_tx`, node.rs:404). About 256 such 131,072-byte transactions fill POOL_MAX_BYTES (32 MiB; or 4,096 by count). The pool then answers −32016 to small transactions that would still fit the room, and the squatters are relayed to peers. The cost is only the balance needed to pass execution on the pending state, never spent. Every new head also re-executes the stuck pool (`rebuild_pool`), bounded by POOL_MAX. Code inspection; not run. Proposal N5 |
 | RPC | — | eth_sendRawTransaction returns a hash whose receipt stays null; `pocol_getCaps` (network.md:333) answers −32601 | same; proposal N6 |
-| reorg at the boundary | the counters follow the branch | adoption by work alone (D133); detached transactions return to the pool (A11) and are includable on a branch with room | tested |
+| reorg at the boundary | the counters follow the branch | adoption by work alone (D133); detached transactions return to the pool (A11) and are includable on a branch with room | tested for both counters since round 3 (`counters_are_per_branch_across_a_reorg_at_the_exhaustion_boundary`). For TX_CAP and for TXBYTES_CAP, a block on the branch that is not the head is checked against its own branch's counter, in both directions: a block that fits its branch's room but not the head's is valid, and one that fits the head's room but not its branch's is "16 caps". Up to round 2, only the TX_CAP side was tested (second review R2C-1, §7b) |
 
 ### 3b. LOG_CAP reached
 
@@ -142,7 +150,7 @@ This section covers the case where the remaining room is smaller than a transact
 | rewards, settlement | unaffected | unaffected; halted transactions still pay tip × gas limit into the pot |
 | base fee | an exceptional halt consumes all gas | a halted transaction adds its whole gas limit to the block's gasUsed (`user_phase.rs:253`), which drives the next base fee (`fees::next_base_fee`, chain.rs:217). After exhaustion, logging transactions with generous gas limits raise the London base fee as if they used their full limit, and their senders pay that limit. Code inspection; the log_cap test measures the charge, not the base-fee effect |
 | builder | halts are valid blocks | includes them (tested through the node) |
-| mempool | no rule | accepts. The pending state runs without the A03 meter, so the pool believes the transaction succeeds |
+| mempool | no rule | accepts. The pending state runs without the log (and dirty) part of the A03 meter. `PoolMeter::admit` (node.rs:410) checks only SLOT_CAP, ACCT_CAP and SYS_SLOT_MAX (`PoolMeter`, user_phase.rs:169). LOG_COUNT_MAX, LOG_BLOCK_MAX, LOG_CAP and the dirty limits are checked only in `BlockMeter::check` (user_phase.rs:193–207). So the pool believes that a transaction that will halt at LOG_CAP succeeds |
 | RPC | — | eth_call and eth_estimateGas simulate without the meter (rpc.rs:439). They report success for a transaction that will halt and cost its whole gas limit (proposal N7) |
 | reorg | per branch | `Entry.cum_log_bytes` comes from the parent (chain.rs:344) |
 
@@ -189,7 +197,7 @@ All five options keep the conformance of §6.
 | | consensus | storage at the caps | resident memory (pocold) | compatibility | liveness and griefing | complexity |
 |---|---|---|---|---|---|---|
 | **O1** keep the caps, freeze as specified (status quo + §6) | none | inventory 19.65 GiB logical (storage.md:73); pocold journal ≈ TXBYTES_CAP + 4 B per tx + 3.3 KB per block (network 8.4 GiB; receipts and logs are not stored, replay recomputes them) | history term TXBYTES_CAP + 380·TX_CAP + LOG_CAP·33/32 (resources.rs:103–107): devnet 1,079 MiB; network 12.6 GiB (already refused by the 6 GiB A13 gate) | none | the chain continues, but user activity is frozen permanently; network: organically at 20–34% average use, by griefing for 6.6·10^10 (LOG_CAP) to 1.5·10^12 wei (TX_CAP) at the idle base fee (§2) | done |
-| **O2** unreachable by construction (A1a extended to all three) | gate R27: H_END·LOG_BLOCK_MAX ≤ LOG_CAP; R28: H_END·⌊GAS_LIMIT/21000⌋ ≤ TX_CAP; R29: H_END·TXB_BLOCK ≤ TXBYTES_CAP, where TXB_BLOCK is the largest raw-byte sum of a body ≤ BODY_MAX (196,592). Only exception: the simnet caps-test build. TX caps are CP, so a new genesisHash; LOG_CAP is a constant (same hash; a hard fork via ForkSchedule on any existing chain, but none holds > 1 GiB of logs) | network at LOG_CAP 2^32, TX_CAP 5·10^7, TXBYTES_CAP 24 GiB: inventory ≈ 43.2 GiB logical (txs 8.0 → 24.0, receipts 0.50 → 2.5, indexes 0.63 → 3.15, logs 1.0 → 4.0; 42.8 at the exact R27–R29 minima), ≈ 65 GiB on disk at the spec's 1.5× ratio | history term TXBYTES_CAP + 380·TX_CAP + L·33/32 (resources.rs:103–107), L the log bytes assumed. Network at the O2 sizes (L = 2^32): 45.8 GiB. Devnet at the R28/R29 minima (TX_CAP 7.6·10^6, TXBYTES_CAP 3,931,840,000): 6.98 GiB (7,495,680,000 B) with L = min(LOG_CAP, H_END·LOG_BLOCK_MAX) = 655,360,000, A1a's tightening, which resources.rs:107 does not have; 7.38 GiB with L = 2^30 as coded; 10.48 GiB with N1's 2^32. These replace today's 1,131,673,472 B for the same three items, so the whole A13 model goes from 5,627,687,516 B to 11,991,694,044 B (11.17 GiB, tightened). That needs a 12.76 GiB budget (ceil(8·total/7)), and the 6 GiB gate refuses boot. Unused headroom today: 10,808,068 B (10.3 MiB; A13-DERIVATION.md:188–189, evidence/a13-breakdown-redb.json). **Needs canonical history off-heap first** (bodies and receipts read from the journal beyond K_hist, as D-REORG-REDB did for side blocks: a local storage decision). Also, eth_getTransactionByHash scans the canonical chain linearly (rpc.rs:455), and `Node::open` holds the whole journal (A13 condition open-replay-transient) | GSV1 unchanged (a frozen vector; gate rules are not decode rules); devnet genesis files regenerated; networks.json gets the new network genesisHash; no RPC change | no cumulative freeze; only the per-block limits remain | low: three values, three gate predicates, the inventory re-derived |
+| **O2** unreachable by construction (A1a extended to all three) | gate R27: H_END·LOG_BLOCK_MAX ≤ LOG_CAP; R28: H_END·⌊GAS_LIMIT/21000⌋ ≤ TX_CAP; R29: H_END·TXB_BLOCK ≤ TXBYTES_CAP, where TXB_BLOCK is the largest raw-byte sum of a body ≤ BODY_MAX (196,592). Only exception: the simnet caps-test build. TX caps are CP, so a new genesisHash; LOG_CAP is a constant (same hash; a hard fork via ForkSchedule on any existing chain, but none holds > 1 GiB of logs) | network at LOG_CAP 2^32, TX_CAP 5·10^7, TXBYTES_CAP 24 GiB: inventory ≈ 43.2 GiB logical (txs 8.0 → 24.0, receipts 0.50 → 2.5, indexes 0.63 → 3.15, logs 1.0 → 4.0; 42.8 at the exact R27–R29 minima), ≈ 65 GiB on disk at the spec's 1.5× ratio | history term TXBYTES_CAP + 380·TX_CAP + L·33/32 (resources.rs:103–107), L the log bytes assumed. Network at the O2 sizes (L = 2^32): 45.8 GiB. Devnet at the R28/R29 minima (TX_CAP 7.6·10^6, TXBYTES_CAP 3,931,840,000): 6.98 GiB (7,495,680,000 B) with L = min(LOG_CAP, H_END·LOG_BLOCK_MAX) = 655,360,000, A1a's tightening, which resources.rs:107 does not have; 7.38 GiB with L = 2^30 as coded; 10.48 GiB with N1's 2^32. These replace the 1,131,673,472 B of the same three items at the devnet caps. At the integrated head fa97594 (model 5,577,343,580 B, 68,343,995 B unused), the whole A13 model becomes 11.12 GiB tightened, 11.52 GiB with L = 2^30 and 14.62 GiB with N1's 2^32 as coded. Those need budgets of 12.71, 13.17 and 16.70 GiB (ceil(8·total/7)), and the 6 GiB gate refuses boot in every case. §5b gives the exact figures, also on the c3a78e7 base that rounds 1 and 2 called "today". **Needs canonical history off-heap first** (bodies and receipts read from the journal beyond K_hist, as D-REORG-REDB did for side blocks: a local storage decision). Also, eth_getTransactionByHash scans the canonical chain linearly (rpc.rs:455), and `Node::open` holds the whole journal (A13 condition open-replay-transient) | GSV1 unchanged (a frozen vector; gate rules are not decode rules); devnet genesis files regenerated; networks.json gets the new network genesisHash; no RPC change | no cumulative freeze; only the per-block limits remain | low: three values, three gate predicates, the inventory re-derived |
 | **O3** linear allowance: cum_X(block h) ≤ ⌊h·CAP_X/H_END⌋ + BURST_X for txs, tx bytes and log bytes (a log halt, a tx block invalid) | a new validity/halt rule, a protocol change; BURST is new CP or derived | lifetime ≤ CAP + BURST: inventory unchanged | unchanged | new vectors at the h boundaries; pocol_getCaps should expose the allowance | never permanent. Throughput is capped at the lifetime average plus the burst: network 77 tx, 66 KB, 8.3 KB of logs per block. A griefer can take each block's allowance; the base fee does not price it below the target, so honest users must outbid on tips | moderate |
 | **O4** sliding window (A2 generalized) | as O3 | ≤ ⌈H_END/W⌉·cap | unchanged | as O3 | a stall of up to W minus the fill time per saturation | moderate |
 | **O5** remove the caps from validity (A4 generalized) | for TX caps a CP schema change (version 2, 50 fields: GSV1, refdec.js and every vector change) | as O2 | as O2 | heavy | as O2 | high for the schema |
@@ -224,6 +232,41 @@ All five options keep the conformance of §6.
 | N7 | eth_call and eth_estimateGas report an A03 halt (or apply the meter) instead of success | execution.md:101–102 |
 | N8 | state the scope explicitly: "the counts of the branch up to the parent plus this block" (item 16; LOG-CAP-AGGREGATE for logs) | consensus.md:170 |
 
+## 5b. O2 resident memory, by commit
+
+The A13 model (`pocold::resources::derive`, printed by `tests/consensus.rs` `a13_bound_breakdown`)
+changes with the code, so each figure below names its commit.
+
+- In rounds 1 and 2, "today" meant the D-REORG-REDB final model, 5,627,687,516 B. It was measured at
+  9ce5a7c (evidence/a13-breakdown-redb.json, A13-DERIVATION.md:187–189), and the second review
+  confirmed it at c3a78e7, the caps round-2 head.
+- RpcGuard round 2 (RPCGUARD.md:158, merged at ba7d294) reduced the model to 5,577,343,580 B. That is
+  the model at 273e785 (second review) and at fa97594, the integrated head this round starts from
+  (evidence/caps-r3/a13-fa97594.log).
+
+O2 replaces the three history items at the devnet caps with the history term at the R28/R29 minima:
+- at the devnet caps, the items for TXBYTES_CAP (16,777,216 B), TX_CAP (7,600,000 B) and LOG_CAP
+  (1,107,296,256 B) are 1,131,673,472 B together;
+- the O2 term is TXBYTES_CAP + 380·TX_CAP + L·33/32 = 3,931,840,000 + 2,888,000,000 + L·33/32.
+
+The gate needs ceil(8·total/7) ≤ 6 GiB = 6,442,450,944 B.
+
+| base | model at that commit | unused at that commit | L (log bytes assumed) | history term | O2 model | O2 budget needed |
+|---|---:|---:|---|---:|---:|---:|
+| fa97594 | 5,577,343,580 B | 68,343,995 B (65.2 MiB) | 655,360,000 = H_END·LOG_BLOCK_MAX (A1a's tightening; not in resources.rs:107) | 7,495,680,000 B (6.98 GiB) | 11,941,350,108 B (11.12 GiB) | 13,647,257,267 B (12.71 GiB) |
+| | | | 2^30, as coded at fa97594 | 7,927,136,256 B (7.38 GiB) | 12,372,806,364 B (11.52 GiB) | 14,140,350,131 B (13.17 GiB) |
+| | | | 2^32, as coded with N1 | 11,249,025,024 B (10.48 GiB) | 15,694,695,132 B (14.62 GiB) | 17,936,794,437 B (16.70 GiB) |
+| c3a78e7 (9ce5a7c's model) | 5,627,687,516 B | 10,808,068 B (10.3 MiB) | 655,360,000, tightened | 7,495,680,000 B | 11,991,694,044 B (11.17 GiB) | 13,704,793,194 B (12.76 GiB) |
+| | | | 2^30 | 7,927,136,256 B | 12,423,150,300 B (11.57 GiB) | 14,197,886,058 B (13.22 GiB) |
+| | | | 2^32 | 11,249,025,024 B | 15,745,039,068 B (14.66 GiB) | 17,994,330,364 B (16.76 GiB) |
+
+Reading:
+- The 6 GiB gate refuses boot in every row.
+- resources.rs:107 counts LOG_CAP itself. So N1 + O2 as coded uses L = 2^32; the tightened rows need
+  A1a's tightening to be implemented there as well. Even then, the model needs about twice the budget.
+- The conclusion of §5 is unchanged: O2 on the devnet first needs canonical history off-heap.
+- The arithmetic, integers only, is recorded in evidence/caps-r3/o2-memory-fa97594.json.
+
 ## 6. What is implemented (conformance), and the evidence
 
 | change | spec | commit | evidence (development/audit-2026-10-22/evidence/caps/) |
@@ -235,6 +278,19 @@ All five options keep the conformance of §6.
 | model, vectors, identity test | — | bc53984 | `caps-model-a0dd771.log`, `caps-tests-a0dd771.log` |
 | round 2: the byte-exact TXBYTES_CAP boundary test (review CV-1); comment citations | consensus.md:170, D49, execution.md:83 | c635594 | `r2-caps-tests-0b9b4d0.log` (7 pass), `r2-mutations-c635594.log` (16 of 16 killed, §7a) |
 | round 2: model check label and `emptyBlocksFromBaseFee0ToIdle` (review CV-7, CV-12) | — | 0b9b4d0 | `r2-caps-model-0b9b4d0.log` (25 checks; byte-identical to the committed vectors), `r2-caps-tests-0b9b4d0.log` (caps_identity 3 pass on the new vectors) |
+| round 3: tests pin which block and which branch item 16 reads the byte counter from, and the builder's exact fit across blocks (second review R2C-1, R2C-2); test-only | consensus.md:170, D49, execution.md:83 | 5965b8d | in `evidence/caps-r3/`: `caps-tests-5965b8d.log` (7 pass), `mutations-5965b8d.log` (§7c) |
+| round 3: the A13 model at the integrated head, and O2 recomputed on it (R2C-3, R2C-5) | — | measured at fa97594 | in `evidence/caps-r3/`: `a13-fa97594.log`, `o2-memory-fa97594.json` (§5b) |
+
+Round 3 ran at 5965b8d, in release, on Linux. The later round-3 commits change only `development/`.
+The logs are in `evidence/caps-r3/`:
+- `tests/caps.rs`: 7 pass;
+- lp4-execution `caps_identity`: 3 pass;
+- in the caps-test build, `tests/log_cap.rs` 2 pass and `tests/caps.rs` 7 pass;
+- the whole pocold suite, once: 153 pass, 0 fail, 8 ignored (the 2 spec-depth tests and the 6 journal
+  measurements, not run), no compiler warnings;
+- `caps_model.py`: 25 checks, byte-identical to the committed vectors.
+
+The full lp4-execution suite was not rerun, because round 3 changes no lp4 code.
 
 Round 2, at 0b9b4d0 (its `prototypes/` tree equals c635594's), release: lp4-execution 165 pass, 0 fail;
 pocold 130 pass, 0 fail, 2 ignored (the spec-depth tests, not run); no compiler warnings
@@ -308,3 +364,43 @@ The review's other notes need no code change:
   constant is; the equality tests pin the constant to validation.md:2065.
 - **M1's first variant** did not compile and counted as incomplete. The corrected variant is killed,
   here and in the review.
+
+## 7b. Round-3 corrections (after the second review)
+
+The second review of `wf/caps` at 273e785 found no blocker, one major issue and five minor ones. Every
+finding and its resolution is listed below. The only code change is to tests (`tests/caps.rs`,
+5965b8d); nothing normative is implemented, and development/m1/reference is not edited.
+
+| finding | resolution |
+|---|---|
+| R2C-1 (major): no test pinned which entry's counter item 16 reads for TXBYTES. W11 (the grandparent's counter) and W12 (the head's) survived the whole pocold suite. The reorg test pinned the branch scope for TX_CAP only, and every "over" block followed two empty blocks | fixed in 5965b8d, in three parts. (1) The boundary test checks the over block on the block that used the room, with no empty block between, so the parent's and the grandparent's counters differ (W11). (2) The reorg test has a TXBYTES fork case, with TXBYTES_CAP = big + b0 − 1 (828 B). Branch A carries big (716 B) and is left with 112 B of room. Branch B (fallback, b0 113 B, fallback) forks at genesis and is heavier. While A is the head, B's block carrying b0 fits B's room but not A's, and it is valid. Once B is the head, A's next block (113 B) fits B's room (715 B) but not A's, and it is "16 caps". This kills W12, and each direction is pinned on its own (X9, X10 in §7c). (3) The TX_CAP part also imports A's next block after the reorg, so the count is read from the parent, not from the head (X1). §3a's "tested" now covers both counters |
+| R2C-2: the builder's exact fit was pinned in one position only, the second transaction of a block on genesis. B10, B11 and B12 survived tests/caps.rs | fixed in 5965b8d: a cross-block exact fit with TXBYTES_CAP = a0 + b0. a0 is alone in block 1. Then `template_txs` returns [b0], with b1 skipped. b0 is block 2's first transaction and fills the room on a non-zero parent counter. Block 2 reaches cum_tx_bytes = TXBYTES_CAP and is a valid head (the positive item-16 exact fit across blocks), and b1 on block 2 is "16 caps" |
+| R2C-3: the "today" A13 figures (5,627,687,516 B, 10,808,068 B unused) were stale at the integrated head | §5 O2 cell and the new §5b name the commit of each figure. 5,627,687,516 B is 9ce5a7c's model, confirmed at c3a78e7. At fa97594 the model is 5,577,343,580 B (measured, `evidence/caps-r3/a13-fa97594.log`, = RPCGUARD.md:158), with 68,343,995 B unused. O2 is recomputed at fa97594: 11,941,350,108 B tightened, needing 13,647,257,267 B. A13-DERIVATION.md's "9ce5a7c and later" is not this track's file; replacement text is handed to the orchestrator |
+| R2C-4: "waiting 145 empty blocks reaches that fee from any starting base fee" | §2: from baseFee0 = 10^9. A higher start needs about 5.2 more empty blocks per doubling: 150, 162 and 196 blocks from 2·10^9, 10^10 and 10^12 (recomputed by exact integer simulation) |
+| R2C-5: the O2 whole model was given only with A1a's tightened log term | §5b gives the as-coded totals (L = 2^30, and N1's 2^32) next to the tightened one, on both bases. It also states that N1 + O2 as coded uses 2^32 unless resources.rs:107 implements the tightening, and that the gate refuses boot in every case |
+| R2C-6: "the pending state runs without the A03 meter" was imprecise | §3b mempool row: `PoolMeter::admit` (node.rs:410) checks SLOT_CAP, ACCT_CAP and SYS_SLOT_MAX. LOG_COUNT_MAX, LOG_BLOCK_MAX, LOG_CAP and the dirty limits are only in `BlockMeter::check` (user_phase.rs:193–207). The LOG_CAP conclusion is unchanged |
+
+The review's line-reference note is applied too: the intro now lists the node.rs and rpc.rs lines that
+moved by fa97594.
+
+### 7c. Mutation check after round 3
+
+Three sets were rerun against the round-3 `tests/caps.rs` at 5965b8d, one mutant at a time, in release:
+- the second review's 24 mutants (B1–B12, W1–W12), with its edits unchanged;
+- the first review's 21 (M1–M11), with its edits unchanged;
+- 10 new ones (X1–X10).
+
+Results are in `evidence/caps-r3/mutations-5965b8d.log` and `.json`. The runner and the edits stay in
+the scratch directory. **55 of 55 are killed.** None was incomplete and none timed out. The log_cap
+and caps_identity mutants (M4, M4b, M5, M10, M11) ran the tests they target, as in the first review.
+
+| set | mutants | killed by |
+|---|---|---|
+| second review, builder | B1–B12 | B10 (exact fit refused on a non-zero parent counter), B11 (list header counted for a block's first transaction) and B12 (off by one for a block's first transaction): the cross-block exact fit, where `template_txs` must return [b0] on block 1's counter. B1–B9 as in round 2 (the boundary test, and for B2 the fork case too) |
+| second review, item 16 and the stored counter | W1–W12 | W11 (the grandparent's counter): the over block checked on the block that used the room. W12 (the head's counter): the fork case, B's block while A is the head. W1–W10 as in round 2 |
+| first review | M1–M11 (with M2a–M2h, M3a–M3c, M4b) | the existing tests, as in round 2 |
+| new: branch and block scope of item 16 | X1 TX count from the head; X2 TX count from the grandparent; X3 bytes from the canonical block at the parent's height; X4 a non-canonical parent's byte counter read as 0; X9 min(head, parent), the lenient direction only; X10 max(head, parent), the strict direction only | X1: A's next block after the reorg (TX_CAP part). X2: the template-locking test. X3 and X10: B's block while A is the head. X4 and X9: A's block while B is the head. So each direction of the fork case is load-bearing on its own |
+| new: builder room and stored counter | X5 builder room from the grandparent's counter; X6 stored byte counter not cumulative; X7 stored byte counter from the head; X8 a block's first transaction not checked against the byte room | X5: the cross-block fit, plus two other tests. X6: six tests. X7: the stored-counter check (`assert_within_caps`) in the reorg test. X8: four tests |
+
+The review's whole-suite survivors (W11, W12, B11) are now killed by `tests/caps.rs`, which is part of
+the whole suite.
