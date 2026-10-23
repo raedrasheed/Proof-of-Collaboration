@@ -1,6 +1,6 @@
 //! TX_CAP and TXBYTES_CAP at exhaustion. execution.md:83: "TXBYTES_CAP and TX_CAP: the block is invalid,
 //! and the builder skips the transaction"; consensus.md:170 (item 16, the counts of the branch up to the
-//! parent plus this block); consensus.md:136 (a violating template counts as absent); D49 (raw tx bytes).
+//! parent plus this block); consensus.md:101, §4(a) (a violating template counts as absent); D49 (raw tx bytes).
 //! Devnets with small caps (DevnetConfig::tx_cap / txbytes_cap) are mined past exhaustion.
 use std::collections::HashMap;
 use std::time::{Duration,Instant};
@@ -93,6 +93,28 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
     let _=std::fs::remove_dir_all(&dir);
 }
 
+#[test] fn txbytes_cap_boundary_is_byte_exact_in_the_builder_and_in_item_16(){
+    // No slack: TXBYTES_CAP = a0+b0 (an exact fit, filled and valid) and a0+b0-1 (b0 one byte over: skipped by
+    // the builder, and a block carrying it is "16 caps"). Raw bytes only (D49), no RLP item header.
+    let (alice,bob)=(devnet::account_key("alice"),devnet::account_key("bob"));let (a0,b0,b1)=(pay(&alice,0,0),pay(&bob,0,0),pay(&bob,1,0));
+    for short in [0u64,1]{
+        let cap=(a0.len()+b0.len()) as u64-short;let c=cfg(1000,cap);let (mut n,dir)=node(&c,&format!("txbytes-edge{short}"),None,None);let mut h=net(&c);
+        // Item 16 by itself, on a hand-built block at cum_tx_bytes = TXBYTES_CAP + short.
+        let both=signed(&h,h.chain.head,vec![a0.clone(),b0.clone()]);let v=h.chain.validate(&both,None,0).map(|_|());
+        assert!(if short==0{v.is_ok()}else{matches!(v,Err(Reject::Block(ref w)) if w=="16 caps")},"item 16 at TXBYTES_CAP+{short}: {v:?}");
+        for t in [&a0,&b0,&b1]{n.submit_tx(t.clone(),false).unwrap();}
+        let want=if short==0{vec![a0.clone(),b0.clone()]}else{vec![a0.clone()]};
+        let head=n.chain.head().meta_clone();assert_eq!(n.template_txs(&head),want,"TXBYTES_CAP = a0+b0-{short}");
+        let sizes=mine_templates(&mut n,&mut h,3);assert_eq!(sizes,vec![want.len(),0,0]);assert_within_caps(&n);
+        let used:u64=want.iter().map(|t|t.len() as u64).sum();assert_eq!(n.chain.head().cum_tx_bytes,used);assert_eq!(cap-used,if short==0{0}else{b0.len() as u64-1});
+        // The next transaction passes the room by its whole length (exact fit) or by one byte.
+        let next=if short==0{b1.clone()}else{b0.clone()};let over=signed(&h,n.chain.head,vec![next]);
+        assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"));
+        println!("CAPS {}",serde_json::json!({"profile":format!("txbytes_cap=a0+b0-{short}={cap}"),"templateSizes":sizes,"cumTxBytes":used,"roomLeft":cap-used}));
+        let _=std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[test] fn counters_are_per_branch_across_a_reorg_at_the_exhaustion_boundary(){
     let c=cfg(3,1<<24);let alice=devnet::account_key("alice");let t:Vec<Vec<u8>>=(0..4).map(|i|pay(&alice,i,0)).collect();
     let (mut n,dir)=node(&c,"reorg",None,None);let mut ha=net(&c);let g=ha.chain.head;
@@ -114,7 +136,7 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
 }
 
 #[test] fn a_received_template_past_the_caps_is_treated_as_absent(){
-    // consensus.md:136: a violating template is as if absent (no lock; sticky FB at T_j). Positive control:
+    // consensus.md:101, §4(a): a violating template is as if absent (no lock; sticky FB at T_j). Positive control:
     // the same template shape within the caps locks.
     let alice=devnet::account_key("alice");let t:Vec<Vec<u8>>=(0..3).map(|i|pay(&alice,i,0)).collect();
     for (tag,txs,locks) in [("tpl-over",vec![t[2].clone()],false),("tpl-ok",vec![],true)]{

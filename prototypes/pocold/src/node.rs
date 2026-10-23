@@ -553,7 +553,7 @@ impl Node{
         let tid=template_id(&shell.ut_raw);
         let ok_sig=matches!(hashes::recover_address(&hashes::sig_msg(&tid),&shell.sig),Ok(a) if a[..]==shell.proposer[..]);
         if !ok_sig||shell.proposer[..]!=ctx.proposer[..]||!ctx.window.contains(shell.ts)||crate::timing::is_future(shell.ts,now_s(),self.capital_phi()){return false}
-        // consensus.md:136: a template whose block would fail item 16 is as if absent (no lock).
+        // consensus.md:101, §4(a): a template whose block would fail item 16 is as if absent (no lock).
         if !self.chain.within_caps(&p,&body.txs){return false}
         let Ok(effects)=self.chain.evidence_effects(&p,&body,shell.h) else{return false};
         let rebuilt=self.chain.rebuild_signed(&p,&ctx,shell.ts,Address::from_slice(&shell.proposer),&body,effects);
