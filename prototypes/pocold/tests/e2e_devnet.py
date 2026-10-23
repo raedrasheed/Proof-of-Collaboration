@@ -4,8 +4,10 @@
 Gates exercised (LOCAL-DEVNET-PLAN.md LP5/LP7):
   * >=100 freshly produced H-full blocks from a fresh genesis across 3 nodes
   * late join (node c starts after height 15) and sync
-  * partition: c isolated mines a minority branch; heal -> c reorganizes to the
-    heavier branch (D133) and all nodes converge
+  * partition: c isolated mines its own branch; heal -> the nodes on the lighter
+    branch reorganize to the heavier one (D133) and all nodes converge. Which side is
+    heavier depends on timing (an isolated miner mines only its own nonce range and waits
+    for fallbacks, but the a/b side can stall on fallbacks too), so it is not assumed
   * SIGKILL crash of node b during production, restart from its journal
   * malicious peer: wrong-network Hello, garbage frames, invalid block body
   * user transactions submitted over RPC are included and their receipts match
@@ -90,21 +92,28 @@ def main():
         before = h(0, work); wait(lambda: h(0, work) > before, 60, "a keeps producing after malicious input")
         ok("malicious frames/Hello/invalid block do not stop node a", True, f"rejects={len(dn.rpc(8540,'pocol_getRejects'))}")
         # Partition: isolate c (restart without peers and without a listener).
+        mined_before = {"a": 0, "b": 0, "c": dn.rpc(8542, "pocol_status")["stats"]["mined"]}
         base_c = h(2, work)
         dn.stop(work, only=["c"]); time.sleep(1)
         ci = 2
         p = subprocess.Popen([dn.BIN, "run", "--network", os.path.join(work, "net"), "--data", os.path.join(work, "data", "c"), "--name", "c", "--miner", "c", "--rpc", "127.0.0.1:8542", "--log"],
                              stdout=open(os.path.join(work, "c-isolated.log"), "ab"), stderr=subprocess.STDOUT, start_new_session=True)
         wait(lambda: h(2, work) >= base_c + 2, 120, "isolated c builds a minority branch")
-        c_tip = dn.rpc(8542, "pocol_status")["head"]
         time.sleep(8)
+        c_tip = dn.rpc(8542, "pocol_status")["head"]
         ab_tip = dn.rpc(8540, "pocol_status")["head"]
         ok("partition: branches diverge", c_tip["hash"] != ab_tip["hash"], f"c={c_tip['height']} ab={ab_tip['height']}")
+        mined_before["c"] += dn.rpc(8542, "pocol_status")["stats"]["mined"]
         os.killpg(p.pid, signal.SIGTERM); p.wait()
         dn.start(work, log=True, only=["c"])
-        wait(lambda: dn.rpc(8542, "pocol_status")["head"]["hash"] == dn.rpc(8540, "pocol_status")["head"]["hash"], 120, "heal convergence")
-        ok("heal: c reorganizes to the heavier branch", dn.rpc(8542, "pocol_status")["stats"]["reorgs"] >= 1)
+        wait(lambda: len({dn.rpc(8540 + i, "pocol_status")["head"]["hash"] for i in range(3)}) == 1, 120, "heal convergence")
+        healed = [dn.rpc(8540 + i, "pocol_status") for i in range(3)]
+        heavier = max(int(c_tip["totalWork"], 16), int(ab_tip["totalWork"], 16))
+        ok("heal: the lighter side reorganizes and all nodes converge on a head at least as heavy as either branch",
+           int(healed[0]["head"]["totalWork"], 16) >= heavier and sum(x["stats"]["reorgs"] for x in healed) >= 1,
+           f"reorgs a/b/c={[x['stats']['reorgs'] for x in healed]} c_tip={c_tip['height']} ab_tip={ab_tip['height']}")
         # Crash: SIGKILL b mid-production, restart from its journal.
+        mined_before["b"] += dn.rpc(8541, "pocol_status")["stats"]["mined"]
         os.kill(json.load(open(os.path.join(work, "pids.json")))["b"], signal.SIGKILL); time.sleep(2)
         dn.stop(work, only=["b"]); dn.start(work, log=True, only=["b"])
         wait(lambda: abs(h(1, work) - h(0, work)) <= 1, 90, "b recovers")
@@ -126,8 +135,11 @@ def main():
             bs = [dn.rpc(8540 + i, "eth_getBlockByNumber", [hex(n), False]) for i in range(3)]
             if not all((b["hash"], b["stateRoot"], b["receiptsRoot"]) == (bs[0]["hash"], bs[0]["stateRoot"], bs[0]["receiptsRoot"]) for b in bs): mism.append(n)
         ok(f"identical canonical hash/stateRoot/receiptsRoot at heights 1..{top} on 3 nodes", not mism, str(mism[:5]))
+        # Every miner produced blocks. The `mined` counter restarts with its process, so each process's
+        # count is sampled before it stops (c twice, b before its SIGKILL) and added.
         stats = {l: dn.rpc(8540 + i, "pocol_status")["stats"] for i, l in enumerate("abc")}
-        ok("every miner produced blocks", all(s["mined"] > 0 for s in stats.values()), json.dumps({k: v["mined"] for k, v in stats.items()}))
+        total = {k: mined_before[k] + stats[k]["mined"] for k in "abc"}
+        ok("every miner produced blocks", all(v > 0 for v in total.values()), json.dumps(total))
         signed = sum(1 for n in range(1, top + 1) if dn.rpc(8540, "eth_getBlockByNumber", [hex(n), False])["pocol"]["signed"])
         ok("signed and fallback templates both occur", 0 < signed < top, f"signed={signed}/{top}")
         # Full restart: deterministic replay. Each journal is replayed by a fresh process with no
