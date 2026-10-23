@@ -188,7 +188,7 @@ All five options keep the conformance of §6.
 
 | | consensus | storage at the caps | resident memory (pocold) | compatibility | liveness and griefing | complexity |
 |---|---|---|---|---|---|---|
-| **O1** keep the caps, freeze as specified (status quo + §6) | none | inventory 19.65 GiB logical (storage.md:73); pocold journal ≈ TXBYTES_CAP + 4 B per tx + 3.3 KB per block (network 8.4 GiB; receipts and logs are not stored, replay recomputes them) | history term TXBYTES_CAP + 380·TX_CAP + LOG_CAP·33/32 (resources.rs:103–107): devnet 1,079 MiB; network 12.6 GiB (already refused by the 6 GiB A13 gate) | none | the chain continues, but user activity is frozen permanently; network: organically at 20–34% average use, by griefing for ≤ 12.8 coins | done |
+| **O1** keep the caps, freeze as specified (status quo + §6) | none | inventory 19.65 GiB logical (storage.md:73); pocold journal ≈ TXBYTES_CAP + 4 B per tx + 3.3 KB per block (network 8.4 GiB; receipts and logs are not stored, replay recomputes them) | history term TXBYTES_CAP + 380·TX_CAP + LOG_CAP·33/32 (resources.rs:103–107): devnet 1,079 MiB; network 12.6 GiB (already refused by the 6 GiB A13 gate) | none | the chain continues, but user activity is frozen permanently; network: organically at 20–34% average use, by griefing for 6.6·10^10 (LOG_CAP) to 1.5·10^12 wei (TX_CAP) at the idle base fee (§2) | done |
 | **O2** unreachable by construction (A1a extended to all three) | gate R27: H_END·LOG_BLOCK_MAX ≤ LOG_CAP; R28: H_END·⌊GAS_LIMIT/21000⌋ ≤ TX_CAP; R29: H_END·TXB_BLOCK ≤ TXBYTES_CAP, where TXB_BLOCK is the largest raw-byte sum of a body ≤ BODY_MAX (196,592). Only exception: the simnet caps-test build. TX caps are CP, so a new genesisHash; LOG_CAP is a constant (same hash; a hard fork via ForkSchedule on any existing chain, but none holds > 1 GiB of logs) | network at LOG_CAP 2^32, TX_CAP 5·10^7, TXBYTES_CAP 24 GiB: inventory ≈ 43.2 GiB logical (txs 8.0 → 24.0, receipts 0.50 → 2.5, indexes 0.63 → 3.15, logs 1.0 → 4.0; 42.8 at the exact R27–R29 minima), ≈ 65 GiB on disk at the spec's 1.5× ratio | history term TXBYTES_CAP + 380·TX_CAP + L·33/32 (resources.rs:103–107), L the log bytes assumed. Network at the O2 sizes (L = 2^32): 45.8 GiB. Devnet at the R28/R29 minima (TX_CAP 7.6·10^6, TXBYTES_CAP 3,931,840,000): 6.98 GiB (7,495,680,000 B) with L = min(LOG_CAP, H_END·LOG_BLOCK_MAX) = 655,360,000, A1a's tightening, which resources.rs:107 does not have; 7.38 GiB with L = 2^30 as coded; 10.48 GiB with N1's 2^32. These replace today's 1,131,673,472 B for the same three items, so the whole A13 model goes from 5,627,687,516 B to 11,991,694,044 B (11.17 GiB, tightened). That needs a 12.76 GiB budget (ceil(8·total/7)), and the 6 GiB gate refuses boot. Unused headroom today: 10,808,068 B (10.3 MiB; A13-DERIVATION.md:188–189, evidence/a13-breakdown-redb.json). **Needs canonical history off-heap first** (bodies and receipts read from the journal beyond K_hist, as D-REORG-REDB did for side blocks: a local storage decision). Also, eth_getTransactionByHash scans the canonical chain linearly (rpc.rs:455), and `Node::open` holds the whole journal (A13 condition open-replay-transient) | GSV1 unchanged (a frozen vector; gate rules are not decode rules); devnet genesis files regenerated; networks.json gets the new network genesisHash; no RPC change | no cumulative freeze; only the per-block limits remain | low: three values, three gate predicates, the inventory re-derived |
 | **O3** linear allowance: cum_X(block h) ≤ ⌊h·CAP_X/H_END⌋ + BURST_X for txs, tx bytes and log bytes (a log halt, a tx block invalid) | a new validity/halt rule, a protocol change; BURST is new CP or derived | lifetime ≤ CAP + BURST: inventory unchanged | unchanged | new vectors at the h boundaries; pocol_getCaps should expose the allowance | never permanent. Throughput is capped at the lifetime average plus the burst: network 77 tx, 66 KB, 8.3 KB of logs per block. A griefer can take each block's allowance; the base fee does not price it below the target, so honest users must outbid on tips | moderate |
 | **O4** sliding window (A2 generalized) | as O3 | ≤ ⌈H_END/W⌉·cap | unchanged | as O3 | a stall of up to W minus the fill time per saturation | moderate |
@@ -233,8 +233,16 @@ All five options keep the conformance of §6.
 | `try_lock_signed` treats an over-cap template as absent | consensus.md:101, §4(a) | 9094f98 | `a_received_template_past_the_caps_is_treated_as_absent` in the same logs |
 | cargo feature caps-test: LOG_CAP = 2^24; admission refuses anything but a simnet profile on a simnet node | validation.md:2065 | a797c83, a0dd771 | `caps-test-build-a0dd771.log`; both suites in that build: `suites-caps-test-a0dd771.log` |
 | model, vectors, identity test | — | bc53984 | `caps-model-a0dd771.log`, `caps-tests-a0dd771.log` |
+| round 2: the byte-exact TXBYTES_CAP boundary test (review CV-1); comment citations | consensus.md:170, D49, execution.md:83 | c635594 | `r2-caps-tests-0b9b4d0.log` (7 pass), `r2-mutations-c635594.log` (16 of 16 killed, §7a) |
+| round 2: model check label and `emptyBlocksFromBaseFee0ToIdle` (review CV-7, CV-12) | — | 0b9b4d0 | `r2-caps-model-0b9b4d0.log` (25 checks; byte-identical to the committed vectors), `r2-caps-tests-0b9b4d0.log` (caps_identity 3 pass on the new vectors) |
 
-Suites at a0dd771, which carries the final code (later commits add documents only):
+Round 2, at 0b9b4d0 (its `prototypes/` tree equals c635594's), release: lp4-execution 165 pass, 0 fail;
+pocold 130 pass, 0 fail, 2 ignored (the spec-depth tests, not run); no compiler warnings
+(`r2-suites-release-0b9b4d0.log`). In the caps-test build only the tests the round touches were run:
+`tests/caps.rs` 7 pass and `caps_identity` 3 pass (`r2-caps-test-build-0b9b4d0.log`). The caps-test
+full suites below are stage A's.
+
+Suites at a0dd771, which carries stage A's final code (later stage A commits add documents only):
 
 | build | lp4-execution | pocold |
 |---|---|---|
@@ -271,9 +279,32 @@ is implemented.
 | CV-4: O2's "≈ 7.0 GiB" was the history term only, with the A1a tightening, and was quoted as resident memory | §5 now gives the formula, the log bytes assumed (6.98 / 7.38 / 10.48 GiB) and the whole A13 model (11.17 GiB, needing 12.76 GiB) |
 | CV-5: the measured 74–78 s stall is the tests/caps.rs profile (D_att 73), not the default devnet | §3a: 74–78 s measured on that test devnet; D_att+Γ in general, 30 s on the default devnet and about 330 s on the network profile (derived, not run) |
 | CV-6: the starvation mode was given without its reach | §3a: only when TX_CAP is below one block's count (≤ 380); not on any real profile |
-| CV-7: "at most 12.8 coins" | §2: 12.8 coins is one strategy. 145 free empty blocks reach the 7 wei floor, after which TX_CAP costs about 1.5·10^12 wei. The model now records `emptyBlocksFromBaseFee0ToIdle` = 145 |
+| CV-7: "at most 12.8 coins" (§2; "≤ 12.8 coins" in §5 O1) | 12.8 coins is one strategy. 145 free empty blocks reach the 7 wei floor, after which TX_CAP costs about 1.5·10^12 wei. The model now records `emptyBlocksFromBaseFee0ToIdle` = 145 |
 | CV-8: free pool squatting near the TXBYTES boundary was missed | §3a row added (code inspection); N5 now covers transactions that do not fit the remaining room |
 | CV-9: halted transactions charge their whole gas limit to gasUsed | §3b base-fee row added (code inspection) |
 | CV-10: N5's "re-checked after a reorg" is already approved (network.md:153) | N5 is limited to the −32016 {cap} code and the eviction |
 | CV-11: the caps-test item is only partly implemented | §6: LOG_CAP implemented; HIST_TRIE_BUDGET = 64 MiB not, with the reason |
 | CV-12: "five rate blocks"; "lower bound" for the caps-test history term | up to six 136-byte rate blocks (701 B with padding; the model's check label is corrected too); with LOG_CAP = 2^24 the history term is a smaller, still valid upper bound for that build |
+
+### 7a. Mutation check after the fix
+
+The review's mutants of the builder, item 16 and template locking, rerun against the round-2
+`tests/caps.rs` at c635594 (`r2-mutations-c635594.log`; the runner and the edits stay in the scratch
+directory). All 16 are killed, the six former survivors by the new boundary test:
+
+| mutant | killed by |
+|---|---|
+| M2a builder `>=` room; M3a builder counts the RLP header | the exact fit (template carries only a0) |
+| M2b builder 1 byte over the room | one byte short (template carries b0) |
+| M2f item 16 `<` TXBYTES_CAP; M3b item 16 counts 2 extra bytes per transaction | the exact fit (the hand-built block on genesis is refused) |
+| M2h item 16 accepts TXBYTES_CAP + 1 | one byte short (the hand-built [a0, b0] block is accepted) |
+| M1, M2c–M2e, M2g, M3c, M6–M9 (killed before as well) | the existing tests, plus the boundary test where it applies |
+
+The review's other notes need no code change:
+- **M5tb** removes every status assertion from `log_cap.rs` together with the halt status. Its
+  survival only shows that the assertions are what detect M5, and M5 itself is killed.
+- **M4** (caps-test LOG_CAP back to 2^30) is killed by the constant-equality tests. The exhaustion test
+  is written in terms of `caps::LOG_CAP` on purpose, so that it tests the halt at whatever the build's
+  constant is; the equality tests pin the constant to validation.md:2065.
+- **M1's first variant** did not compile and counted as incomplete. The corrected variant is killed,
+  here and in the review.
