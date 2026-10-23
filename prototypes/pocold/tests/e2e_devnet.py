@@ -4,17 +4,22 @@
 Gates exercised (LOCAL-DEVNET-PLAN.md LP5/LP7):
   * >=100 freshly produced H-full blocks from a fresh genesis across 3 nodes
   * late join (node c starts after height 15) and sync
-  * partition and heal with a known winner (D133, consensus.md §9): c is isolated and mines its
-    own branch; a and b extend theirs >= 2 blocks past c's isolated head and are restarted without
-    a miner; c mines until its branch is strictly heavier than every a/b tip and is restarted
-    without a miner too, so no tip can move. Heal: a and b fetch c's branch by Status sync
-    (consensus.md:235) and reorganize; every head is exactly c's tip, no a/b tip is canonical on
-    any node, and the reorg counters of a and b moved. A test peer then relays the lighter a/b
-    branch to c, which never held it: c stores it and keeps its head (the head is the maximum of
-    ≻ whatever the order of arrival, consensus.md:215)
+  * partition and heal with a known winner that is strictly heavier and strictly LOWER than every
+    other tip, so most work (consensus.md:209) and longest chain disagree (D133, consensus.md §9):
+    c is isolated and mines its own branch; a and b extend theirs >= 2 blocks past c's isolated
+    head and are restarted without a miner; c mines until it leads them by LEAD a/b tip blocks of
+    work and is frozen (isolated, no miner); a and b then mine late (PAUSE s after their tip), when
+    ASERT makes their blocks cheap, until they are higher than c, and are frozen too: no tip can
+    move. Heal: a and b fetch c's branch by Status sync (consensus.md:235) and reorganize once;
+    every head is exactly c's tip and no a/b tip is canonical on any node. Then c, which holds
+    none of a's branch, is sent it twice: below a's tip by a peer claiming genesis (no session),
+    and in full in a sync session with a peer claiming more work than c; c stores it and keeps its
+    head (the head is the maximum of ≻ whatever the order of arrival, consensus.md:215), also
+    after replaying its journal alone
   * SIGKILL crash of node b during production, restart from its journal
   * malicious peer: a garbage frame and a wrong-network Hello close the connection (a well-formed
-    Hello does not); a corrupted block sent after a valid Hello is rejected; a keeps producing
+    Hello does not); a corrupted block sent after a valid Hello adds exactly one reject entry, for
+    a block a does not store; a keeps producing
   * user transactions submitted over RPC are included and their receipts match
   * convergence: identical canonical hash, stateRoot and receiptsRoot at every
     height on every node; full restart replays to the same head
@@ -27,6 +32,9 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import devnet as dn
 SIGN = os.environ.get("POCOL_SIGN", os.path.join(os.path.dirname(dn.BIN), "pocol-sign"))
 L = "abc"
+# Partition: c's lead over the frozen a/b tips, in works of an a/b tip block, and when a/b mine late
+# (s after their tip's timestamp; > D_att + Gamma = 46, so the first late block takes attempt >= 1).
+LEAD, PAUSE = 4, 120
 
 def waited(pred, timeout):
     t = time.time()
@@ -43,6 +51,7 @@ def st(i): return dn.rpc(8540 + i, "pocol_status")
 def h(i): return st(i)["head"]["height"]
 def tip(i): x = st(i)["head"]; return {"hash": x["hash"], "number": x["height"], "work": int(x["totalWork"], 16)}
 def canon(i, n): b = dn.rpc(8540 + i, "eth_getBlockByNumber", [hex(n), False]); return b and b["hash"]
+def blk(i, hsh): return dn.rpc(8540 + i, "eth_getBlockByHash", [hsh, False])
 def short(t): return f"{t['number']}:{t['hash'][:12]}:w={t['work']:#x}"
 def port_open(p):
     with socket.socket() as s: s.settimeout(0.5); return s.connect_ex(("127.0.0.1", p)) == 0
@@ -71,6 +80,25 @@ def closed_by_peer(s, t):
             except socket.timeout: return False
     except OSError: return True
     return False
+def msg_type(p):
+    """The message type of a frame payload (an RLP list whose first item is the type)."""
+    k = 1 if p[0] <= 0xf7 else 1 + p[0] - 0xf7; b = p[k]
+    return 0 if b == 0x80 else b if b < 0x80 else None
+def await_msg(s, t, want):
+    """Reads the node's frames until one of type `want` arrives: True, or False after t s or a close."""
+    end = time.time() + t; buf = b""
+    try:
+        while time.time() < end:
+            s.settimeout(max(0.05, end - time.time()))
+            try: chunk = s.recv(65536)
+            except socket.timeout: return False
+            if not chunk: return False
+            buf += chunk
+            while len(buf) >= 4 and len(buf) >= 4 + struct.unpack(">I", buf[:4])[0]:
+                n = struct.unpack(">I", buf[:4])[0]; p, buf = buf[4:4 + n], buf[4 + n:]
+                if p and msg_type(p) == want: return True
+    except OSError: return False
+    return False
 
 def main():
     busy = [p for p in (30300, 30301, 30302, 8540, 8541, 8542) if port_open(p)]
@@ -83,6 +111,7 @@ def main():
     def run_node(l, miner=True, connect=True):
         # As devnet.py start; isolated (connect=False): no listener and no peers.
         i = L.index(l)
+        if port_open(8540 + i) or port_open(30300 + i): raise AssertionError(f"{l} is still running")  # else RPC would answer from the old process
         cmd = [dn.BIN, "run", "--network", net, "--data", os.path.join(work, "data", l), "--name", l, "--rpc", f"127.0.0.1:{8540+i}", "--log"]
         if miner: cmd += ["--miner", l]
         if connect: cmd += ["--listen", f"127.0.0.1:{30300+i}"] + sum([["--peer", f"127.0.0.1:{30300+j}"] for j in range(3) if j != i], [])
@@ -90,16 +119,23 @@ def main():
         pf = os.path.join(work, "pids.json"); pids = json.load(open(pf)) if os.path.exists(pf) else {}
         pids[l] = procs[l].pid; json.dump(pids, open(pf, "w"))
         wait(lambda: st(i) is not None, 60, f"{l} answers RPC")
-    def stop_node(l, sig=signal.SIGTERM):
-        # The `mined` counter restarts with its process, so it is added up just before each stop; a
-        # block mined after this read is not counted, so the sum can only be low.
-        i = L.index(l)
-        try: mined[l] += st(i)["stats"]["mined"]
-        except Exception: pass
-        dn.stop(work, only=[l], sig=sig)
-        try: procs.pop(l).wait(30)
-        except (KeyError, subprocess.TimeoutExpired): pass
-        wait(lambda: not port_open(8540 + i) and not port_open(30300 + i), 30, f"{l} stopped")
+    def stop_nodes(ls, sig=signal.SIGTERM):
+        # Signals all of `ls` at once. The `mined` counter restarts with its process, so it is added up
+        # just before each stop; a block mined after this read is not counted, so the sum can only be
+        # low. A process leaves `procs` only once it has exited (the finally block kills what is left).
+        for l in ls:
+            try: mined[l] += st(L.index(l))["stats"]["mined"]
+            except Exception: pass
+        dn.stop(work, only=list(ls), sig=sig)
+        for l in ls:
+            p = procs[l]
+            try: p.wait(30)
+            except subprocess.TimeoutExpired:
+                os.killpg(p.pid, signal.SIGKILL); p.wait(30); procs.pop(l)
+                raise AssertionError(f"{l} still running 30 s after {sig.name}")
+            procs.pop(l)
+        for l in ls: i = L.index(l); wait(lambda: not port_open(8540 + i) and not port_open(30300 + i), 30, f"{l} stopped")
+    def stop_node(l, sig=signal.SIGTERM): stop_nodes([l], sig)
     try:
         with contextlib.redirect_stdout(io.StringIO()):  # init-devnet echoes devnet.json
             dn.init(work, "a,b,c", ["--t-blk", "2", "--tau", "20", "--c", "8", "--d-att", "41", "--fb-wait", "3", "--work-bits", "15"])
@@ -139,54 +175,99 @@ def main():
         ok("malicious peer: a garbage frame and a wrong-network Hello close the connection; a well-formed Hello does not", garbage and wrong and kept,
            f"garbage closed={garbage} wrong-network closed={wrong} valid kept={kept}")
         rej0 = {json.dumps(r, sort_keys=True) for r in dn.rpc(8540, "pocol_getRejects")}
-        n = h(0); blk = dn.rpc(8540, "pocol_getBlockRlp", [hex(n)]); sr = bytes.fromhex(dn.rpc(8540, "eth_getBlockByNumber", [hex(n), False])["stateRoot"][2:])
-        hdr = bytearray(bytes.fromhex(blk["header"][2:])); k = hdr.find(sr); hdr[k + 16 if k >= 0 else 200] ^= 0xff  # a stateRoot byte: still decodes, new hash
-        s.sendall(frame(rlp_list([uint(1), rlp_bytes(bytes(hdr)), rlp_bytes(bytes.fromhex(blk["body"][2:]))])))
-        rejected = waited(lambda: any(json.dumps(r, sort_keys=True) not in rej0 for r in dn.rpc(8540, "pocol_getRejects")), 15); s.close()
+        def new_rejects(): return [r for r in dn.rpc(8540, "pocol_getRejects") if json.dumps(r, sort_keys=True) not in rej0]
+        n = h(0); raw = dn.rpc(8540, "pocol_getBlockRlp", [hex(n)]); orig = dn.rpc(8540, "eth_getBlockByNumber", [hex(n), False]); sr = bytes.fromhex(orig["stateRoot"][2:])
+        hdr = bytearray(bytes.fromhex(raw["header"][2:])); k = hdr.find(sr); hdr[k + 16 if k >= 0 else 200] ^= 0xff  # a stateRoot byte: still decodes, new hash
+        s.sendall(frame(rlp_list([uint(1), rlp_bytes(bytes(hdr)), rlp_bytes(bytes.fromhex(raw["body"][2:]))])))
+        waited(lambda: new_rejects(), 15); s.close(); nr = new_rejects()
+        # Exactly one new entry, for a block a does not store (a rejected block is not stored) and that
+        # is not the original: the entry is the corrupted block's (its hash is not recomputed here).
+        rejected = len(nr) == 1 and nr[0]["hash"] != orig["hash"] and blk(0, nr[0]["hash"]) is None
         before = h(0); progressed = waited(lambda: h(0) > before, 60)
         ok("malicious peer: a corrupted block after a valid Hello is rejected and a keeps producing", rejected and progressed,
-           f"new reject={rejected} rejects={len(dn.rpc(8540, 'pocol_getRejects'))} a {before}->{h(0)}")
-        # Partition and heal (D133, consensus.md §9) with a winner fixed before the heal. c is isolated
-        # (no listener, no peers) and keeps mining; a and b extend their branch >= 2 blocks past c's
-        # isolated head (the fork point is at most that height, so their reorganization is >= 2 deep)
-        # and are restarted without a miner; c mines until it is strictly heavier than every a/b tip.
+           f"new rejects={nr} a {before}->{h(0)}")
+        # Partition and heal (D133, consensus.md §9) with a winner fixed before the heal that is
+        # strictly heavier and strictly LOWER than every competing tip, so the most-work rule
+        # (consensus.md:209) and a longest-chain rule choose differently.
+        # 1. c is isolated (no listener, no peers) and mines; a and b extend their branch >= 2 blocks
+        #    past c's isolated head (the fork point is at most that height, so their reorganization is
+        #    >= 2 deep) and are restarted without a miner.
         stop_node("c"); run_node("c", connect=False)
         c0 = h(2)
         wait(lambda: min(h(0), h(1)) >= c0 + 2, 90, "a and b extend their branch 2 blocks past c's isolated head")
-        for l in "ab": stop_node(l)
+        stop_nodes("ab")
         for l in "ab": run_node(l, miner=False)
         # a and b settle between themselves (two equal-work siblings of one kind may stay apart: that tie is local, D133).
         wait(lambda: tip(0)["work"] == tip(1)["work"], 60, "a and b settle on their branch")
+        ab0 = [tip(0), tip(1)]; w0 = ab0[0]["work"]; t_ab = max(st(i)["head"]["ts"] for i in (0, 1))
+        d0 = max(int(blk(i, t["hash"])["difficulty"], 16) for i, t in enumerate(ab0))  # the work of an a/b tip block
+        # 2. c mines until it leads the frozen a/b tips by LEAD tip blocks of work; c is frozen (isolated, no miner).
+        t0 = time.time(); lead = waited(lambda: tip(2)["work"] > w0 + LEAD * d0, 300)
+        ok(f"partition: isolated c leads the frozen a/b tips by more than {LEAD} a/b tip blocks of work", lead, f"c={short(tip(2))} a/b={[short(t) for t in ab0]} in {time.time()-t0:.0f}s")
+        stop_node("c"); run_node("c", miner=False, connect=False); c_tip = tip(2)
+        # 3. a and b mine LATE, from PAUSE s after their tip's timestamp: the tip's attempt 0 has expired
+        #    (C > U(0)+Γ), so its child takes an attempt >= 1 fallback timestamp L(a) >= p.ts+42
+        #    (consensus.md:93-97), and ASERT's target grows with p.ts-g_ts-T_blk·p.h (consensus.md §7):
+        #    every late block after the first is cheap. a and b climb past c's height with little work
+        #    (the precondition below checks it) and are frozen again. From here no tip can move.
+        time.sleep(max(0.0, t_ab + PAUSE - time.time()))  # a wall-clock deadline: nothing to poll
+        stop_nodes("ab")
+        for l in "ab": run_node(l)
+        up = waited(lambda: min(h(0), h(1)) > c_tip["number"], 120)
+        stop_nodes("ab")
+        for l in "ab": run_node(l, miner=False)
+        wait(lambda: tip(0)["work"] == tip(1)["work"], 60, "a and b settle on their late branch")
         ab_tips = [tip(0), tip(1)]; w_ab = max(t["work"] for t in ab_tips)
-        t0 = time.time(); lead = waited(lambda: tip(2)["work"] > w_ab, 300)
-        ok("partition: isolated c builds a branch strictly heavier than the frozen a/b tips", lead, f"c={short(tip(2))} a/b={[short(t) for t in ab_tips]} in {time.time()-t0:.0f}s")
-        forks = [next(n for n in range(min(tip(2)["number"], t["number"]), -1, -1) if canon(i, n) == canon(2, n)) for i, t in enumerate(ab_tips)]
+        forks = [next(n for n in range(min(c_tip["number"], t["number"]), -1, -1) if canon(i, n) == canon(2, n)) for i, t in enumerate(ab_tips)]
+        branch = [canon(0, n) for n in range(forks[0] + 1, ab_tips[0]["number"] + 1)]  # a's branch above the fork, parents first
+        late = [dn.rpc(8540, "eth_getBlockByNumber", [hex(n), False])["pocol"]["attempt"] for n in range(ab0[0]["number"] + 1, ab_tips[0]["number"] + 1)]
+        ok("partition: c's tip is strictly heavier and strictly lower than every a/b tip, each >= 2 blocks past the fork",
+           up and all(c_tip["work"] > t["work"] and c_tip["number"] < t["number"] and t["number"] >= f + 2 for f, t in zip(forks, ab_tips)),
+           f"c={short(c_tip)} a/b={[short(t) for t in ab_tips]} fork={forks}; work above the frozen a/b tips in a/b tip blocks: c {(c_tip['work']-w0)/d0:.2f}, "
+           f"late a/b {(w_ab-w0)/d0:.2f}; late attempts {late}")
         relay = [dn.rpc(8540, "pocol_getBlockRlp", [hex(n)]) for n in range(forks[0] + 1, ab_tips[0]["number"] + 1)]
         reorgs0 = [st(i)["stats"]["reorgs"] for i in (0, 1)]
-        # c's miner stops too; c rejoins without one. From here no tip can move: c's tip is the known winner.
+        # 4. Heal: c rejoins without a miner. Nothing is mined, so no block is broadcast and the heal can
+        #    only start from Status sync (consensus.md:235): a and b see c claim more work and fetch its branch.
         stop_node("c"); run_node("c", miner=False)
-        c_tip = tip(2)
-        ok("partition: branches diverge; c's tip is strictly heavier and each a/b tip is >= 2 blocks past the fork",
-           c_tip["work"] > w_ab and all(c_tip["number"] > f and t["number"] >= f + 2 for f, t in zip(forks, ab_tips)),
-           f"c={short(c_tip)} a/b={[short(t) for t in ab_tips]} fork={forks}")
         t0 = time.time(); healed = waited(lambda: all(tip(i)["hash"] == c_tip["hash"] for i in range(3)), 120)
         heads = [tip(i) for i in range(3)]
-        ok("heal: every node's head is c's tip (the strictly heavier branch)", healed, f"heads a/b/c={[short(t) for t in heads]} c_tip={short(c_tip)} in {time.time()-t0:.0f}s")
+        ok("heal: every node's head is c's tip (heavier, and lower than every a/b tip)", healed, f"heads a/b/c={[short(t) for t in heads]} c_tip={short(c_tip)} in {time.time()-t0:.0f}s")
         ok("heal: on every node the canonical block at c's tip height is c's tip", all(canon(i, c_tip["number"]) == c_tip["hash"] for i in range(3)))
         ok("heal: no a/b tip is canonical on any node", all(canon(i, t["number"]) != t["hash"] for t in ab_tips for i in range(3)), f"a/b={[short(t) for t in ab_tips]}")
         reorgs = [st(i)["stats"]["reorgs"] for i in (0, 1)]
-        ok("heal: a and b reorganized (their reorg counters moved)", all(r > r0 for r, r0 in zip(reorgs, reorgs0)), f"a/b reorgs {reorgs0} -> {reorgs}")
-        # Relay: a test peer (valid Hello, claiming genesis, so no sync session is started with it)
-        # delivers the lighter a/b branch, parents first, to c, which never held it.
+        ok("heal: a and b each reorganized exactly once (one head switch, nothing mined)", all(r - r0 == 1 for r, r0 in zip(reorgs, reorgs0)), f"a/b reorgs {reorgs0} -> {reorgs}")
+        # 5. Relay without a session: a test peer (valid Hello claiming genesis, so c starts no session
+        #    with it) delivers a's branch below a's tip, parents first, to c, which holds none of it.
+        ok("relay: c holds no block of a's branch above the fork", all(blk(2, x) is None for x in branch), f"{len(branch)} blocks h={forks[0]+1}..{ab_tips[0]['number']}")
         s = socket.create_connection(("127.0.0.1", 30302)); s.sendall(hello(info["chainId"], genesis, genesis, 0, 0, b"e2e-relay"))
-        for b in relay: s.sendall(block_frame(b))
-        stored = waited(lambda: dn.rpc(8542, "eth_getBlockByHash", [ab_tips[0]["hash"], False]) is not None, 60); s.close()
-        ok("relay: c stores the lighter a/b branch delivered after the heal", stored, f"{len(relay)} blocks h={forks[0]+1}..{ab_tips[0]['number']}")
+        for b in relay[:-1]: s.sendall(block_frame(b))
+        stored = waited(lambda: blk(2, branch[-2]) is not None, 60); s.close()
         c_now = tip(2)
-        ok("relay: c keeps its head and the relayed lighter tip is not canonical (head = maximum of ≻, consensus.md:215)",
-           c_now["hash"] == c_tip["hash"] and canon(2, ab_tips[0]["number"]) != ab_tips[0]["hash"], f"c head={short(c_now)}")
+        ok("relay: c stores a's lighter branch below a's tip, keeps its head, and the branch is not canonical (head = maximum of ≻, consensus.md:215)",
+           stored and c_now["hash"] == c_tip["hash"] and canon(2, ab_tips[0]["number"] - 1) != branch[-2], f"stored={stored} c head={short(c_now)}")
+        # 6. Relay in a sync session: a second test peer claims a's tip with more work than c's head, so
+        #    c opens a session with it and asks (GetFrom); the peer answers with all of a's branch. c
+        #    stores a's tip and keeps its head: the work of the blocks decides, not the peer's claim.
+        sess0 = st(2)["stats"]["syncSessions"]
+        s = socket.create_connection(("127.0.0.1", 30302))
+        s.sendall(hello(info["chainId"], genesis, bytes.fromhex(ab_tips[0]["hash"][2:]), ab_tips[0]["number"], c_tip["work"] + 1, b"e2e-session"))
+        asked = await_msg(s, 15, 7)  # 7 = GetFrom
+        if asked:
+            for b in relay: s.sendall(block_frame(b))
+        stored = asked and waited(lambda: blk(2, ab_tips[0]["hash"]) is not None, 60); s.close()
+        c_now = tip(2); sess = st(2)["stats"]["syncSessions"]
+        ok("relay: c syncs a's tip from a peer claiming more work, keeps its head, and a's tip is not canonical",
+           stored and sess > sess0 and c_now["hash"] == c_tip["hash"] and canon(2, ab_tips[0]["number"]) != ab_tips[0]["hash"],
+           f"GetFrom={asked} stored={stored} sessions {sess0}->{sess} c head={short(c_now)}")
+        # 7. c restarts alone (no peers, no miner) and replays a journal whose last records are a's
+        #    branch: the replayed head is still c's tip, whatever the order of the records (consensus.md:215).
+        stop_node("c"); run_node("c", miner=False, connect=False)
+        c_now = tip(2)
+        ok("replay after the relay: c's head is c's tip; a's tip is stored and not canonical",
+           c_now["hash"] == c_tip["hash"] and blk(2, ab_tips[0]["hash"]) is not None and canon(2, ab_tips[0]["number"]) != ab_tips[0]["hash"], f"c head={short(c_now)}")
         # Every node mines again on the healed chain.
-        for l in L: stop_node(l)
+        stop_nodes(L)
         for l in L: run_node(l)
         wait(lambda: min(h(i) for i in range(3)) > c_tip["number"], 120, "production resumes on the healed chain")
         # Crash: SIGKILL b mid-production, restart from its journal.
