@@ -135,6 +135,7 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
 fn live(tag:&str,tx_cap:u64,txbytes_cap:u64,pool:u64,stop_at:u64)->Node{
     let g=pocold::node::now_s();let mut c=DevnetConfig::new(CHAIN,g,&["a"]);c.hash_rate=1024;c.d_att=73;c.tau=40;c.c=8;c.tx_cap=tx_cap;c.txbytes_cap=txbytes_cap;
     let (mut n,dir)=node(&c,tag,Some(devnet::miner_identity("a").key),Some(stop_at));let alice=devnet::account_key("alice");
+    n.cfg.log=true;// the production trace (locks, own-block rejections, attempt expiry) goes to stderr
     for i in 0..pool{n.submit_tx(pay(&alice,i,0),false).unwrap();}
     let t=Instant::now();let run=std::thread::spawn(move||{n.run();n});
     while !run.is_finished()&&t.elapsed()<Duration::from_secs(240){std::thread::sleep(Duration::from_millis(100));}
