@@ -1,9 +1,9 @@
 # Debug verification (final code 687ac38; CARGO_TARGET_DIR=dbg-target).
-# lp4-execution: full debug suite below (162 tests). pocold: lib + net + admission below (60 tests).
-# pocold consensus binary: EXCLUDED here. A single-threaded debug run of it (task bmrmba6l9)
-#   ran >61 min CPU on the deep-reorg (270-/360-block re-execution + restart) and mining tests and
-#   was stopped at the 5000s wall cap without completing: an unoptimized-build runtime limit, not a
-#   failure. Those tests PASS in the release integration (evidence/integration.json, pocold 110).
+# lp4-execution: full debug suite below (162 tests): PASS. pocold lib + net + admission below (60): PASS.
+# pocold consensus binary: TIMEOUT / INCOMPLETE. Its single-threaded debug run (task bmrmba6l9) was
+#   stopped at the 5000s wall cap before printing any result. Outcome UNKNOWN: a timeout does not
+#   distinguish a slow test from a stalled one. The release pass (integration.json) is separate
+#   evidence and does not stand in for it. A per-test completion run is recorded separately.
 
 === lp4 debug (full) ===
      Running unittests src/lib.rs (/tmp/claude-0/-home-user-Proof-of-Collaboration/5c42c059-8cb3-5c8b-83e8-431ffbd082d1/scratchpad/dbg-target/debug/deps/pocol_lp4_execution-7f4ffc91eb318f63)
@@ -43,7 +43,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
      Running tests/wire.rs (/tmp/claude-0/-home-user-Proof-of-Collaboration/5c42c059-8cb3-5c8b-83e8-431ffbd082d1/scratchpad/dbg-target/debug/deps/wire-5323cf542fa8b86d)
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
-=== pocold debug (lib + net + admission; consensus excluded: release-verified) ===
+=== pocold debug (lib + net + admission; consensus: TIMEOUT/INCOMPLETE, see header) ===
      Running unittests src/lib.rs (/tmp/claude-0/-home-user-Proof-of-Collaboration/5c42c059-8cb3-5c8b-83e8-431ffbd082d1/scratchpad/dbg-target/debug/deps/pocold-a63883e533ac96b1)
 test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
      Running tests/admission.rs (/tmp/claude-0/-home-user-Proof-of-Collaboration/5c42c059-8cb3-5c8b-83e8-431ffbd082d1/scratchpad/dbg-target/debug/deps/admission-52257bc53974cbcf)

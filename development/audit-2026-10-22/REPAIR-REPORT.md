@@ -113,11 +113,13 @@ implementation commit):
   bounded adversarial load, 0.22% of the model. Measured, not the model bound and not a ceiling
   (A13-DERIVATION §2b).
 - **Debug build (final code, evidence/debug-final.log):** lp4-execution full debug suite 162 passed;
-  pocold lib 37 + admission 3 + net 20 = 60 passed. The pocold `consensus` binary (~50 tests, the
-  270-/360-block deep-reorg re-execution + restart and the mining tests) is **release-verified** (part
-  of the pocold 110 above): a single-threaded debug run of it exceeded the 5000s wall cap without
-  finishing — an unoptimized-build runtime limit, not a failure — so it is excluded from the debug pass
-  and recorded as such.
+  pocold lib 37 + admission 3 + net 20 = 60 passed.
+- **TIMEOUT / INCOMPLETE — pocold `consensus` binary in debug.** Its single-threaded debug run was
+  stopped at the 5000s wall cap before printing a result, so its debug outcome is **unknown**: a
+  timeout does not distinguish a slow test from a stalled one, and no per-test result was captured.
+  The release integration's pass (pocold 110) is separate evidence and does not stand in for the debug
+  run. A per-test completion run (each test alone, with its own timeout) is in progress; until it
+  reports, debug verification of this binary is not complete.
 - **Mutation controls re-run on the final code (`687ac38`, evidence/mutations-final.json, §MUTATIONS):**
   14 of 14 test-failure mutations caught, plus the F6 compile-time field-inventory catch (15 controls in
   all). Each has a positive control (the named test passes on clean code) and a mutant run that fails
