@@ -1,8 +1,7 @@
 # Windows verification of the repair scope (round 2)
 
-Status: **prepared, not run.**
-- The scoped workflow cannot be dispatched until its file is on the default branch.
-- No Windows host is available in this environment.
+Status (2026-10-23): **running through a pull_request trigger; no passing run yet.** See "Runs" at the
+end. The sections before "Runs" are the original preparation record and are kept as they were.
 
 ## The existing workflows (inspected)
 
@@ -73,3 +72,51 @@ What deserves attention on Windows:
 Until one of these happens:
 - Windows evidence for the repair commit does not exist.
 - Every Windows-dependent item stays BLOCKED (environment), in FINDING-STATUS.json and the dashboard.
+
+## Runs
+
+The owner's 2026-10-23 instruction ("complete the authorized works: RpcGuard and the Windows
+verification") was taken as authorizing option B:
+- commit a03e089 adds a `pull_request` trigger, limited to PRs into `claude/affectionate-pascal-rjhh2k`
+  from this repository, and to the repair paths;
+- the commit under test is the PR head SHA.
+Nothing was merged into `main`, and manual dispatch is unchanged.
+
+### Run 1: a03e089 (code tree identical to 3c3792e): FAIL
+- Run: https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/39942501824 (pull_request).
+- Artifact `audit-r2-windows-a03e089a35affc22fed9f5aa3c961eac97d61658`, zip SHA-256
+  `6b2a90c1e45e118607438f3ffe96ea370478bd96de1f2917b328c6a7cc27f482`. Its content is copied unchanged to
+  `evidence/windows-a03e089/`.
+- Platform: Windows Server 2022 (NT 10.0.20348), image win22 20261012.333.1; Rust 1.58.1 / 1.99.1;
+  Node 22.22.0, checksum verified.
+
+| check | status | detail |
+|---|---|---|
+| lp1-store-journal | PASS | 12 passed, 0 failed (the Windows-only journal tests) |
+| lp1-node-all | PASS | 150 passed, 0 failed, 20 binaries |
+| lp4-execution | PASS | 162 passed, 0 failed, 19 binaries |
+| pocold | **FAIL** | 75 passed, 48 failed, 12 binaries |
+| extension npm ci / build / unit | PASS | unit: 234 passed |
+
+The 48 pocold failures have **one cause**:
+- All 48 are in `tests/consensus.rs` (28) and `tests/net.rs` (20), and each panics with
+  `retention.rkeep: Access is denied. (os error 5)`.
+- `retention_rkeep` (src/node.rs, added by D-REORG-REDB in 3c3792e) fsyncs the data directory with
+  `File::open(dir)`. Windows cannot open a directory as a file without backup semantics, so every
+  `Node::open` failed on Windows.
+- `store::sync_dir` already skips that case. This new call did not, and the Linux suites cannot see the
+  difference.
+- No other test failed. Every test that did not call `Node::open` passed, including the
+  store/journal v2 tests. The thread-count assertions were reported THREADS-NOT-MEASURED, as designed.
+
+Fix (next commit): on non-Unix targets the directory fsync after the rename is skipped, as in
+`store::sync_dir`. On Linux the code path is unchanged. Linux check:
+`cargo test --release --locked --test consensus replay_uses_the_largest_r_keep` → 1 passed.
+The fix is verified only by a Windows run on the commit that carries it (Run 2).
+
+Durability note:
+- On Windows, the rename of `retention.rkeep` is not followed by a directory flush. This is the same
+  as the journal's own renames.
+- A crash right after the rename can leave the old value. The old value is never smaller than the one
+  used by the records written before it, because the file is raised before replay and never lowered.
+  So the worst case is that the next open rewrites the file.

@@ -154,7 +154,9 @@ fn result_bytes(r:&Option<ParentResult>)->Vec<u8>{
 }
 
 /// The largest R_keep this data directory has used (`retention.rkeep`), raised to `configured` and
-/// written durably (temporary file, fsync, rename, directory fsync) before replay starts.
+/// written durably (temporary file, fsync, rename, directory fsync) before replay starts. Windows cannot
+/// open a directory as a file (Access is denied), so there the directory fsync is skipped, as in
+/// `store::sync_dir`.
 fn retention_rkeep(dir:&std::path::Path,configured:u64)->std::io::Result<u64>{
     use std::io::Write;
     let path=dir.join("retention.rkeep");
@@ -163,7 +165,7 @@ fn retention_rkeep(dir:&std::path::Path,configured:u64)->std::io::Result<u64>{
     if stored!=Some(rk){
         let tmp=dir.join("retention.rkeep.tmp");
         {let mut f=std::fs::File::create(&tmp)?;f.write_all(rk.to_string().as_bytes())?;f.sync_all()?;}
-        std::fs::rename(&tmp,&path)?;std::fs::File::open(dir)?.sync_all()?;
+        std::fs::rename(&tmp,&path)?;if cfg!(unix){std::fs::File::open(dir)?.sync_all()?;}
     }
     Ok(rk)
 }
