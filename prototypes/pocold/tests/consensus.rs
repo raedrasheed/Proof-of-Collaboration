@@ -596,7 +596,7 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     let v:serde_json::Value=serde_json::from_str(&pocold::rpc::handle(&mut node,q.as_bytes())).unwrap();assert_eq!(v["result"].as_array().map(|a|a.len()),Some(546),"{}",&v.to_string()[..200.min(v.to_string().len())]);
     let _=std::fs::remove_dir_all(&dir);
 }
-/// RpcGuard SCRATCH (network.md:228, (ز)): eth_getLogs charges the working bytes it materializes
+/// RpcGuard SCRATCH (network.md:220, (ز)): eth_getLogs charges the working bytes it materializes
 /// against the heavy SCRATCH budget; an overflow is -32020 {scratch} with the same resume data as a
 /// per-block limit, and the partial result is dropped. A heavy request is run through `answer`, which
 /// derives the budget from the node's running SCRATCH_HEAVY, so a small limit reaches the bound in
@@ -613,7 +613,7 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     let getlogs=|node:&mut Node|->serde_json::Value{
         let q=format!(r#"{{"jsonrpc":"2.0","id":7,"method":"eth_getLogs","params":[{{"fromBlock":"0x{first:x}","toBlock":"0x{first:x}"}}]}}"#);
         let (t,_r)=std::sync::mpsc::channel();
-        let a=rpc::answer(node,&Request{body:q.into_bytes(),reply:t,site:false,deadline:Instant::now()+Duration::from_secs(30),accepted:Instant::now(),light:false,held:None});
+        let a=rpc::answer(node,&Request::local(q.into_bytes(),t,Instant::now()+Duration::from_secs(30),false));
         serde_json::from_str::<serde_json::Value>(&a.body).unwrap()
     };
     // Small SCRATCH_HEAVY: the first block's logs exceed it -> -32020 {scratch}, no result.
@@ -629,6 +629,18 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     let mut node2=Node::open(Config{dir:dir2.clone(),name:"scratch2".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},admitted(&cfg(&["a","b","c"]))).unwrap();
     for (_,h) in &hs{let e=n.chain.blocks[h].clone();node2.import(Block{header:e.header,body:e.body},None).unwrap();}
     assert_eq!(getlogs(&mut node2)["result"].as_array().map(|a|a.len()),Some(546),"the default budget answers the block");
+    // Review M3/V5: past its COMPUTE_DEADLINE (here already at entry) each log handler answers -32020
+    // {deadline} with the resume data of no progress (network.md:300), and its scan stops at the first
+    // block, before it materializes any log (the handler's charged working set stays 0).
+    let fh=format!("0x{first:x}");let bh=pocold::types::hex(&hs.iter().find(|x|x.0==first).unwrap().1);
+    for q in [format!(r#"{{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{{"fromBlock":"{fh}","toBlock":"{fh}"}}]}}"#),
+        format!(r#"{{"jsonrpc":"2.0","id":2,"method":"pocol_getLogs","params":[{{"fromBlock":"{fh}","toBlock":"{fh}"}}]}}"#),
+        format!(r#"{{"jsonrpc":"2.0","id":3,"method":"pocol_getLogs","params":[{{"blockHash":"{bh}"}}]}}"#)]{
+        let mut b=rpc::Budget{compute_by:Instant::now(),scratch_max:usize::MAX,scratch_used:0,walled:false};
+        let v:serde_json::Value=serde_json::from_str(&rpc::handle_until_budgeted(&mut node2,q.as_bytes(),false,None,None,&mut b)).unwrap();let e=&v["error"];
+        assert_eq!(e["code"],-32020,"{v}");assert_eq!(e["data"]["reason"],"deadline");assert_eq!(e["data"]["fromBlock"],fh);assert_eq!(e["data"]["nextFromBlock"],fh);assert!(e["data"]["lastCompleteBlock"].is_null());
+        assert_eq!(b.scratch_used,0,"the scan stopped at its first block: {q}");
+    }
     let _=std::fs::remove_dir_all(&dir);let _=std::fs::remove_dir_all(&dir2);
 }
 
@@ -693,7 +705,7 @@ fn grow(h:&mut Net,parent:[u8;32],n:usize,first:&dyn Fn(&Net,[u8;32])->Block)->V
     let (mut n,dir,_)=retention_node("txmax");n.import(b,None).unwrap();assert_eq!(n.chain.head().body.txs.len(),1);
     let body=format!(r#"{{"jsonrpc":"2.0","id":3,"method":"eth_getTransactionByHash","params":["{hash}"]}}"#);assert!(pocold::rpc::is_light(body.as_bytes()));
     let (t,_r)=std::sync::mpsc::channel();
-    let a=pocold::rpc::answer(&mut n,&pocold::rpc::Request{body:body.into_bytes(),reply:t,site:false,deadline:std::time::Instant::now()+std::time::Duration::from_secs(30),accepted:std::time::Instant::now(),light:true,held:None});
+    let a=pocold::rpc::answer(&mut n,&pocold::rpc::Request::local(body.into_bytes(),t,std::time::Instant::now()+std::time::Duration::from_secs(30),true));
     let v:serde_json::Value=serde_json::from_str(&a.body).unwrap();
     assert_eq!(v["result"]["hash"],format!("{hash}"),"answered, not -32008: {}",&a.body[..a.body.len().min(200)]);
     assert!(v["result"].get("raw").is_none());assert!(a.body.len()<=2*txmax+2048,"{} B",a.body.len());
@@ -724,7 +736,7 @@ fn heavier(h:&mut Net,parent:[u8;32],than:U256,extra:usize)->Vec<Block>{
 fn unprotected(n:&pocold::node::Node)->usize{n.chain.blocks.keys().filter(|h|n.chain.blocks[*h].height>0&&!n.chain.is_canonical(h)&&!n.chain.protect.contains(*h)).count()}
 fn rpc_local(n:&mut pocold::node::Node,method:&str,params:serde_json::Value)->serde_json::Value{
     let body=json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}).to_string();let (t,_r)=std::sync::mpsc::channel();
-    let a=pocold::rpc::answer(n,&pocold::rpc::Request{body:body.into_bytes(),reply:t,site:false,deadline:std::time::Instant::now()+std::time::Duration::from_secs(120),accepted:std::time::Instant::now(),light:false,held:None});
+    let a=pocold::rpc::answer(n,&pocold::rpc::Request::local(body.into_bytes(),t,std::time::Instant::now()+std::time::Duration::from_secs(120),false));
     serde_json::from_str::<serde_json::Value>(&a.body).unwrap()["result"].clone()
 }
 /// Every canonical block (with full transactions) and every receipt, as the node answers them over RPC.
@@ -1024,7 +1036,7 @@ fn wait_for(secs:u64,f:&dyn Fn()->bool)->bool{let t=std::time::Instant::now();wh
     let (mut n,dir,_)=rnode("call",64,16);for x in &blocks{n.import(x.clone(),None).unwrap();}
     assert!(n.chain.canonical_at(1).unwrap().pruned,"block 1 is outside the K_hist window");
     let body=json!({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":format!("{:#x}",devnet::account_key("bob").address())},"0x1"]}).to_string();let (t,_r)=std::sync::mpsc::channel();
-    let a=pocold::rpc::answer(&mut n,&pocold::rpc::Request{body:body.into_bytes(),reply:t,site:false,deadline:std::time::Instant::now()+std::time::Duration::from_secs(60),accepted:std::time::Instant::now(),light:false,held:None});
+    let a=pocold::rpc::answer(&mut n,&pocold::rpc::Request::local(body.into_bytes(),t,std::time::Instant::now()+std::time::Duration::from_secs(60),false));
     let v:serde_json::Value=serde_json::from_str(&a.body).unwrap();assert_eq!(v["error"]["code"],-32017,"{v}");
     assert!(!rpc_local(&mut n,"eth_call",json!([{"to":format!("{:#x}",devnet::account_key("bob").address())},"latest"])).is_null(),"the head state answers");
     let _=std::fs::remove_dir_all(&dir);

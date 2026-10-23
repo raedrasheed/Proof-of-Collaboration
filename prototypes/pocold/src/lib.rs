@@ -57,25 +57,25 @@ use pocol_lp4_execution::{admission::{self,NodeLocal,Request},devnet,gate::FactC
 /// side state is rebuilt on demand from its nearest retained ancestor). K_hist stays 32.
 pub const SIDE_MAX:u32=2;
 pub fn single_host_local()->NodeLocal{NodeLocal{gossip:[net::MAX_FRAME as u32;6],rpc:rpc_facts(&rpc::Limits::default()),side_max:SIDE_MAX,..NodeLocal::single_host()}}
-/// R26 facts (D-A02-SCOPE): the RpcGuard fields pocold enforces or enforces by an equivalent (or
+/// R26 facts (D-A02-SCOPE): the RpcGuard fields pocold enforces, or enforces by an equivalent (or
 /// stronger) bound within its architecture, at their running values (development/audit-2026-10-22/
 /// RPCGUARD.md maps each). heavy_active and light_active are reported at 1, the equivalent bound of
-/// the single consensus thread (active work ≤ 1 ≤ the spec's 4/16); cancel_max_ms = 100 is the
-/// equivalent cancellation gap. Three fields stay absent, never nominal, so admission can only be an
-/// experimental-devnet admission: send_sock_buf (std exposes no portable setsockopt; D93 says it
-/// enters no criterion), mem_total (pocold bounds RPC memory through its own A13 budget, not a 192
-/// MiB field), and timer_eps_ms (pocold paces by a backstop re-check, not the exact 1 ms tie-break).
-pub const RPC_ENFORCED:[&str;26]=["conn_max","req_buf","conn_buf","heavy_active","light_active","light_queue","heavy_resp_mem","light_resp_mem",
-    "resp_max","light_resp_max","batch_resp_max","scratch_heavy","scratch_light","batch_max","err_item_max","logs_count_max","logs_scan_bytes",
-    "rate","bucket_cap","queue_wait_ms","compute_heavy_ms","cancel_max_ms","grace_ms","min_send_rate","batch_wall_ms","enforce_slack_ms"];
-/// pocold's equivalent CANCEL_MAX: the cancellation gap is ≤ one block scan / one loop body, well
-/// under this reported bound (network.md:235).
-pub const RPC_CANCEL_MAX_MS:u64=100;
+/// the single consensus thread (active work ≤ 1 ≤ the spec's 4/16); conn_buf is SMALL_REPLY_MAX, the
+/// structural bound on a connection's small answers (the spec's CONN_BUF use); rate and bucket_cap
+/// are the per-connection bucket on a connection's one request. Five fields stay absent, never
+/// nominal, so admission can only be an experimental-devnet admission: send_sock_buf (std exposes no
+/// portable setsockopt), scratch_heavy and scratch_light (only the log handlers are charged; the
+/// others, eth_call's EVM memory included, are not), mem_total (pocold bounds RPC memory through its
+/// own A13 budget, not a 192 MiB field), and cancel_max_ms (a precompile call is not interruptible,
+/// so the cancellation gap is not bounded by 100 ms).
+pub const RPC_ENFORCED:[&str;24]=["conn_max","req_buf","conn_buf","heavy_active","light_active","light_queue","heavy_resp_mem","light_resp_mem",
+    "resp_max","light_resp_max","batch_resp_max","batch_max","err_item_max","logs_count_max","logs_scan_bytes",
+    "rate","bucket_cap","queue_wait_ms","compute_heavy_ms","grace_ms","min_send_rate","batch_wall_ms","enforce_slack_ms","timer_eps_ms"];
 pub fn rpc_facts(l:&rpc::Limits)->admission::RpcFacts{
     let ms=|d:std::time::Duration|d.as_millis() as u64;
-    let v:[u64;26]=[l.conn_max as u64,rpc::REQ_BUF as u64,l.conn_buf as u64,1,1,l.light_queue as u64,rpc::HEAVY_RESP_POOL as u64,rpc::light_pool(l) as u64,
-        rpc::RESP_MAX as u64,rpc::LIGHT_RESP_MAX as u64,rpc::BATCH_RESP_MAX as u64,l.scratch_heavy as u64,l.scratch_light as u64,rpc::BATCH_MAX as u64,rpc::ERR_ITEM_MAX as u64,rpc::LOGS_COUNT_MAX as u64,rpc::LOGS_SCAN_BYTES as u64,
-        l.rate as u64,l.bucket_cap as u64,ms(l.queue_wait),ms(l.compute_heavy),RPC_CANCEL_MAX_MS,ms(l.grace),l.min_send_rate,ms(l.batch_wall),ms(l.enforce_slack)];
+    let v:[u64;24]=[l.conn_max as u64,rpc::REQ_BUF as u64,rpc::SMALL_REPLY_MAX as u64,1,1,l.light_queue as u64,rpc::HEAVY_RESP_POOL as u64,rpc::light_pool(l) as u64,
+        rpc::RESP_MAX as u64,rpc::LIGHT_RESP_MAX as u64,rpc::BATCH_RESP_MAX as u64,rpc::BATCH_MAX as u64,rpc::ERR_ITEM_MAX as u64,rpc::LOGS_COUNT_MAX as u64,rpc::LOGS_SCAN_BYTES as u64,
+        l.rate as u64,l.bucket_cap as u64,ms(l.queue_wait),ms(l.compute_heavy),ms(l.grace),l.min_send_rate,ms(l.batch_wall),ms(l.enforce_slack),ms(l.timer_eps)];
     let present:Vec<(&str,u64)>=RPC_ENFORCED.iter().zip(v).map(|(k,x)|(*k,x)).collect();
     admission::RpcFacts::enforced(&present).expect("RPC_ENFORCED names RpcGuard fields")
 }
