@@ -297,3 +297,13 @@ Windows defects found and fixed by this verification:
 2. A dropped P2P peer's reader that `shutdown` does not wake on Windows (Run 2).
 3. Nagle plus delayed-ACK stalls of about 200 ms on every RPC answer (Run 2).
 4. Kernel absorption of unread RPC answers (Runs 3, 5, 7): SO_SNDBUF plus the write cap.
+
+### Runs 10–13: all PASS
+| run | commit | what changed since Run 9 | counted as |
+|---|---|---|---|
+| 10 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40006362144 | 273e785 | evidence only | repeat of Run 9 (same code) |
+| 11 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40006493330 | 0d6f9dd | merge of wf/journal-r2: adds `tests/journal_measure.rs` (#[ignore] measurement tests) | **verifies that journal_measure.rs builds on Windows** (its tests are ignored, so they are not run) |
+| 12 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40007742530 | e35f165 | merge of wf/e2e-r2: changes only tests/e2e_devnet.py, which this workflow does not run | repeat of Run 11 for the Rust code |
+| 13 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40009973331 | d40fd91 | evidence only | repeat |
+
+Their artifacts are not copied: the code under test is that of Run 9 or Run 11.
