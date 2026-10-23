@@ -61,11 +61,15 @@ fn base()->DevnetConfig{DevnetConfig::new(777930,1_700_000_000,&["a","b","c"])}
     let d=tmp("scope");let dir=d.join("ok");publish(&base(),&dir,true);
     let spec=pocold::load_spec(&dir,&pocold::single_host_local()).unwrap();let a=spec.admission();
     assert_eq!(a.scope(),Scope::ExperimentalDevnet);assert!(!a.specification_compliant());
-    let f=&a.local().rpc;assert_eq!(f.absent().len(),22);assert!(!f.is_fixture());
+    // RpcGuard round 2: 26 enforced/equivalent fields, 3 absent (send_sock_buf, mem_total, timer_eps_ms).
+    let f=&a.local().rpc;assert_eq!(f.absent().len(),3);assert!(!f.is_fixture());
     for x in pocold::RPC_ENFORCED{assert!(!f.absent().contains(&x),"{x} is enforced")}
-    assert_eq!((f.values().heavy_resp_mem,f.values().rate,f.values().min_send_rate),(0,0,0),"absent fields are not nominal");
+    assert_eq!((f.values().send_sock_buf,f.values().mem_total,f.values().timer_eps_ms),(0,0,0),"absent fields are not nominal");
+    assert_eq!((f.values().heavy_resp_mem,f.values().rate,f.values().min_send_rate),(48<<20,10_000,65536),"enforced fields carry their running values");
     assert_eq!(f.values().req_buf,pocold::rpc::REQ_BUF as u64);
-    let w=&a.report().waivers;assert_eq!(w.len(),1);assert_eq!(w[0].checked.len(),4);
+    // 14 of the 18 R26 predicates read only enforced fields and are checked; 4 read an absent field
+    // (memoryRequired<=memTotal, timerEps>0, timerEps<enforceSlack, sendSockBuf<=64KiB) and are waived.
+    let w=&a.report().waivers;assert_eq!(w.len(),1);assert_eq!(w[0].checked.len(),14);assert_eq!(w[0].waived.len(),4);
     let j=pocold::admission_json(a);assert_eq!(j["scope"],"experimental-devnet");assert_eq!(j["specificationCompliant"],false);
     assert!(j["conditions"].as_array().unwrap().iter().any(|c|c["id"]=="rpc-absent"));
     // Specification scope on the same artifacts and local facts.

@@ -128,8 +128,13 @@ fn sh()->NodeLocal{NodeLocal::single_host()}
 
 // D-A02-SCOPE: an absent RpcGuard field is never nominal; specification scope refuses every open
 // condition; the experimental-devnet scope waives only R26 predicates reading absent fields.
-/// pocold's enforced RpcGuard fields (pocold::RPC_ENFORCED) at its values.
-fn pocold_like()->RpcFacts{RpcFacts::enforced(&[("conn_max",32),("req_buf",1<<20),("resp_max",8<<20),("batch_resp_max",16<<20),("batch_max",20),("logs_count_max",10000),("logs_scan_bytes",32<<20)]).unwrap()}
+/// pocold's enforced/equivalent RpcGuard fields (pocold::RPC_ENFORCED) at its running values
+/// (RpcGuard round 2). heavy_active/light_active = 1 are the single-consensus-thread equivalent;
+/// send_sock_buf, mem_total and timer_eps_ms stay absent.
+fn pocold_like()->RpcFacts{RpcFacts::enforced(&[("conn_max",32),("req_buf",1<<20),("conn_buf",64<<10),("heavy_active",1),("light_active",1),("light_queue",32),
+    ("heavy_resp_mem",48<<20),("light_resp_mem",33*(512<<10)),("resp_max",8<<20),("light_resp_max",512<<10),("batch_resp_max",16<<20),("scratch_heavy",16<<20),("scratch_light",1<<20),
+    ("batch_max",20),("err_item_max",256),("logs_count_max",10000),("logs_scan_bytes",32<<20),("rate",10_000),("bucket_cap",10_000),("queue_wait_ms",2000),("compute_heavy_ms",5000),
+    ("cancel_max_ms",100),("grace_ms",2000),("min_send_rate",65536),("batch_wall_ms",420000),("enforce_slack_ms",200)]).unwrap()}
 #[test] fn r26_predicates_are_the_gate_conjunction(){
     // Deterministic configurations around every boundary; the split must equal the gate's verdict.
     let mut x=0x9e3779b97f4a7c15u64;let mut next=||{x^=x<<13;x^=x>>7;x^=x<<17;x};
@@ -160,9 +165,11 @@ fn scope_slot<'a>(l:&'a mut RpcLimits,f:&str)->&'a mut u64{
 }
 #[test] fn absent_rpc_fields_enter_the_gate_as_zero_never_nominal(){
     let f=pocold_like();let v=f.values();
-    assert_eq!((v.heavy_resp_mem,v.light_resp_mem,v.rate,v.bucket_cap,v.min_send_rate,v.compute_heavy_ms,v.mem_total),(0,0,0,0,0,0,0));
-    assert_eq!((v.conn_max,v.resp_max,v.batch_max),(32,8<<20,20));assert_eq!(f.absent().len(),22);assert!(!f.is_fixture());
-    assert!(!v.satisfies_r26(),"absent mechanisms cannot satisfy R26");
+    // Only the three unenforced fields enter the gate as 0; the enforced/equivalent ones carry values.
+    assert_eq!((v.send_sock_buf,v.mem_total,v.timer_eps_ms),(0,0,0));
+    assert_eq!((v.heavy_resp_mem,v.rate,v.min_send_rate,v.compute_heavy_ms),(48<<20,10_000,65536,5000));
+    assert_eq!((v.conn_max,v.resp_max,v.batch_max),(32,8<<20,20));assert_eq!(f.absent().len(),3);assert!(!f.is_fixture());
+    assert!(!v.satisfies_r26(),"absent mechanisms (mem_total, timer_eps) cannot satisfy R26");
     assert!(RpcFacts::enforced(&[("rate_limit",1)]).is_err());assert!(RpcFacts::enforced(&[("rate",1),("rate",2)]).is_err());
 }
 #[test] fn specification_scope_refuses_every_open_condition(){
@@ -176,7 +183,7 @@ fn scope_slot<'a>(l:&'a mut RpcLimits,f:&str)->&'a mut u64{
     let local=NodeLocal{rpc:pocold_like(),..sh()};
     let e=admit(&Request{scope:Scope::Specification,..n.request(&local,Some(&tt))}).err().unwrap();
     assert!(e.missing.contains(&"specification:rpc-absent".to_string())&&!e.missing.contains(&"specification:rpc-fixture".to_string()));
-    assert!(e.notes.iter().any(|x|x.contains("heavy_resp_mem")&&x.contains("min_send_rate")),"{:?}",e.notes);
+    assert!(e.notes.iter().any(|x|x.contains("send_sock_buf")&&x.contains("mem_total")&&x.contains("timer_eps_ms")),"{:?}",e.notes);
     // A gate violation is still reported with the conditions.
     let e=admit(&Request{scope:Scope::Specification,..n.request(&NodeLocal{delta_rel:4,..sh()},Some(&tt))}).err().unwrap();assert!(e.rules.contains(&"R2".to_string()));
 }
@@ -185,7 +192,12 @@ fn scope_slot<'a>(l:&'a mut RpcLimits,f:&str)->&'a mut u64{
     let a=admit(&n.request(&NodeLocal{rpc:pocold_like(),..sh()},Some(&tt))).unwrap_or_else(|e|panic!("{e}"));
     assert_eq!(a.scope(),Scope::ExperimentalDevnet);assert!(!a.specification_compliant());
     let w=&a.report().waivers;assert_eq!(w.len(),1);assert_eq!(w[0].rule,"R26");
-    assert_eq!(w[0].checked,vec!["batchRespMax>=respMax","respMax>=2*32768+546*512","logsCountMax>=546","logsScanBytes>=32768"]);
+    // 14 predicates read only enforced/equivalent fields; the 4 reading mem_total, timer_eps_ms or
+    // send_sock_buf are waived.
+    assert_eq!(w[0].checked,vec!["derive","heavyRespMem>=respMax","lightRespMem>=connMax*lightRespMax","batchRespMax>=respMax","lightQueue>=connMax",
+        "batchMax*errItemMax+64<=connBuf","respMax>=2*32768+546*512","logsCountMax>=546","logsScanBytes>=32768","lightRespMax>=385KiB","batchWallMin<=batchWallMs",
+        "rate>=1","bucketCap>=batchMax","enforceSlack<=500"]);
+    assert_eq!(w[0].waived,vec!["memoryRequired<=memTotal","timerEps>0","timerEps<enforceSlack","sendSockBuf<=64KiB"]);
     assert_eq!(w[0].waived.len()+w[0].checked.len(),R26_PREDICATES.len());
     let ids:Vec<&str>=a.report().conditions.iter().map(|c|c.id).collect();
     assert!(ids.contains(&"rpc-absent")&&ids.contains(&"calibration-synthetic")&&ids.contains(&"timing-not-a-bound"),"{ids:?}");

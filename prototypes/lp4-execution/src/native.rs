@@ -46,6 +46,32 @@ pub fn execute_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockConte
     crate::code_caps::validate_snapshot(snapshot,limits).map_err(EVMError::Custom)?;
     execute_on_chain(snapshot,tx,block,profile.spec().chain_id,Some(limits))
 }
+/// The EVMError::Custom text of a simulation that `stop` ended.
+pub const SIMULATION_STOPPED:&str="rpc simulation stopped";
+/// RPC simulation only (eth_call/eth_estimateGas, network.md RpcGuard (و)): `execute_for_profile` with
+/// `stop` polled at every 64th JUMP/JUMPI and at every CALL/CREATE-family instruction (so at least once
+/// per loop body or frame). When it returns true the execution ends with
+/// EVMError::Custom(SIMULATION_STOPPED). A precompile call runs to its end. Block validation, SYSTEM
+/// and USER never use it.
+pub fn simulate_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity,stop:std::rc::Rc<dyn Fn()->bool>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+    let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
+    crate::code_caps::validate_snapshot(snapshot,limits).map_err(EVMError::Custom)?;
+    validate_nonce(snapshot,tx.caller,tx.nonce)?;
+    build_engine(snapshot,tx,block,profile.spec().chain_id,Some(limits)).modify()
+        .append_handler_register_box(Box::new(move|h|stop_register(h,stop.clone()))).build().transact()
+}
+fn stop_register<EXT:'static>(h:&mut revm::handler::register::EvmHandler<'_,EXT,InMemoryDB>,stop:std::rc::Rc<dyn Fn()->bool>){
+    use revm::interpreter::{opcode,InstructionResult};
+    let n=std::rc::Rc::new(std::cell::Cell::new(0u32));
+    for (op,every) in [(opcode::JUMP,64),(opcode::JUMPI,64),(opcode::CALL,1),(opcode::CALLCODE,1),(opcode::DELEGATECALL,1),(opcode::STATICCALL,1),(opcode::CREATE,1),(opcode::CREATE2,1)]{
+        let (stop,n)=(stop.clone(),n.clone());
+        h.instruction_table.update_boxed(op,move|prev,interp,host|{
+            let k=n.get().wrapping_add(1);n.set(k);
+            if k%every==0&&stop(){host.evm.error=Err(EVMError::Custom(SIMULATION_STOPPED.into()));interp.instruction_result=InstructionResult::FatalExternalError;return}
+            prev(interp,host)
+        });
+    }
+}
 fn execute_on_chain(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     validate_nonce(snapshot,tx.caller,tx.nonce)?;
     build_engine(snapshot,tx,block,chain_id,limits).transact()

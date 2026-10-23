@@ -145,12 +145,16 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // LIGHT_BODY_MAX. The consensus thread handles one request at a time: its parse tree
     // (rpc::parse_bytes_max, enforced by JSON_VALUES_MAX) and the answer being built: the batch
     // so far (a growing String: VEC x BATCH_BYTES_HARD) plus one member (its JSON tree and
-    // string, a log result stopping at RESP_MAX), counted as 4 x RESP_MAX by inspection.
+    // string, a log result stopping at RESP_MAX), counted as 4 x RESP_MAX by inspection. RpcGuard
+    // round 2: queued heavy bodies are now capped at HEAVY_QUEUE (not 2·conn_max), the light lane
+    // at LIGHT_QUEUE; the per-source token bucket map is bounded at 4096 entries. The SendPacer
+    // writes the answer straight from its reservation (only a small response header is allocated).
     let r=&limits.rpc;use crate::rpc::{REQ_BUF,HEAD_MAX,READ_CHUNK,RESP_MAX,LIGHT_BODY_MAX,HEAVY_RESP_POOL,BATCH_BYTES_HARD,SMALL_REPLY_MAX};
     let rq=[("rpc/connection requests (conn_max)",mul(r.conn_max as u128,(4*(HEAD_MAX+READ_CHUNK)+REQ_BUF) as u128)?),
         ("rpc/heavy response pool",HEAVY_RESP_POOL as u128),("rpc/light response pool ((conn_max+1) x LIGHT_RESP_MAX)",crate::rpc::light_pool(r) as u128),
         ("rpc/small answers outside the pools (conn_max)",mul(r.conn_max as u128,SMALL_REPLY_MAX as u128)?),
-        ("rpc/queued heavy bodies (queued_max)",mul(crate::rpc::queued_max(r) as u128,REQ_BUF as u128+256)?),("rpc/light lane (conn_max)",mul(r.conn_max as u128,LIGHT_BODY_MAX as u128+256)?),
+        ("rpc/queued heavy bodies (HEAVY_QUEUE)",mul(crate::rpc::queued_max(r) as u128,REQ_BUF as u128+256)?),("rpc/light lane (LIGHT_QUEUE)",mul(r.light_queue as u128,LIGHT_BODY_MAX as u128+256)?),
+        ("rpc/token bucket map (<=4096 sources)",mul(4096,17+24+16)?),
         ("rpc/request parse tree",crate::rpc::parse_bytes_max(REQ_BUF)),("rpc/answer being built",memory::VEC*(BATCH_BYTES_HARD as u128)+4*(RESP_MAX as u128))];
     let rpc=add(&rq.map(|x|x.1))?;items.extend(rq);
     // Threads: reserved stacks (an upper bound on their resident stack) and per-thread heap.
