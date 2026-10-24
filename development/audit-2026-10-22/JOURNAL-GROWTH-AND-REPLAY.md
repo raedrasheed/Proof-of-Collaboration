@@ -971,6 +971,14 @@ both rows):**
 The adopting stall adds the pool re-execution of the abandoned branch's transactions (≤ 1024 blocks' worth;
 ≈ 1 s each for the worst kind, so up to ≈ 17 min more).
 
+**Correction (2026-10-24, `462fffc`, PR #27 review thread).** The walk in `detached_txs` was bounded by
+2·REORG_RESTORE_MAX = 2,048 steps over both sides together, not 1,024 blocks per side. A reorg whose
+sides total more than 2,048 blocks lost the oldest detached transactions. The walk
+(`detached_blocks`) now reaches the common ancestor, so the restore covers up to R_keep = 2,048
+abandoned blocks. For the worst kind (one ≈ 1 s transaction per block) the adopting stall therefore
+adds up to ≈ 34 min, not ≈ 17 min. This figure is derived, not measured. The measured figures above
+(§5.2, 50 abandoned blocks) are unchanged.
+
 The empty-block figures (96 s devnet, 10.4 min network) are **empty-chain figures** (J2-M1); round 2's
 devnet row used H = 17,952 (the fork point), which dropped the 2·d·a term (J2-m2). Every stall exceeds
 the attempt window D_att (governance.md:6: network 300 s, devnet 25 s) even for empty blocks, and the

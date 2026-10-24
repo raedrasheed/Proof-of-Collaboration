@@ -3,12 +3,12 @@
  "repairBranch": "claude/audit-repair-a01-a14",
  "pr": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/27",
  "commits": {
-  "prHead": "latest commit on claude/audit-repair-a01-a14 (docs and evidence only after c959379)",
-  "lastImplementation": "c959379 (its prototypes/ changes are test files only; the last src change is dd7d1ec, merged at 2b1a571; .github/ is unchanged since a03e089)",
-  "integrationTested": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+  "prHead": "latest commit on claude/audit-repair-a01-a14 (docs and evidence only after 462fffc)",
+  "lastImplementation": "462fffc (PR #27 review threads: the A11 reorg walk in pocold/src/node.rs and the R14/R19 calibration in lp4-execution/src/admission.rs, each with a test; evidence/pr27-review-threads/). Before it c959379 (test files only; the last src change of round 3 is dd7d1ec, merged at 2b1a571); .github/ is unchanged since a03e089",
+  "integrationTested": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
   "witnessTested": "3c3792e (not re-run on the round-3 code)",
   "chromeTested": "3c3792e (not re-run on the round-3 code)",
-  "windowsTested": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+  "windowsTested": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
  },
  "axes": {
   "implemented": "YES | PARTIAL",
@@ -310,12 +310,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
@@ -358,12 +358,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [
     "Only an experimental-devnet admission is possible: Specification scope refuses every current profile (rpc-absent, calibration-synthetic, timing-not-a-bound, gas-monotonicity-assumed, gate-deferred LP3 items)",
@@ -410,12 +410,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
@@ -458,12 +458,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [
     "Real power loss is not tested (simulated by file edits only)",
@@ -539,12 +539,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [
     "RpcGuard is mapped item by item in RPCGUARD.md (ENFORCED, EQUIVALENT, PARTIAL, NOT ENFORCED). Not enforced or partial: SCRATCH outside the log handlers and light SCRATCH (absent), RPC_MEM_TOTAL as a field (absent; bounded by A13), CANCEL_MAX for precompile runs (absent; proposal P2), PacerTrace, chunked batch streaming, the numeric log range before admission, pocol_getLogs anchors, the unlisted-method rule (PARTIAL; proposal P4), the conditional light entries' lane (they run on the heavy lane, with the light deadline and answer limit), the aggregate rate across reconnects (proposal P1); RPC runs on the consensus thread (no separate runtime)",
@@ -588,12 +588,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [
     "After a request is initiated it may be broadcast; it is reported as initiated/broadcast, never as cancelled (by design)"
@@ -633,12 +633,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
@@ -672,12 +672,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
@@ -710,12 +710,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
@@ -748,12 +748,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
@@ -788,12 +788,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
@@ -826,12 +826,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
@@ -888,12 +888,12 @@
     ],
     "witnessOnRepair": "n/a (source review)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [
     "OPEN: gas monotonicity in the domain fields (§4.1)",
@@ -947,12 +947,12 @@
     ],
     "witnessOnRepair": "NOT_REPRODUCED with its positive control (evidence/WITNESS-CONTROLS.md)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3)",
+     "integration": "3c3792e for the full LP10 integration with real Chrome; the round-3 suites ran on 2b1a571 and c959379 (integrationR3); pocold, lp4-execution, the ignored consensus tests and e2e_devnet ran on 462fffc (evidence/pr27-review-threads/)",
      "witness": "3c3792e (not re-run on the round-3 code)",
      "realChrome": "3c3792e (not re-run on the round-3 code)",
-     "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
+     "windows": "c959379 (Windows CI run 22, PASS; windowsVerification); 462fffc not yet run"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {

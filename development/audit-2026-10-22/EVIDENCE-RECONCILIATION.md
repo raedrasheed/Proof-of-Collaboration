@@ -5,6 +5,25 @@ Commit roles for the verification, and proof of which evidence commits carry the
 section comes first; the reconciliation recorded for `3c3792e` and the one for `687ac38` follow,
 kept for history.
 
+## After round 3 (2026-10-24): code at `462fffc` (PR #27 review threads)
+
+`462fffc` changes `pocold/src/node.rs` (the A11 reorg walk) and `lp4-execution/src/admission.rs` (the
+R14/R19 calibration), each with a new test. It is now the last implementation commit. Results from
+`c959379` and earlier apply to the code before this change.
+
+| role | commit | prototypes/ | .github/ | pocold/src | lp4-execution/src |
+|---|---|---|---|---|---|
+| last implementation commit | `462fffc5e4af6006a0ef5aa96bb1070d50a2749b` | `e1314693fc8b` | `0c6344e64559` | `828205b1c784` | `6ef83cebf0a3` |
+
+Ran on `462fffc` (release, Linux; evidence/pr27-review-threads/):
+- lp4-execution 169/0;
+- pocold 171/0 (15 ignored);
+- the ignored consensus tests 3/3;
+- e2e_devnet 38/38.
+
+Not yet run on `462fffc`: Windows CI, the debug runs, the mutation controls of other tracks, and the
+LP10/Chrome integration.
+
 ## Round 3 (2026-10-24): code at `c959379`
 
 In round 3 the evidence ran on several commits, because four tracks were merged one after another.

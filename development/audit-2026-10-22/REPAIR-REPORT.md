@@ -14,7 +14,8 @@
 >   (MODEXP) takes about 1.0 s, over the devnet t_exec = 1 s; the state root is recomputed on every
 >   block; the worst devnet open at H_END takes about 7.3 h. The three journal obligations (disk
 >   growth, re-execution from genesis, the open-time memory transient) stay OPEN.
-> - Windows: the repair-scope CI passes (run 22 on `c959379`, the last code commit; earlier runs 9, 16, 19 and 21). It does not
+> - Windows: the repair-scope CI passes (run 22 on `c959379`; earlier runs 9, 16, 19 and 21). The review-thread fix `462fffc`
+>   (the last code commit, §3c) has not yet been run on Windows. The CI does not
 >   cover the real-Chrome and Python e2e suites, the thread-count assertions or the `#[ignore]`
 >   measurement tests (§5). Until 2026-10-23 this box said "Windows was not run"; that was true then.
 >
@@ -25,13 +26,13 @@
 |---|---|
 | Audited snapshot | `090eae4dc059d1a7df330d9fe674c873ac515564` (branch `claude/affectionate-pascal-rjhh2k`) |
 | Repair branch, PR | `claude/audit-repair-a01-a14`, [PR #27](https://github.com/raedrasheed/Proof-of-Collaboration/pull/27) (draft) |
-| Last implementation commit (prototypes/ and .github/) | `c959379` (round 3; its prototypes/ changes are test files only). Last source change: `dd7d1ec` (RpcGuard r3c), merged at `2b1a571`. `.github/` unchanged since `a03e089`. Before round 3: `3c3792e` (D-REORG-REDB final code; before it, `687ac38`) |
-| Integration-tested commit | Round-3 suites: `2b1a571` (pocold, lp4-execution, caps-test build) and `c959379` (e2e_devnet, e2e_site, consensus), evidence/integration-r3/. The full LP10 integration (extension, real Chrome, integrated Chrome) last ran on `3c3792e` and was not re-run on the round-3 code |
+| Last implementation commit (prototypes/ and .github/) | `462fffc` (fixes for two PR #27 review threads, §3c: the A11 reorg walk in node.rs and the R14/R19 calibration fee in admission.rs, each with a test). Before it: `c959379` (round 3; its prototypes/ changes are test files only). Last source change: `dd7d1ec` (RpcGuard r3c), merged at `2b1a571`. `.github/` unchanged since `a03e089`. Before round 3: `3c3792e` (D-REORG-REDB final code; before it, `687ac38`) |
+| Integration-tested commit | `462fffc`: pocold, lp4-execution, the ignored consensus tests and e2e_devnet (evidence/pr27-review-threads/). Round-3 suites: `2b1a571` (pocold, lp4-execution, caps-test build) and `c959379` (e2e_devnet, e2e_site, consensus), evidence/integration-r3/. The full LP10 integration (extension, real Chrome, integrated Chrome) last ran on `3c3792e` and was not re-run on the round-3 code |
 | Witness-tested commit | `3c3792e` (not re-run on the round-3 code) |
 | Real-Chrome-tested commit | `3c3792e` (in the integration; not re-run on the round-3 code) |
-| Windows-tested commit | `c959379` (CI run 22, PASS; the last code commit, including its test-only changes); earlier `1cc96c4` (run 21), `2b1a571` (run 19), `25bec25` (run 16), `29fd44a` (run 9) |
+| Windows-tested commit | `c959379` (CI run 22, PASS); `462fffc` not yet run; earlier `1cc96c4` (run 21), `2b1a571` (run 19), `25bec25` (run 16), `29fd44a` (run 9) |
 | Mutation-controlled commits | `3342af3` for D-REORG-REDB (Rust sources equal to `3c3792e`); round 3: caps `e985ce1`, RpcGuard `dd7d1ec`, e2e test `ad84942` (each on its track branch) |
-| PR head | latest commit on `claude/audit-repair-a01-a14` (docs and evidence only after `c959379`; see EVIDENCE-RECONCILIATION.md) |
+| PR head | latest commit on `claude/audit-repair-a01-a14` (docs and evidence only after `462fffc`; see EVIDENCE-RECONCILIATION.md) |
 | Tree equivalence | [EVIDENCE-RECONCILIATION.md](EVIDENCE-RECONCILIATION.md) |
 | Plan, decisions | [REPAIR-PLAN.md](REPAIR-PLAN.md) |
 | Per-finding status (five axes) | [FINDING-STATUS.json](FINDING-STATUS.json) |
@@ -446,6 +447,31 @@ The owner's 2026-10-23 instruction was taken as authorizing a pull_request trigg
 - **Not covered on Windows:** the real-Chrome and Python e2e suites, pocold's thread-count assertions
   (they read /proc) and the `#[ignore]` measurement tests. `c959379`'s Rust test change (tests/consensus.rs
   from `16bebfd`) ran on Windows in run 22 (PASS); tests/e2e_devnet.py is a Python e2e test the workflow does not run.
+
+### PR #27 review threads (2026-10-24; evidence/pr27-review-threads/)
+
+Three automated review threads from 2026-10-22 were still open. Each was checked against `8ce75c4`.
+
+- **Side-block pruning (`chain.rs`, outdated).** Already fixed: `retain` evicts leaves repeatedly, so the
+  cap holds after a reorg. No change.
+- **A11 restore after a deep reorg (`node.rs`). Reproduced and fixed in `462fffc`.**
+  - The cause: the walk to the common ancestor stopped after 2·1,024 steps. A reorg whose two sides total
+    more than 2,048 blocks therefore lost the oldest detached transactions. This case is reachable since
+    D-REORG-REDB adopts at depth R_keep.
+  - The fix: the walk now reaches the ancestor, and the bodies are read back from the journal one at a
+    time. That removes an unmodelled A13 transient, a copy of all the detached transactions (at most
+    TXBYTES_CAP = 16 MiB on the admitted profiles).
+  - The test: a new ignored release test fails before the fix and passes after it.
+- **R14/R19 calibration (`admission.rs`). Reproduced and fixed in `462fffc`.**
+  - The cause: the London base fee of full blocks passed the fixed fee cap after about 24 blocks, and
+    later samples were empty blocks. With D = 30, block 25 used 0 gas.
+  - The fix: the base fee is now held at baseFee0, and `measure` refuses a block below GAS_LIMIT gas.
+  - The test: a new test fails before the fix (with the guard) and passes after it.
+  - The approved profiles (11 blocks) were not affected.
+
+Suites on `462fffc`: lp4-execution 169/0; pocold 171/0 (15 ignored); the three ignored consensus tests 3/3
+(spec depth 2048/2049, D133 at 400, the new deep reorg); e2e_devnet 38/38. Neither
+change is normative.
 
 ### Corrections within round 3 (each withdrawn by a later pass, history kept in the track documents)
 
