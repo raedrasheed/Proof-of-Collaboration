@@ -30,7 +30,7 @@ pub mod threads{
         let mut i=0;while i<hs.len(){if hs[i].is_finished(){let _=hs.swap_remove(i).join();}else{i+=1}}
     }
 }
-pub mod types;pub mod chain;pub mod store;pub mod miner;pub mod net;pub mod node;pub mod rpc;pub mod resources;
+pub mod history;pub mod types;pub mod chain;pub mod store;pub mod miner;pub mod net;pub mod node;pub mod rpc;pub mod resources;
 /// Unit tests only: a counting allocator (per thread, while switched on) so tests can bound the
 /// heap a code path requests.
 #[cfg(test)]

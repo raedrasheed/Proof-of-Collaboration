@@ -879,3 +879,29 @@ fn jm_tx_state_term(){
     let other=ptrs(&m.chain.head().state);let (h,ptr)=other.iter().next().unwrap();
     assert!(head.get(h).is_some_and(|p|p!=ptr),"the same runtime executed elsewhere is a separate buffer (what a rebuilt or side state holds)");
 }
+
+/// C-1 S1: the cost of redb's full integrity check of history.redb (every page checksum), against the
+/// store size, to decide whether open can afford it, and the file size against the stored payload.
+/// Synthetic blocks of 4 receipts of HIST_REC bytes (default 2048) and 4 transaction index entries;
+/// HIST_MB of receipts (default 256); HIST_DURABLE set: one durable commit per block as live import.
+#[test]
+#[ignore="measurement: run in release with --ignored --nocapture"]
+fn history_integrity_check_cost(){
+    use pocold::history::History;
+    let dir=std::env::temp_dir().join(format!("pocold-hist-measure-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);std::fs::create_dir_all(&dir).unwrap();
+    let mb:u64=std::env::var("HIST_MB").ok().and_then(|x|x.parse().ok()).unwrap_or(256);
+    let rec_b:u64=std::env::var("HIST_REC").ok().and_then(|x|x.parse().ok()).unwrap_or(2048);
+    let blocks=(mb<<20)/(4*rec_b);let durable=std::env::var("HIST_DURABLE").is_ok();
+    {let h=History::open(&dir).unwrap();let t=Instant::now();
+        for i in 0..blocks{let mut b=[0u8;32];b[..8].copy_from_slice(&i.to_be_bytes());b[8..16].copy_from_slice(&i.wrapping_mul(0x9e3779b97f4a7c15).to_be_bytes());
+            let rec:Vec<Vec<u8>>=(0..4).map(|k|vec![(i as u8)^(k as u8);rec_b as usize]).collect();
+            let txs:Vec<B256>=(0..4u64).map(|k|revm::primitives::keccak256((i*4+k).to_be_bytes())).collect();
+            h.put_with(&b,&rec,&txs,durable).unwrap();if !durable&&i%256==255{h.sync().unwrap();}}
+        h.sync().unwrap();println!("JM-HIST-FILL {}",serde_json::json!({"blocks":blocks,"durableEach":durable,"ms":t.elapsed().as_millis()}));}
+    let size=std::fs::metadata(dir.join(pocold::history::FILE)).unwrap().len();
+    // Drop the page cache's effect as far as a user process can: a fresh open, timed separately.
+    let t=Instant::now();let mut h=History::open(&dir).unwrap();let open_ms=t.elapsed().as_millis();
+    let t=Instant::now();let ok=h.verify().unwrap();let check_ms=t.elapsed().as_millis();
+    println!("JM-HIST-CHECK {}",serde_json::json!({"fileBytes":size,"payloadBytes":blocks*4*rec_b,"receiptBytes":rec_b,"blocks":blocks,"openMs":open_ms,"checkMs":check_ms,"clean":ok,"msPerGiB":(check_ms as f64)*((1u64<<30) as f64)/(size as f64)}));
+    drop(h);let _=std::fs::remove_dir_all(&dir);
+}

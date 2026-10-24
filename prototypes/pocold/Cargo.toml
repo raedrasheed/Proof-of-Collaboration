@@ -16,6 +16,9 @@ sha2 = "=0.9.9"
 sha3 = "=0.9.1"
 # k256 (as in lp4-execution) replaces the unmaintained libsecp256k1 0.5.0 behind the shared hashes.rs (secp_backend, audit 2026-10-22).
 k256 = { version = "=0.13.4", features = ["ecdsa"] }
+# C-1 storage program (D-1, owner approved): the spec's store (storage.md:63-73). Its only runtime
+# dependency, libc, is already in the lock; every other dependency it lists is dev-only.
+redb = "=2.6.4"
 
 # SO_SNDBUF on RPC connections (RpcGuard SEND_SOCK_BUF, network.md): std exposes no setsockopt. Both
 # crates and versions are already in the lock (libc through getrandom and others, windows-sys through

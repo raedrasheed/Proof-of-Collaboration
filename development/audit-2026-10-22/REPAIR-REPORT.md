@@ -20,8 +20,8 @@
 >     and stay OPEN.
 >   - The five independent reviews of the round-3 tracks are done, and their MEDIUM-and-above findings
 >     are fixed, except R3-6 (decision D-7) (§3d).
->   - The network profile still does not boot within 6 GiB. It needs 120.95 GiB after C-1 S2, against
->     172.4 GiB before (C-1, D-1).
+>   - The network profile still does not boot within 6 GiB. It needs 103.92 GiB after C-1 S1 and S2,
+>     against 172.4 GiB before (C-1, D-1 approved as option (a)). S3–S5 remain.
 > - Windows: the repair-scope CI passes on the last code commit `d567ce1` (run 33; runs 29–32 on the earlier
 >   decision-package commits). Before them it passed on `462fffc` (run 26, PR head `43e7e0f`; the
 >   review-thread fix, §3c); earlier runs 9, 16, 19, 21 and 22. The CI does not
@@ -535,6 +535,17 @@ Also done in this pass:
 - **C-1 S2.** The code term counts one set per lineage, since a state copy shares its runtime buffers
   (a test proves it). The network model falls from 150.83 to 105.83 GiB, still far over 6 GiB. The
   devnet model total is 5,487,223,178 B (A13-DERIVATION.md).
+- **C-1 S1** (owner-approved D-1 (a), 2026-10-24). Canonical history below a resident window of
+  K_hist blocks moves off the heap:
+  - bodies and headers are read from the journal;
+  - receipts and the transaction index come from `history.redb`, which is derived and rebuilt from the
+    journal when damaged.
+  Results:
+  - the RPC answers are byte-identical to the tree before S1;
+  - the network model falls from 105.83 to 90.93 GiB;
+  - the devnet model total is 4,323,240,949 B.
+  Evidence: [evidence/c1-s1/](evidence/c1-s1/README.md); design and status:
+  [proposals/C1-STORAGE-DESIGN.md](proposals/C1-STORAGE-DESIGN.md).
 - **consensus.md:101 "the peer is punished"** (R1-5): a local disconnect, with a test and a mutation
   control.
 

@@ -46,6 +46,10 @@ pub const MIN_TX_BYTES:u128=85;
 pub const TX_GAS_MIN:u128=21_000;
 /// Receipt encoding without logs: status, cumulative gas, a 256-byte bloom, list headers.
 pub const RECEIPT_BASE:u128=300;
+/// C-1 S1: history.redb's file size over the bytes it stores (receipts records, index entries, keys),
+/// for its allocator term. Measured at most 4.1 (journal_measure::history_integrity_check_cost: redb
+/// grows the file by regions and rounds values to page orders); counted at 8.
+pub const HISTORY_FILE_FACTOR:u128=8;
 /// Longest stored rejection reason (chain::REASON_MAX) and status rejects kept (node).
 pub const REASON_MAX:u128=chain::REASON_MAX as u128;
 
@@ -61,6 +65,7 @@ pub const CONDITIONS:&[(&str,&str)]=&[
     ("main-thread","the main thread's stack is reserved by the platform; counted at 1 MiB because it only spawns and joins"),
     ("revm-representation","the execution term relies on revm 19.7 behaviour checked by source inspection (iterative frames, SharedMemory truncation, fixed stack capacity) and by measured adversarial peaks"),
     ("cpu-and-timing","CPU costs (world-root rebuild, chain scans, pool re-execution, deep-fork rebuild) are not memory terms; worst-case timing is not bounded"),
+    ("redb-representation","the history.redb terms rely on redb 2.6.4 behaviour checked by source inspection (cache split and write-buffer flush, allocator bitmaps) and on a measured file-size factor (HISTORY_FILE_FACTOR)"),
     ("open-replay-transient","Node::open holds the whole journal's payloads (store::open, pre-existing) and a replay index of two entries per record while replaying; this open-time transient grows with the journal and is not part of the steady-state bound"),
 ];
 /// The model total and its parts. `items` itemizes every group term ("group/item", bytes); the
@@ -112,16 +117,38 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let entry=size_of::<([u8;32],Entry)>() as u128;
     let per_block=add(&[mul(entry+1,3)?,64,mul(hdr,2)?,256+20+65+64,mul(8,s)?,mul(32,s+1)?,mul(64,m)?,
         memory::empty_snapshot()?,mul(u128::from(cp.E_max),24)?])?;
-    // Evidence: valid evidence tombstones its identity, and evidence against a tombstone is
-    // a host error (block invalid), so the chain holds at most one item per identity ever:
-    // M_max initial records plus R_max registrations per block (D86 registry rotation).
+    // A block's transactions are bounded by its body and by its gas.
+    let side_txs=(u128::from(cp.BODY_MAX)/MIN_TX_BYTES).min(u128::from(cp.GAS_LIMIT)/TX_GAS_MIN);
+    let per_tx=24+24+32+RECEIPT_BASE;
+    // Canonical chain (C-1 S1): <= H_END+1 blocks. The last `window` (Limits::history_window, default
+    // K_hist) are resident whole; every older journaled canonical block is offloaded by Chain::retain:
+    // its encoded header, body (evidence included), receipts and tx hashes are dropped and read from the
+    // journal and history.redb, so its entry is the per-block term less one header and the evidence.
+    // The window's content is bounded per block (BODY_MAX, E_max evidence items, side_txs receipts,
+    // LOG_BLOCK_MAX log bytes encoded at most 33/32) and in total by the chain caps (TXBYTES_CAP, the
+    // evidence identities, TX_CAP, LOG_CAP), so a window of the whole chain is the model before S1.
+    let blocks=u128::from(cp.H_END)+1;let window=u128::from(limits.history_window.unwrap_or(u64::from(k_hist))).min(blocks);
+    let offloaded_entry=per_block.checked_sub(hdr)?.checked_sub(mul(u128::from(cp.E_max),24)?)?;
+    // Evidence: valid evidence tombstones its identity, and evidence against a tombstone is a host error
+    // (block invalid), so the chain holds at most one item per identity ever: M_max initial records plus
+    // R_max registrations per block (D86 registry rotation).
     let identities=u128::from(cp.M_max).checked_add(mul(u128::from(cp.R_max),u128::from(cp.H_END))?)?;
-    let evidence=mul(identities,u128::from(cp.EVID_BYTES_MAX)+24)?;
-    // Canonical chain: <= H_END+1 blocks; transactions <= TX_CAP and their bytes <= TXBYTES_CAP
-    // (chain cumulative, block invalid beyond); logs <= LOG_CAP charged bytes (USER halts),
-    // encoded at most 33/32 of their charge; receipts and hashes per transaction.
-    let hist=[("history/blocks (H_END+1)",mul(u128::from(cp.H_END)+1,per_block)?),("history/transaction bytes (TXBYTES_CAP)",u128::from(cp.TXBYTES_CAP)),
-        ("history/transaction index and receipts (TX_CAP)",mul(u128::from(cp.TX_CAP),24+24+32+RECEIPT_BASE)?),("history/logs (LOG_CAP)",u128::from(caps::LOG_CAP)/32*33),("history/evidence",evidence)];
+    let w_bodies=mul(window,u128::from(cp.BODY_MAX))?.min(u128::from(cp.TXBYTES_CAP));
+    let w_evidence=mul(window,mul(u128::from(cp.E_max),u128::from(cp.EVID_BYTES_MAX))?)?.min(mul(identities,u128::from(cp.EVID_BYTES_MAX)+24)?);
+    let w_receipts=mul(mul(window,side_txs)?.min(u128::from(cp.TX_CAP)),per_tx)?;
+    let w_logs=mul(window,u128::from(caps::LOG_BLOCK_MAX))?.min(u128::from(caps::LOG_CAP))/32*33;
+    // history.redb (crate::history): its page cache is HISTORY_CACHE (redb splits it 9:1 between reads
+    // and the write buffer, and flushes the write buffer to the file past its share). Its allocator keeps
+    // per page two buddy bitmaps over the page orders (about 4 bits a page, redb 2.6.4 buddy_allocator.rs),
+    // counted at one byte per 4 KiB page of the file. The file holds per block a receipts record and per
+    // transaction an index entry, at most HISTORY_FILE_FACTOR times their bytes (measured below 4.2,
+    // evidence/c1-s1/).
+    let payload=add(&[mul(blocks,32+32+64)?,mul(u128::from(cp.TX_CAP),RECEIPT_BASE+4+64+4)?,u128::from(caps::LOG_CAP)/32*33])?;
+    let redb_alloc=mul(payload,HISTORY_FILE_FACTOR)?/4096;
+    let hist=[("history/offloaded canonical block metadata (H_END+1 − window)",mul(blocks-window,offloaded_entry)?),
+        ("history/resident window: block entries",mul(window,per_block)?),("history/resident window: transaction bytes",w_bodies),("history/resident window: evidence",w_evidence),
+        ("history/resident window: transaction hashes and receipts",w_receipts),("history/resident window: logs",w_logs),
+        ("history/history.redb page cache (HISTORY_CACHE)",crate::history::HISTORY_CACHE as u128),("history/history.redb allocator state",redb_alloc)];
     let history=add(&hist.map(|x|x.1))?;items.extend(hist);
     // Side blocks (D-REORG-REDB): every journaled non-canonical block is offloaded to metadata at the
     // retain() that follows its import (Chain::retain): its encoded header and body (evidence included),
@@ -130,8 +157,7 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // by a sync session. Replay: all <= side_cap + protect_max (Chain::replaying). One full block is
     // resident between its insert and that retain (or while restore_canonical re-executes it): its
     // transactions are bounded by its body and by its gas.
-    let side_txs=(u128::from(cp.BODY_MAX)/MIN_TX_BYTES).min(u128::from(cp.GAS_LIMIT)/TX_GAS_MIN);
-    let side_block=add(&[per_block,mul(u128::from(cp.E_max),u128::from(cp.EVID_BYTES_MAX))?,u128::from(cp.BODY_MAX),mul(side_txs,24+24+32+RECEIPT_BASE)?,u128::from(caps::LOG_BLOCK_MAX)/32*33])?;
+    let side_block=add(&[per_block,mul(u128::from(cp.E_max),u128::from(cp.EVID_BYTES_MAX))?,u128::from(cp.BODY_MAX),mul(side_txs,per_tx)?,u128::from(caps::LOG_BLOCK_MAX)/32*33])?;
     let side_entries=add(&[limits.side_cap as u128,mul(2,u128::from(limits.r_keep))?])?;
     let side_entry=per_block.checked_sub(hdr)?.checked_sub(mul(u128::from(cp.E_max),24)?)?.checked_add(32+16)?;
     let side_meta=mul(side_entries,side_entry)?;let side_full=side_block;

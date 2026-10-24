@@ -64,6 +64,65 @@ If a step would change one of them, it stops and goes back to the decision packa
   5. Mutation controls: a receipt read from the wrong block, a missing TXIDX entry, and offloading
      inside the window.
 
+### S1 status (2026-10-24): landed; evidence/c1-s1/
+
+What was built as frozen above, and what was added after the tests showed a gap:
+- `src/history.rs`: the two tables, written at import before the journal append (I3) and at replay for
+  every re-executed block. Replay commits without fsync and makes them durable every 256 blocks and at
+  the end; the journal records already exist, so a crash before that only means replay refills again.
+- **Added: the store is never trusted past what it can prove.** The tests found two gaps, now closed:
+  - a truncated `history.redb` made redb **panic** at open (an internal assertion), not return an error;
+  - a flipped byte in a transaction-index key went **undetected** on read (redb checks page checksums
+    only in `check_integrity`). The transaction was then reported "not found".
+  The fixes:
+  - open catches a panic inside redb and runs redb's full `check_integrity` (every page checksum). A store
+    that fails either is set aside as `history.redb.aside` and rebuilt by replay. The check costs about
+    1.0–1.4 s per GiB of store (measured), against the replay from genesis that open does anyway;
+  - each receipts record carries keccak(block hash ++ record). A transaction-index entry is checked
+    against the block's transaction hashes. Either failure while running marks the store damaged
+    (`history.redb.damaged`), and the next open rebuilds it;
+  - while the store is marked damaged, an RPC history read is **−32603**, never a block without its
+    receipts, a shortened log list or "not found". An import's history write fails, and the node stops
+    as on a failed journal append (exit 70). This cannot happen with an intact store, which was the only
+    store before S1.
+- `pocol_status` reports historyRefilled, historyRebuilt and historyDamaged.
+- **Window:** `Limits::history_window`, default K_hist. A test reference sets `u64::MAX` (nothing
+  offloaded).
+- **Disk:** the redb file was at most 4.1 times the bytes it stores (synthetic records; redb grows by
+  regions and rounds values to page orders). The A13 allocator term counts a factor of 8.
+
+**A13, measured by `derive()`:**
+
+| | before S1 | after S1 |
+|---|---:|---:|
+| devnet model total | 5,487,223,178 B | **4,323,240,949 B** |
+| network history group | 19.19 GiB | **4.28 GiB**, of which 4.25 GiB is offloaded per-block metadata (S4) |
+| network model total | 105.83 GiB | **90.93 GiB** (gate 103.92 GiB) |
+
+A window of the whole chain reproduces the pre-S1 model exactly, apart from two differences:
+- history.redb's cache and allocator are added;
+- the logs term is now also bounded per block (LOG_BLOCK_MAX), which the USER phase enforces.
+
+`a13_bound_breakdown` asserts this identity.
+
+**Acceptance tests (all pass):**
+- `canonical_history_off_the_heap_answers_as_it_did_resident` covers tests 1–3. A node that offloads
+  answers as a resident reference after each of these:
+  - live import, reopen;
+  - deletion, junk overwrite and truncation of history.redb;
+  - a crash between the history write and the journal append.
+  It also checks:
+  - a third node syncs the whole chain over P2P from the offloading node alone;
+  - the transaction index is checked against the blocks themselves.
+- `a_damaged_history_store_is_never_served_and_is_rebuilt` (test 3, extended):
+  - 39 single-byte flips (receipts records, index keys, spread positions);
+  - two kinds of wrong content that pass redb's checksums.
+  No wrong answer is ever returned, and every damaged store is rebuilt.
+- **Cross-version (I2):** the reference answers of the scenario on the tree before S1 (`e6025ce`) and on
+  S1 are byte-identical (1,156,012 B, the same sha256).
+- `a13_bound_breakdown` (test 4).
+- Mutation controls (test 5): `evidence/c1-s1/mutants.log`.
+
 ## S3: retained and side states as reverse diffs; copy-on-write overlays (storage.md:70, D30)
 
 - Only the head state is held in full.
@@ -101,6 +160,68 @@ If a step would change one of them, it stops and goes back to the decision packa
   - `a13_model_at_the_network_profile` is inverted and asserts `budget_required ≤ 6 GiB`;
   - RSS measured on a synthetic near-cap network state.
 
+### S3 refinement (2026-10-24, before code): two parts
+
+Reading the executor showed that S3 is two changes of very different reach:
+- `lp4-execution` takes and returns whole `InMemoryDB` states (`apply_block` clones its parent, and the
+  USER phase result is cloned back);
+- its checks walk the whole state (`code_caps::validate_snapshot`, the genesis image check, the state
+  root);
+- `InMemoryDB` appears 124 times in `lp4-execution/src`.
+
+**S3a: retained and side states as diffs (pocold only; the executor is unchanged).** This removes 34 of
+the 45 copies: K_hist + 1 retained states and side_max side states, 55.5 GiB at the network profile.
+- **Diffs.** Each stored block within the window, and each side block with a state, keeps a `StateDiff`:
+  the before and after values of every account and slot that differ between its parent's state and its
+  own. It is computed when the block is inserted, while both states are present (one comparison of the
+  two maps).
+- **Which states stay full.** The head stays full, and so does genesis (its state is the genesis
+  allocation, small). Every other state is materialized on demand:
+  - start from a clone of the head, which shares its code buffers (S2);
+  - apply the before values from the head down to the lowest common ancestor;
+  - apply the after values up the requested branch.
+  At most one materialized state is alive at a time; it is a new A13 term, counted at one full copy.
+- **Callers.** Every caller that read `&e.state` goes through `Chain::state_of`. It borrows the head's
+  state and builds any other state. The callers are:
+  - validating a child of a non-head block;
+  - the RPC state queries at a tag;
+  - production on a non-head parent;
+  - rebuild and restore.
+- **Bounds and A13.**
+  - Per block, the changed slots are at most GAS_LIMIT / 2,900 (the cheapest first write of a distinct
+    slot, warm SSTORE reset), plus SYS_KEYS_BLOCK_MAX.
+  - The changed accounts are at most GAS_LIMIT / 21,000 × 3 (sender, recipient, coinbase), plus the
+    accounts a CALL with value can touch per 9,000 gas, plus SYS_ACCT_BLOCK_MAX.
+  - Storage cleared by an account's removal is bounded by the same writes: under Cancun only an account
+    created in the same transaction is destroyed, so it had no earlier storage. This is to be confirmed
+    against revm 19.7 and `commit_epoch` before the bound is pinned; if it does not hold, the diff keeps
+    the cleared storage and the bound is stated without it.
+  - The derived per-block diff bound × (K_hist + 1 + side_max) replaces the 34 copies in `derive()`.
+- **CPU.** The comparison is O(state) per block, as the existing whole-state checks are. It is measured
+  on the near-cap devnet state and reported with C-2. If it is too slow, the executor can return its
+  written set instead; that would be an lp4 change.
+- **Acceptance tests:**
+  - every materialized state equals the full state it replaces, account by account and by stateRoot, at
+    every height of the window, on chains with reorgs (the old resident copies kept as the reference in
+    the test);
+  - the suites unchanged: lp4 vectors, pocold consensus and caps, e2e, replay equals live, 2048/2049,
+    D133 at 400;
+  - RPC state answers at each retained tag are unchanged;
+  - mutation controls: a diff missing a slot, a diff applied in the wrong direction, materialization
+    from the wrong LCA.
+
+**S3b: transient working copies as overlays (an executor change, done together with S5).**
+- This removes the 10 transient copies and the growth copy, 18.0 GiB at the network profile.
+- It needs `lp4-execution` to run on a layered state: a `CacheDB` over a borrowed base, with whole-state
+  iteration through a merged view, and the whole-state checks made incremental. The state root is
+  C-2 item 4.
+- S5 needs the same generalization, since its base is on disk. So S3b is designed and frozen with S5,
+  as one executor change verified against the lp4 vectors, not as a separate pass.
+
+Projected network model after S3a: 90.93 − 55.5 − 3.0 (the per-copy code containers) − 2.25 (side code
+sets) ≈ **30.2 GiB, plus the diff and materialization terms (new)**. This is a projection until
+`derive()` prints it.
+
 ## S4: per-block metadata off the heap
 
 - Entries older than R_keep keep only what fork choice and contexts need for the heights still reachable
@@ -134,9 +255,9 @@ If a step would change one of them, it stops and goes back to the decision packa
 
 ## Order of work
 
-1. S1.
-2. S3.
-3. S5, with D-6 on it.
+1. S1 (done).
+2. S3a.
+3. S5 with S3b (one executor change), and D-6 on it.
 4. S4.
 
 Each stage lands with its own commit, evidence directory, suites and mutation controls. Its `derive()`

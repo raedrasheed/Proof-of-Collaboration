@@ -43,8 +43,13 @@ pub struct Limits{pub net:net::Limits,pub rpc:crate::rpc::Limits,
     /// Decision D-7 (local pool policy): the longest one slice of pool revalidation runs on the
     /// consensus thread before the next event is taken (POOL_SLICE), and an optional bound on the
     /// pooled transactions' summed gas limits (None: no bound; the value is the owner's decision).
-    pub pool_slice:Duration,pub pool_gas_max:Option<u64>}
-impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None}}}
+    pub pool_slice:Duration,pub pool_gas_max:Option<u64>,
+    /// C-1 S1: how many canonical blocks below the head stay resident (None: K_hist). Older canonical
+    /// history is served from the journal and history.redb. A test reference sets u64::MAX (none offloaded).
+    pub history_window:Option<u64>}
+impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None,history_window:None}}}
+/// C-1 S1: replay refills history.redb with non-durable commits and makes them durable every this many blocks.
+const HISTORY_SYNC:u64=256;
 /// D-7: one slice of pool revalidation. The consensus thread is held for at most this, plus the
 /// execution of the one transaction in progress when it ends (one transaction is at most GAS_LIMIT,
 /// which the R14/R19 gate bounds by t_exec).
@@ -134,6 +139,8 @@ pub struct Node{
     pub cfg:Config,
     pub chain:Chain,
     journal:Journal,
+    /// C-1 S1: receipts and the transaction index of every validated block (derived; rebuilt by replay).
+    pub history:crate::history::History,
     peers:HashMap<PeerId,Peer>,
     /// Sync: each peer's announced Status, the live session (at most one), when a session last
     /// started and the round-robin turn among peers announcing more work.
@@ -175,6 +182,8 @@ pub struct Stats{pub imported:u64,pub mined:u64,pub signed_templates:u64,pub fal
     /// Sync sessions started and rounds asked; solicited imports of blocks retention had removed
     /// (re-fetch); canonical blocks made whole after adoptions (restore); journal records replay skipped.
     pub sync_sessions:u64,pub sync_rounds:u64,pub refetched:u64,pub restored:u64,pub replay_skipped:u64,
+    /// C-1 S1: blocks whose receipts and transaction index replay wrote to history.redb (missing ones).
+    pub history_refilled:u64,
     /// Peers whose template from Draw(h,0) for this node's parent failed its checks (consensus.md:101).
     pub template_penalties:u64,
     /// D-7: pool revalidation slices run and the longest one (ms).
@@ -217,6 +226,8 @@ impl Node{
         // this data directory has used is kept durably beside the journal and replay uses it.
         let rk_replay=retention_rkeep(&cfg.dir,cfg.limits.r_keep).map_err(|e|format!("retention.rkeep: {e}"))?;
         let mut chain=Chain::new(spec);chain.r_keep=rk_replay;chain.side_cap=cfg.limits.side_cap;chain.replaying=true;
+        // C-1 S1: canonical history below the resident window lives off the heap (journal + history.redb).
+        let history=crate::history::History::open(&cfg.dir).map_err(|e|format!("history: {}",e.0))?;chain.history_window=Some(cfg.limits.history_window.unwrap_or(chain.k_hist));
         // D-REORG-REDB replay. Every record is replayed in journal order with retain() after each, as
         // live import did. Live journals a block only after validating it on a present parent, and
         // only when it is absent, so: (1) a block whose NEXT journal event is a child record is
@@ -233,7 +244,7 @@ impl Node{
             events.entry(block_hash(&header)).or_default().push_back((i,false));events.entry(header.parent_hash).or_default().push_back((i,true));
         }
         let mut rec_off=40u64; // first record frame starts after MAGIC(8)+binding(32)
-        let (mut skipped,mut restored)=(0u64,0usize);
+        let (mut skipped,mut restored,mut refilled)=(0u64,0usize,0u64);
         for (i,payload) in rec.payloads.iter().enumerate(){
             let this_off=rec_off; rec_off+=(payload.len()+store::OVERHEAD) as u64;
             let (hb,bb,rb)=store::decode_record(payload).map_err(|e|format!("record {i}: {e}"))?;
@@ -253,6 +264,10 @@ impl Node{
                     };
                     if result_bytes(&entry.result)!=rb{return Err(format!("parentResultMismatch at record {i}"))}
                     entry.body_off=Some(this_off);
+                    // Replay refills a store that was lost or damaged (I1): a stored block is left as it is.
+                    // Writes are made durable every HISTORY_SYNC blocks (redb frees pages only then) and at the end.
+                    if history.put_with(&entry.hash,&entry.receipts,&entry.tx_hashes,false).map_err(|e|format!("replay {i}: history {}",e.0))?{refilled+=1;
+                        if refilled%HISTORY_SYNC==0{history.sync().map_err(|e|format!("replay {i}: history {}",e.0))?;}}
                     chain.insert(entry);
                 }
             }
@@ -266,6 +281,7 @@ impl Node{
             chain.retain();
             if adopted{restored+=chain.restore_canonical(fork_h,&rec.journal).map_err(|e|format!("replay {i}: restore canonical {e:?}"))?;}
         }
+        if refilled>0{history.sync().map_err(|e|format!("replay: history {}",e.0))?;}
         drop(events);chain.protect.clear();chain.replaying=false;chain.r_keep=cfg.limits.r_keep;chain.retain();
         // Every adoption was restored above, so this finds nothing unless replay skipped a record.
         restored+=chain.restore_canonical(0,&rec.journal).map_err(|e|format!("replay: restore canonical {e:?}"))?;
@@ -274,10 +290,10 @@ impl Node{
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
         let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());let pool_code=checked_code_total(&head_state,&chain.spec);
         let net=net::Net::new(cfg.limits.net.clone());
-        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,deferred:VecDeque::new(),between:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
+        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,history,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,deferred:VecDeque::new(),between:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
             pool:Pool{code_total:pool_code,txs:vec![],pending_state:head_state,bytes:0,meter,backlog:VecDeque::new(),backlog_bytes:0,gas:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
-        node.stats.imported=rec.payloads.len() as u64;node.stats.replay_skipped=skipped;node.stats.restored=restored as u64;
+        node.stats.imported=rec.payloads.len() as u64;node.stats.replay_skipped=skipped;node.stats.restored=restored as u64;node.stats.history_refilled=refilled;
         if rec.torn_tail{node.log("recovered torn journal tail into a new journal");}
         if rec.migrated_v1{node.log("migrated a fully verified v1 journal to format v2 (original kept as blocks.journal.v1-n)");}
         Ok(node)
@@ -392,6 +408,10 @@ impl Node{
             Err(e)=>{if let Reject::Envelope(w)=&e{self.reject(hash,w);}return Err(e)}
         };
         self.observe_template(&b.header);self.observe_win(&b.header);
+        // C-1 S1 (invariant I3): the receipts and transaction index are durable before the journal record.
+        // A write that fails (a disk error, or a store marked damaged) stops the node as a failed journal
+        // append does; the next open sets a damaged store aside and replay rebuilds it.
+        if let Err(e)=self.history.put(&entry.hash,&entry.receipts,&entry.tx_hashes){self.log(&format!("FATAL history write: {}",e.0));std::process::exit(70);}
         let record=store::encode_record(&b.header.encoded,&b.body.encode(),&result_bytes(&entry.result));
         // D-REORG-REDB: record the journal frame offset so this block's body can be read back off-heap.
         match self.journal.append(&record){Ok(off)=>entry.body_off=Some(off),Err(e)=>{self.log(&format!("FATAL journal append: {e:?}"));std::process::exit(70);}}
@@ -871,12 +891,12 @@ impl Node{
                 // The highest locator hash on our canonical chain (genesis always is); answers stop when
                 // the peer's queue is half full (offer) and the peer asks again from its last block.
                 let Some(start)=locator.iter().find(|h|self.chain.is_canonical(h)).and_then(|h|self.chain.get(h)).map(|e|e.height+1) else{return};
-                for hgt in start..start.saturating_add(count.min(SYNC_COUNT)){match self.chain.canonical_at(hgt){Some(e)=>{if !p.offer(&Msg::Block{header:e.header.encoded.clone(),body:e.body.encode()}){break}}None=>break}}
+                for hgt in start..start.saturating_add(count.min(SYNC_COUNT)){match self.chain.canonical_at(hgt).and_then(|e|self.block_msg(&e.hash)){Some(m)=>{if !p.offer(&m){break}}None=>break}}
             }
             Msg::GetRange{start,count}=>{
                 let Some(p)=self.peers.get(&from) else{return};
                 // Responses stop when the peer's queue is half full (offer); the peer asks again.
-                for hgt in start..start.saturating_add(count.min(512)){match self.chain.canonical_at(hgt){Some(e) if e.height>0=>{if !p.offer(&Msg::Block{header:e.header.encoded.clone(),body:e.body.encode()}){break}}_=>break}}
+                for hgt in start..start.saturating_add(count.min(512)){match self.chain.canonical_at(hgt).filter(|e|e.height>0).and_then(|e|self.block_msg(&e.hash)){Some(m)=>{if !p.offer(&m){break}}None=>break}}
             }
             Msg::Tx{raw}=>self.relay_tx(raw),
         }
@@ -890,15 +910,24 @@ impl Node{
         if !e.offloaded{return Some(Msg::Block{header:e.header.encoded.clone(),body:e.body.encode()})}
         match self.journal.read_at(e.body_off?){Ok((hb,bb,_))=>Some(Msg::Block{header:hb,body:bb}),Err(err)=>{self.log(&format!("journal read for {}: {err:?}",&hex(hash)[..14]));None}}
     }
-    /// A stored block for RPC (eth_getBlockByHash): as stored when resident; an offloaded non-canonical
-    /// block is materialized from its journal record (encoded header, body, tx hashes), so the answer is
-    /// the same as before D-REORG-REDB for every block still retained. None if it is not stored.
-    pub fn block_view(&self,hash:&[u8;32])->Option<std::borrow::Cow<'_,Entry>>{
-        let e=self.chain.get(hash)?;
+    /// A stored block for RPC (eth_getBlockByHash): as stored when resident; an offloaded one (a side block,
+    /// or since C-1 S1 canonical history below the resident window) is materialized from its journal record
+    /// (encoded header, body, tx hashes) and history.redb (receipts), so every answer is the one it had
+    /// while resident. None if it is not stored, or if its record cannot be read (logged; a damaged
+    /// history store is marked, imports then stop the node and the next open rebuilds the store).
+    pub fn block_view(&self,hash:&[u8;32])->Option<std::borrow::Cow<'_,Entry>>{self.view(self.chain.get(hash)?)}
+    /// `block_view` of an entry the caller already holds.
+    pub fn view<'a>(&'a self,e:&'a Entry)->Option<std::borrow::Cow<'a,Entry>>{
         if !e.offloaded{return Some(std::borrow::Cow::Borrowed(e))}
-        let (hb,bb,_)=self.journal.read_at(e.body_off?).map_err(|err|self.log(&format!("journal read for {}: {err:?}",&hex(hash)[..14]))).ok()?;
+        let hash=e.hash;
+        let (hb,bb,_)=self.journal.read_at(e.body_off?).map_err(|err|self.log(&format!("journal read for {}: {err:?}",&hex(&hash)[..14]))).ok()?;
         let body=Body::decode(&bb,self.chain.spec.cp().BODY_MAX as usize).ok()?;
         let mut v=e.meta_clone();v.tx_hashes=body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();v.body=body;v.header.encoded=hb;v.offloaded=false;
+        // Every journaled block's receipts were stored before its record (I3) or by replay: a missing or
+        // damaged record means the store is damaged. No partial answer is given; the next open rebuilds it.
+        match self.history.receipts(&hash){Ok(Some(r))=>v.receipts=r,
+            Ok(None)=>{let e=self.history.mark_damaged("receipts missing for a journaled block");self.log(&format!("history read for {}: {}",&hex(&hash)[..14],e.0));return None}
+            Err(err)=>{self.log(&format!("history read for {}: {}",&hex(&hash)[..14],err.0));return None}}
         Some(std::borrow::Cow::Owned(v))
     }
     /// TrieRebuild of a stored block's state through the journal (offloaded bodies read back).
@@ -920,7 +949,7 @@ impl Node{
             "a13":crate::resources::derive(self.chain.spec.cp(),self.chain.spec.local().k_hist,self.chain.spec.local().side_max,&self.cfg.limits,self.cfg.peers.len()).map(|b|serde_json::json!({
                 "boundBytes":b.total.to_string(),"budgetBytes":self.cfg.limits.mem_budget,"conditions":crate::resources::CONDITIONS.iter().map(|(id,d)|serde_json::json!({"id":id,"detail":d})).collect::<Vec<_>>()})),
             "stats":{"imported":self.stats.imported,"mined":self.stats.mined,"signedTemplates":self.stats.signed_templates,"fallbackTemplates":self.stats.fallback_templates,"sharesSeen":self.stats.shares_seen,"hashesInExhaustedRanges":self.stats.hashes,"reorgs":self.stats.reorgs,
-                "syncSessions":self.stats.sync_sessions,"syncRounds":self.stats.sync_rounds,"refetched":self.stats.refetched,"restored":self.stats.restored,"replaySkipped":self.stats.replay_skipped,"templatePenalties":self.stats.template_penalties,"poolSlices":self.stats.pool_slices,"poolSliceMaxMs":self.stats.pool_slice_max_ms,"poolBacklog":self.pool.backlog.len()},
+                "syncSessions":self.stats.sync_sessions,"syncRounds":self.stats.sync_rounds,"refetched":self.stats.refetched,"restored":self.stats.restored,"replaySkipped":self.stats.replay_skipped,"templatePenalties":self.stats.template_penalties,"poolSlices":self.stats.pool_slices,"poolSliceMaxMs":self.stats.pool_slice_max_ms,"poolBacklog":self.pool.backlog.len(),"historyRefilled":self.stats.history_refilled,"historyRebuilt":self.history.rebuilt,"historyDamaged":self.history.is_damaged()},
             "retention":{"rKeep":self.chain.r_keep,"sideCap":self.chain.side_cap,"side":self.chain.side_counts().0,"protected":self.chain.protect.len(),"evicted":self.chain.evicted_total}})
     }
     pub fn template_json(&self)->serde_json::Value{

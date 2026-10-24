@@ -63,14 +63,14 @@ were not results. The table below replaces them.
 | stage | change (spec text) | items removed (GiB, measured) | network model after it |
 |---|---|---|---:|
 | S2 ✔ | code shared between snapshots (done, `d567ce1`) | code 54.69 → 9.69 | **105.83 (measured)** |
-| S1 | canonical bodies, receipts, logs and evidence off the heap, read from disk on demand (storage.md:70) | tx bytes 8.00, receipts and index 3.54, logs 1.03, evidence 1.99 = 14.56 | 91.27 + a bounded read cache (new) |
-| S3 | retained and side states as reverse diffs from the head (storage.md:70, D30); transient copies as copy-on-write overlays | 44 of the 45 full copies (73.49); the per-copy code containers and the extra code sets (8.48), since the states then share one code set | 9.30 + new: K_hist + side diffs, overlays (bounded by the written entries of the work in progress) |
-| S4 | per-block metadata off the heap (an index on disk) | per-block entries 4.63 | 4.67 + new: index cache |
-| S5 | live state on disk behind a bounded cache (redb live trie, storage.md:63–67) | the one full copy (1.63) | 3.05 + new: state cache, diffs, overlays; target ≤ 5.25 (budget less the 1/8 reserve) |
+| S1 ✔ | canonical bodies, receipts, logs and evidence off the heap below a resident window of K_hist blocks, read from the journal and history.redb on demand (storage.md:70) | history 19.19 → 4.28 (tx bytes, receipts and index, logs, evidence moved; offloaded entries drop their header bytes; added: window 0.013, redb cache and allocator 0.025) | **90.93 (measured)**, gate 103.92 |
+| S3 | retained and side states as reverse diffs from the head (storage.md:70, D30); transient copies as copy-on-write overlays | 44 of the 45 full copies (73.49); the per-copy code containers and the extra code sets (8.48), since the states then share one code set | 8.96 + new: K_hist + side diffs, overlays (bounded by the written entries of the work in progress) |
+| S4 | per-block metadata off the heap (an index on disk) | offloaded per-block entries 4.25 | 4.71 + new: index cache |
+| S5 | live state on disk behind a bounded cache (redb live trie, storage.md:63–67) | the one full copy (1.63) | 3.08 + new: state cache, diffs, overlays; target ≤ 5.25 (budget less the 1/8 reserve) |
 
 What is left after S5 is measured, not projected: execution 1.10, one code set with its containers 1.22,
-side metadata 0.20, queues 0.24, RPC 0.20, threads 0.08. That is 3.05 GiB. The new terms must fit the
-remaining 2.2 GiB under the 5.25 GiB target. They are derived and pinned stage by stage.
+side metadata 0.20, queues 0.24, RPC 0.20, threads 0.08, the S1 window and history.redb 0.04. That is
+3.08 GiB. The new terms must fit the remaining 2.17 GiB under the 5.25 GiB target. They are derived and pinned stage by stage.
 
 - **Consensus, genesisHash and validity:** none.
 - **Compatibility:** the journal and storage format change. This is a local migration; no on-chain or RPC
@@ -115,6 +115,21 @@ waiting for routine approvals.
   gate.
 - The real remaining terms are the 45 full state copies (75.12 GiB, S3/S5) and the in-memory history
   (19.19 GiB, S1).
+
+**S1 status (2026-10-24, done; measured by `derive()`):** proposals/C1-STORAGE-DESIGN.md "S1 status" and
+evidence/c1-s1/.
+- Canonical blocks below a resident window (K_hist) keep only their metadata in memory. Bodies and
+  headers are read from the journal; receipts and the transaction index come from `history.redb`.
+- Network history group: 19.19 → 4.28 GiB. Model total: 105.83 → **90.93 GiB**, so the gate needs
+  **103.92 GiB**. Still far over 6 GiB: the full state copies (75.12 GiB) are S3/S5's.
+- Devnet model total: 5,487,223,178 → 4,323,240,949 B.
+- The answers are byte-identical to the tree before S1 on the acceptance scenario. Damage to the store
+  (deletion, truncation, junk, flipped bytes, wrong content) is never served and is rebuilt from the
+  journal.
+- Two local behaviours are new, and neither is normative:
+  - open runs redb's full integrity check, about 1–1.4 s per GiB of store;
+  - while a damaged store is detected, history RPC reads answer −32603, and the node stops at its next
+    import, as on a journal error.
 
 ---
 

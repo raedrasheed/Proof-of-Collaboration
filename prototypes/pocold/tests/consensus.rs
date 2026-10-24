@@ -864,10 +864,20 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     let d=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits::default(),2).unwrap();
     assert_eq!(d.items.iter().map(|x|x.1).sum::<u128>(),d.total);
     // RpcGuard review 2 (m2): the total is pinned, so a term cannot change unnoticed (round 3: the
-    // small-answer term counts SMALL_REPLY_PEAK per connection, +4,082,688 B). Some terms are type sizes
-    // (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
+    // small-answer term counts SMALL_REPLY_PEAK per connection, +4,082,688 B; C-1 S1: canonical history
+    // below the resident window is off the heap, 5,487,223,178 -> 4,323,763,701 B). Some terms are type
+    // sizes (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
     // target checks that it boots within the budget with its reserve.
-    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,5_487_223_178,"the A13 model total changed");}
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,4_323_240_949,"the A13 model total changed");}
+    // C-1 S1: a window of the whole chain is the model before S1, plus history.redb's cache and allocator.
+    let all=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits{history_window:Some(u64::MAX),..Default::default()},2).unwrap();
+    let redb:u128=all.items.iter().filter(|x|x.0.starts_with("history/history.redb")).map(|x|x.1).sum();
+    // The one term that differs: the logs, now also bounded per block (LOG_BLOCK_MAX, enforced by the USER
+    // phase), which is tighter than LOG_CAP for H_END+1 devnet blocks.
+    let logs=all.items.iter().find(|x|x.0=="history/resident window: logs").unwrap().1;let pre_logs=u128::from(pocol_lp4_execution::user_phase::caps::LOG_CAP)/32*33;
+    assert!(logs<pre_logs);
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(all.total-redb+(pre_logs-logs),5_487_223_178,"the whole-chain window reproduces the pre-S1 model");}
+    assert!(all.items.iter().any(|x|x.0.starts_with("history/offloaded")&&x.1==0));
     assert!(pocold::resources::budget_required(d.total).unwrap()<=u128::from(pocold::node::MEM_BUDGET));
     assert_eq!(d.items.iter().find(|x|x.0.starts_with("rpc/small answers")).map(|x|x.1),Some(32*pocold::rpc::SMALL_REPLY_PEAK as u128));
     println!("A13-BREAKDOWN {}",serde_json::json!({"total":d.total.to_string(),"items":d.items.iter().map(|(k,v)|serde_json::json!([k,v.to_string()])).collect::<Vec<_>>()}));
@@ -1154,6 +1164,185 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
         assert_eq!(chain_view(&mut r),view);
     }
     let _=std::fs::remove_dir_all(&dir);
+}
+
+/// C-1 S1 acceptance (proposals/C1-STORAGE-DESIGN.md): canonical history below the resident window is off
+/// the heap, its bodies and headers in the journal and its receipts and transaction index in history.redb.
+/// A node that offloads answers every block, transaction, receipt, log, header and block-bytes query, and
+/// serves every block to peers, exactly as a reference node that keeps everything resident. The chain has
+/// an early reorg, so blocks first imported as side blocks are now canonical history. The same holds:
+/// - after reopening, after history.redb is deleted, and after it is overwritten with junk (the store is
+///   rebuilt from the journal, invariant I1);
+/// - after a crash between the history write and the journal append (I3: an orphan entry nobody reads);
+/// - for a third node that syncs the whole chain over P2P from the offloading node alone.
+/// The transaction index is also checked against the blocks themselves (the reference uses it too), and
+/// with S1_DUMP set the reference answers are written out for the cross-version check against the tree
+/// before S1 (evidence/c1-s1/).
+#[test] fn canonical_history_off_the_heap_answers_as_it_did_resident(){
+    use pocold::node::{Config,Limits,Node};
+    let alice=devnet::account_key("alice");
+    let mk=|tag:&str,window:Option<u64>|{let dir=std::env::temp_dir().join(format!("pocold-s1-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+        let d=dir.clone();let t=tag.to_string();let conf=move||Config{dir:d.clone(),name:t.clone(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{history_window:window,..Default::default()}};
+        (Node::open(conf(),admitted(&cfg(&["a","b","c"]))).unwrap(),dir,conf)};
+    let (mut a,da,ca)=mk("off",None);let (mut b,db,_)=mk("ref",Some(u64::MAX));
+    let (mut h,blocks,p)=s1_chain();
+    let mut txs=vec![];for x in &blocks{for t in &x.body.txs{txs.push(format!("{}",revm::primitives::keccak256(t)));}}
+    for n in [&mut a,&mut b]{for x in &blocks{n.import(x.clone(),None).unwrap();}assert_eq!(n.chain.head,p);}
+    let w=a.chain.history_window.unwrap();let top=a.chain.head().height;
+    let off:Vec<u64>=(1..=top).filter(|h|a.chain.canonical_at(*h).unwrap().offloaded).collect();
+    assert!(off.len()>=60&&a.chain.canonical_resident(),"positive control: {} canonical blocks offloaded, the window resident",off.len());
+    assert_eq!(off,(1..top.saturating_sub(w)+1).collect::<Vec<_>>(),"exactly the canonical blocks below the window of {w} are offloaded");
+    assert!((1..=b.chain.head().height).all(|h|!b.chain.canonical_at(h).unwrap().offloaded),"the reference keeps all resident");
+    let views=|n:&mut Node,txs:&[String]|->Vec<serde_json::Value>{let top=n.chain.head().height;let mut v=chain_view(n);
+        for t in txs{v.push(rpc_local(n,"eth_getTransactionByHash",json!([t])));v.push(rpc_local(n,"eth_getTransactionReceipt",json!([t])));}
+        v.push(rpc_local(n,"eth_getLogs",json!([{"fromBlock":"0x0","toBlock":format!("{top:#x}")}])));
+        v.push(rpc_local(n,"pocol_getHeaders",json!(["0x1",format!("{top:#x}")])));
+        for x in 0..=top{v.push(rpc_local(n,"pocol_getBlockRlp",json!([format!("{x:#x}")])));
+            let hash=n.chain.canonical_at(x).unwrap().hash;v.push(json!(n.block_msg(&hash).map(|m|format!("{m:?}"))));}
+        v};
+    let want=views(&mut b,&txs);let logs=want.iter().filter(|x|x.is_array()).map(|x|x.as_array().unwrap().len()).max().unwrap_or(0);
+    assert!(logs>=24,"positive control: the log query returns the 24 transactions' logs: {logs}");
+    if let Ok(path)=std::env::var("S1_DUMP"){std::fs::write(path,serde_json::to_string_pretty(&want).unwrap()).unwrap();}
+    // The transaction index against the blocks themselves: each canonical transaction at its block and
+    // index, the abandoned block's transaction unknown (both nodes use the index, so this is not A vs B).
+    let canon:HashMap<String,(String,u64)>=(1..=top).flat_map(|x|{let e=b.chain.canonical_at(x).unwrap();let bh=hex(&e.hash);
+        e.tx_hashes.iter().enumerate().map(move|(i,t)|(format!("{t}"),(bh.clone(),i as u64))).collect::<Vec<_>>()}).collect();
+    assert_eq!(canon.len(),48,"positive control: 48 canonical transactions");
+    for n in [&mut a,&mut b]{for t in &txs{let got=rpc_local(n,"eth_getTransactionByHash",json!([t]));
+        match canon.get(t){Some((bh,i))=>{assert_eq!(got["blockHash"].as_str().map(|x|x.trim_start_matches("0x").to_string()),Some(bh.trim_start_matches("0x").to_string()),"{t}");assert_eq!(got["transactionIndex"],json!(format!("{i:#x}")),"{t}");}
+            None=>assert!(got.is_null(),"the abandoned block's transaction is not found: {t}")}}}
+    assert!(txs.iter().any(|t|!canon.contains_key(t)),"positive control: one transaction only in the abandoned block");
+    assert_eq!(views(&mut a,&txs),want,"offloaded canonical history answers as resident");
+    let receipts_a=a.history.receipts(&blocks[1].hash()).unwrap();assert!(receipts_a.is_some(),"the side block's receipts were stored when it was imported");
+    let open=||Node::open(ca(),admitted(&cfg(&["a","b","c"]))).unwrap();
+    drop(a);let mut r=open();assert_eq!(r.stats.history_refilled,0,"an intact store is not rewritten");assert_eq!(views(&mut r,&txs),want,"after reopen");drop(r);
+    std::fs::remove_file(da.join(pocold::history::FILE)).unwrap();
+    let mut r=open();assert_eq!(r.stats.history_refilled,blocks.len() as u64,"replay refilled every journaled block");
+    assert_eq!(views(&mut r,&txs),want,"after history.redb was deleted: rebuilt by replay");drop(r);
+    std::fs::write(da.join(pocold::history::FILE),vec![0x5a;65536]).unwrap();
+    let mut r=open();assert!(r.history.rebuilt,"a damaged store is set aside and rebuilt");assert_eq!(r.stats.history_refilled,blocks.len() as u64);
+    assert_eq!(views(&mut r,&txs),want,"after history.redb was overwritten");
+    let len=std::fs::metadata(da.join(pocold::history::FILE)).unwrap().len();drop(r);
+    let f=std::fs::OpenOptions::new().write(true).open(da.join(pocold::history::FILE)).unwrap();f.set_len(len/2).unwrap();drop(f);
+    let mut r=open();assert!(r.history.rebuilt,"a truncated store is set aside and rebuilt");assert_eq!(views(&mut r,&txs),want,"after history.redb was truncated");drop(r);
+    // I3: a crash after the history write and before the journal append. The next block X is validated by
+    // the reference; its receipts and index go into A's store as import writes them, and A stops there.
+    let x=branch(&mut h,p,1,&[Body{txs:vec![pay(&alice,48,9)],evidence:vec![]}]).remove(0);let xt=format!("{}",revm::primitives::keccak256(&x.body.txs[0]));
+    b.import(x.clone(),None).unwrap();let ex=b.chain.get(&x.hash()).unwrap().clone();
+    let r=open();r.history.put(&ex.hash,&ex.receipts,&ex.tx_hashes).unwrap();drop(r);
+    let mut r=open();assert_eq!(r.chain.head,p,"the block was never journaled");assert!(r.history.has(&x.hash()).unwrap(),"positive control: the orphan entry is there");
+    assert!(rpc_local(&mut r,"eth_getTransactionByHash",json!([xt])).is_null()&&rpc_local(&mut r,"eth_getTransactionReceipt",json!([xt])).is_null(),"an orphan entry is never read");
+    assert_eq!(views(&mut r,&txs),want,"after the crash");
+    r.import(x.clone(),None).unwrap();txs.push(xt);let want=views(&mut b,&txs);assert_eq!(views(&mut r,&txs),want,"the block imported after the crash");drop(r);
+    // P2P: node C syncs the whole chain from A alone (GetFrom/GetRange serve offloaded canonical blocks).
+    let port=||std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let addr=|p:u16|->std::net::SocketAddr{format!("127.0.0.1:{p}").parse().unwrap()};
+    let (pa,pc,rc)=(port(),port(),port());let dc=std::env::temp_dir().join(format!("pocold-s1-sync-{}",std::process::id()));let _=std::fs::remove_dir_all(&dc);
+    let mut na=Node::open(Config{listen:Some(addr(pa)),..ca()},admitted(&cfg(&["a","b","c"]))).unwrap();
+    let served=(1..=na.chain.head().height).filter(|h|na.chain.canonical_at(*h).unwrap().offloaded).count();assert!(served>=60,"positive control: A serves {served} offloaded blocks");
+    let target=x.hash();na.start_network().unwrap();std::thread::spawn(move||na.run());
+    let mut nc=Node::open(Config{dir:dc.clone(),name:"c".into(),miner:None,listen:Some(addr(pc)),peers:vec![addr(pa)],rpc:Some(addr(rc)),stop_at:None,log:false,limits:Default::default()},admitted(&cfg(&["a","b","c"]))).unwrap();
+    nc.start_network().unwrap();std::thread::spawn(move||nc.run());
+    assert!(wait_for(300,&||rpc_tcp(rc,"eth_getBlockByNumber",json!(["latest",false]))["hash"]==json!(hex(&target))),"C syncs to A's head over P2P");
+    let tcp_view=|p:u16|{let mut v=vec![];for h in 0..=b.chain.head().height{let blk=rpc_tcp(p,"eth_getBlockByNumber",json!([format!("{h:#x}"),true]));
+        for t in blk["transactions"].as_array().cloned().unwrap_or_default(){v.push(rpc_tcp(p,"eth_getTransactionReceipt",json!([t["hash"]])));}v.push(blk);}v};
+    assert_eq!(tcp_view(rc),chain_view(&mut b),"the synced node answers as the reference");
+    for d in [da,db,dc]{let _=std::fs::remove_dir_all(&d);}
+}
+/// C-1 S1: a damaged history.redb is never served. Single bytes of the store are flipped: inside receipts
+/// records and transaction index keys (found by their bytes) and at positions spread over the file. After
+/// each flip the node opens and answers every block, transaction, receipt, log, header and block-bytes
+/// query. Each answer equals the reference's, or is an error while the store is marked damaged; the
+/// comparison would also admit a transaction reported not found, and the tally shows none occurs: open's
+/// full integrity check catches every targeted flip. A wrong block, transaction, receipt or log is never
+/// returned. Then wrong content that passes redb's checksums (written through redb) is caught by its
+/// reader. The next open rebuilds a store marked damaged, and its answers equal the reference's.
+#[test] fn a_damaged_history_store_is_never_served_and_is_rebuilt(){
+    use pocold::node::{Config,Limits,Node};
+    let dir=std::env::temp_dir().join(format!("pocold-s1-flip-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let conf=||Config{dir:dir.clone(),name:"flip".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()};
+    let open=||Node::open(conf(),admitted(&cfg(&["a","b","c"]))).unwrap();
+    let (_,blocks,_)=s1_chain();
+    let mut a=open();for x in &blocks{a.import(x.clone(),None).unwrap();}
+    let txs:Vec<String>=blocks.iter().flat_map(|x|x.body.txs.iter().map(|t|format!("{}",revm::primitives::keccak256(t)))).collect();
+    let full=|n:&mut Node,m:&str,p:serde_json::Value|{let body=json!({"jsonrpc":"2.0","id":1,"method":m,"params":p}).to_string();let (t,_r)=std::sync::mpsc::channel();
+        let r=pocold::rpc::answer(n,&pocold::rpc::Request::local(body.into_bytes(),t,std::time::Instant::now()+std::time::Duration::from_secs(120),false));
+        let v:serde_json::Value=serde_json::from_str(&r.body).unwrap();if v.get("error").is_some(){json!({"error":v["error"]["code"]})}else{json!({"result":v["result"]})}};
+    // (answer, whether it is a transaction lookup)
+    let answers=|n:&mut Node|->Vec<(serde_json::Value,bool)>{let top=n.chain.head().height;let mut v=vec![];
+        for t in &txs{v.push((full(n,"eth_getTransactionByHash",json!([t])),true));v.push((full(n,"eth_getTransactionReceipt",json!([t])),true));}
+        v.push((full(n,"eth_getLogs",json!([{"fromBlock":"0x0","toBlock":format!("{top:#x}")}])),false));
+        v.push((full(n,"pocol_getHeaders",json!(["0x1",format!("{top:#x}")])),false));
+        for x in 0..=top{let hx=format!("{x:#x}");v.push((full(n,"eth_getBlockByNumber",json!([hx,true])),false));v.push((full(n,"pocol_getBlockRlp",json!([hx])),false));
+            let hash=hex(&n.chain.canonical_at(x).unwrap().hash);v.push((full(n,"eth_getBlockByHash",json!([hash,true])),false));}
+        v};
+    let want=answers(&mut a);assert!(want.iter().all(|(x,_)|x.get("result").is_some()),"positive control: every reference answer is a result");
+    let path=dir.join(pocold::history::FILE);
+    // Targets: a byte inside each of a few receipts records and inside a few index keys, then spread.
+    let mut receipts_at=vec![];let mut keys_at=vec![];
+    for x in blocks.iter().filter(|x|!x.body.txs.is_empty()).step_by(6){let e=a.block_view(&x.hash()).unwrap();let r=&e.receipts[0];
+        let mut k=e.tx_hashes[0].to_vec();k.extend_from_slice(&e.hash);receipts_at.push(r.clone());keys_at.push(k);}
+    drop(a);let orig=std::fs::read(&path).unwrap();
+    let find=|needle:&[u8]|orig.windows(needle.len()).position(|w|w==needle);
+    let mut pos:Vec<(usize,&str)>=vec![];
+    for r in &receipts_at{if let Some(i)=find(r){pos.push((i+r.len()/2,"receipts"));}}
+    for k in &keys_at{if let Some(i)=find(k){pos.push((i+10,"key-tx"));pos.push((i+40,"key-block"));}}
+    assert!(pos.iter().filter(|p|p.1=="receipts").count()>=3&&pos.iter().filter(|p|p.1=="key-tx").count()>=3,"positive control: records and keys found in the file: {pos:?}");
+    for k in 0..24{pos.push(((orig.len()/24)*k+ (k*131)%4096,"spread"));}
+    let mut tally:HashMap<String,usize>=HashMap::new();
+    for (at,kind) in &pos{let at=(*at).min(orig.len()-1);
+        let mut f=orig.clone();f[at]^=0xff;std::fs::write(&path,&f).unwrap();let _=std::fs::remove_file(dir.join(pocold::history::DAMAGED));
+        let mut r=open();let rebuilt=r.history.rebuilt;let got=answers(&mut r);let damaged=r.history.is_damaged();
+        assert_eq!(got.len(),want.len(),"{kind}@{at}");
+        let mut not_found=0;let mut errors=0;
+        for ((g,_),(w,is_tx)) in got.iter().zip(&want){if g==w{continue}
+            if g.get("error")==Some(&json!(-32603)){assert!(damaged,"{kind}@{at}: an error only once the store is marked damaged");errors+=1;continue}
+            assert!(*is_tx&&g.get("result")==Some(&serde_json::Value::Null),"{kind}@{at}: a wrong answer {g} for {w}");not_found+=1;}
+        let outcome=if rebuilt{"rebuilt at open"}else if errors>0{"detected: errors, marked damaged"}else if damaged{"detected: marked damaged"}else if not_found>0{"undetected: not found"}else{"no effect"};
+        *tally.entry(format!("{kind}: {outcome}")).or_default()+=1;
+        drop(r);let mut r=open();if damaged{assert!(r.history.rebuilt,"{kind}@{at}: the store marked damaged is rebuilt");}
+        if damaged||rebuilt{assert_eq!(answers(&mut r),want,"{kind}@{at}: answers after the rebuild");}drop(r);
+    }
+    let mut t:Vec<_>=tally.into_iter().collect();t.sort();println!("S1-FLIP {}",json!(t));
+    // Open's full check (every page checksum) catches each targeted flip, index keys included.
+    assert!(!t.iter().any(|(k,_)|k.contains("undetected")),"no flip goes undetected with a changed answer: {t:?}");
+    for kind in ["receipts","key-tx","key-block"]{assert!(t.iter().filter(|(k,_)|k.starts_with(kind)).all(|(k,_)|k.ends_with("rebuilt at open")),"{kind}: {t:?}");}
+    // Wrong content that redb's checksums cannot see (written through redb itself): the reader's checks
+    // catch it. A receipts record under another block's key fails its seal; an index entry with the wrong
+    // position does not name its transaction.
+    let x=blocks.iter().find(|b|b.body.txs.len()==2).unwrap();let y=blocks.iter().rev().find(|b|b.body.txs.len()==2).unwrap();
+    let tx0=revm::primitives::keccak256(&x.body.txs[0]);
+    let receipts_t:redb::TableDefinition<&[u8;32],&[u8]>=redb::TableDefinition::new("receipts");
+    let txidx_t:redb::TableDefinition<&[u8;64],u32>=redb::TableDefinition::new("txidx");
+    use redb::ReadableTable;let edits:[(&str,Box<dyn Fn(&redb::WriteTransaction)>);2]=[
+        ("receipts under another key",Box::new(|w|{let mut t=w.open_table(receipts_t).unwrap();let v=t.get(&y.hash()).unwrap().unwrap().value().to_vec();t.insert(&x.hash(),v.as_slice()).unwrap();})),
+        ("index entry at the wrong position",Box::new(|w|{let mut t=w.open_table(txidx_t).unwrap();let mut k=[0u8;64];k[..32].copy_from_slice(tx0.as_slice());k[32..].copy_from_slice(&x.hash());
+            assert_eq!(t.get(&k).unwrap().map(|v|v.value()),Some(0),"positive control: the entry exists");t.insert(&k,1u32).unwrap();}))];
+    for (what,edit) in &edits{
+        std::fs::write(&path,&orig).unwrap();
+        {let db=redb::Database::create(&path).unwrap();let w=db.begin_write().unwrap();edit(&w);w.commit().unwrap();}
+        let mut r=open();assert!(!r.history.rebuilt,"{what}: positive control: redb's check passes");let got=answers(&mut r);let damaged=r.history.is_damaged();
+        let mut errors=0;
+        for ((g,_),(w,_)) in got.iter().zip(&want){if g==w{continue}
+            assert_eq!(g.get("error"),Some(&json!(-32603)),"{what}: a wrong answer {g} for {w}");errors+=1;}
+        assert!(damaged&&errors>0,"{what}: detected by its reader ({errors} errors) and the store marked damaged");
+        println!("S1-CONTENT {}",json!({"edit":what,"errors":errors}));
+        drop(r);let mut r=open();assert!(r.history.rebuilt,"{what}: rebuilt at the next open");assert_eq!(answers(&mut r),want,"{what}: answers after the rebuild");drop(r);
+    }
+    let _=std::fs::remove_dir_all(&dir);
+}
+/// The S1 scenario chain: A1 (with a transaction) abandoned for the heavier B1, B2 from genesis, then 96
+/// blocks with a payment and a LOG0-emitting create every 4th block. Returns the builder, every block in
+/// import order and the tip.
+fn s1_chain()->(Net,Vec<Block>,[u8;32]){
+    let alice=devnet::account_key("alice");
+    let log_tx=|nonce:u64|Tx{chain_id:777910,nonce,max_priority:U256::from(1u64),max_fee:U256::from(100_000_000_000u64),gas:200_000,to:None,value:U256::ZERO,data:vec![0x61,0x00,0x10,0x5f,0xa0,0x00].into()}.sign_1559(&alice);
+    let mut h1=net();let g=h1.chain.head;let a1=branch(&mut h1,g,1,&[Body{txs:vec![pay(&alice,0,5)],evidence:vec![]}]);
+    let mut h=net();let mut blocks=a1.clone();blocks.extend(branch(&mut h,g,2,&[]));
+    let (mut nonce,mut p)=(0u64,blocks[2].hash());
+    for i in 0..96{let body=if i%4==0{let t=vec![pay(&alice,nonce,1+i),log_tx(nonce+1)];nonce+=2;Body{txs:t,evidence:vec![]}}else{Body::default()};
+        let x=branch(&mut h,p,1,&[body]);p=x[0].hash();blocks.extend(x);}
+    (h,blocks,p)
 }
 
 /// Equal-work branches: at every height all of them use the same attempt, so their timestamps and

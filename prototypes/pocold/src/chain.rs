@@ -145,6 +145,11 @@ pub struct Chain{
     /// R21 window: full states kept for heights > head-K_hist (and genesis).
     pub k_hist:u64,
     pub rebuilds:u64,
+    /// C-1 S1: when set (by a node whose receipts and transaction index live in `history.redb`), canonical
+    /// journaled blocks more than this many blocks below the head are offloaded like side blocks; the
+    /// last `history_window` canonical blocks stay resident. None for a bare chain: nothing canonical is
+    /// offloaded. `history_cursor`: every canonical height below it has been offloaded already.
+    pub history_window:Option<u64>,pub history_cursor:u64,
     /// Blocks `restore_canonical` re-executed (resident ones on its span included): the restore work.
     pub restore_reexecs:u64,
     /// Invalid committed contents (blockReject) never re-validated.
@@ -178,7 +183,7 @@ impl Chain{
             receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
         let k_hist=u64::from(spec.local().k_hist);
-        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
+        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,history_window:None,history_cursor:1,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
             r_keep:R_KEEP,side_cap:SIDE_BLOCKS_MAX,protect:Default::default(),replaying:false}
     }
     pub fn head(&self)->&Entry{&self.blocks[&self.head]}
@@ -448,7 +453,8 @@ impl Chain{
     ///   later journal records build on) is exempt from this cap only;
     /// - every journaled non-canonical block is offloaded to metadata (D-REORG-REDB): its body,
     ///   receipts, tx hashes and encoded header are dropped and read from the journal on demand.
-    ///   Canonical blocks are never offloaded here (`restore_canonical` makes adopted ones whole);
+    ///   Canonical blocks are offloaded only below the resident window of C-1 S1 (`history_window`), so
+    ///   `restore_canonical` makes adopted ones whole only inside it;
     /// - at most `side_max` non-canonical blocks keep a state (unprotected and lowest-work first
     ///   are pruned, rebuilt on demand).
     pub fn retain(&mut self){
@@ -494,6 +500,15 @@ impl Chain{
         // append), so no crash can lose them; genesis is never journaled and never offloaded.
         let side_left=side(self);
         for h in &side_left{if let Some(e)=self.blocks.get_mut(h){if !e.offloaded&&e.body_off.is_some()&&e.height>0{offload(e);}}}
+        // C-1 S1: canonical history below the resident window goes off the heap too; its receipts and
+        // transaction index are in history.redb (written before the journal record, invariant I3).
+        if let Some(w)=self.history_window{
+            let below=head_h.saturating_sub(w)+1;
+            while self.history_cursor<below{
+                if let Some(h)=self.canonical.get(self.history_cursor as usize).copied(){if let Some(e)=self.blocks.get_mut(&h){if !e.offloaded&&e.body_off.is_some(){offload(e);}}}
+                self.history_cursor+=1;
+            }
+        }
         let mut with_state:Vec<(bool,U256,u64,[u8;32])>=side_left.into_iter().filter(|h|!self.blocks[h].pruned).map(|h|{let e=&self.blocks[&h];(self.protect.contains(&h),e.total_work,e.import_seq,h)}).collect();
         let side_max=self.spec.local().side_max as usize;
         if with_state.len()>side_max{with_state.sort();let over=with_state.len()-side_max;
@@ -528,7 +543,9 @@ impl Chain{
         self.head=best;self.rebuild_canonical();
     }
     /// Whether every canonical block holds its bytes (D-REORG-REDB invariant after an import or open).
-    pub fn canonical_resident(&self)->bool{self.canonical.iter().all(|h|!self.blocks[h].offloaded)}
+    /// Every canonical block inside the resident window is resident (all of them for a bare chain).
+    pub fn canonical_resident(&self)->bool{let head_h=self.head().height;let start=self.history_window.map_or(0,|w|head_h.saturating_sub(w)+1);
+        self.canonical.iter().skip(start as usize).all(|h|!self.blocks[h].offloaded)}
     /// A block's committed body: resident, or read back from the journal when offloaded.
     pub fn body_of(&self,e:&Entry,src:Option<&dyn BlockBytes>)->Result<Body,Reject>{
         if !e.offloaded{return Ok(e.body.clone())}
@@ -559,7 +576,9 @@ impl Chain{
     pub fn restore_canonical(&mut self,from_h:u64,src:&dyn BlockBytes)->Result<usize,Reject>{
         let head_h=self.head().height;
         let off=|c:&Chain,h:u64|c.canonical_at(h).map_or(false,|e|e.offloaded);
-        let Some(first)=(from_h.max(1)..=head_h).find(|h|off(self,*h)) else{return Ok(0)};
+        // C-1 S1: below the resident window a canonical block stays offloaded (its receipts are stored).
+        let window_start=self.history_window.map_or(1,|w|head_h.saturating_sub(w)+1);
+        let Some(first)=(from_h.max(1).max(window_start)..=head_h).find(|h|off(self,*h)) else{return Ok(0)};
         let last=(first..=head_h).rev().find(|h|off(self,*h)).unwrap_or(first);
         let ph=self.canonical[first as usize-1];let was_pruned=self.blocks[&ph].pruned;
         self.ensure_state_with(&ph,Some(src))?;
