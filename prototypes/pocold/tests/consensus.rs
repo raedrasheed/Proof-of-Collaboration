@@ -112,6 +112,23 @@ fn best_of(chain:&Chain)->[u8;32]{
     assert_eq!(n.chain.head,reference_best(&n));assert_eq!(n.chain.head,b9.hash());
 }
 
+/// Review R4-1: every stored block's total work is its parent's plus work(target) of its OWN committed
+/// target, computed here independently of `chain::work` as floor(2^256/(t+1)) = (!t)/(t+1)+1
+/// (consensus.md:117, §9), on a chain of signed and fallback blocks and on a side branch.
+#[test] fn every_block_total_work_is_its_parents_plus_the_work_of_its_own_target(){
+    let mut n=net();let g=n.chain.head;let mut p=g;
+    for i in 0..24{let b=if i%3==0{signed(&n,p,Body::default(),0)}else{fallback(&n,p,0)};import(&mut n,&b);n.chain.retain();p=b.hash();}
+    let fork=n.chain.canonical[10];let s=signed(&n,fork,Body::default(),0);import(&mut n,&s);let mut q=s.hash();for _ in 0..3{let b=fallback(&n,q,0);import(&mut n,&b);q=b.hash();}
+    assert!(!n.chain.is_canonical(&q),"a side branch is stored too");
+    let mut checked=0;let mut distinct=std::collections::HashSet::new();
+    for e in n.chain.blocks.values(){
+        assert!(e.height>0||e.total_work==U256::ZERO,"genesis has total work 0");
+        let Some(par)=e.parent else{continue};let t=U256::from_be_bytes(e.header.target.to_be_bytes());
+        let w=(!t)/(t+U256::from(1u8))+U256::from(1u8);distinct.insert(t);
+        assert_eq!(e.total_work,n.chain.blocks[&par].total_work+w,"h={}: total work = parent's + work(own target)",e.height);checked+=1;
+    }
+    assert!(checked>=28&&distinct.len()>=2,"positive control: {checked} blocks, {} distinct targets (a parent-target mutant differs)",distinct.len());
+}
 #[test] fn every_validity_item_rejects_its_mutation(){
     let mut n=net();for _ in 0..3{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);}
     let head=n.chain.head;
@@ -980,6 +997,38 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
     assert!(prefix.iter().all(|x|r.chain.blocks.get(&x.hash()).map_or(false,|e|e.offloaded)),"the lighter prefix is retained as offloaded side blocks");
     r.import(last.clone(),None).unwrap();assert_eq!(r.chain.head,last.hash());assert_eq!(chain_view(&mut r),new_view,"re-delivery adopts the same chain");
     drop(r);let mut r=reopen(&conf);assert_eq!(chain_view(&mut r),new_view);
+    let _=std::fs::remove_dir_all(&dir);
+}
+
+/// Review R3-3: replay restores each adopted branch when it is adopted, as live import does. Before,
+/// one restore at the end of open rebuilt the parent of the lowest offloaded canonical block (pruned:
+/// from genesis) and re-executed every canonical block up to the highest offloaded one, so one early
+/// and one late depth-1 reorg made the open re-execute nearly the whole chain again. The reopened node
+/// must hold the same chain as live, whole, having done the same rebuild and restore work as live.
+#[test] fn replay_restores_each_adopted_branch_with_the_work_live_did(){
+    let (len,early,late)=(90u64,5u64,80u64);
+    let mut a=net();let (mut n,dir,conf)=rnode("r33",64,16);
+    let step=|a:&mut Net,n:&mut pocold::node::Node,b:Block|{import(a,&b);a.chain.retain();n.import(b,None).unwrap();};
+    while n.chain.head().height<len{
+        let h=n.chain.head().height+1;let p=n.chain.head;
+        if h==early||h==late{
+            // F, F2 on p; then a signed S on p (a side block, offloaded), extended until it is adopted.
+            let f=fallback(&a,p,0);step(&mut a,&mut n,f.clone());let f2=fallback(&a,f.hash(),0);step(&mut a,&mut n,f2);
+            let s=signed(&a,p,Body::default(),0);step(&mut a,&mut n,s.clone());assert!(!n.chain.is_canonical(&s.hash()),"S starts as a side block");
+            let mut q=s.hash();while n.chain.head!=q{let b=fallback(&a,q,0);q=b.hash();step(&mut a,&mut n,b);}
+            assert!(n.chain.is_canonical(&s.hash()));continue;
+        }
+        let b=fallback(&a,p,0);step(&mut a,&mut n,b);
+    }
+    assert!(n.stats.reorgs>=2&&n.stats.restored>=2,"positive control: two adoptions of offloaded branches: {:?}",(n.stats.reorgs,n.stats.restored));
+    let live=(n.chain.head,n.chain.rebuilds,n.chain.restore_reexecs,n.stats.restored);let view=chain_view(&mut n);drop(n);
+    for _ in 0..2{
+        let mut r=reopen(&conf);
+        assert_eq!(r.chain.head,live.0);assert!(r.chain.canonical_resident());assert_eq!(r.stats.replay_skipped,0);
+        assert_eq!((r.chain.rebuilds,r.chain.restore_reexecs,r.stats.restored),(live.1,live.2,live.3),"open does the rebuild and restore work live did, no more");
+        assert!(r.chain.rebuilds+r.chain.restore_reexecs<late-early,"and not a re-execution of the span between the two reorgs");
+        assert_eq!(chain_view(&mut r),view);
+    }
     let _=std::fs::remove_dir_all(&dir);
 }
 

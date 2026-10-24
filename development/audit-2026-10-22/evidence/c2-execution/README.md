@@ -15,13 +15,40 @@ These changes are conformance work: no validity, root, receipt, genesisHash or R
 The other sessions' reviews loaded this host during both runs, so absolute times are higher than the
 unloaded round-3 figures. The comparison is between runs made on the same states.
 
-| state | 380 transfers, before | after | 200 small creates, before | after |
+| state | 380 transfers, before | after | 149 small creates, before | after |
 |---|---:|---:|---:|---:|
 | code (67 accounts, 2.05 MB of code) | 7,891 ms (`code-base.log`) | 266 ms (`code-new.log`) | 5,081 ms | 1,711 ms |
 | near all caps (18,828 accounts, 46,636 slots, 2.05 MB) | 28,463 ms (`all-base.log`) | 5,395 ms (`all-new.log`) | 11,178 ms | 5,463 ms |
 
 The remaining cost after `49b2bc2` is the per-transaction engine clone (7.3 ms at the near-cap state)
-and the create-time scan. Items 3b and 2 remove both; their measurement is `final-*.log`, when present.
+and the create-time scan. Items 3b and 2 remove both; their measurement follows.
+
+Correction: the column header above first said "200 small creates". The logs record `manySmallTxs` = 149.
+
+## Final measurement (`3a52ae6` against `2ce03c1`, the code with items 1, 2, 3a and 3b)
+
+Each side ran in its own worktree and target directory, alternating base, final, base, final
+(`final-load.txt` has the load averages at the end of each run: 2.0–2.8 on 4 CPUs). Other work on the
+host (builds and tests of later review fixes) ran during the last two runs, so they are not unloaded
+figures. The final code ran under the same load or more, so its gains are not overstated.
+
+| state (height) | block of | before (`final-*-base.log`) | after (`final-*-final.log`) |
+|---|---|---:|---:|
+| code, end (125; 67 accounts, 2.05 MB of code) | 380 transfers | 6,686 ms | 163 ms |
+| | 247 CREATE2 creates | 2,386 ms | 126 ms |
+| | 149 small creates | 4,150 ms | 157 ms |
+| | empty child | 184.9 ms | 97.4 ms |
+| near all caps (549; 18,828 accounts, 46,636 slots, 2.05 MB) | 380 transfers | 22,553 ms | 655 ms |
+| | 247 CREATE2 creates | 4,862 ms | 562 ms |
+| | 149 small creates | 9,867 ms | 510 ms |
+| | empty child | 777.2 ms | 465.0 ms |
+
+The whole measurement took 1,112 s before and 311 s after on the near-cap series (541 s and 43 s on the
+code series).
+
+What remains at the near-cap state is mostly per block, not per transaction. The empty child
+(465 ms) has no USER transaction, and its cost includes a state root over the whole state. This
+measurement does not split that cost further. Item 4 (incremental state root) targets the root part.
 
 ## Tests and mutation controls
 

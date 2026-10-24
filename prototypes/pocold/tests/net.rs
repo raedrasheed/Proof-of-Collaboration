@@ -138,9 +138,20 @@ fn small()->Limits{
     // The whole-request deadline (1.5 s) closes the idle readers, even a client trickling bytes; then clients are served.
     for s in idle.iter_mut(){s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();assert!(closed(s));}
     let (code,b)=rpc(r.rpc,r#"{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}"#,false);assert_eq!(code,200,"{b}");
-    let mut trickle=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();
-    for _ in 0..5{let _=trickle.write_all(b"P");std::thread::sleep(Duration::from_millis(400));}
-    trickle.set_read_timeout(Some(Duration::from_secs(2))).unwrap();assert!(closed(&mut trickle),"trickling request closed");
+    // Review R2-5: the deadline runs over the whole request, not per read. A client sending one byte
+    // every 400 ms for 3 s (twice the deadline) is closed while it still trickles, about 1.5 s after
+    // its first byte; a per-read idle timeout would never close it.
+    let mut trickle=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();trickle.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    let t0=Instant::now();let mut closed_at=None;
+    while t0.elapsed()<Duration::from_secs(3)&&closed_at.is_none(){
+        let _=trickle.write_all(b"P");let next=Instant::now()+Duration::from_millis(400);
+        while Instant::now()<next{let mut b=[0u8;64];match trickle.read(&mut b){
+            Ok(0)=>{closed_at=Some(t0.elapsed());break}
+            Err(e) if matches!(e.kind(),std::io::ErrorKind::WouldBlock|std::io::ErrorKind::TimedOut)=>{}
+            _=>{closed_at=Some(t0.elapsed());break}}}
+    }
+    let at=closed_at.expect("a client trickling for twice REQ_READ_DEADLINE is closed while it trickles");
+    assert!(at>=Duration::from_millis(1400)&&at<=Duration::from_millis(2300),"closed about REQ_READ_DEADLINE after the first byte: {at:?}");
     // Many concurrent clients each finish promptly: served (200) or refused (503 or reset), none hangs.
     let t=Instant::now();
     let hs:Vec<_>=(0..24).map(|i|{let p=r.rpc;std::thread::spawn(move||rpc(p,&format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"eth_chainId","params":[]}}"#),false).0)}).collect();
@@ -169,6 +180,27 @@ fn small()->Limits{
     // The singleton form is equally denied; without an Origin the local miner keeps its interface.
     let (_,b)=rpc(r.rpc,r#"{"jsonrpc":"2.0","id":9,"method":"pocol_getTemplate","params":[]}"#,true);assert!(b.contains("-32601"),"{b}");
     let (_,b)=rpc(r.rpc,r#"[{"jsonrpc":"2.0","id":9,"method":"pocol_getTemplate","params":[]}]"#,false);assert!(b.contains("\"result\""),"{b}");
+}
+
+/// Review R2-3: every error item the guard or the dispatcher produces stays within ERR_ITEM_MAX
+/// (network.md:276), whatever the size of the member's id or method name: ORIGIN_DENY, an unknown
+/// method and a member without a method. A short id is still echoed. In process.
+#[test] fn guard_and_dispatch_error_items_stay_within_err_item_max(){let _g=serial();
+    let dir=std::env::temp_dir().join(format!("pocold-net-erritem-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let cfg=Config{dir,name:"erritem".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()};
+    let mut n=Node::open(cfg,spec()).unwrap();
+    let (big,name)=(format!("\"{}\"","i".repeat(100_000)),"m\\u0000".repeat(20_000));
+    let batch=format!(r#"[{{"jsonrpc":"2.0","id":{big},"method":"pocol_getTemplate","params":[]}},{{"jsonrpc":"2.0","id":{big},"method":"{name}","params":[]}},{{"jsonrpc":"2.0","id":{big}}},
+        {{"jsonrpc":"2.0","id":7,"method":"pocol_getTemplate","params":[]}},{{"jsonrpc":"2.0","id":8,"method":"no_such","params":[]}}]"#);
+    let v:serde_json::Value=serde_json::from_str(&pocold::rpc::handle_with(&mut n,batch.as_bytes(),true)).unwrap();let a=v.as_array().unwrap();
+    for (i,code) in [(0,-32601),(1,-32601),(2,-32600),(3,-32601),(4,-32601)]{
+        assert_eq!(a[i]["error"]["code"],code,"{}",a[i]);let len=a[i].to_string().len();assert!(len<=pocold::rpc::ERR_ITEM_MAX,"item {i}: {len} B");}
+    for i in 0..3{assert!(a[i]["id"].is_null(),"an id over ID_ECHO_MAX is not echoed");}
+    assert_eq!((a[3]["id"].clone(),a[4]["id"].clone()),(serde_json::json!(7),serde_json::json!(8)),"short ids are echoed");
+    assert_eq!(a[4]["error"]["message"],"method no_such not found");assert_eq!(a[1]["error"]["message"],"method not found");
+    // The single-request forms are bounded the same way.
+    for body in [format!(r#"{{"jsonrpc":"2.0","id":{big},"method":"{name}","params":[]}}"#),format!(r#"{{"jsonrpc":"2.0","id":{big},"method":"pocol_getTemplate"}}"#)]{
+        let s=pocold::rpc::handle_with(&mut n,body.as_bytes(),true);assert!(s.len()<=pocold::rpc::ERR_ITEM_MAX&&s.contains("-32601"),"{} B",s.len());}
 }
 
 #[test] fn inbound_floods_cannot_take_the_slots_for_configured_peers(){let _g=serial();
@@ -548,6 +580,24 @@ fn pacer_batch()->String{
     println!("HONEST {}",serde_json::json!({"answerBytes":out.len()-at,"sendMs":sent}));
     assert!(sent<=2000,"the honest reader's ~14 MiB answer took {sent} ms to send");
 }
+/// Review R2-4: bytes after the request (a trailing CRLF that some clients add, or a pipelined request,
+/// which is never served: network.md:187) are drained before the close, so the close does not reset the
+/// connection. Before, the client of a large answer saw `Connection reset by peer` after the body on
+/// every try. The ~14 MiB batch answer is read in full, without an error, after 0 and 300 ms.
+#[test] fn bytes_after_the_request_do_not_reset_the_answer(){let _g=serial();
+    let mut l=small();l.rpc.work_deadline=Duration::from_secs(60);l.rpc.write_deadline=Duration::from_secs(120);let r=start("trailing",l);
+    let body=pacer_batch();
+    for (tail,wait) in [(&b"\r\n"[..],0u64),(&b"\r\n"[..],300),(&b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}"[..],300)]{
+        let mut s=TcpStream::connect(("127.0.0.1",r.rpc)).unwrap();s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        s.write_all(format!("POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes()).unwrap();
+        std::thread::sleep(Duration::from_millis(30));s.write_all(tail).unwrap();std::thread::sleep(Duration::from_millis(wait));
+        let mut out=Vec::new();let res=s.read_to_end(&mut out);
+        let at=out.windows(4).position(|w|w==b"\r\n\r\n").expect("an HTTP answer")+4;
+        let len:usize=String::from_utf8_lossy(&out[..at]).lines().find_map(|h|h.strip_prefix("Content-Length: ").map(|x|x.trim().parse().unwrap())).unwrap();
+        assert!(res.is_ok(),"tail {:?}, wait {wait} ms: {:?} after {} of {len} body bytes",String::from_utf8_lossy(tail),res.err(),out.len()-at);
+        assert_eq!(out.len()-at,len,"every byte of the answer arrived");assert!(len>10<<20,"the large answer: {len} B");
+    }
+}
 /// Review 3 (RG3V-M1): the pacer's timer is at s_v + TIMER_EPS with s_v = max(GRACE, A/R) and is
 /// re-armed on every change of A (network.md:243-246). A reader above R keeps A/R ahead of sendTime
 /// past GRACE: its blocked writes wait for writability or the backstop. A timer at GRACE alone would
@@ -680,6 +730,35 @@ fn pacer_batch()->String{
     assert_eq!(v["error"]["code"],-32020,"{v}");assert_eq!(v["error"]["data"]["reason"],"deadline");assert_eq!(n.pool.txs.len(),0,"the method never ran");
     n.cfg.limits.rpc.compute_light=Duration::from_secs(5);
     let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&req()).body).unwrap();assert!(v["result"].is_string(),"{v}");assert_eq!(n.pool.txs.len(),1);
+}
+/// Review R2-2: the pool admission of eth_sendRawTransaction runs under the request's COMPUTE_DEADLINE
+/// (network.md RpcGuard (د) step 4, (و)). An interpreted execution is stopped at its next poll; a
+/// precompile run, which no poll can cut short, is checked again before the commit. Either way the
+/// transaction is refused with -32020 {deadline} and nothing is pooled. In process, deterministically.
+#[test] fn a_transaction_admission_past_its_compute_deadline_is_refused_and_not_pooled(){let _g=serial();
+    use pocold::rpc::{answer,Request};
+    let dir=std::env::temp_dir().join(format!("pocold-net-admitdl-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let cfg=Config{dir,name:"admitdl".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()};
+    let mut n=Node::open(cfg,spec()).unwrap();let alice=devnet::account_key("alice");
+    let tx=|nonce:u64,to:Option<revm::primitives::Address>,data:Vec<u8>|Tx{chain_id:777940,nonce,max_priority:U256::from(1u64),max_fee:U256::from(10_000_000_000u64),gas:7_900_000,to,value:U256::ZERO,data:data.into()}.sign_1559(&alice);
+    // A create whose init code loops until it runs out of gas (JUMPDEST PUSH1 0 JUMP): interpreted.
+    let spin=tx(0,None,vec![0x5b,0x60,0x00,0x56]);
+    let t=Instant::now();let e=n.submit_tx_by(spin.clone(),false,Some(Instant::now())).unwrap_err();let stopped=t.elapsed();
+    assert_eq!(e,pocold::node::SUBMIT_DEADLINE);assert_eq!(n.pool.txs.len(),0,"refused, not pooled");
+    let t=Instant::now();n.submit_tx_by(spin,false,None).unwrap();let full=t.elapsed();assert_eq!(n.pool.txs.len(),1,"positive control: with no deadline it is pooled");
+    assert!(stopped*4<full,"the stop hook ended the execution early ({stopped:?} against a whole run of {full:?})");
+    // BLAKE2F with 7.8M rounds as the transaction itself: no poll can stop it, the check before commit does.
+    let input=pocold::types::unhex(&format!("{:08x}{}01",7_800_000u32,"00".repeat(64+128+16))).unwrap();
+    let blake=tx(1,Some(revm::primitives::Address::with_last_byte(9)),input);
+    let e=n.submit_tx_by(blake.clone(),false,Some(Instant::now())).unwrap_err();assert_eq!(e,pocold::node::SUBMIT_DEADLINE);assert_eq!(n.pool.txs.len(),1);
+    // Through the RPC: a 1 ms light deadline. The answer is -32020 {deadline} (kept, not replaced) and nothing is pooled.
+    n.cfg.limits.rpc.compute_light=Duration::from_millis(1);
+    let body=format!(r#"{{"jsonrpc":"2.0","id":7,"method":"eth_sendRawTransaction","params":["0x{}"]}}"#,hex(&blake));
+    let req=||{let (t,_r)=std::sync::mpsc::channel();Request::local(body.as_bytes().to_vec(),t,Instant::now()+Duration::from_secs(30),true)};
+    let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&req()).body).unwrap();
+    assert_eq!((v["error"]["code"].clone(),v["error"]["data"]["reason"].clone()),(serde_json::json!(-32020),serde_json::json!("deadline")),"{v}");assert_eq!(n.pool.txs.len(),1);
+    n.cfg.limits.rpc.compute_light=Duration::from_secs(5);
+    let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&req()).body).unwrap();assert!(v["result"].is_string(),"positive control: with time left it is pooled: {v}");assert_eq!(n.pool.txs.len(),2);
 }
 /// Review B1, end to end at the default limits: a light request that waits behind more heavy work
 /// than its 500 ms compute deadline is answered with its result (or busy past QUEUE_WAIT), never
@@ -1072,4 +1151,36 @@ fn blake_then(rounds:u32,tail:&str)->String{
     }
     let v=rpc_json(r.rpc,&format!("[{},{}]",req("eth_blockNumber","[]","other"),req("eth_blockNumber","[]",ENCODE_DELAY_ID)));
     let a=v.as_array().unwrap_or_else(||panic!("{v}"));assert!(a[0]["result"].is_string()&&dl(&a[1]),"batch member: {v}");
+}
+
+/// PR #27 review R2-1 (network.md (ط): RPC does not hold up validation, mining or sync): one batch of
+/// heavy eth_call members used to run on the consensus thread with only the light lane drained between
+/// members, so a P2P Hello waited for the whole batch. Queued P2P, miner and timer events now run between
+/// members: a peer that connects during the batch gets the node's Hello long before the batch ends.
+#[test] fn a_batch_does_not_hold_p2p_events_for_its_whole_length(){let _g=serial();
+    let r=start("batch-p2p",Limits::default());
+    let batch=format!("[{}]",(0..8).map(|_|blake_max()).collect::<Vec<_>>().join(","));
+    let port=r.rpc;let ha=&pocold::rpc::COUNTERS.heavy_active;let ha0=ha.load(Ordering::SeqCst);
+    let h=std::thread::spawn(move||{let t=Instant::now();
+        let mut s=TcpStream::connect(("127.0.0.1",port)).unwrap();s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();let _=s.set_nodelay(true);
+        s.write_all(format!("POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{batch}",batch.len()).as_bytes()).unwrap();
+        let mut out=String::new();let _=s.read_to_string(&mut out);(out.get(9..12).map(str::to_string),t.elapsed())});
+    let t=Instant::now();while ha.load(Ordering::SeqCst)==ha0&&t.elapsed()<Duration::from_secs(10){std::thread::sleep(Duration::from_millis(5));}
+    std::thread::sleep(Duration::from_millis(200));
+    // Time from connecting until the node's Hello arrives: the node sends it when the consensus thread
+    // handles the Connected event.
+    let mut s=TcpStream::connect(("127.0.0.1",r.p2p)).unwrap();s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    // A heavy request sent during the batch is answered (it is set aside between members, never run inside the batch).
+    let port2=r.rpc;let other=std::thread::spawn(move||{let mut s=TcpStream::connect(("127.0.0.1",port2)).unwrap();s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+        let body=blake(1,"eth_call");s.write_all(format!("POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes()).unwrap();
+        let mut out=String::new();let _=s.read_to_string(&mut out);out});
+    let t=Instant::now();s.write_all(&hello(&r,"during-batch")).unwrap();let mut b=[0u8;4];s.read_exact(&mut b).unwrap();let hello_after=t.elapsed();
+    let (code,batch_took)=h.join().unwrap();
+    assert_eq!(code.as_deref(),Some("200"));
+    let o=other.join().unwrap();
+    // It waited behind the batch longer than QUEUE_WAIT, so busy is the RpcGuard answer (as before); what
+    // matters is that it is answered, never lost or left hanging by being set aside.
+    assert!(o.starts_with("HTTP/1.1 200")&&(o.contains("\"result\"")||o.contains("-32021")),"the request queued during the batch is answered: {o}");
+    assert!(hello_after*3<batch_took,"the Hello came {hello_after:?} into a {batch_took:?} batch: it waited for the batch");
+    println!("BATCH-P2P {}",serde_json::json!({"helloMs":hello_after.as_millis() as u64,"batchMs":batch_took.as_millis() as u64}));
 }

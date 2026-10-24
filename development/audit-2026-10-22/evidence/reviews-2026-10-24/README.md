@@ -18,17 +18,19 @@ repository. Only these reports are committed.
 
 | finding | severity | disposition |
 |---|---|---|
-| R3-2: a reverting CREATE2-heavy transaction pays every `current_total` scan without changing the state, so the worst state-scan block is repeatable at every height | HIGH | C-2 item 2 (`2ce03c1`): a create reads only the journaled accounts. Re-measurement pending |
-| R3-3: open restores every adopted branch only at its end, re-executing from the lowest offloaded canonical block. Any reorg doubles later opens | HIGH | **OPEN**: conformance fix queued (restore each adopted branch during replay) |
+| R3-2: a reverting CREATE2-heavy transaction pays every `current_total` scan without changing the state, so the worst state-scan block is repeatable at every height | HIGH | C-2 item 2 (`2ce03c1`): a create reads only the journaled accounts. Re-measured: 247 CREATE2 creates at the near-cap state take 562 ms, against 4,862 ms before ([../c2-execution/README.md](../c2-execution/README.md)) |
+| R3-3: open restores every adopted branch only at its end, re-executing from the lowest offloaded canonical block. Any reorg doubles later opens | HIGH | fixed: replay restores each adopted branch as live does; open does exactly live's rebuild and restore work ([r3-fixes/](r3-fixes/README.md)) |
 | R3-1: the "7.3 h + 8.5 min" devnet bound double-counts TX_CAP and omits the per-transaction state term (≈ 7.45 h before R3-2 and R3-3) | MEDIUM | study correction queued; C-2 changes the per-transaction term |
 | R3-6: every new head re-executes the whole pool with no gas bound (about 68–95 min at 4,096 MODEXP transactions) | MEDIUM | needs a local-policy decision (a pool gas limit changes which transactions are accepted): added to the decision package. C-2 already removed the per-submission scan and clone |
 | R3-7: after `462fffc` a detached transaction already on the new branch pays a full scan before its nonce rejection | MEDIUM | fixed by C-2 (`2ce03c1`); also R5-1 |
-| R5-1: a normal reorg's shared transactions each pay a full scan and a clone (74.6 s against 32.0 s in the reviewer's benchmark) | MEDIUM | fixed by C-2 (`2ce03c1`): neither cost remains. Re-measurement pending |
-| R2-1: one RPC batch holds the consensus thread (a P2P Hello waited 14.3 s; up to about 35 s by construction) | MEDIUM | **OPEN**: conformance fix queued (network.md (ط) separates RPC from consensus) |
-| R1-1: near the TXBYTES room the builder offers transactions that depend on a skipped one and can starve an independent valid transaction | MEDIUM | **OPEN**: conformance fix queued (execution.md:83) |
-| R1-2: no committed test pins LOG_CAP accumulation within a block, its per-branch scope, or `cum_log_bytes` in `meta_clone` (L1, L2 and L4 survive) | MEDIUM | **OPEN**: tests queued |
+| R5-1: a normal reorg's shared transactions each pay a full scan and a clone (74.6 s against 32.0 s in the reviewer's benchmark) | MEDIUM | fixed by C-2 (`2ce03c1`): neither cost remains. Re-measured: 380 transfers at the near-cap state take 655 ms, against 22,553 ms before |
+| R2-1: one RPC batch holds the consensus thread (a P2P Hello waited 14.3 s; up to about 35 s by construction) | MEDIUM | fixed: queued P2P, miner and timer events run between batch members; a Hello came 442 ms into a 5.7 s batch, against 4.85 s into 5.05 s before ([r2-fixes/](r2-fixes/README.md)) |
+| R1-1: near the TXBYTES room the builder offers transactions that depend on a skipped one and can starve an independent valid transaction | MEDIUM | fixed (`6e99b19`): the builder executes its selection on the parent state ([r1-fixes/](r1-fixes/README.md)) |
+| R1-2: no committed test pins LOG_CAP accumulation within a block, its per-branch scope, or `cum_log_bytes` in `meta_clone` (L1, L2 and L4 survive) | MEDIUM | fixed (`6e99b19`): `tests/log_cap_scope.rs` (caps-test build) |
 | R4-1: the e2e's only measure of "heavier" is the node's own totalWork, so a work-accounting bug that every node shares passes | MEDIUM | **OPEN**: test change queued |
 | R4-2: relay and Hello-refresh breakage pass (full mesh; every sync starts from a new connection) | MEDIUM | **OPEN**: test change queued |
 
 The LOW and NOTE findings are listed in each report. Those that need code or test changes are queued
 after the items above, in the order of the decision package priorities.
+
+LOW findings fixed so far: R1-4 (`6e99b19`), and R2-2 to R2-5 ([r2-fixes/](r2-fixes/README.md)).

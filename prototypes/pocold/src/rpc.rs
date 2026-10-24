@@ -606,7 +606,8 @@ pub fn serve(addr:SocketAddr,node:SyncSender<Event>,light:LightLane,limits:Limit
             crate::threads::reap(&mut conns);
             if conns.len()>=limits.conn_max{
                 COUNTERS.refused.fetch_add(1,Ordering::SeqCst);
-                let _=s.set_write_timeout(Some(Duration::from_millis(100)));let _=respond(&mut s,503,"{}");continue
+                // Closed without reading or lingering: the acceptor never waits on a refused client.
+                let _=s.set_write_timeout(Some(Duration::from_millis(100)));let _=write_reply(&mut s,503,"{}");continue
             }
             let (n,lt,lim,srv)=(node.clone(),light.clone(),limits.clone(),srv.clone());
             COUNTERS.active.fetch_add(1,Ordering::SeqCst);
@@ -699,7 +700,19 @@ fn conn(mut s:TcpStream,node:SyncSender<Event>,light:LightLane,l:&Limits,srv:&Se
     // The reservation in the Reply is released when it drops, after the write or its failure. The
     // 200 answer is written under the SendPacer (`pace_write`), so a slow reader cannot hold its
     // reservation beyond SEND_MAX(size); `r` stays alive across the write, holding the reservation.
-    match r{Some(r) if r.close=>Ok(()),Some(r)=>pace_write(&mut s,r.body.as_bytes(),l,r.batch_from),None=>respond(&mut s,504,"{}")}
+    // A BATCH_WALL close is immediate (network.md:282); an answer that was sent ends with `linger`.
+    match r{Some(r) if r.close=>Ok(()),Some(r)=>{pace_write(&mut s,r.body.as_bytes(),l,r.batch_from)?;linger(&mut s);Ok(())},None=>respond(&mut s,504,"{}")}
+}
+/// How long, at most, a connection drains unread input after its answer before it is closed.
+pub const LINGER:Duration=Duration::from_millis(500);
+/// After an answer: the write side is shut down (the client reads its end) and input the server never
+/// reads (a trailing CRLF, a pipelined request: network.md:187 has no pipelining) is drained for at
+/// most LINGER and REQ_BUF bytes, so the close does not make the kernel reset the connection, which
+/// can discard an answer the client has not read yet (review R2-4). A client that closes after reading
+/// ends it at once.
+fn linger(s:&mut TcpStream){
+    let _=s.shutdown(std::net::Shutdown::Write);let by=Instant::now()+LINGER;let mut tmp=[0u8;READ_CHUNK];let mut left=REQ_BUF;
+    while left>0{match read_until(s,&mut tmp,by){Ok(0)|Err(_)=>break,Ok(n)=>left=left.saturating_sub(n)}}
 }
 /// Reserves one HEAVY_QUEUE place, waiting for one until `until` if the queue is full
 /// (network.md:234). The place is released when the node dequeues the request (`Held` drop).
@@ -710,7 +723,9 @@ fn reserve_heavy(c:&Arc<AtomicUsize>,max:usize,until:Instant)->Option<Held>{
         std::thread::sleep(Duration::from_millis(5).min(left));
     }
 }
-fn respond(s:&mut TcpStream,code:u16,body:&str)->std::io::Result<()>{
+/// A request connection's small answer, then `linger`.
+fn respond(s:&mut TcpStream,code:u16,body:&str)->std::io::Result<()>{write_reply(s,code,body)?;linger(s);Ok(())}
+fn write_reply(s:&mut TcpStream,code:u16,body:&str)->std::io::Result<()>{
     let reason=match code{200=>"OK",204=>"No Content",405=>"Method Not Allowed",413=>"Payload Too Large",431=>"Request Header Fields Too Large",503=>"Service Unavailable",_=>"Error"};
     // One write for the header and one for the body (write! would issue a write per piece).
     let head=format!("HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type\r\nConnection: close\r\n\r\n",body.len());
@@ -738,6 +753,13 @@ fn result_bytes(id:&Value)->String{
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32020,"message":"response too large","data":{"reason":"resultBytes"}}}).to_string()
 }
 fn id_of(v:&Value)->Value{v.get("id").cloned().unwrap_or(Value::Null)}
+/// The id an error item echoes: the request's while its encoding is <= ID_ECHO_MAX bytes, else null,
+/// so a guard or dispatch error stays within ERR_ITEM_MAX (network.md:276; review R2-3).
+fn echo_id(id:Value)->Value{if id.to_string().len()<=ID_ECHO_MAX{id}else{Value::Null}}
+/// -32601 for a method not in the table: the name is echoed only while its JSON encoding is short, so
+/// the item stays within ERR_ITEM_MAX with an echoed id (review R2-3).
+fn not_found(m:&str)->(i64,String){(-32601,if serde_json::to_string(m).map_or(usize::MAX,|e|e.len())<=METHOD_ECHO_MAX{format!("method {m} not found")}else{"method not found".into()})}
+pub const METHOD_ECHO_MAX:usize=42;
 /// `site`: the request carried an Origin header. ORIGIN_DENY is decided for the request
 /// and for every batch member before any member executes; a denied member is answered
 /// -32601 and never reaches its method; malformed members are -32600 (A10).
@@ -746,13 +768,13 @@ pub fn handle_with(n:&mut Node,body:&[u8],site:bool)->String{handle_until_budget
 /// started after `deadline` (the nobody-waits work deadline: each is answered -32020 {deadline}
 /// without running). Each member that runs is admitted in turn on the one consensus thread with its
 /// own COMPUTE_DEADLINE (its class's, from when it starts) and SCRATCH budget; light requests waiting
-/// in their lane run between members. Once `wall_by` (BATCH_WALL from the read-end, network.md:282)
+/// in their lane, and queued P2P, miner and timer events, run between members (`drain_between_members`). Once `wall_by` (BATCH_WALL from the read-end, network.md:282)
 /// has passed, no further member runs and the batch is closed (`Budget::walled`).
 pub fn handle_until_budgeted(n:&mut Node,body:&[u8],site:bool,deadline:Option<Instant>,wall_by:Option<Instant>,budget:&mut Budget)->String{
     if json_values(body)>JSON_VALUES_MAX{COUNTERS.too_complex.fetch_add(1,Ordering::SeqCst);return err(&Value::Null,-32600,"request has too many JSON values").to_string()}
     let v:Value=match serde_json::from_slice(body){Ok(v)=>v,Err(_)=>return err(&Value::Null,-32700,"parse error").to_string()};
     let denied=|i:&Value|site&&i.get("method").and_then(|m|m.as_str()).map_or(false,|m|ORIGIN_DENY.contains(&m));
-    let site_err=|i:&Value|{COUNTERS.origin_denied.fetch_add(1,Ordering::SeqCst);err(&i.get("id").cloned().unwrap_or(Value::Null),-32601,"method not available to sites")};
+    let site_err=|i:&Value|{COUNTERS.origin_denied.fetch_add(1,Ordering::SeqCst);err(&echo_id(id_of(i)),-32601,"method not available to sites")};
     if let Value::Array(items)=&v{
         if items.is_empty()||items.len()>BATCH_MAX{return err(&Value::Null,-32600,"batch").to_string()}
         let deny:Vec<bool>=items.iter().map(|i|denied(i)).collect();
@@ -760,7 +782,7 @@ pub fn handle_until_budgeted(n:&mut Node,body:&[u8],site:bool,deadline:Option<In
         return batch(items,BATCH_RESP_MAX,|k,i|{
             if budget.walled{return String::new()}
             if wall_by.is_some_and(|w|Instant::now()>=w){budget.walled=true;COUNTERS.batch_wall_hits.fetch_add(1,Ordering::SeqCst);return String::new()}
-            if k>0{n.drain_light()}
+            if k>0{n.drain_between_members()}
             if deny[k]{site_err(i).to_string()}
             else if deadline.is_some_and(|d|Instant::now()>=d){COUNTERS.expired_members.fetch_add(1,Ordering::SeqCst);item_err(i,-32020,"work deadline","deadline")}
             else{
@@ -807,8 +829,7 @@ fn batch(items:&[Value],limit:usize,mut run:impl FnMut(usize,&Value)->String)->S
 }
 /// An error item that echoes the request id only while it stays within ERR_ITEM_MAX (256 B).
 fn item_err(i:&Value,code:i64,m:&str,reason:&str)->String{
-    let id=id_of(i);let id=if id.to_string().len()<=128{id}else{Value::Null};
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":m,"data":{"reason":reason}}}).to_string()
+    json!({"jsonrpc":"2.0","id":echo_id(id_of(i)),"error":{"code":code,"message":m,"data":{"reason":reason}}}).to_string()
 }
 /// Methods whose effect happens when they run: their answer is returned even when it completes past
 /// the deadline (a late -32020 would hide an accepted transaction or share). This is the running
@@ -846,11 +867,12 @@ fn deadline_fail(n:&Node,m:&str,v:&Value)->Fail{
 fn one(n:&mut Node,v:&Value,b:&mut Budget)->Value{
     if !v.is_object(){return err(&Value::Null,-32600,"invalid request")}
     let id=v["id"].clone();let p=v["params"].as_array().cloned().unwrap_or_default();
-    let m=match v["method"].as_str(){Some(m)=>m,None=>return err(&id,-32600,"invalid request")};
+    let m=match v["method"].as_str(){Some(m)=>m,None=>return err(&echo_id(id),-32600,"invalid request")};
     // COMPUTE_DEADLINE at the handler entry: a request that reaches its handler past it is -32020
     // {deadline} without running (network.md:235). The log handlers check it at their first block.
     if b.expired()&&!LOGS.contains(&m){b.late();return fail_json(&id,deadline_fail(n,m,v))}
-    match call(n,m,&p,b){Ok(r)=>json!({"jsonrpc":"2.0","id":id,"result":r}),Err(f)=>fail_json(&id,f)}
+    // A method not in the table is a dispatch error: its item is bounded like the guard's (review R2-3).
+    match call(n,m,&p,b){Ok(r)=>json!({"jsonrpc":"2.0","id":id,"result":r}),Err(f) if f.0==-32601=>fail_json(&echo_id(id),f),Err(f)=>fail_json(&id,f)}
 }
 /// An RPC error with optional data (network.md: −32020 carries {reason, fromBlock, …}).
 struct Fail(i64,String,Option<Value>);
@@ -914,7 +936,10 @@ fn call(n:&mut Node,m:&str,p:&[Value],b:&mut Budget)->R{
             Ok(json!(qty(hi)))
         }
         "eth_sendRawTransaction"=>{let raw=p.first().and_then(|x|x.as_str()).and_then(|s|unhex(s).ok()).ok_or(bad("raw"))?;
-            n.submit_tx(raw,true).map(|h|json!(format!("{h}"))).map_err(|e|{let code=e.split(' ').next().and_then(|c|c.parse().ok()).unwrap_or(-32000);Fail(code,e,None)})}
+            // Admission runs under the request's COMPUTE_DEADLINE (review R2-2); past it nothing is pooled.
+            n.submit_tx_by(raw,true,Some(b.compute_by)).map(|h|json!(format!("{h}"))).map_err(|e|{
+                if e==crate::node::SUBMIT_DEADLINE{b.late();return Fail(-32020,"compute deadline".into(),Some(json!({"reason":"deadline"})))}
+                let code=e.split(' ').next().and_then(|c|c.parse().ok()).unwrap_or(-32000);Fail(code,e,None)})}
         "eth_getBlockByNumber"=>{let e=block_by_tag(n,p.first().unwrap_or(&Value::Null));Ok(e.map(|e|block_json(n,e,p.get(1).and_then(|x|x.as_bool()).unwrap_or(false))).unwrap_or(Value::Null))}
         "eth_getBlockByHash"=>{let h=p.first().and_then(|x|x.as_str()).and_then(|s|unhex(s).ok()).ok_or(bad("hash"))?;
             Ok(h.try_into().ok().and_then(|h:[u8;32]|n.block_view(&h)).map(|e|block_json(n,&e,p.get(1).and_then(|x|x.as_bool()).unwrap_or(false))).unwrap_or(Value::Null))}
@@ -952,7 +977,7 @@ fn call(n:&mut Node,m:&str,p:&[Value],b:&mut Budget)->R{
         "pocol_getMiners"=>{let s=&n.chain.head().state;Ok(json!(apply::record_list(s).iter().map(|id|{let r=apply::miner_record(s,*id).unwrap();
             json!({"id":format!("{id:#x}"),"status":r.status,"tomb":r.tomb,"bondState":r.bond_state,"lastShare":r.last_share,"reward":format!("{:#x}",r.reward),"rewardBalance":qty256(s.accounts.get(&r.reward).map(|a|a.info.balance).unwrap_or_default())})}).collect::<Vec<_>>()))}
         "pocol_getTemplate"=>Ok(n.template_json()),
-        _=>Err(Fail::from((-32601,format!("method {m} not found")))),
+        _=>Err(Fail::from(not_found(m))),
     }
 }
 fn next_base(n:&Node)->U256{let h=n.chain.head();if h.height==0{chain::from_fixed_lp4(&n.chain.spec.cp().baseFee0)}else{pocol_lp4_execution::fees::next_base_fee(h.base_fee,h.gas_used,h.header.gas_limit).unwrap_or(h.base_fee)}}

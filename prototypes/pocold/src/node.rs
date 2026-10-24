@@ -5,7 +5,7 @@ use std::collections::{BTreeSet,HashMap,HashSet,VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc,Mutex,mpsc::{self,Receiver,Sender,SyncSender}};
-use std::time::{Duration,SystemTime,UNIX_EPOCH};
+use std::time::{Duration,Instant,SystemTime,UNIX_EPOCH};
 use crate::{hashes,header::Header};
 use pocol_lp4_execution::{apply::ParentResult,txsign::Key,wire,native::{self,NativeBlockContext},user_phase::{self,PoolMeter}};
 use revm::{InMemoryDB,primitives::{Address,B256,U256}};
@@ -79,6 +79,10 @@ pub enum Event{Net(NetEvent),Miner(MinerEvent),Rpc(crate::rpc::Request),Tick,Wak
 /// members): at most LIGHT_TURN, so a light flood delays any other event by at most LIGHT_TURN
 /// light executions; a lane left non-empty wakes the node again.
 pub const LIGHT_TURN:usize=8;
+/// Queued non-RPC events run between two members of an RPC batch (`drain_between_members`).
+pub const EVENT_TURN:usize=8;
+/// `submit_tx_by`'s refusal when the request's COMPUTE_DEADLINE passed before the transaction was pooled.
+pub const SUBMIT_DEADLINE:&str="-32020 compute deadline (not pooled)";
 
 pub fn now_ms()->u128{SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()}
 pub fn now_s()->u64{(now_ms()/1000) as u64}
@@ -121,6 +125,9 @@ pub struct Node{
     /// RPC light lane (network.md classification table): drained before every main event and
     /// between heavy batch members, so a light request never waits behind a queue of heavy work.
     light:crate::rpc::LightLane,light_rx:Receiver<Event>,draining:bool,resp:crate::rpc::RespPools,
+    /// RPC events taken off the queue between batch members, run next in arrival order (at most the
+    /// heavy queue's places: every queued RPC request holds one). `between`: such a drain is running.
+    deferred:VecDeque<Event>,between:bool,
     /// At most one timer Tick waits in the event queue: a tick that takes longer than the timer
     /// period must not fill the queue ahead of blocks, peers and RPC (round 2).
     tick_pending:Arc<std::sync::atomic::AtomicBool>,
@@ -203,13 +210,13 @@ impl Node{
             events.entry(block_hash(&header)).or_default().push_back((i,false));events.entry(header.parent_hash).or_default().push_back((i,true));
         }
         let mut rec_off=40u64; // first record frame starts after MAGIC(8)+binding(32)
-        let mut skipped=0u64;
+        let (mut skipped,mut restored)=(0u64,0usize);
         for (i,payload) in rec.payloads.iter().enumerate(){
             let this_off=rec_off; rec_off+=(payload.len()+store::OVERHEAD) as u64;
             let (hb,bb,rb)=store::decode_record(payload).map_err(|e|format!("record {i}: {e}"))?;
             let header=decode_header(&hb).map_err(|e|format!("record {i}: {e}"))?;
             let body=Body::decode(&bb,chain.spec.cp().BODY_MAX as usize).map_err(|e|format!("record {i}: {e}"))?;
-            let block=Block{header,body};let hash=block.hash();let parent=block.header.parent_hash;
+            let block=Block{header,body};let hash=block.hash();let parent=block.header.parent_hash;let old_head=chain.head;
             // Same rules as live import: a journaled fork child of a block below the K_hist window
             // needs the TrieRebuild that import performed before journaling it.
             match chain.validate(&block,None,0){
@@ -228,17 +235,23 @@ impl Node{
             }
             for b in [hash,parent]{if let Some(q)=events.get_mut(&b){while q.front().map_or(false,|x|x.0<=i){q.pop_front();}
                 if q.front().map_or(false,|x|x.1){chain.protect.insert(b);}else{chain.protect.remove(&b);}if q.is_empty(){events.remove(&b);}}}
+            // As live import: the fork height is taken before retain(), and an adopted branch whose
+            // blocks were offloaded as side blocks is made whole right after it (review R3-3: restoring
+            // once at the end re-executed every canonical block from the lowest offloaded one up).
+            let fork_h=if chain.head!=old_head{chain.lca_height(&old_head,&chain.head).unwrap_or(0)}else{0};
+            let adopted=chain.head!=old_head;
             chain.retain();
+            if adopted{restored+=chain.restore_canonical(fork_h,&rec.journal).map_err(|e|format!("replay {i}: restore canonical {e:?}"))?;}
         }
         drop(events);chain.protect.clear();chain.replaying=false;chain.r_keep=cfg.limits.r_keep;chain.retain();
-        // Canonical blocks offloaded while they were non-canonical are made whole (RPC and serving).
-        let restored=chain.restore_canonical(0,&rec.journal).map_err(|e|format!("replay: restore canonical {e:?}"))?;
+        // Every adoption was restored above, so this finds nothing unless replay skipped a record.
+        restored+=chain.restore_canonical(0,&rec.journal).map_err(|e|format!("replay: restore canonical {e:?}"))?;
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
         let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.light_queue);let resp=crate::rpc::RespPools::new(&cfg.limits.rpc);
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
         let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());let pool_code=checked_code_total(&head_state,&chain.spec);
         let net=net::Net::new(cfg.limits.net.clone());
-        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
+        let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,deferred:VecDeque::new(),between:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
             pool:Pool{code_total:pool_code,txs:vec![],pending_state:head_state,bytes:0,meter},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;node.stats.replay_skipped=skipped;node.stats.restored=restored as u64;
@@ -264,7 +277,7 @@ impl Node{
     pub fn run(&mut self){
         self.restart_production();
         while !self.stopped{
-            let ev=match self.rx.recv_timeout(Duration::from_millis(200)){Ok(e)=>e,Err(mpsc::RecvTimeoutError::Timeout)=>Event::Tick,Err(_)=>break};
+            let ev=match self.deferred.pop_front(){Some(e)=>e,None=>match self.rx.recv_timeout(Duration::from_millis(200)){Ok(e)=>e,Err(mpsc::RecvTimeoutError::Timeout)=>Event::Tick,Err(_)=>break}};
             if matches!(ev,Event::Wake){self.light.wake.store(false,std::sync::atomic::Ordering::SeqCst);}
             self.drain_light();self.handle(ev);
         }
@@ -278,6 +291,22 @@ impl Node{
         while ran<LIGHT_TURN{match self.light_rx.try_recv(){Ok(ev)=>{self.handle(ev);ran+=1}Err(_)=>break}}
         self.draining=false;
         if ran==LIGHT_TURN{self.light.wake(&self.tx);}
+    }
+    /// Between two members of an RPC batch (PR #27 review R2-1; network.md (ط) keeps RPC from holding
+    /// up validation, mining and sync): the light lane as before, then up to EVENT_TURN queued events
+    /// that are not RPC requests (P2P messages and connections, miner results, ticks), so one batch no
+    /// longer holds them for its whole length. A queued RPC request is set aside and runs next, in
+    /// order, never inside the batch. Never nested.
+    pub fn drain_between_members(&mut self){
+        self.drain_light();
+        if self.between{return}
+        self.between=true;
+        for _ in 0..EVENT_TURN{match self.rx.try_recv(){
+            Ok(Event::Rpc(q))=>self.deferred.push_back(Event::Rpc(q)),
+            Ok(Event::Wake)=>self.light.wake.store(false,std::sync::atomic::Ordering::SeqCst),
+            Ok(ev)=>self.handle(ev),
+            Err(_)=>break}}
+        self.between=false;
     }
     /// The RPC response pools (rpc::answer reserves from them).
     pub fn resp_pools(&self)->crate::rpc::RespPools{self.resp.clone()}
@@ -405,7 +434,12 @@ impl Node{
         let base=if h.height==0{chain::from_fixed_lp4(&cp.baseFee0)}else{pocol_lp4_execution::fees::next_base_fee(h.base_fee,h.gas_used,h.header.gas_limit).unwrap_or(U256::MAX)};
         NativeBlockContext{height:U256::from(h.height+1),timestamp:U256::from(now_s().max(h.ts+1)),gas_limit:U256::from(cp.GAS_LIMIT),base_fee:base,prevrandao:B256::ZERO}
     }
-    pub fn submit_tx(&mut self,raw:Vec<u8>,relay:bool)->Result<B256,String>{
+    pub fn submit_tx(&mut self,raw:Vec<u8>,relay:bool)->Result<B256,String>{self.submit_tx_by(raw,relay,None)}
+    /// `submit_tx` for an RPC request with a COMPUTE_DEADLINE `by` (network.md RpcGuard (د) step 4, (و);
+    /// review R2-2): the execution polls the deadline every STOP_GAS gas and before every call, and a
+    /// transaction whose admission ends past it is refused with SUBMIT_DEADLINE before anything is
+    /// pooled or relayed, so the -32020 {deadline} answer never hides an accepted transaction.
+    pub fn submit_tx_by(&mut self,raw:Vec<u8>,relay:bool,by:Option<Instant>)->Result<B256,String>{
         let cp=self.chain.spec.cp();
         if raw.len()>cp.TX_MAX as usize{return Err("-32014 oversized".into())}
         let env=wire::decode_for_profile(&raw,self.chain.spec.profile()).map_err(|e|format!("{} {e:?}",e.specified_pool_code().unwrap_or(-32000)))?;
@@ -413,9 +447,13 @@ impl Node{
         if self.pool.txs.iter().any(|(h,_)|*h==hash){return Ok(hash)}
         if self.pool.bytes+raw.len()>POOL_MAX_BYTES||self.pool.txs.len()>=POOL_MAX_TXS{return Err("-32016 pool full".into())}
         let ctx=self.next_block_ctx();
-        let r=match self.pool.code_total{
-            Some(total)=>native::execute_on_validated(&self.pool.pending_state,total,env.tx_env(),&ctx,self.chain.spec.profile()),
-            None=>native::execute_for_profile(&self.pool.pending_state,env.tx_env(),&ctx,self.chain.spec.profile())}.map_err(|e|format!("-32000 {e:?}"))?;
+        let r=match(by,self.pool.code_total){
+            (Some(by),total)=>native::admit_for_profile(&self.pool.pending_state,total,env.tx_env(),&ctx,self.chain.spec.profile(),std::rc::Rc::new(move||Instant::now()>=by)),
+            (None,Some(total))=>native::execute_on_validated(&self.pool.pending_state,total,env.tx_env(),&ctx,self.chain.spec.profile()),
+            (None,None)=>native::execute_for_profile(&self.pool.pending_state,env.tx_env(),&ctx,self.chain.spec.profile())};
+        let r=match r{Err(revm::primitives::EVMError::Custom(m)) if m==native::SIMULATION_STOPPED=>return Err(SUBMIT_DEADLINE.into()),r=>r.map_err(|e|format!("-32000 {e:?}"))?};
+        // A precompile runs to its end between two polls: the deadline is checked again before the commit.
+        if by.is_some_and(|by|Instant::now()>=by){return Err(SUBMIT_DEADLINE.into())}
         // A13: the effects must stay within the caps a block enforces; then only live entries are kept.
         self.pool.meter.admit(&self.pool.pending_state,&r.state).map_err(|h|format!("-32000 pending state would exceed a cap ({h:?})"))?;
         // The same commit as a block's USER phase (EIP-161 cleanup, normalization), so the meter

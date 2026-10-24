@@ -82,6 +82,22 @@ pub fn simulate_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockCont
     build_engine(snapshot,None,tx,block,profile.spec().chain_id,Some(limits)).modify()
         .append_handler_register_box(Box::new(move|h|stop_register(h,stop.clone()))).build().transact()
 }
+/// Pool admission of an RPC-submitted transaction (pocold eth_sendRawTransaction, network.md RpcGuard
+/// (د) step 4 and (و)): the same execution as `execute_on_validated` (with `code_total`) or
+/// `execute_for_profile` (without), with `stop` polled as in `simulate_for_profile`. The hook only reads
+/// the clock and calls the next instruction, so while `stop` returns false the result is the same.
+/// Its result is never a block's: blocks are validated with `execute_on_validated` or the USER phase.
+pub fn admit_for_profile(state:&InMemoryDB,code_total:Option<u64>,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity,stop:std::rc::Rc<dyn Fn()->bool>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+    let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
+    match code_total{
+        Some(t)=>{debug_assert_eq!(crate::code_caps::validate_snapshot(state,limits),Ok(()),"pool state left the code limits");
+            debug_assert_eq!(crate::code_caps::inventory(state),Ok(t),"pool running code total");}
+        None=>crate::code_caps::validate_snapshot(state,limits).map_err(EVMError::Custom)?,
+    }
+    validate_nonce(state,tx.caller,tx.nonce)?;
+    build_engine(state,code_total,tx,block,profile.spec().chain_id,Some(limits)).modify()
+        .append_handler_register_box(Box::new(move|h|stop_register(h,stop.clone()))).build().transact()
+}
 fn stop_register<EXT:'static,DB:revm::Database>(h:&mut revm::handler::register::EvmHandler<'_,EXT,DB>,stop:std::rc::Rc<dyn Fn()->bool>){
     use revm::interpreter::{opcode::*,InstructionResult};
     // `n` counts hooked instructions; `mark` is the frame gas remaining at the last poll (a frame

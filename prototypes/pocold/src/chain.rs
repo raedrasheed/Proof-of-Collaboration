@@ -145,6 +145,8 @@ pub struct Chain{
     /// R21 window: full states kept for heights > head-K_hist (and genesis).
     pub k_hist:u64,
     pub rebuilds:u64,
+    /// Blocks `restore_canonical` re-executed (resident ones on its span included): the restore work.
+    pub restore_reexecs:u64,
     /// Invalid committed contents (blockReject) never re-validated.
     pub invalid:HashMap<[u8;32],String>,
     /// Insertion order of `invalid`; a cache only (never a validity input), at most INVALID_MAX.
@@ -176,7 +178,7 @@ impl Chain{
             receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
         let k_hist=u64::from(spec.local().k_hist);
-        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
+        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
             r_keep:R_KEEP,side_cap:SIDE_BLOCKS_MAX,protect:Default::default(),replaying:false}
     }
     pub fn head(&self)->&Entry{&self.blocks[&self.head]}
@@ -569,7 +571,7 @@ impl Chain{
             let (hb,bb)=if e.offloaded{let o=e.body_off.ok_or_else(||Reject::Block("offloaded block without body_off".into()))?;let (hb,bb,_)=src.record_at(o)?;(Some(hb),Some(bb))}else{(None,None)};
             let body=match &bb{Some(bb)=>Body::decode(bb,self.spec.cp().BODY_MAX as usize).map_err(|_|Reject::Block("offloaded body decode".into()))?,None=>e.body.clone()};
             if let Some(hb)=&hb{if decode_header(hb).map(|h|block_hash(&h)).ok()!=Some(hash){return blk("restore: journal header does not hash to the block")}}
-            let out=self.reexec(&p,e,&body)?;
+            let out=self.reexec(&p,e,&body)?;self.restore_reexecs+=1;
             if out.receipts_root.0!=e.header.receipts_root||out.gas_used!=e.header.gas_used{return blk("restore: receipts mismatch")}
             let x=self.blocks.get_mut(&hash).unwrap();
             if x.offloaded{x.tx_hashes=body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();x.receipts=out.receipts;x.body=body;
