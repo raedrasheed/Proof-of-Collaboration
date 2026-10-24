@@ -244,7 +244,14 @@ fn execute_user_phase_inner_ctx(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&Nativ
   // merely the actual post-refund gas consumption of this transaction.
   if tx.gas_limit>limit.checked_sub(used).ok_or(UserError::Gas)?{return Err(UserError::Gas)}
   let (price,tip)=fees::effective_fees(block.base_fee,tx.gas_price,tx.gas_priority_fee).map_err(|_|UserError::Arithmetic)?;
-  let result=match profile{Some(p)=>native::execute_for_profile(&state,tx.clone(),block,p),None=>native::execute_in_context(&state,tx.clone(),block)}.map_err(|e|UserError::Execution(i,format!("{e:?}")))?;
+  // C-2 item 1: the snapshot is validated once, at the point where the first transaction's own check
+  // ran (after its decode, gas and fee checks; same index, same error text). Every later state comes
+  // from committing this engine's results, so the later per-transaction scans could not fail.
+  if let (Some(p),0)=(profile,i){
+   let limits=crate::code_caps::CodeLimits{runtime:p.cp().B_code_max,logical:p.cp().CODE_CAP};
+   crate::code_caps::validate_snapshot(&state,limits).map_err(|e|UserError::Execution(0,format!("{:?}",revm::primitives::EVMError::<core::convert::Infallible>::Custom(e))))?;
+  }
+  let result=match profile{Some(p)=>native::execute_on_validated(&state,tx.clone(),block,p),None=>native::execute_in_context(&state,tx.clone(),block)}.map_err(|e|UserError::Execution(i,format!("{e:?}")))?;
   let e=effects(&state,&result.state);
   // The caps are PoCol execution: the profile-free Cancun control path stays geth-equivalent.
   if let Some(why)=profile.and_then(|_|meter.check(result.result.logs(),&e)){

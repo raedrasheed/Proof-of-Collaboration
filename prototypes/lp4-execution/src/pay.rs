@@ -15,22 +15,20 @@ pub fn escrow_address() -> Address { Address::from_word(U256::from(0xc0c002u64).
 #[derive(Default)]
 pub struct NativeContext {
     pub(crate) active_code: Option<Address>,
-    // Owned complete pre-transaction database, never the mutable execution journal.
-    // Private: callers cannot submit an eligibility/success flag.
-    pre_transaction: InMemoryDB,
 }
-impl NativeContext {
-    pub(crate) fn from_snapshot(snapshot: &InMemoryDB) -> Self {
-        Self { active_code: None, pre_transaction: snapshot.clone() }
-    }
-    fn durable(&self, recipient: Address) -> bool {
-        self.pre_transaction.accounts.get(&recipient).map(|account| {
-            account.account_state != revm::db::AccountState::NotExisting
-                && (account.info.nonce > 0
-                    || (account.info.code_hash != revm::primitives::KECCAK_EMPTY
-                        && account.info.code_hash != revm::primitives::B256::ZERO))
-        }).unwrap_or(false)
-    }
+/// Durability is judged on the pre-transaction database, never the mutable execution journal.
+/// That database is the engine's own: during `transact()` revm writes only to its journaled state,
+/// and the database gains nothing but cache entries for accounts that do not exist
+/// (`AccountState::NotExisting`), which are not durable either. So it answers exactly as the copy
+/// of the snapshot this context used to own (decision package C-2, item 3: one whole-state clone
+/// per transaction less). Callers still cannot submit an eligibility/success flag.
+fn durable(pre_transaction: &InMemoryDB, recipient: Address) -> bool {
+    pre_transaction.accounts.get(&recipient).map(|account| {
+        account.account_state != revm::db::AccountState::NotExisting
+            && (account.info.nonce > 0
+                || (account.info.code_hash != revm::primitives::KECCAK_EMPTY
+                    && account.info.code_hash != revm::primitives::B256::ZERO))
+    }).unwrap_or(false)
 }
 
 fn outcome(inputs: &CallInputs, result: InstructionResult) -> FrameOrResult {
@@ -56,7 +54,7 @@ pub(crate) fn call(context: &mut Context<NativeContext,InMemoryDB>, inputs: &Cal
         || inputs.gas_limit<PAY_GAS { return Ok(fail()); }
     let recipient=Address::from_slice(&inputs.input[12..32]);
     let amount=U256::from_be_slice(&inputs.input[32..64]);
-    if recipient==Address::ZERO || !context.external.durable(recipient) { return Ok(fail()); }
+    if recipient==Address::ZERO || !durable(&context.evm.db, recipient) { return Ok(fail()); }
     let evm=&mut context.evm.inner;
     evm.journaled_state.load_account(inputs.caller,&mut evm.db)?;
     evm.journaled_state.load_account(recipient,&mut evm.db)?;

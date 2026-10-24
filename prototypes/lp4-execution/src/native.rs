@@ -46,6 +46,17 @@ pub fn execute_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockConte
     crate::code_caps::validate_snapshot(snapshot,limits).map_err(EVMError::Custom)?;
     execute_on_chain(snapshot,tx,block,profile.spec().chain_id,Some(limits))
 }
+/// `execute_for_profile` on a state already known to pass `validate_snapshot`: the USER phase
+/// validates its snapshot once, then changes it only by committing this engine's results. Within the
+/// phase code enters only through CREATE, whose `create_return` hook enforces B_code_max and CODE_CAP,
+/// and under Cancun (EIP-6780) code leaves only within its creating transaction, so the check holds
+/// after every commit and the per-transaction scan is redundant (decision package C-2, item 1).
+/// Debug builds still run the full check, so a broken invariant panics there.
+pub(crate) fn execute_on_validated(state:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+    let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
+    debug_assert_eq!(crate::code_caps::validate_snapshot(state,limits),Ok(()),"USER-phase state left the code limits");
+    execute_on_chain(state,tx,block,profile.spec().chain_id,Some(limits))
+}
 /// The EVMError::Custom text of a simulation that `stop` ended.
 pub const SIMULATION_STOPPED:&str="rpc simulation stopped";
 /// The gas of one frame between two polls of a simulation's `stop` (network.md RpcGuard (و): the
@@ -89,7 +100,7 @@ fn execute_on_chain(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chai
 
 /// Shared hooks only. SYSTEM uses direct frames; USER retains transact().
 pub(crate) fn build_engine(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>)->Evm<'static,NativeContext,InMemoryDB>{
-    Evm::builder().with_db(snapshot.clone()).with_external_context(NativeContext::from_snapshot(snapshot))
+    Evm::builder().with_db(snapshot.clone()).with_external_context(NativeContext::default())
         .with_spec_id(SpecId::CANCUN)
         .modify_cfg_env(|cfg|cfg.chain_id=chain_id)
         .modify_block_env(|b|{b.number=block.height;b.timestamp=block.timestamp;b.gas_limit=block.gas_limit;b.basefee=block.base_fee;b.prevrandao=Some(block.prevrandao);b.coinbase=pay::escrow_address();b.blob_excess_gas_and_price=Some(revm::primitives::BlobExcessGasAndPrice::new(0,false));})
