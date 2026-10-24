@@ -168,7 +168,11 @@ export class RecordStore {
   async load(netKey, site) { const s = this.st(this.keyOf(netKey, site)); const e = await this.ready(s); return e ? { error: e.error, dict: Object.create(null) } : { dict: Object.assign(Object.create(null), s.dict) }; }
   /** storage_set after BridgeAuth and StoreQueue admission; FIFO per key. The reply can be sent
    * (storeTimeout) while the key's chain still waits for Chrome to settle the write. */
-  write(netKey, site, method, params) {
+  write(netKey, site, method, params) { return this.submit(netKey, site, method, params).reply; }
+  /** A12: {reply, settled}. `reply` answers the frame (possibly storeTimeout); `settled` resolves
+   * only when the underlying storage operation has settled (never, for a write that never
+   * settles), so ownership of admission follows the operation and not the reply. */
+  submit(netKey, site, method, params) {
     const s = this.st(this.keyOf(netKey, site)); const accepted = this.now();
     let reply; const replied = new Promise((r) => { reply = r; });
     const job = s.chain.then(async () => {
@@ -186,6 +190,6 @@ export class RecordStore {
       s.dict = d.next; reply({ result: null }); await this.pruneBelow(s, w.name);
     }).catch(() => reply({ error: { code: -32603, message: 'transport', data: { reason: 'transport' } } }));
     s.chain = job;
-    return replied;
+    return { reply: replied, settled: job.then(() => true, () => true) };
   }
 }

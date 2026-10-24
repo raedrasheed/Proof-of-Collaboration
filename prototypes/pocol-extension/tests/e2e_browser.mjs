@@ -38,7 +38,8 @@ const rpc = async (port, method, params = []) => {
 const portFree = (p) => new Promise((res) => { const s = connect(p, '127.0.0.1'); s.on('connect', () => { s.destroy(); res(false); }); s.on('error', () => res(true)); });
 
 // ---------------- RpcTap and canaries ----------------
-const tap = { log: [], holdMs: {} };
+// genesisOverride (A06): rewrites pocol_status.genesisHash, as an endpoint whose identity changed.
+const tap = { log: [], holdMs: {}, genesisOverride: null };
 const tapServer = createServer((req, res) => {
   let body = ''; req.on('data', (c) => { body += c; }); req.on('end', async () => {
     let m = null; try { m = JSON.parse(body); } catch {}
@@ -46,6 +47,10 @@ const tapServer = createServer((req, res) => {
     for (const x of methods) tap.log.push({ method: x, params: m && !Array.isArray(m) ? m.params : null, origin: req.headers.origin || null, t: Date.now() });
     const hold = tap.holdMs[methods[0]]; if (hold) await sleep(hold);
     const up = httpRequest({ host: '127.0.0.1', port: 8540, method: 'POST', path: '/', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (r) => {
+      if (tap.genesisOverride && methods[0] === 'pocol_status') {
+        let t = ''; r.on('data', (c) => { t += c; }); r.on('end', () => { const v = JSON.parse(t); if (v.result) v.result.genesisHash = tap.genesisOverride; res.writeHead(r.statusCode, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }); res.end(JSON.stringify(v)); });
+        return;
+      }
       res.writeHead(r.statusCode, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }); r.pipe(res);
     });
     up.on('error', () => { res.writeHead(502); res.end(); }); up.end(body);
@@ -153,7 +158,7 @@ async function storedDict(b, dist, stKey) {
 async function main() {
   for (const p of [30300, 30301, 30302, 8540, 8541, 8542, TAP, CANARY]) if (!(await portFree(p))) throw new Error('port busy ' + p);
   await new Promise((r) => tapServer.listen(TAP, '127.0.0.1', r)); await new Promise((r) => canaryServer.listen(CANARY, '0.0.0.0', r)); await new Promise((r) => udp.bind(UDP, '0.0.0.0', r));
-  if (!REUSE) py(['init', work, '--miners', 'a,b,c', '--t-blk', '2', '--tau', '20', '--d-att', '4', '--fb-wait', '1', '--work-bits', '15']);
+  if (!REUSE) py(['init', work, '--miners', 'a,b,c', '--t-blk', '2', '--tau', '20', '--c', '8', '--d-att', '41', '--fb-wait', '3', '--work-bits', '15']);
   const info = JSON.parse(readFileSync(join(work, 'net', 'devnet.json'), 'utf8')); const cid = String(info.chainId);
   const profileBase = JSON.parse(readFileSync(join(work, 'net', 'profile.json'), 'utf8'));
   if (!REUSE) py(['start', work, '--log']);
@@ -309,7 +314,7 @@ async function main() {
     await page.waitForFunction(() => !document.querySelector('#stage iframe'), null, { timeout: 15000 });
     ok('D26 a self-navigating frame is torn down on its second load', /D26/.test(await page.textContent('#status')));
 
-    // --- wallet: BR14 legitimate path, rejection and wrong from ---
+    // --- wallet: BR14 legitimate path, rejection and wrong from; A06 transitions in Chrome ---
     await b.send({ type: 'wallet.create', password: 'devnet-only', seedHex: '0x' + '42'.repeat(32) });
     const wAddr = (await b.send({ type: 'wallet.address', name: 'devnet' })).address;
     const aliceNonce = Number(await rpc(8540, 'eth_getTransactionCount', [info.accounts.find((a) => a.label === 'alice').address, 'pending']));
@@ -317,18 +322,34 @@ async function main() {
     await rpc(8540, 'eth_sendRawTransaction', [fund]); await wait(async () => BigInt(await rpc(8540, 'eth_getBalance', [wAddr, 'latest'])) > 0n, 90000, 'wallet funded');
     await page.goto(`chrome-extension://${b.id}/viewer.html#devnet/${S_A}/`); await page.reload(); ({ fr, n } = await siteFrame(page));
     tap.log.length = 0;
+    // A06: 'othernet' shares the chainId with another genesis, so both profiles are read-only until it is removed.
+    const listed = (await b.send({ type: 'profiles.list' })).profiles;
+    const conflictReq = await fr.evaluate(() => ethereum.request({ method: 'eth_requestAccounts' }).then(() => 'ok', (e) => e.code));
+    ok('A06 Chrome: a profile with the same chainId and another genesis flags both as conflicting; eth_requestAccounts -> 4100 without a dialog',
+      listed.find((x) => x.name === 'devnet').conflict === true && listed.find((x) => x.name === 'othernet').conflict === true && conflictReq === 4100 && (await page.isHidden('#modal')), `${conflictReq} ${JSON.stringify(listed.map((x) => [x.name, x.conflict]))}`);
+    await b.send({ type: 'profiles.remove', name: 'othernet' });
     const accP = fr.evaluate(() => ethereum.request({ method: 'eth_requestAccounts' }));
-    await page.waitForSelector('#modal[data-kind=confirmAccounts]:not([hidden])'); await page.click('#approve');
+    await page.waitForSelector('#modal[data-kind=confirmAccounts]:not([hidden])'); const armedAtOnce = await page.$eval('#approve', (b) => !b.disabled);
+    ok('A06 Chrome: approve is not armed the moment a dialog appears (a double click cannot approve it)', armedAtOnce === false);
+    await page.click('#approve');
     const accts = await accP; ok('BR14 eth_requestAccounts after click returns the per-network wallet address', accts.length === 1 && accts[0].toLowerCase() === wAddr.toLowerCase(), accts[0]);
     const s2 = info.accounts.find((a) => a.label === 'bob').address;
     const txP = fr.evaluate(([from, to]) => ethereum.request({ method: 'eth_sendTransaction', params: [{ from, to, value: '0x1' }] }), [accts[0], s2]);
-    await page.waitForSelector('#modal[data-kind=confirmTx]:not([hidden])'); const txText = await page.textContent('#mtext');
-    const shownHash = /txHash: (0x[0-9a-f]{64})/.exec(txText)[1], shownRaw = /raw: (0x[0-9a-f]+)/.exec(txText)[1];
+    await page.waitForSelector('#modal[data-kind=confirmTx]:not([hidden])'); const txText = await page.textContent('#mtext'); const atModal = tap.log.length;
+    // A06: the dialog shows the unsigned bytes and their signing hash; signing happens only after the click.
+    const shownHash = /signingHash: (0x[0-9a-f]{64})/.exec(txText)[1], shownUnsigned = /unsigned: (0x[0-9a-f]+)/.exec(txText)[1];
     ok('BR14 no eth_sendRawTransaction before the click', tapCount('eth_sendRawTransaction') === 0);
     await page.click('#approve'); const txHash = await txP;
-    const C = await import(pathToFileURL(join(dist, 'lib', 'crypto.js')).href), HX = await import(pathToFileURL(join(dist, 'lib', 'hex.js')).href);
+    const C = await import(pathToFileURL(join(dist, 'lib', 'crypto.js')).href), HX = await import(pathToFileURL(join(dist, 'lib', 'hex.js')).href), RL = await import(pathToFileURL(join(dist, 'lib', 'rlp.js')).href);
     const sent = tap.log.filter((x) => x.method === 'eth_sendRawTransaction');
-    ok('BR14 exactly one eth_sendRawTransaction, raw = displayed bytes, keccak(raw) = displayed txHash = result', sent.length === 1 && sent[0].params[0] === shownRaw && HX.toHex(C.keccak(HX.fromHex(shownRaw))) === shownHash && txHash === shownHash, `${sent.length} ${txHash}`);
+    const sraw = sent.length ? HX.fromHex(sent[0].params[0]) : new Uint8Array(1); let spre = null, signer = null;
+    try { const f = RL.decode(sraw.subarray(1)); spre = HX.toHex(HX.concat(Uint8Array.of(2), RL.encode(f.slice(0, 9)))); const pad = (x) => HX.concat(new Uint8Array(32 - x.length), x);
+      signer = HX.toHex(C.recover(C.keccak(HX.fromHex(spre)), HX.concat(pad(f[10]), pad(f[11]), Uint8Array.of(f[9].length ? f[9][0] : 0)))); } catch {}
+    ok('BR14 exactly one eth_sendRawTransaction; its signed preimage = displayed unsigned bytes, keccak of them = displayed signingHash, signer = wallet, result = keccak(raw)',
+      sent.length === 1 && spre === shownUnsigned && HX.toHex(C.keccak(HX.fromHex(shownUnsigned))) === shownHash && signer === wAddr.toLowerCase() && txHash === HX.toHex(C.keccak(sraw)), `${sent.length} ${signer} ${txHash}`);
+    const after = tap.log.slice(atModal).map((x) => x.method);
+    ok('A06 Chrome: endpoint identity re-checked after the click, before the submission (eth_chainId, pocol_status, then eth_sendRawTransaction)',
+      after.indexOf('pocol_status') >= 0 && after.indexOf('eth_chainId') >= 0 && after.indexOf('pocol_status') < after.indexOf('eth_sendRawTransaction'), after.join(','));
     const rc = await wait(() => rpc(8540, 'eth_getTransactionReceipt', [txHash]), 90000, 'receipt');
     ok('BR14 transaction included by the devnet (status 1) and identical receipt on all nodes', rc.status === '0x1' && (await wait(async () => { const r = await Promise.all([8541, 8542].map((p) => rpc(p, 'eth_getTransactionReceipt', [txHash]))); return r.every((x) => x && x.status === '0x1' && x.blockHash === rc.blockHash) && r; }, 60000, 'receipts')), rc.blockNumber);
     const rejTx = fr.evaluate(([from, to]) => ethereum.request({ method: 'eth_sendTransaction', params: [{ from, to, value: '0x1' }] }).then(() => 'ok', (e) => e.code), [accts[0], s2]);
@@ -336,8 +357,84 @@ async function main() {
     ok('BR14 rejected signature -> 4001 and no further eth_sendRawTransaction', (await rejTx) === 4001 && tapCount('eth_sendRawTransaction') === 1);
     const wrongFrom = await fr.evaluate((to) => ethereum.request({ method: 'eth_sendTransaction', params: [{ from: '0x' + '99'.repeat(20), to, value: '0x1' }] }).then(() => 'ok', (e) => e.code), s2);
     ok('BR14 from not granted -> 4100', wrongFrom === 4100 && tapCount('eth_sendRawTransaction') === 1);
+    // A06 in Chrome: transitions while the confirmation is open. A fresh session (reload) keeps the
+    // wallet requests inside WALLET_PER_MIN = 5 per session and minute; the grant is per session.
+    await page.reload(); ({ fr, n } = await siteFrame(page));
+    const regrant = fr.evaluate(() => ethereum.request({ method: 'eth_requestAccounts' }));
+    await page.waitForSelector('#modal[data-kind=confirmAccounts]:not([hidden])'); await page.click('#approve'); await regrant;
+    const pendingTx = () => fr.evaluate(([from, to]) => ethereum.request({ method: 'eth_sendTransaction', params: [{ from, to, value: '0x1' }] }).then(() => 'ok', (e) => e.code), [accts[0], s2]);
+    const modalTx = () => page.waitForSelector('#modal[data-kind=confirmTx]:not([hidden])');
+    const modalGone = () => page.waitForSelector('#modal', { state: 'hidden', timeout: 5000 }).then(() => true, () => false);
+    let pTx = pendingTx(); await modalTx(); await b.send({ type: 'wallet.lock' });
+    const lockCode = await pTx;
+    ok('A06 Chrome: wallet.lock while the confirmation is open -> 4100, dialog withdrawn, nothing sent', lockCode === 4100 && (await modalGone()) && tapCount('eth_sendRawTransaction') === 1, lockCode);
+    await b.send({ type: 'wallet.unlock', password: 'devnet-only' });
+    pTx = pendingTx(); await modalTx(); await b.send({ type: 'profiles.add', profile: { ...profileBase, name: 'node-x', endpoint: 'http://127.0.0.1:8541', trustLevel: 'LN' } });
+    const profCode = await pTx;
+    ok('A06 Chrome: a profile change while the confirmation is open -> 4901, dialog withdrawn, nothing sent; the unchanged session stays', profCode === 4901 && (await modalGone()) && tapCount('eth_sendRawTransaction') === 1 && (await page.$('#stage iframe#site')) !== null, profCode);
+    // The frame is removed by the revocation, so the in-frame promise ends with a detached frame.
+    pTx = pendingTx().catch(() => 'frame detached'); await modalTx(); tap.genesisOverride = '0x' + '77'.repeat(32); await page.click('#approve');
+    await page.waitForSelector('#stage .err', { timeout: 20000 }).catch(() => {}); const revokedText = await page.textContent('#stage'); await pTx;
+    tap.genesisOverride = null;
+    ok('A06 Chrome: endpoint genesis changed before signing -> the frame is torn down with 4901, nothing sent', /4901/.test(revokedText) && tapCount('eth_sendRawTransaction') === 1 && !(await page.$('#stage iframe')), revokedText);
+    // browser.md: the identity is also checked every 30 s; an idle session on a changed endpoint ends.
+    const pI = await openSite(b, 'devnet', S_A); const fI = (await siteFrame(pI.page)).fr;
+    // A dialog is open when the session ends: it must be withdrawn with the frame.
+    fI.evaluate(() => pocol.openExternal('https://example.org/')).catch(() => {}); await pI.page.waitForSelector('#modal[data-kind=confirmExternal]:not([hidden])');
+    tap.genesisOverride = '0x' + '77'.repeat(32); const tI = Date.now();
+    await pI.page.waitForSelector('#stage .err', { timeout: 45000 }).catch(() => {}); const dI = Date.now() - tI; const idleText = await pI.page.textContent('#stage'); tap.genesisOverride = null;
+    ok('A06 Chrome: periodic identity check ends an idle session whose endpoint genesis changed (4901 within 30 s + slack)', /4901/.test(idleText) && dI <= 40000, `${dI} ms: ${idleText}`);
+    ok('A06 Chrome: the open dialog is withdrawn when the session is revoked', await pI.page.isHidden('#modal'));
+    await pI.page.close();
+
+    // --- A06 round 2 in Chrome: submission states over a held transport queue ---
+    // Four sessions each hold an 8 MiB pocol_getLogs at the tap, so SITE_POOL (32 MiB) is full and the
+    // approved, signed transaction waits for its transport reservation (queued, not yet sent). The
+    // transaction is built and shown first (its reads use the same pool); the reads start while the
+    // dialog is open. The pending nonce on all three nodes shows whether anything reached any node.
+    await page.reload(); ({ fr, n } = await siteFrame(page));
+    const regrant2 = fr.evaluate(() => ethereum.request({ method: 'eth_requestAccounts' }));
+    await page.waitForSelector('#modal[data-kind=confirmAccounts]:not([hidden])'); await page.click('#approve'); await regrant2;
+    const extra = []; for (let i = 0; i < 3; i++) { const o = await openSite(b, 'devnet', S_A); extra.push({ ...o, fr: (await siteFrame(o.page)).fr }); }
+    const headBlk = await rpc(8540, 'eth_getBlockByNumber', ['latest', false]);
+    const txState = () => fr.evaluate(([from, to]) => ethereum.request({ method: 'eth_sendTransaction', params: [{ from, to, value: '0x1' }] }).then((h) => ({ ok: h }), (e) => ({ code: e.code, data: e.data })), [accts[0], s2]).catch(() => ({ detached: true }));
+    const holdQueue = async () => {
+      tap.holdMs.pocol_getLogs = 6000; const l0 = tapCount('pocol_getLogs');
+      for (const f of [fr, ...extra.map((x) => x.fr)]) f.evaluate((h) => ethereum.request({ method: 'eth_getLogs', params: [{ blockHash: h }] }), headBlk.hash).catch(() => {});
+      await wait(() => tapCount('pocol_getLogs') >= l0 + 4, 15000, 'four held reads');
+    };
+    const approveQueued = async () => { await modalTx(); await holdQueue(); const st = tapCount('pocol_status'); await page.click('#approve'); await wait(() => tapCount('pocol_status') > st, 15000, 'identity at signing'); await sleep(300); };
+    const drained = async () => { delete tap.holdMs.pocol_getLogs; await sleep(6500); };
+    const nonces = async () => JSON.stringify(await Promise.all([8540, 8541, 8542].map((p) => rpc(p, 'eth_getTransactionCount', [wAddr, 'pending']))));
+    const cancelledQ = (r, c) => r.code === c && r.data && r.data.submission === 'cancelled' && r.data.before === 'queued';
+    let sent0 = tapCount('eth_sendRawTransaction'), n0 = await nonces();
+    let pQ = txState(); await approveQueued(); await b.send({ type: 'wallet.lock' }); let rQ = await pQ; await drained();
+    ok('A06-R2 Chrome: wallet.lock while the signed transaction waits for transport -> 4100 {submission: cancelled, before: queued}; never sent, also after the queue drains',
+      cancelledQ(rQ, 4100) && tapCount('eth_sendRawTransaction') === sent0 && (await nonces()) === n0, JSON.stringify(rQ));
+    await b.send({ type: 'wallet.unlock', password: 'devnet-only' });
+    sent0 = tapCount('eth_sendRawTransaction'); n0 = await nonces();
+    pQ = txState(); await approveQueued(); await b.send({ type: 'profiles.add', profile: { ...profileBase, name: 'node-y', endpoint: 'http://127.0.0.1:8542', trustLevel: 'LN' } }); rQ = await pQ; await drained();
+    ok('A06-R2 Chrome: a profile change while queued -> 4901 cancelled before queued, never sent; the unchanged session stays',
+      cancelledQ(rQ, 4901) && tapCount('eth_sendRawTransaction') === sent0 && (await nonces()) === n0 && (await page.$('#stage iframe#site')) !== null, JSON.stringify(rQ));
+    // Initiated: the request has reached the tap (held there); a lock now cannot recall it.
+    sent0 = tapCount('eth_sendRawTransaction'); tap.holdMs.eth_sendRawTransaction = 3000;
+    pQ = txState(); await modalTx(); await page.click('#approve'); await wait(() => tapCount('eth_sendRawTransaction') > sent0, 15000, 'submission initiated');
+    await b.send({ type: 'wallet.lock' }); rQ = await pQ; delete tap.holdMs.eth_sendRawTransaction;
+    const rcI = typeof rQ.ok === 'string' ? await wait(() => rpc(8540, 'eth_getTransactionReceipt', [rQ.ok]), 90000, 'receipt') : null;
+    ok('A06-R2 Chrome: wallet.lock after the request was initiated is not reported as a cancellation; the transaction is broadcast and included', typeof rQ.ok === 'string' && rcI && rcI.status === '0x1', JSON.stringify(rQ));
+    await b.send({ type: 'wallet.unlock', password: 'devnet-only' });
+    // The session's own endpoint changes while queued: the session is revoked and nothing is sent to either endpoint.
+    sent0 = tapCount('eth_sendRawTransaction'); n0 = await nonces();
+    pQ = txState(); await approveQueued(); await b.send({ type: 'profiles.add', profile: { ...prof, endpoint: 'http://127.0.0.1:8541' } });
+    await page.waitForSelector('#stage .err', { timeout: 20000 }).catch(() => {}); const epText = await page.textContent('#stage'); await pQ; await drained();
+    ok('A06-R2 Chrome: the session profile endpoint changed while queued -> session revoked (4901); nothing reached the old or the new endpoint (pending nonce unchanged on every node)',
+      /4901/.test(epText) && tapCount('eth_sendRawTransaction') === sent0 && (await nonces()) === n0, epText);
+    await b.send({ type: 'profiles.add', profile: prof }); await b.send({ type: 'profiles.remove', name: 'node-y' });
+    for (const x of extra) await x.page.close();
+    await page.reload(); ({ fr, n } = await siteFrame(page));
 
     // --- netKey binding: another network's profile against this endpoint is refused ---
+    await b.send({ type: 'profiles.add', profile: { ...prof, name: 'othernet', genesisPre: oHex, genesisHash: oInfo.genesisHash } });
     const pO = await openSite(b, 'othernet', S_A); await pO.page.waitForSelector('#stage .err', { timeout: 30000 });
     ok('profile of another genesis pointed at this node is refused (netKey binding, 4901)', /genesis differs/.test(await pO.page.textContent('#stage')), await pO.page.textContent('#stage'));
     await pO.page.close();
@@ -377,6 +474,8 @@ async function main() {
   }
 }
 
+// A stray rejection is a failed check, never a crash that skips the devnet shutdown in main's finally.
+process.on('unhandledRejection', (e) => ok('no unhandled rejection', false, (e && e.stack) || String(e)));
 try { await main(); } catch (e) { ok('e2e driver completed', false, e.stack || e.message); }
 const summary = { result: failed ? 'FAIL' : 'PASS', checks: results.length, failed, work };
 writeFileSync(join(EXT, 'tests', 'e2e_browser.last.json'), JSON.stringify({ ...summary, results }, null, 1) + '\n');

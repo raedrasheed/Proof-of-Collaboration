@@ -36,6 +36,7 @@ pub mod profile;
 pub mod rewards;
 pub mod rlp;
 pub mod rpc;
+pub mod secp_backend;
 pub mod store;
 pub mod timing;
 pub mod verify;

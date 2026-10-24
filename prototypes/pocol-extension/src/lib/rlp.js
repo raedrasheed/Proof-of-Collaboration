@@ -30,4 +30,4 @@ export function encode(x) {
 }
 function prefix(base, n) { if (n < 56) return Uint8Array.of(base + n); const l = []; let v = n; while (v) { l.unshift(v & 255); v = Math.floor(v / 256); } return Uint8Array.of(base + 55 + l.length, ...l); }
 function concatAll(xs) { const n = xs.reduce((a, x) => a + x.length, 0); const o = new Uint8Array(n); let i = 0; for (const x of xs) { o.set(x, i); i += x.length; } return o; }
-export const encUint = (v) => { let x = BigInt(v); const o = []; while (x) { o.unshift(Number(x & 0xffn)); x >>= 8n; } return Uint8Array.from(o); };
+export const encUint = (v) => { let x = BigInt(v); if (x < 0n) throw new Error('negative integer'); const o = []; while (x) { o.unshift(Number(x & 0xffn)); x >>= 8n; } return Uint8Array.from(o); };

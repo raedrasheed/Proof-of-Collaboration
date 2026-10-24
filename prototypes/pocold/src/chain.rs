@@ -2,17 +2,47 @@
 //! construction (signed / Build_fb), ParentResult (D142) and D133 fork choice.
 use std::collections::{HashMap,BTreeMap};
 use crate::{assignment::{self,Assignment,DrawWeights,Membership,NonceMode,ParentMember,ParentView,ShareCount},asert,hashes,header::Header,timing::AttemptWindow};
-use pocol_lp4_execution::{apply::{self,BlockInput,BlockOutput,EvidenceEffect,Genesis,ParentResult,Proposer},fees,profile::ProfileIdentity,txsign::Key};
+use pocol_lp4_execution::{admission::{Admitted,NodeLocal},apply::{self,BlockInput,BlockOutput,EvidenceEffect,Genesis,ParentResult,Proposer},fees,profile::ProfileIdentity,txsign::Key};
 use revm::{InMemoryDB,primitives::{Address,B256,U256}};
 use crate::types::*;
 
+/// Longest stored rejection reason (A13 accounting).
+pub const REASON_MAX:usize=256;
+pub fn truncate(why:&str)->String{if why.len()<=REASON_MAX{return why.to_string()}let mut n=REASON_MAX;while !why.is_char_boundary(n){n-=1}why[..n].to_string()}
+/// governance.md R_keep: a non-canonical block this far below the head is removed (A13).
+pub const R_KEEP:u64=2048;
+/// Unprotected non-canonical blocks kept as METADATA (local retention, not validity; consensus.md:29).
+/// D-REORG-REDB (owner-approved): fork choice (`better`, `rebuild_canonical`, the LCA walk) reads only
+/// metadata, and `retain` offloads every journaled non-canonical block's body, receipts, tx hashes and
+/// encoded header (they are in the journal). R_keep entries: D118 keeps at most one non-canonical block
+/// per height, so a whole window of competing blocks fits. Beyond it the lowest-work unprotected leaf is
+/// evicted first; an evicted branch is re-fetched by a sync session from the fork point (locator) when a
+/// peer serves a heavier chain (consensus.md §10: "fetched by sync"), and a session's blocks are
+/// protected from this cap (`protect_max`). A13-DERIVATION §4 item 18.
+pub const SIDE_BLOCKS_MAX:usize=R_KEEP as usize;
+/// Hashes of side blocks removed by retention, remembered so that a copy received again is refused
+/// before it is validated or journaled (a branch longer than SIDE_BLOCKS_MAX would otherwise be
+/// re-fetched, re-executed and re-journaled every sync turn). FIFO, a cache only.
+pub const EVICTED_MAX:usize=1024;
+/// Bound of the invalid-block cache (A05). A forgotten entry is only re-validated.
+pub const INVALID_MAX:usize=4096;
+
 /// Immutable chain configuration: cfg = {chainId, genesisHash, ForkSchedule, CP, M_0}.
-pub struct Spec{pub profile:ProfileIdentity,pub genesis:Genesis,pub genesis_hash:[u8;32],pub spec_bytes:Vec<u8>}
+/// Constructible only from a ParamGate admission (A02): nothing boots an unadmitted profile.
+pub struct Spec{admitted:Admitted}
 impl Spec{
-    pub fn cp(&self)->&pocol_lp4_execution::profile::ConsensusParams{self.profile.cp()}
-    pub fn chain_id(&self)->u64{self.profile.spec().chain_id}
-    pub fn target_g(&self)->Fixed{Fixed::from_be_slice(&self.profile.cp().target_g.to_be_bytes()).unwrap()}
-    pub fn active_version(&self,h:u64)->u16{self.profile.forks().active_version(h)}
+    pub fn new(admitted:Admitted)->Self{Self{admitted}}
+    pub fn profile(&self)->&ProfileIdentity{self.admitted.profile()}
+    pub fn genesis(&self)->&Genesis{self.admitted.genesis()}
+    pub fn genesis_hash(&self)->[u8;32]{self.admitted.genesis_hash()}
+    pub fn spec_bytes(&self)->&[u8]{self.admitted.spec_bytes()}
+    /// The node-local timing admitted with the profile (Φ=2φ, Δ_rel, Γ).
+    pub fn local(&self)->&NodeLocal{self.admitted.local()}
+    pub fn admission(&self)->&Admitted{&self.admitted}
+    pub fn cp(&self)->&pocol_lp4_execution::profile::ConsensusParams{self.profile().cp()}
+    pub fn chain_id(&self)->u64{self.profile().spec().chain_id}
+    pub fn target_g(&self)->Fixed{Fixed::from_be_slice(&self.profile().cp().target_g.to_be_bytes()).unwrap()}
+    pub fn active_version(&self,h:u64)->u16{self.profile().forks().active_version(h)}
 }
 
 #[derive(Clone,Debug)]
@@ -38,12 +68,38 @@ pub struct Entry{
     pub tx_hashes:Vec<B256>,
     pub cum_txs:u64,
     pub cum_tx_bytes:u64,
+    /// Charged log bytes up to and including this block (LOG_CAP, A03).
+    pub cum_log_bytes:u64,
     /// R21: state dropped outside the K_hist window; rebuilt by re-execution on demand.
     pub pruned:bool,
     /// Draw(h,0) for this block's height on its branch (evidence type 1 DrawIndex).
     pub drawn:Address,
     /// This block's nonce ranges (owner lookup for evidence without old state).
     pub ranges:Vec<(Address,u128,u128)>,
+    /// D-REORG-REDB off-heap block store: the journal frame offset of this block's record, set by
+    /// the node after `journal.append` (and recomputed on replay). `None` for a bare chain with no
+    /// journal and for genesis (never journaled). Only a block with `body_off = Some` may be offloaded.
+    pub body_off:Option<u64>,
+    /// When true, `body`, `receipts`, `tx_hashes` and `header.encoded` have been dropped (empty) and
+    /// are read on demand from the journal at `body_off`. State residence stays governed by `pruned`.
+    pub offloaded:bool,
+}
+
+/// Source of a block's bytes for the off-heap store: given a journal frame offset (an `Entry.body_off`),
+/// returns (headerBytes, bodyBytes, parentResultBytes). Implemented by the node over `store::Journal`
+/// (`read_at`); a bare chain passes `None` and never offloads, so it is never called there.
+pub trait BlockBytes{fn record_at(&self,off:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8>),Reject>;}
+/// Drops a journaled block's bytes from memory (D-REORG-REDB): body, receipts, tx hashes and the
+/// encoded header. Fork choice, child contexts and evidence ancestry read only the metadata kept.
+fn offload(e:&mut Entry){e.body=Body::default();e.receipts=Vec::new();e.tx_hashes=Vec::new();e.header.encoded=Vec::new();e.offloaded=true;}
+impl Entry{
+    /// A copy without the executed state (an empty, pruned state), for rolling re-execution and views.
+    pub fn meta_clone(&self)->Entry{
+        Entry{hash:self.hash,header:self.header.clone(),body:self.body.clone(),height:self.height,parent:self.parent,total_work:self.total_work,import_seq:self.import_seq,
+            signed:self.signed,ts:self.ts,target:self.target,base_fee:self.base_fee,gas_used:self.gas_used,seal:self.seal,state:InMemoryDB::default(),is_final:self.is_final,
+            result:self.result.clone(),receipts:self.receipts.clone(),tx_hashes:self.tx_hashes.clone(),cum_txs:self.cum_txs,cum_tx_bytes:self.cum_tx_bytes,
+            cum_log_bytes:self.cum_log_bytes,pruned:true,drawn:self.drawn,ranges:self.ranges.clone(),body_off:self.body_off,offloaded:self.offloaded}
+    }
 }
 
 /// Everything a child of `p` at attempt `a` needs, derived only from p and its state.
@@ -73,6 +129,10 @@ pub enum Reject{
     NeedsRebuild([u8;32]),
     Future,
     Duplicate,
+    /// Removed by local retention (SIDE_BLOCKS_MAX or R_keep) and not taken again (EVICTED_MAX), or a new
+    /// block at or below head-R_keep, which retention would remove at once (it cannot be canonical or win
+    /// D133 there; deeper rollback is the manual checkpoint of governance.md:200). Never a validity verdict.
+    Evicted,
 }
 fn blk<T>(s:impl Into<String>)->Result<T,Reject>{Err(Reject::Block(s.into()))}
 
@@ -85,10 +145,30 @@ pub struct Chain{
     /// R21 window: full states kept for heights > head-K_hist (and genesis).
     pub k_hist:u64,
     pub rebuilds:u64,
+    /// C-1 S1: when set (by a node whose receipts and transaction index live in `history.redb`), canonical
+    /// journaled blocks more than this many blocks below the head are offloaded like side blocks; the
+    /// last `history_window` canonical blocks stay resident. None for a bare chain: nothing canonical is
+    /// offloaded. `history_cursor`: every canonical height below it has been offloaded already.
+    pub history_window:Option<u64>,pub history_cursor:u64,
+    /// Blocks `restore_canonical` re-executed (resident ones on its span included): the restore work.
+    pub restore_reexecs:u64,
     /// Invalid committed contents (blockReject) never re-validated.
     pub invalid:HashMap<[u8;32],String>,
+    /// Insertion order of `invalid`; a cache only (never a validity input), at most INVALID_MAX.
+    invalid_order:std::collections::VecDeque<[u8;32]>,
     /// tid -> (proposer, parent, h) for equivocation detection (evidence type 1).
     pub seen_templates:BTreeMap<(u64,[u8;32]),Vec<(Vec<u8>,Vec<u8>)>>,
+    /// Side blocks removed by retention (EVICTED_MAX, FIFO) and how many were removed in all.
+    evicted:std::collections::HashSet<[u8;32]>,evicted_order:std::collections::VecDeque<[u8;32]>,pub evicted_total:u64,
+    /// Local retention parameters (consensus.md:29, governance.md:15): defaults R_KEEP and SIDE_BLOCKS_MAX.
+    /// Tests lower them to exercise the boundaries quickly; they never affect validity.
+    pub r_keep:u64,pub side_cap:usize,
+    /// Blocks the side cap must not evict: the live sync session's fetched prefix, or (on replay) blocks
+    /// that later journal records build on. Still subject to the R_keep boundary.
+    pub protect:std::collections::HashSet<[u8;32]>,
+    /// Journal replay: the cap then bounds ALL non-canonical blocks by side_cap + protect_max (what live
+    /// could hold), since replay protects only blocks live held (Node::open).
+    pub replaying:bool,
 }
 
 pub fn u256_fixed(v:&Fixed)->U256{from_fixed(v)}
@@ -96,13 +176,15 @@ pub fn work(t:&Fixed)->U256{from_fixed(&crate::fixed::work(t))}
 
 impl Chain{
     pub fn new(spec:Spec)->Self{
-        let gh=spec.genesis_hash;let cp=spec.cp();
+        let gh=spec.genesis_hash();let cp=spec.cp();
         let mut h=blank_header();h.chain_id=spec.chain_id();h.genesis_hash=gh;h.ts=cp.g_ts;h.target=spec.target_g();
         let genesis=Entry{hash:gh,header:h,body:Body::default(),height:0,parent:None,total_work:U256::ZERO,import_seq:0,signed:false,ts:cp.g_ts,
-            target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis.state().clone(),is_final:false,result:None,
-            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![]};
+            target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis().state().clone(),is_final:false,result:None,
+            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
-        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist:32,rebuilds:0,invalid:HashMap::new(),seen_templates:BTreeMap::new()}
+        let k_hist=u64::from(spec.local().k_hist);
+        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,history_window:None,history_cursor:1,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
+            r_keep:R_KEEP,side_cap:SIDE_BLOCKS_MAX,protect:Default::default(),replaying:false}
     }
     pub fn head(&self)->&Entry{&self.blocks[&self.head]}
     pub fn get(&self,h:&[u8;32])->Option<&Entry>{self.blocks.get(h)}
@@ -147,11 +229,11 @@ impl Chain{
     // ---------------- execution ----------------
     fn execute(&self,p:&Entry,ctx:&ChildCtx,ts:u64,proposer:Proposer,body:&Body,effects:Vec<EvidenceEffect>)->Result<BlockOutput,Reject>{
         let input=BlockInput{height:ctx.height,timestamp:ts,base_fee:ctx.base_fee,gas_limit:self.spec.cp().GAS_LIMIT,prevrandao:ctx.prevrandao,proposer,
-            parent_result:ctx.parent_result.clone(),evidence:effects,evidence_raw:&body.evidence,transactions:&body.txs,ancestors:ctx.ancestors.clone()};
-        apply::apply_block(&p.state,&self.spec.genesis,&self.spec.profile,&input).map_err(|e|Reject::Block(format!("apply {e:?}")))
+            parent_result:ctx.parent_result.clone(),evidence:effects,evidence_raw:&body.evidence,transactions:&body.txs,ancestors:ctx.ancestors.clone(),cum_log_bytes:p.cum_log_bytes};
+        apply::apply_block(&p.state,self.spec.genesis(),self.spec.profile(),&input).map_err(|e|Reject::Block(format!("apply {e:?}")))
     }
     fn fill_ut(&self,p:&Entry,ctx:&ChildCtx,ts:u64,out:&BlockOutput,proposer:&[u8])->Header{
-        let mut h=blank_header();h.chain_id=self.spec.chain_id();h.genesis_hash=self.spec.genesis_hash;h.parent_hash=p.hash;h.h=ctx.height;h.a=ctx.attempt;
+        let mut h=blank_header();h.chain_id=self.spec.chain_id();h.genesis_hash=self.spec.genesis_hash();h.parent_hash=p.hash;h.h=ctx.height;h.a=ctx.attempt;
         h.protocol_version=self.spec.active_version(ctx.height);h.ts=ts;h.target=ctx.target;h.state_root=out.state_root.0;h.tx_root=out.transactions_root.0;
         h.receipts_root=out.receipts_root.0;h.logs_bloom=out.logs_bloom.to_vec();h.gas_limit=self.spec.cp().GAS_LIMIT;h.gas_used=out.gas_used;
         h.base_fee=to_fixed(ctx.base_fee);h.evidence_root=out.evidence_root.0;h.proposer=proposer.to_vec();reseal(&mut h);h
@@ -188,7 +270,7 @@ impl Chain{
         // 1. sizes, 1b NetID.
         if x.encoded.len()>crate::header::HDR_MAX{return blk("1 header size")}
         if x.chain_id!=self.spec.chain_id(){return blk("netChain")}
-        if x.genesis_hash!=self.spec.genesis_hash{return blk("netGenesis")}
+        if x.genesis_hash!=self.spec.genesis_hash(){return blk("netGenesis")}
         if x.protocol_version!=self.spec.active_version(x.h){return blk("netVersion")}
         if !self.blocks.contains_key(&x.parent_hash){return Err(Reject::UnknownParent)}
         if let Some(r)=self.invalid.get(&x.parent_hash){return blk(format!("ancestorInvalid {r}"))}
@@ -232,12 +314,14 @@ impl Chain{
         // Body binding first (D129): the block hash commits the header only and the body through
         // tx_root/evidence_root. A body that does not match is another copy, not an invalid block:
         // envReject, never marked invalid. Body-content checks below run on the bound body only.
-        let tx_root=crate::types::ordered_root(&b.body.txs)?;let ev_root=crate::types::ordered_root(&b.body.evidence)?;
-        if tx_root!=x.tx_root||ev_root!=x.evidence_root{return Err(Reject::Envelope("15 body does not match the header roots".into()))}
+        // An uncomputable commitment (empty item) is also a copy fault: no header can commit to it (audit A01).
+        let bound=crate::types::body_commitment(&b.body.txs)==Some(x.tx_root)&&crate::types::body_commitment(&b.body.evidence)==Some(x.evidence_root);
+        if !bound{return Err(Reject::Envelope("15 body does not match the header roots".into()))}
         // 1 (body): sizes and evidence bounds before any evidence evaluation.
         if b.body.txs.iter().any(|t|t.len()>cp.TX_MAX as usize){return blk("1 TX_MAX")}
-        let body_bytes:usize=b.body.txs.iter().chain(b.body.evidence.iter()).map(|t|t.len()).sum();
-        if body_bytes>cp.BODY_MAX as usize{return blk("1 BODY_MAX")}
+        // consensus.md: Body = [txs, evidence] <= BODY_MAX, the encoded body, exactly as Body::decode
+        // checks it for blocks from peers (review finding: the raw item sum was checked here).
+        if b.body.encode().len()>cp.BODY_MAX as usize{return blk("1 BODY_MAX")}
         if b.body.evidence.len()>usize::from(cp.E_max)||b.body.evidence.iter().any(|e|e.len()>cp.EVID_BYTES_MAX as usize){return blk("1 evidence bounds")}
         // 12. exclusive form. Fallback: body 0xc2c0c0 and UT byte-equal to Build_fb (needs apply).
         let mut fb_out=None;
@@ -255,7 +339,7 @@ impl Chain{
         // 15. evidence validity (roots were bound above). 16. cumulative caps.
         let effects=if signed{self.evidence_effects(p,&b.body,x.h)?}else{vec![]};
         let tx_bytes:u64=b.body.txs.iter().map(|t|t.len() as u64).sum();
-        if p.cum_txs+b.body.txs.len() as u64>cp.TX_CAP||p.cum_tx_bytes+tx_bytes>cp.TXBYTES_CAP{return blk("16 caps")}
+        if !self.within_caps(p,&b.body.txs){return blk("16 caps")}
         // 17. apply.
         let out=match fb_out{Some(o)=>o,None=>self.execute(p,&ctx,x.ts,Proposer::Signed(Address::from_slice(&x.proposer)),&b.body,effects)?};
         if out.state_root.0!=x.state_root{return blk("17 stateRoot")}
@@ -264,10 +348,19 @@ impl Chain{
         let entry=Entry{hash,header:x.clone(),body:b.body.clone(),height:x.h,parent:Some(p.hash),total_work:p.total_work.saturating_add(work(&x.target)),
             import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,
             result:Some(ParentResult{block_hash:B256::from(hash),winner:addr(&owner),shares}),receipts:out.receipts,tx_hashes,
-            cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,pruned:false,drawn:ctx.proposer,
-            ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect()};
+            cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,cum_log_bytes:p.cum_log_bytes+out.log_bytes,pruned:false,drawn:ctx.proposer,
+            ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect(),body_off:None,offloaded:false};
         Ok((entry,ctx))
     }
+
+    /// Item 16 (consensus.md:170): the transaction count and raw bytes (D49: len(rawTx)) of p's branch plus
+    /// `txs` within TX_CAP and TXBYTES_CAP. The one definition validation, the builder and template locking use.
+    pub fn within_caps(&self,p:&Entry,txs:&[Vec<u8>])->bool{
+        let cp=self.spec.cp();let bytes=txs.iter().try_fold(p.cum_tx_bytes,|n,t|n.checked_add(t.len() as u64));
+        p.cum_txs.checked_add(txs.len() as u64).map_or(false,|n|n<=cp.TX_CAP)&&bytes.map_or(false,|n|n<=cp.TXBYTES_CAP)
+    }
+    /// What item 16 leaves for a child of p: (transactions, raw bytes).
+    pub fn caps_room(&self,p:&Entry)->(u64,u64){let cp=self.spec.cp();(cp.TX_CAP.saturating_sub(p.cum_txs),cp.TXBYTES_CAP.saturating_sub(p.cum_tx_bytes))}
 
     /// Evidence (incentives.md "الأدلة"). Type 1: RLP([1, ST1, ST2]); type 2:
     /// RLP([2, TemplateID, nonce, shareRoot1, sig1, shareRoot2, sig2]). Invalid
@@ -301,7 +394,7 @@ impl Chain{
         };
         let (u1,s1)=parse(a)?;let (u2,s2)=parse(b)?;
         if u1.ut_raw==u2.ut_raw{return blk("ev1 identical")}
-        if u1.parent_hash!=u2.parent_hash||u1.h!=u2.h||u1.a!=0||u2.a!=0||u1.chain_id!=self.spec.chain_id()||u2.chain_id!=self.spec.chain_id()||u1.genesis_hash!=self.spec.genesis_hash||u2.genesis_hash!=self.spec.genesis_hash{return blk("ev1 context")}
+        if u1.parent_hash!=u2.parent_hash||u1.h!=u2.h||u1.a!=0||u2.a!=0||u1.chain_id!=self.spec.chain_id()||u2.chain_id!=self.spec.chain_id()||u1.genesis_hash!=self.spec.genesis_hash()||u2.genesis_hash!=self.spec.genesis_hash(){return blk("ev1 context")}
         if u1.h+u64::from(self.spec.cp().E_win)<h_incl{return blk("ev1 too old")}
         let r1=hashes::recover_address(&hashes::sig_msg(&template_id(&u1.ut_raw)),&s1).map_err(|_|Reject::Block("ev1 sig1".into()))?;
         let r2=hashes::recover_address(&hashes::sig_msg(&template_id(&u2.ut_raw)),&s2).map_err(|_|Reject::Block("ev1 sig2".into()))?;
@@ -346,30 +439,196 @@ impl Chain{
         if better{self.head=hash;self.rebuild_canonical();}
         better
     }
-    pub fn mark_invalid(&mut self,hash:[u8;32],why:String){self.invalid.insert(hash,why);}
-    /// R21 retention: drop states of blocks at height <= head-K_hist (genesis kept).
-    pub fn retain(&mut self){
-        let cut=self.head().height.saturating_sub(self.k_hist);
-        for e in self.blocks.values_mut(){ if e.height>0&&e.height<=cut&&!e.pruned{e.state=InMemoryDB::default();e.pruned=true;} }
+    pub fn mark_invalid(&mut self,hash:[u8;32],why:String){
+        if self.invalid.insert(hash,truncate(&why)).is_none(){self.invalid_order.push_back(hash);}
+        while self.invalid_order.len()>INVALID_MAX{if let Some(old)=self.invalid_order.pop_front(){self.invalid.remove(&old);}}
     }
+    /// R21 retention: drop states of canonical blocks at height <= head-K_hist (genesis kept).
+    /// A13 side-branch bounds (local retention, never validity; consensus.md:29, D118):
+    /// - a non-canonical block `r_keep` or more below the head is removed with its descendants
+    ///   (adoption is owed at depth <= R_keep, network.md:144; deeper is governance.md:200);
+    /// - at most `side_cap` UNPROTECTED non-canonical blocks are kept: the lowest-work unprotected
+    ///   leaf goes first, repeatedly (its parent may become a leaf), so the bound holds after every
+    ///   call, a reorg included. `protect` (a sync session's fetched branch, or on replay the blocks
+    ///   later journal records build on) is exempt from this cap only;
+    /// - every journaled non-canonical block is offloaded to metadata (D-REORG-REDB): its body,
+    ///   receipts, tx hashes and encoded header are dropped and read from the journal on demand.
+    ///   Canonical blocks are offloaded only below the resident window of C-1 S1 (`history_window`), so
+    ///   `restore_canonical` makes adopted ones whole only inside it;
+    /// - at most `side_max` non-canonical blocks keep a state (unprotected and lowest-work first
+    ///   are pruned, rebuilt on demand).
+    pub fn retain(&mut self){
+        let head_h=self.head().height;let cut=head_h.saturating_sub(self.k_hist);
+        // R21 is the canonical trie window; non-canonical states are bounded by side_max below. (Pruning
+        // a side block below the window made each block of a deep competing branch rebuild its parent
+        // from genesis: quadratic work for an R_keep-deep adoption.)
+        let prune:Vec<[u8;32]>=self.canonical.iter().skip(1).take(cut as usize).copied().collect();
+        for h in prune{if let Some(e)=self.blocks.get_mut(&h){if !e.pruned{e.state=InMemoryDB::default();e.pruned=true;}}}
+        let side=|c:&Chain|->Vec<[u8;32]>{c.blocks.values().filter(|e|e.height>0&&!c.is_canonical(&e.hash)).map(|e|e.hash).collect()};
+        let r_keep=self.r_keep;
+        let mut gone:Vec<[u8;32]>=side(self).into_iter().filter(|h|self.blocks[h].height+r_keep<=head_h).collect();
+        for h in &gone{self.blocks.remove(h);}
+        // Descendants of a removed block go too (their parent is gone).
+        loop{let orphaned:Vec<[u8;32]>=self.blocks.values().filter(|e|e.parent.map_or(false,|p|!self.blocks.contains_key(&p))).map(|e|e.hash).collect();
+            if orphaned.is_empty(){break}for h in orphaned{self.blocks.remove(&h);gone.push(h);}}
+        let side_now=side(self);
+        let unprotected=side_now.iter().filter(|h|!self.protect.contains(*h)).count();
+        // Live: unprotected <= side_cap (a session holds <= protect_max more). Replay: all <= their sum.
+        let (count,limit)=if self.replaying{(side_now.len(),self.side_cap+self.protect_max())}else{(unprotected,self.side_cap)};
+        if count>limit{
+            // Children over all blocks: a block with a (protected) child is never a leaf.
+            let mut children:HashMap<[u8;32],usize>=HashMap::new();
+            for e in self.blocks.values(){if let Some(p)=e.parent{*children.entry(p).or_insert(0)+=1;}}
+            let evictable:std::collections::HashSet<[u8;32]>=side_now.iter().filter(|h|!self.protect.contains(*h)).copied().collect();
+            let key=|c:&Chain,h:&[u8;32]|{let e=&c.blocks[h];std::cmp::Reverse((e.total_work,e.import_seq,*h))};
+            let mut leaves:std::collections::BinaryHeap<_>=evictable.iter().filter(|h|!children.contains_key(*h)).map(|h|key(self,h)).collect();
+            let mut n=count;
+            while n>limit{
+                let Some(std::cmp::Reverse((_,_,h)))=leaves.pop() else{break};
+                let parent=self.blocks.remove(&h).and_then(|e|e.parent);gone.push(h);n-=1;
+                if let Some(p)=parent{if let Some(c)=children.get_mut(&p){*c-=1;if *c==0&&evictable.contains(&p){children.remove(&p);leaves.push(key(self,&p));}}}
+            }
+        }
+        for h in gone{self.evicted_total+=1;if self.evicted.insert(h){self.evicted_order.push_back(h);}}
+        while self.evicted_order.len()>EVICTED_MAX{if let Some(old)=self.evicted_order.pop_front(){self.evicted.remove(&old);}}
+        // Live: protection is for non-canonical session blocks only (an adopted one no longer counts
+        // toward protect_max). Replay keeps a canonical block protected while a later record builds on
+        // it, in case a later replayed reorg makes it non-canonical again.
+        let keep:Vec<[u8;32]>=self.protect.iter().filter(|h|self.blocks.contains_key(*h)&&(self.replaying||!self.is_canonical(h))).copied().collect();
+        self.protect=keep.into_iter().collect();
+        // Offload: the journal holds every byte dropped here (body_off is set only after a fsynced
+        // append), so no crash can lose them; genesis is never journaled and never offloaded.
+        let side_left=side(self);
+        for h in &side_left{if let Some(e)=self.blocks.get_mut(h){if !e.offloaded&&e.body_off.is_some()&&e.height>0{offload(e);}}}
+        // C-1 S1: canonical history below the resident window goes off the heap too; its receipts and
+        // transaction index are in history.redb (written before the journal record, invariant I3).
+        if let Some(w)=self.history_window{
+            let below=head_h.saturating_sub(w)+1;
+            while self.history_cursor<below{
+                if let Some(h)=self.canonical.get(self.history_cursor as usize).copied(){if let Some(e)=self.blocks.get_mut(&h){if !e.offloaded&&e.body_off.is_some(){offload(e);}}}
+                self.history_cursor+=1;
+            }
+        }
+        let mut with_state:Vec<(bool,U256,u64,[u8;32])>=side_left.into_iter().filter(|h|!self.blocks[h].pruned).map(|h|{let e=&self.blocks[&h];(self.protect.contains(&h),e.total_work,e.import_seq,h)}).collect();
+        let side_max=self.spec.local().side_max as usize;
+        if with_state.len()>side_max{with_state.sort();let over=with_state.len()-side_max;
+            let drop:Vec<[u8;32]>=with_state.into_iter().take(over).map(|x|x.3).collect();
+            for h in drop{if let Some(e)=self.blocks.get_mut(&h){e.state=InMemoryDB::default();e.pruned=true;}}}
+    }
+    /// Height of the lowest common ancestor of two stored blocks (metadata walk).
+    pub fn lca_height(&self,a:&[u8;32],b:&[u8;32])->Option<u64>{
+        let (mut x,mut y)=(*a,*b);
+        loop{
+            if x==y{return self.blocks.get(&x).map(|e|e.height)}
+            let (ex,ey)=(self.blocks.get(&x)?,self.blocks.get(&y)?);
+            if ex.height>=ey.height{x=ex.parent?}else{y=ey.parent?}
+        }
+    }
+    /// Replay of a journal record whose block is already stored (D-REORG-REDB). Live import journals
+    /// a block only when it is absent, so a second record means live had removed it by retention and
+    /// imported it again: consensus.md:205 gives such a block a NEW importSeq, so replay does the same
+    /// (keeping live and replayed D133 keys order-equal). The head stays the D133 maximum.
+    pub fn reimport(&mut self,hash:&[u8;32],header:Header,body_off:Option<u64>){
+        // Live builds the re-imported entry from that copy (its envelope bytes may differ: the block hash
+        // does not commit sig/winnerSig) and serves it from that record, so replay keeps the same copy.
+        let Some(e)=self.blocks.get_mut(hash) else{return};e.import_seq=self.next_seq;self.next_seq+=1;
+        let resident=!e.offloaded;e.header=header;if !resident{e.header.encoded=Vec::new();}if body_off.is_some(){e.body_off=body_off;}
+        if self.is_canonical(hash){self.recompute_head();}
+        else if self.better(hash,&self.head.clone()){self.head=*hash;self.rebuild_canonical();}
+    }
+    /// Head = the D133 maximum over every stored block (D133: independent of the scan order).
+    fn recompute_head(&mut self){
+        let all:Vec<[u8;32]>=self.blocks.keys().copied().collect();let mut best=self.canonical[0];
+        for h in all{if self.better(&h,&best){best=h;}}
+        self.head=best;self.rebuild_canonical();
+    }
+    /// Whether every canonical block holds its bytes (D-REORG-REDB invariant after an import or open).
+    /// Every canonical block inside the resident window is resident (all of them for a bare chain).
+    pub fn canonical_resident(&self)->bool{let head_h=self.head().height;let start=self.history_window.map_or(0,|w|head_h.saturating_sub(w)+1);
+        self.canonical.iter().skip(start as usize).all(|h|!self.blocks[h].offloaded)}
+    /// A block's committed body: resident, or read back from the journal when offloaded.
+    pub fn body_of(&self,e:&Entry,src:Option<&dyn BlockBytes>)->Result<Body,Reject>{
+        if !e.offloaded{return Ok(e.body.clone())}
+        let off=e.body_off.ok_or_else(||Reject::Block("offloaded block without body_off".into()))?;
+        let src=src.ok_or(Reject::NeedsRebuild(e.hash))?;let (_,bb,_)=src.record_at(off)?;
+        Body::decode(&bb,self.spec.cp().BODY_MAX as usize).map_err(|_|Reject::Block("offloaded body decode".into()))
+    }
+    /// Re-executes the stored block `e` on its parent `p` (whose state must be resident) and checks the
+    /// result against the committed header and ParentResult.
+    fn reexec(&self,p:&Entry,e:&Entry,body:&Body)->Result<BlockOutput,Reject>{
+        let ctx=self.child_ctx(p,e.header.a)?;let effects=self.evidence_effects(p,body,e.height)?;
+        let proposer=if e.signed{Proposer::Signed(Address::from_slice(&e.header.proposer))}else{Proposer::Fallback};
+        let out=self.execute(p,&ctx,e.ts,proposer,body,effects)?;
+        if out.state_root.0!=e.header.state_root{return blk("rebuild stateRoot mismatch")}
+        // Re-derive ParentResult from the header and the rebuilt assignment (parentResultMismatch).
+        let owner=|n:u64|ctx.assignment.owner(n).map(|a|addr(&a));
+        let derived=ParentResult{block_hash:B256::from(e.hash),winner:owner(e.header.nonce).ok_or_else(||Reject::Block("rebuild owner".into()))?,
+            shares:e.header.shares.iter().map(|n|owner(*n).map(|o|(*n,o))).collect::<Option<Vec<_>>>().ok_or_else(||Reject::Block("rebuild share owner".into()))?};
+        if Some(&derived)!=e.result.as_ref(){return blk("parentResultMismatch")}
+        Ok(out)
+    }
+    /// D-REORG-REDB restore: after an adoption (or at the end of replay) the canonical blocks above
+    /// `from_h` that were offloaded while non-canonical are made whole again: header bytes and body from
+    /// the journal, receipts by re-executing the adopted suffix in order from the fork point (a rolling
+    /// state; state residence is unchanged), each checked against stateRoot, receiptsRoot, gasUsed and
+    /// ParentResult. Canonical blocks are therefore always resident for RPC and range serving, exactly as
+    /// before this change. Returns the number of blocks restored.
+    pub fn restore_canonical(&mut self,from_h:u64,src:&dyn BlockBytes)->Result<usize,Reject>{
+        let head_h=self.head().height;
+        let off=|c:&Chain,h:u64|c.canonical_at(h).map_or(false,|e|e.offloaded);
+        // C-1 S1: below the resident window a canonical block stays offloaded (its receipts are stored).
+        let window_start=self.history_window.map_or(1,|w|head_h.saturating_sub(w)+1);
+        let Some(first)=(from_h.max(1).max(window_start)..=head_h).find(|h|off(self,*h)) else{return Ok(0)};
+        let last=(first..=head_h).rev().find(|h|off(self,*h)).unwrap_or(first);
+        let ph=self.canonical[first as usize-1];let was_pruned=self.blocks[&ph].pruned;
+        self.ensure_state_with(&ph,Some(src))?;
+        let mut p=self.blocks[&ph].meta_clone();p.state=self.blocks[&ph].state.clone();
+        if was_pruned&&ph!=self.canonical[0]{let x=self.blocks.get_mut(&ph).unwrap();x.state=InMemoryDB::default();x.pruned=true;}
+        let mut n=0;
+        for hgt in first..=last{
+            let hash=self.canonical[hgt as usize];let e=&self.blocks[&hash];
+            let (hb,bb)=if e.offloaded{let o=e.body_off.ok_or_else(||Reject::Block("offloaded block without body_off".into()))?;let (hb,bb,_)=src.record_at(o)?;(Some(hb),Some(bb))}else{(None,None)};
+            let body=match &bb{Some(bb)=>Body::decode(bb,self.spec.cp().BODY_MAX as usize).map_err(|_|Reject::Block("offloaded body decode".into()))?,None=>e.body.clone()};
+            if let Some(hb)=&hb{if decode_header(hb).map(|h|block_hash(&h)).ok()!=Some(hash){return blk("restore: journal header does not hash to the block")}}
+            let out=self.reexec(&p,e,&body)?;self.restore_reexecs+=1;
+            if out.receipts_root.0!=e.header.receipts_root||out.gas_used!=e.header.gas_used{return blk("restore: receipts mismatch")}
+            let x=self.blocks.get_mut(&hash).unwrap();
+            if x.offloaded{x.tx_hashes=body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();x.receipts=out.receipts;x.body=body;
+                x.header.encoded=hb.unwrap_or_default();x.offloaded=false;n+=1;}
+            let mut next=x.meta_clone();next.state=out.state;p=next;
+        }
+        Ok(n)
+    }
+    /// Bound of `protect` (a sync session's fetched branch): network.md:27 (sync stage R: <= 4096 headers
+    /// per branch), i.e. 2·R_keep at the default R_keep.
+    pub fn protect_max(&self)->usize{(2*self.r_keep) as usize}
+    /// Whether retention removed this block recently (it is then not taken again).
+    pub fn was_evicted(&self,hash:&[u8;32])->bool{self.evicted.contains(hash)}
+    /// Non-canonical blocks, and those holding a state (A13 accounting, status).
+    pub fn side_counts(&self)->(usize,usize){let side=self.blocks.values().filter(|e|e.height>0&&!self.is_canonical(&e.hash));let (mut n,mut s)=(0,0);for e in side{n+=1;if !e.pruned{s+=1}}(n,s)}
     /// TrieRebuild: re-executes from the nearest retained ancestor and checks
     /// every stateRoot against the committed header.
-    pub fn ensure_state(&mut self,hash:&[u8;32])->Result<(),Reject>{
+    pub fn ensure_state(&mut self,hash:&[u8;32])->Result<(),Reject>{self.ensure_state_with(hash,None)}
+    /// As `ensure_state`, but given a `BlockBytes` source so a block whose body was offloaded
+    /// (D-REORG-REDB) is re-executed from its journal record. A bare chain (nothing offloaded) passes
+    /// `None`. A pruned block reached on the rebuild path that is offloaded but has no source, or no
+    /// `body_off`, is an error — never a silent empty body.
+    pub fn ensure_state_with(&mut self,hash:&[u8;32],src:Option<&dyn BlockBytes>)->Result<(),Reject>{
         let mut path=vec![];let mut cur=*hash;
         while self.blocks.get(&cur).map(|e|e.pruned).unwrap_or(false){path.push(cur);cur=self.blocks[&cur].parent.ok_or_else(||Reject::Block("rebuild root".into()))?;}
+        if path.is_empty(){return Ok(())}
+        // A13: rolling re-execution. Only the block being extended holds a state; intermediate
+        // states are dropped, so a rebuild of any depth keeps at most two snapshots alive.
+        let root=self.blocks.get(&cur).ok_or_else(||Reject::Block("rebuild root".into()))?;
+        let mut p=root.meta_clone();p.state=root.state.clone();
         for h in path.into_iter().rev(){
-            let e=self.blocks[&h].clone();let p=self.blocks[&e.parent.unwrap()].clone();
-            let ctx=self.child_ctx(&p,e.header.a)?;let effects=self.evidence_effects(&p,&e.body,e.height)?;
-            let proposer=if e.signed{Proposer::Signed(Address::from_slice(&e.header.proposer))}else{Proposer::Fallback};
-            let out=self.execute(&p,&ctx,e.ts,proposer,&e.body,effects)?;
-            if out.state_root.0!=e.header.state_root{return blk("rebuild stateRoot mismatch")}
-            // Re-derive ParentResult from the header and the rebuilt assignment (parentResultMismatch).
-            let owner=|n:u64|ctx.assignment.owner(n).map(|a|addr(&a));
-            let derived=ParentResult{block_hash:B256::from(e.hash),winner:owner(e.header.nonce).ok_or_else(||Reject::Block("rebuild owner".into()))?,
-                shares:e.header.shares.iter().map(|n|owner(*n).map(|o|(*n,o))).collect::<Option<Vec<_>>>().ok_or_else(||Reject::Block("rebuild share owner".into()))?};
-            if Some(&derived)!=e.result.as_ref(){return blk("parentResultMismatch")}
-            let x=self.blocks.get_mut(&h).unwrap();x.state=out.state;x.pruned=false;self.rebuilds+=1;
+            let e=self.blocks[&h].meta_clone();
+            // Off-heap body: fetched and decoded from the journal when this block was offloaded.
+            let body=self.body_of(&e,src)?;
+            let out=self.reexec(&p,&e,&body)?;
+            let mut next=e;next.state=out.state;next.pruned=false;p=next;self.rebuilds+=1;
         }
+        let x=self.blocks.get_mut(hash).ok_or_else(||Reject::Block("rebuild target".into()))?;x.state=p.state;x.pruned=false;
         Ok(())
     }
     fn key(&self,h:&[u8;32])->(u8,u64,[u8;32]){let e=&self.blocks[h];(if e.signed{0}else{1},e.import_seq,e.hash)}

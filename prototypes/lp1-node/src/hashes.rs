@@ -125,11 +125,9 @@ pub fn check_sig_shape(sig: &[u8]) -> Result<([u8; 64], u8), SigFault> {
 /// Recovers the 20-byte address keccak(pub64)[12..] that produced `sig` over `msg`.
 pub fn recover_address(msg: &H256, sig: &[u8]) -> Result<[u8; 20], SigFault> {
     let (rs, v) = check_sig_shape(sig)?;
-    let m = libsecp256k1::Message::parse(msg);
-    let s = libsecp256k1::Signature::parse_standard_slice(&rs).map_err(|_| SigFault::RRange)?;
-    let id = libsecp256k1::RecoveryId::parse(v).map_err(|_| SigFault::BadV)?;
-    let pk = libsecp256k1::recover(&m, &s, &id).map_err(|_| SigFault::NotRecoverable)?;
-    let ser = pk.serialize();
+    // The recovery primitive comes from the including crate: libsecp256k1 in lp1-node (accepted
+    // Rust 1.58.1 toolchain), k256 in pocold (audit 2026-10-22, D-DEP-SECP).
+    let ser = crate::secp_backend::recover_uncompressed(msg, &rs, v)?;
     let k = keccak256(&ser[1..]);
     let mut a = [0u8; 20];
     a.copy_from_slice(&k[12..]);

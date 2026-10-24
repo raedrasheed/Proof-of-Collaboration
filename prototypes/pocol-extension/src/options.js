@@ -5,14 +5,15 @@ async function refresh() {
   const r = await send({ type: 'profiles.list' });
   $('profiles').replaceChildren(...(r.profiles || []).map((p) => {
     const li = document.createElement('li');
-    li.textContent = `${p.name} · chainId ${p.chainId} · ${p.trustLevel} · ${p.endpoint} · netKey ${p.netKey.slice(0, 18)}…${p.conflict ? ' · تعارض chainId' : ''} `;
+    // A stored profile that no longer validates is listed as invalid (removable, unusable).
+    li.textContent = p.invalid ? `${p.name} · غير صالح: ${p.invalid} ` : `${p.name} · chainId ${p.chainId} · ${p.trustLevel} · ${p.endpoint} · netKey ${p.netKey.slice(0, 18)}…${p.conflict ? ' · تعارض chainId (قراءة فقط)' : ''} `;
     const rm = Object.assign(document.createElement('button'), { type: 'button', textContent: 'حذف' });
     rm.onclick = async () => { await send({ type: 'profiles.remove', name: p.name }); refresh(); };
     li.append(rm); return li;
   }));
   const w = await send({ type: 'wallet.status' });
   $('wallet').textContent = !w.exists ? 'لا محفظة' : w.unlocked ? 'مفتوحة' : 'مقفلة';
-  if (w.unlocked) for (const p of r.profiles || []) { const a = await send({ type: 'wallet.address', name: p.name }); if (a.ok) $('wallet').textContent += `\n${p.name}: ${a.address}`; }
+  if (w.unlocked) for (const p of (r.profiles || []).filter((x) => !x.invalid)) { const a = await send({ type: 'wallet.address', name: p.name }); if (a.ok) $('wallet').textContent += `\n${p.name}: ${a.address}`; }
 }
 $('add').onclick = async () => {
   let p; try { p = JSON.parse($('profile').value); } catch { alert('JSON غير صالح'); return; }

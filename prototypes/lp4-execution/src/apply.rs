@@ -86,6 +86,8 @@ pub struct BlockInput<'a>{
     pub transactions:&'a [Vec<u8>],
     /// (height, blockHash) for the last <=256 ancestors; BLOCKHASH(0)=genesisHash.
     pub ancestors:Vec<(u64,B256)>,
+    /// Charged log bytes of the canonical ancestors (LOG_CAP, A03).
+    pub cum_log_bytes:u64,
 }
 
 #[derive(Clone,Debug)]
@@ -104,6 +106,12 @@ pub struct BlockOutput{
     pub is_final:bool,
     pub facts:ChainFacts,
     pub meter:Meter,
+    /// Charged log bytes of this block (LOG-ACCT-01); the child's cum_log_bytes adds it.
+    pub log_bytes:u64,
+    /// USER transactions that halted exceptionally (A03), by index.
+    pub halts:Vec<(usize,crate::user_phase::Halt)>,
+    /// Accounts the USER phase made dirty (ACCT_DIRTY_BLOCK_MAX metering; reporting, not a root input).
+    pub dirty_accounts:u64,
 }
 
 /// Parent-state facts used by consensus (finality, closing, membership).
@@ -164,7 +172,9 @@ pub struct Genesis{image:crate::genesis_builder::GenesisImage}
 impl Genesis{
     /// Verifies sysCodeHash and allocRoot against the GenesisSpec; rejects nonzero
     /// alloc storage at the reserved Ledger address (LEDGER-01 clause 5).
-    pub fn build(alloc:&InMemoryDB,profile:&ProfileIdentity,programs:&SystemPrograms)->Result<Self,ApplyError>{
+    /// Crate-internal: outside this crate a Genesis exists only inside an `admission::Admitted`
+    /// or a `devnet::Devnet` candidate, never from an unadmitted identity.
+    pub(crate) fn build(alloc:&InMemoryDB,profile:&ProfileIdentity,programs:&SystemPrograms)->Result<Self,ApplyError>{
         if alloc.accounts.get(&ledger()).map(|a|a.storage.values().any(|v|*v!=U256::ZERO)).unwrap_or(false){return Err(ApplyError::Genesis("nonzero Ledger alloc storage".into()))}
         crate::genesis_builder::build(alloc,profile,&programs.codes).map(|image|Self{image}).map_err(|e|ApplyError::Genesis(format!("{e:?}")))
     }
@@ -177,11 +187,15 @@ impl Genesis{
     pub fn initial_supply(&self)->U256{self.image.initial_supply()}
 }
 
-struct Exec<'a>{state:InMemoryDB,profile:&'a ProfileIdentity,block:NativeBlockContext,origin:Address,used:u64,limits:CodeLimits,meter:Meter}
+/// `code_total`: the state's logical code total once the first SYSTEM call has fully checked it
+/// (decision package C-2, item 2).
+struct Exec<'a>{state:InMemoryDB,profile:&'a ProfileIdentity,block:NativeBlockContext,origin:Address,used:u64,limits:CodeLimits,meter:Meter,code_total:Option<u64>}
 /// CapsTracker (P7): distinct storage keys changed and accounts touched by SYSTEM
 /// calls in one block, plus the largest single-call gas.
 #[derive(Clone,Debug,Default)]
-pub struct Meter{pub keys:std::collections::HashSet<(Address,U256)>,pub accounts:std::collections::HashSet<Address>,pub max_call_gas:u64,pub calls:u32}
+pub struct Meter{pub keys:std::collections::HashSet<(Address,U256)>,pub accounts:std::collections::HashSet<Address>,pub max_call_gas:u64,pub calls:u32,
+    /// Gas spent by each SYSTEM call in order (measurement only; never a validity input).
+    pub call_gas:Vec<(&'static str,u64)>}
 impl<'a> Exec<'a>{
     fn call(&mut self,name:&'static str,to:Address,data:Vec<u8>)->Result<Bytes,ApplyError>{
         let err=|d:String|ApplyError::System{call:name,detail:d};
@@ -189,7 +203,7 @@ impl<'a> Exec<'a>{
         let allocation=remaining.min(PER_CALL_GAS);if allocation==0{return Err(ApplyError::Budget("G_SYS"))}
         let tx=TxEnv{caller:self.origin,transact_to:TxKind::Call(to),gas_limit:allocation,gas_price:U256::ZERO,value:U256::ZERO,
             data:Bytes::from(data),chain_id:Some(self.profile.spec().chain_id),..Default::default()};
-        let mut evm=native::build_engine(&self.state,tx,&self.block,self.profile.spec().chain_id,Some(self.limits));
+        let mut evm=native::build_engine(&self.state,self.code_total,tx,&self.block,self.profile.spec().chain_id,Some(self.limits));
         evm.handler.pre_execution.load_accounts(&mut evm.context).map_err(|e|err(format!("{e:?}")))?;
         let precompiles=evm.handler.pre_execution.load_precompiles();evm.context.evm.set_precompiles(precompiles);
         for a in [system_address(),to,escrow()]{evm.context.evm.journaled_state.warm_preloaded_addresses.insert(a);}
@@ -204,16 +218,27 @@ impl<'a> Exec<'a>{
         let (state,logs)=evm.context.evm.journaled_state.finalize();
         if !logs.is_empty(){return Err(ApplyError::Logs)}
         for (a,acct) in state.iter(){ if acct.is_touched(){self.meter.accounts.insert(*a);} for (k,v) in acct.storage.iter(){ if v.is_changed(){self.meter.keys.insert((*a,*k));} } }
-        self.meter.max_call_gas=self.meter.max_call_gas.max(result.gas.spent());self.meter.calls+=1;
+        self.meter.max_call_gas=self.meter.max_call_gas.max(result.gas.spent());self.meter.calls+=1;self.meter.call_gas.push((name,result.gas.spent()));
+        drop(evm);
+        // C-2 item 2: the first call checks the whole state, as before; later calls check what they
+        // touched against the running total (the same Ok/Err and texts as a full scan).
+        let touched:Vec<Address>=state.keys().copied().collect();
+        let before=match self.code_total{Some(_)=>code_caps::code_of(&self.state,&touched).map_err(ApplyError::Caps)?,None=>0};
         commit_epoch(&mut self.state,state);
-        code_caps::validate_snapshot(&self.state,self.limits).map_err(ApplyError::Caps)?;
+        self.code_total=Some(match self.code_total{
+            Some(total)=>code_caps::revalidate_touched(&self.state,self.limits,&touched,total,before).map_err(ApplyError::Caps)?,
+            None=>{code_caps::validate_snapshot(&self.state,self.limits).map_err(ApplyError::Caps)?;code_caps::inventory(&self.state).map_err(ApplyError::Caps)?}});
+        debug_assert_eq!(code_caps::validate_snapshot(&self.state,self.limits),Ok(()));
+        debug_assert_eq!(code_caps::inventory(&self.state),Ok(self.code_total.unwrap()));
         Ok(result.output)
     }
 }
 fn commit_epoch(db:&mut InMemoryDB,state:EvmState){
     let removed:Vec<_>=state.iter().filter(|(_,a)|a.is_selfdestructed()||(a.is_touched()&&a.is_empty())).map(|(a,_)|*a).collect();
+    let touched:Vec<_>=state.iter().filter(|(_,a)|a.is_touched()).map(|(a,_)|*a).collect();
     db.commit(state);
     for address in removed{let a=db.accounts.entry(address).or_default();a.account_state=revm::db::AccountState::NotExisting;a.storage.clear();a.info=Default::default();}
+    crate::user_phase::normalize(db,&touched);
 }
 fn selector(sig:&str)->Vec<u8>{keccak256(sig.as_bytes())[..4].to_vec()}
 fn enc_u256(out:&mut Vec<u8>,v:U256){out.extend(v.to_be_bytes::<32>())}
@@ -248,7 +273,7 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
         state.block_hashes.insert(U256::from(*n),*hash);
     }
     let block=NativeBlockContext{height:U256::from(h),timestamp:U256::from(input.timestamp),gas_limit:U256::from(input.gas_limit),base_fee:input.base_fee,prevrandao:input.prevrandao};
-    let mut ex=Exec{state,profile,block,origin,used:0,limits,meter:Meter::default()};
+    let mut ex=Exec{state,profile,block,origin,used:0,limits,meter:Meter::default(),code_total:None};
 
     // Phase 0.
     for e in &input.evidence{
@@ -272,10 +297,13 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
 
     // Phase 1: USER transactions.
     let budget=cp.BODY_MAX as usize;
-    let users=crate::user_phase::execute_for_profile(&ex.state,input.transactions,&ex.block,budget,budget,profile).map_err(|e|ApplyError::User(format!("{e:?}")))?;
+    let ctx=crate::user_phase::UserContext{cum_log_bytes:input.cum_log_bytes,closing:chain_facts(&ex.state).closing};
+    let users=crate::user_phase::execute_for_block(&ex.state,input.transactions,&ex.block,budget,budget,profile,ctx).map_err(|e|ApplyError::User(format!("{e:?}")))?;
     ex.state=users.state().clone();
     let tips=users.tips();
     code_caps::validate_snapshot(&ex.state,limits).map_err(ApplyError::Caps)?;
+    // The USER phase replaced the state: the next SYSTEM call checks it whole again, as before C-2.
+    ex.code_total=None;
 
     // Phase 2: issuance + closeBlock, or finalize (no subsidy, tips burned).
     let mut issued=U256::ZERO;
@@ -296,7 +324,7 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
     if ex.meter.keys.len() as u64>u64::from(cp.SYS_KEYS_BLOCK_MAX){return Err(ApplyError::Budget("SYS_KEYS_BLOCK_MAX"))}
     if ex.meter.accounts.len() as u64>u64::from(cp.SYS_ACCT_BLOCK_MAX){return Err(ApplyError::Budget("SYS_ACCT_BLOCK_MAX"))}
     let meter=ex.meter.clone();
-    let state=ex.state;
+    let mut state=ex.state;crate::user_phase::drop_unreferenced_code(&mut state);
     genesis.image.verify_candidate(&state,profile).map_err(|e|ApplyError::Genesis(format!("candidate {e:?}")))?;
     check_escrow_invariant(&state,profile,h,is_final)?;
 
@@ -306,7 +334,7 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
     let state_root=state_root(&state)?;
     let facts=chain_facts(&state);
     Ok(BlockOutput{state,state_root,transactions_root:c.transactions_root,receipts_root:c.receipts_root,evidence_root,logs_bloom:c.logs_bloom,gas_used:c.gas_used,
-        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter})
+        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts()})
 }
 
 /// T17: Escrow surplus = balance-(Σpending+heldTotal+burnedTotal) >= 0, and

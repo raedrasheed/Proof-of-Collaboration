@@ -18,8 +18,20 @@ export async function runLiveRp(dist, endpoint, profile) {
   const good = await RP.verifyWindow(rpc, spec);
   ok('RP window over real headers accepted (items 1, 1b, viewFuture, 2-9, viewTargetCeil)', good.ok && good.n === 13 && !good.toGenesis, good.message);
   ok('RP trust message names the header count and the work bound', /RP: مرتبط بالعمل والهوية لـ13 رأسًا/.test(good.message) && /work\(ceilTarget\)/.test(good.message));
-  // Freeze one window, then mutate a single field of one header.
-  const h = BigInt(await rpc('eth_blockNumber', [])); const b = h - 12n; const from = b - 1n;
+  // Freeze one window, then mutate a single field of one header. The timestamp and target mutations
+  // (items 4, 5) need an unsigned (fallback) header: on a signed one they first break the proposer's
+  // signature (item 3). With every proposer up most blocks are signed, so the window is frozen to end
+  // at the latest fallback header of the chain; without one, the tip (and the check below fails).
+  const tip = BigInt(await rpc('eth_blockNumber', []));
+  const isSignedRaw = (x) => R.decode(H.fromHex(x))[0][1].length === 65;
+  let fallbackAt = null;
+  for (let top = tip; top >= 14n && fallbackAt === null; top -= 64n) {
+    const start = top - 63n > 14n ? top - 63n : 14n;
+    const xs = await rpc('pocol_getHeaders', ['0x' + start.toString(16), '0x' + (top - start + 1n).toString(16)]);
+    for (let i = xs.length - 1; i >= 0; i--) if (!isSignedRaw(xs[i])) { fallbackAt = start + BigInt(i); break; }
+  }
+  ok('RP mutation window ends at a fallback header (items 4 and 5 are reachable)', fallbackAt !== null, fallbackAt === null ? 'no fallback header in the chain' : 'height ' + fallbackAt + ' of tip ' + tip);
+  const h = fallbackAt ?? tip; const b = h - 12n; const from = b - 1n;
   const raw = await rpc('pocol_getHeaders', ['0x' + from.toString(16), '0x' + (h - from + 1n).toString(16)]);
   const frozen = async (method, params) => (method === 'eth_blockNumber' ? '0x' + h.toString(16) : method === 'pocol_getHeaders' ? raw.slice() : rpc(method, params));
   ok('frozen real window accepted', (await RP.verifyWindow(frozen, spec)).ok);
@@ -31,7 +43,8 @@ export async function runLiveRp(dist, endpoint, profile) {
   const run = async (mutate, at = idx) => {
     const copy = raw.slice(); const t = R.decode(H.fromHex(raw[at])); mutate(t); copy[at] = H.toHex(R.encode(t));
     const f = async (method, params) => (method === 'pocol_getHeaders' ? copy : frozen(method, params));
-    try { const r = await RP.verifyWindow(f, spec); return r.ok ? 'accepted' : r.flag; } catch (e) { return e.flag || e.message; }
+    // Item 1 carries the Rust reference decoder's detail (A08), e.g. '1 header arity'.
+    try { const r = await RP.verifyWindow(f, spec); return r.ok ? 'accepted' : r.flag; } catch (e) { return e.flag ? (e.detail ? e.flag + ' ' + e.detail : e.flag) : e.message; }
   };
   const u = (v) => R.encUint(BigInt(v)); const big = (x) => H.toBig(x);
   const cases = [
@@ -49,7 +62,7 @@ export async function runLiveRp(dist, endpoint, profile) {
     ['nonce >= nMax -> 6', (t) => { t[1] = H.be((1n << 64n) - 1n, 8); }, '6'],
     ['winnerSig r=0 -> 8', (t) => { const s = t[3].slice(); s.fill(0, 0, 32); t[3] = s; }, '8'],
     ['share equal to the winning nonce -> 9', (t) => { t[2] = [t[1]]; }, '9'],
-    ['bad header shape -> 1', (t) => { t.push(new Uint8Array(1)); }, '1 shape'],
+    ['bad header shape -> 1', (t) => { t.push(new Uint8Array(1)); }, '1 header arity'],
   ];
   for (const [name, m, want] of cases) { const got = await run(m); ok('RP mutation: ' + name, got === want, 'got ' + got); }
   if (signedIdx >= 0) { const got = await run((t) => { const s = t[0][1].slice(); s[5] ^= 1; t[0][1] = s; }, signedIdx); ok('RP mutation: proposer signature altered -> 3', got === '3', 'got ' + got); }
