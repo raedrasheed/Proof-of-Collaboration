@@ -62,8 +62,9 @@ pub fn single_host_local()->NodeLocal{NodeLocal{gossip:[net::MAX_FRAME as u32;6]
 /// RPCGUARD.md maps each). heavy_active and light_active are reported at 1, the equivalent bound of
 /// the single consensus thread (active work ≤ 1 ≤ the spec's 4/16); conn_buf is SMALL_REPLY_MAX, the
 /// structural bound on a connection's small answers (the spec's CONN_BUF use); rate and bucket_cap
-/// are the per-connection bucket on a connection's one request; send_sock_buf is SEND_SOCK_BUF, set on
-/// every accepted connection (one whose buffer cannot be set is not served). Four fields stay absent,
+/// are the per-connection bucket on a connection's one request (rate is vacuous there: RPC_EQUIVALENT
+/// reports it in the admission notes); send_sock_buf is SEND_SOCK_BUF, set on every accepted
+/// connection (one whose buffer cannot be set to it is not served). Four fields stay absent,
 /// never nominal, so admission can only be an experimental-devnet admission: scratch_heavy and scratch_light (only the log handlers are charged; the
 /// others, eth_call's EVM memory included, are not), mem_total (pocold bounds RPC memory through its
 /// own A13 budget, not a 192 MiB field), and cancel_max_ms (a precompile call is not interruptible,
@@ -80,13 +81,25 @@ pub fn rpc_facts(l:&rpc::Limits)->admission::RpcFacts{
     admission::RpcFacts::enforced(&present).expect("RPC_ENFORCED names RpcGuard fields")
 }
 
-/// The admission scope, waivers and conditions, for devnet.json and status (D-A02-SCOPE).
+/// The R26 facts of RPC_ENFORCED that hold by an equivalent bound, not by the spec's mechanism, and
+/// why (RPCGUARD.md). Reported in the admission notes, so none reads as an enforced mechanism.
+pub const RPC_EQUIVALENT:&[(&str,&str)]=&[
+    ("heavy_active","1, the single consensus thread (active heavy work <= 1 <= HEAVY_ACTIVE)"),
+    ("light_active","1, the single consensus thread drains the light lane (<= 1 <= LIGHT_ACTIVE)"),
+    ("conn_buf","SMALL_REPLY_MAX, the structural bound of a connection's busy or rate answer (<= 64 KiB)"),
+    ("light_resp_mem","(conn_max+1) x LIGHT_RESP_MAX, 512 KiB above the spec's 32 x 512 KiB: one reservation per connection plus the one being computed for a connection that left, so a light reservation never fails (S1)"),
+    ("rate","vacuous per connection: a connection carries one request of k <= BATCH_MAX = bucket_cap tokens from a full bucket, so the refill rate is never read; the aggregate rate across connections is open (proposals/RPCGUARD-R2-PROPOSALS.md P1)"),
+    ("bucket_cap","the per-connection bucket on the connection's one request (k > bucket_cap is -32021 {rate})"),
+];
+/// The admission scope, waivers and conditions, for devnet.json and status (D-A02-SCOPE). The notes
+/// are the gate's, then the RPC_EQUIVALENT facts.
 pub fn admission_json(a:&admission::Admitted)->serde_json::Value{
     let r=a.report();
+    let notes:Vec<String>=r.notes.iter().cloned().chain(RPC_EQUIVALENT.iter().map(|(f,w)|format!("R26 {f}: equivalent, {w}"))).collect();
     serde_json::json!({"scope":r.scope.name(),"specificationCompliant":a.specification_compliant(),"binding":types::hex(&r.binding),
         "waivers":r.waivers.iter().map(|w|serde_json::json!({"rule":w.rule,"absent":w.absent,"waived":w.waived,"checked":w.checked})).collect::<Vec<_>>(),
         "conditions":r.conditions.iter().map(|c|serde_json::json!({"id":c.id,"rules":c.rules,"detail":c.detail})).collect::<Vec<_>>(),
-        "notes":r.notes,"deferred":r.deferred})
+        "notes":notes,"deferred":r.deferred})
 }
 
 /// Loads a devnet's published files and runs the full ParamGate admission (A02): the

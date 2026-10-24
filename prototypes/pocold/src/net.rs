@@ -157,19 +157,22 @@ fn next_frame(out:&Outbox,between:&dyn Fn())->Option<Vec<u8>>{
     }
 }
 static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
-/// The longest single blocking read. A closed peer's reader notices `closed` within it: shutdown
+/// The longest single wait for data. A closed peer's reader notices `closed` within it: shutdown
 /// wakes a blocked read on Linux but not on Windows, where the reader would otherwise hold its slot
 /// until the idle deadline.
 const READ_POLL:Duration=Duration::from_millis(100);
-/// Reads exactly `buf` before `deadline`; false on EOF, error, deadline or once `closed` is set.
+/// Reads exactly `buf` before `deadline`; false on EOF, error, deadline or once `closed` is set. Each
+/// read waits for data first (poll/WSAPoll, `rpc::sockwait`, at most READ_POLL), so it never blocks
+/// and no receive ever times out on the socket: SO_RCVTIMEO is not used (on Windows a timed-out
+/// receive leaves the socket in an indeterminate state). The socket stays blocking: the peer's
+/// writer thread shares it.
 fn read_by(r:&mut TcpStream,buf:&mut [u8],deadline:Instant,closed:&AtomicBool)->bool{
     let mut got=0;
     while got<buf.len(){
         if closed.load(Ordering::SeqCst){return false}
         let left=deadline.saturating_duration_since(Instant::now());if left.is_zero(){return false}
-        if r.set_read_timeout(Some(left.min(READ_POLL).max(Duration::from_millis(1)))).is_err(){return false}
-        match r.read(&mut buf[got..]){Ok(0)=>return false,Ok(n)=>got+=n,
-            Err(e) if matches!(e.kind(),std::io::ErrorKind::Interrupted|std::io::ErrorKind::WouldBlock|std::io::ErrorKind::TimedOut)=>{},Err(_)=>return false}
+        match crate::rpc::sockwait::readable(r,left.min(READ_POLL)){Ok(true)=>{},Ok(false)=>continue,Err(_)=>return false}
+        match r.read(&mut buf[got..]){Ok(0)=>return false,Ok(n)=>got+=n,Err(e) if e.kind()==std::io::ErrorKind::Interrupted=>{},Err(_)=>return false}
     }
     true
 }
@@ -288,13 +291,15 @@ mod tests{
     /// Windows run 2: shutdown does not wake a blocked read there, so a dropped peer's reader must
     /// see its closed flag. Here only the flag is set (no shutdown, the peer stays open and silent):
     /// the read returns within READ_POLL plus margin, not at its 10 s deadline.
+    /// Round 3: the read waits through `rpc::sockwait` (no SO_RCVTIMEO); a read that blocked would never
+    /// return here, so it runs on its own thread and the test fails after 2 s instead of hanging.
     #[test] fn a_reader_sees_its_closed_flag_without_a_shutdown(){
         let l=TcpListener::bind("127.0.0.1:0").unwrap();let _c=TcpStream::connect(l.local_addr().unwrap()).unwrap();
         let (mut r,_)=l.accept().unwrap();let closed=Arc::new(AtomicBool::new(false));
         let c=closed.clone();std::thread::spawn(move||{std::thread::sleep(Duration::from_millis(50));c.store(true,Ordering::SeqCst);});
-        let t=Instant::now();let mut b=[0u8;4];
-        assert!(!read_by(&mut r,&mut b,Instant::now()+Duration::from_secs(10),&closed));
-        assert!(t.elapsed()<Duration::from_secs(2),"the reader waited {:?} after its peer was closed",t.elapsed());
+        let (tx,rx)=mpsc::channel();let t=Instant::now();
+        std::thread::spawn(move||{let mut b=[0u8;4];let _=tx.send(read_by(&mut r,&mut b,Instant::now()+Duration::from_secs(10),&closed));});
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)),Ok(false),"the reader waited {:?} after its peer was closed",t.elapsed());
     }
     /// Review F1: a close that lands after the writer found the outbox open and before it waits
     /// must still wake it. The hook holds the writer exactly there (with the queue lock) while the
