@@ -132,6 +132,42 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
     let _=std::fs::remove_dir_all(&dir);
 }
 
+/// Every position and block shape at the boundary of one counter (TX_CAP, or TXBYTES_CAP by raw bytes):
+/// the parent's counter zero (genesis) or not (a0, a1 in block 1), then k = 1..3 of bob's transfers that
+/// reach the cap exactly (short 0) or pass it by one transaction or one byte (short 1). Item 16 accepts a
+/// block of all k only at the exact fit (harness and node); the builder, with bob's four pooled, offers
+/// exactly his first k-short (each one checked against the room the ones before it left), and its block
+/// is a valid head, at the cap when short is 0.
+fn boundary_matrix(bytes:bool){
+    let (alice,bob)=(devnet::account_key("alice"),devnet::account_key("bob"));
+    let pre:Vec<Vec<u8>>=(0..2).map(|i|pay(&alice,i,0)).collect();let bs:Vec<Vec<u8>>=(0..4).map(|i|pay(&bob,i,0)).collect();
+    let l=|t:&[Vec<u8>]|t.iter().map(|x|x.len() as u64).sum::<u64>();let mut cases=vec![];
+    for np in [0usize,2]{for k in 1..=3usize{for short in [0usize,1]{
+        let cap=if bytes{l(&pre[..np])+l(&bs[..k])-short as u64}else{(np+k-short) as u64};if cap==0{continue}// TX_CAP 0: nothing to fit
+        let c=if bytes{cfg(1000,cap)}else{cfg(cap,1<<24)};let tag=format!("edge-{}{np}{k}{short}",if bytes{"b"}else{"t"});
+        let (mut n,dir)=node(&c,&tag,None,None);let mut h=net(&c);
+        if np>0{for t in &pre{n.submit_tx(t.clone(),false).unwrap();}assert_eq!(mine_templates(&mut n,&mut h,1),vec![np],"{tag}: block 1");}
+        let (p,txs0,bytes0)=(n.chain.head,n.chain.head().cum_txs,n.chain.head().cum_tx_bytes);
+        // On a zero-count parent, k > TX_CAP transactions cannot be built (build_signed applies them, and
+        // apply_block refuses more than TX_CAP in one block, apply.rs:250): item 16's count is that check there.
+        if bytes||np>0||short==0{
+            let all=signed(&h,p,bs[..k].to_vec());let v=h.chain.validate(&all,None,0).map(|_|());
+            if short==0{assert!(v.is_ok(),"{tag}: the exact fit of all {k} is valid: {v:?}")}else{
+                assert!(matches!(v,Err(Reject::Block(ref w)) if w=="16 caps"),"{tag}: {k} transactions one over the cap: {v:?}");
+                assert!(matches!(n.import(all,None),Err(Reject::Block(ref w)) if w=="16 caps"),"{tag}: one over the cap, through the node");}
+        }
+        for t in &bs{n.submit_tx(t.clone(),false).unwrap();}
+        let fit=bs[..k-short].to_vec();let head=n.chain.head().meta_clone();assert_eq!(n.template_txs(&head),fit,"{tag}: the builder offers bob's first {}",k-short);
+        mine_templates(&mut n,&mut h,1);let e=n.chain.head();assert_eq!((e.cum_txs,e.cum_tx_bytes),(txs0+fit.len() as u64,bytes0+l(&fit)),"{tag}");
+        if short==0{assert_eq!(if bytes{e.cum_tx_bytes}else{e.cum_txs},cap,"{tag}: the builder's block is a valid head at the cap")}
+        assert_within_caps(&n);cases.push(serde_json::json!([np,k,short,cap]));let _=std::fs::remove_dir_all(&dir);
+    }}}
+    println!("CAPS {}",serde_json::json!({"profile":format!("boundary matrix {}",if bytes{"TXBYTES_CAP"}else{"TX_CAP"}),"cases [parentTxs,k,short,cap]":cases,
+        "txLen":bs.iter().chain(&pre).map(|t|t.len()).collect::<Vec<_>>()}));
+}
+#[test] fn tx_cap_boundary_is_exact_at_every_position_and_block_shape(){boundary_matrix(false)}
+#[test] fn txbytes_cap_boundary_is_exact_at_every_position_and_block_shape(){boundary_matrix(true)}
+
 #[test] fn counters_are_per_branch_across_a_reorg_at_the_exhaustion_boundary(){
     let c=cfg(3,1<<24);let alice=devnet::account_key("alice");let t:Vec<Vec<u8>>=(0..4).map(|i|pay(&alice,i,0)).collect();
     let (mut n,dir)=node(&c,"reorg",None,None);let mut ha=net(&c);let g=ha.chain.head;
@@ -140,17 +176,21 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
     for b in [&a1,&a2]{n.import(b.clone(),None).unwrap();}n.submit_tx(t[3].clone(),false).unwrap();
     assert_eq!(n.chain.head().cum_txs,3);let head=n.chain.head().meta_clone();assert!(n.template_txs(&head).is_empty(),"A is exhausted");
     let over=signed(&ha,a2.hash(),vec![t[3].clone()]);assert!(matches!(ha.chain.validate(&over,None,0),Err(Reject::Block(ref w)) if w=="16 caps"));
-    // Branch B (empty, heavier) from genesis: D133 adopts it by work alone; its counters are its own.
-    let mut hb=net(&c);let mut tip=g;let mut bs=vec![];for _ in 0..3{let b=fallback(&hb,tip);import(&mut hb,&b);tip=b.hash();bs.push(b);}
-    for b in &bs{n.import(b.clone(),None).unwrap();}
-    assert_eq!(n.chain.head,tip,"reorganized to B");assert_eq!(n.chain.head().cum_txs,0);
-    // A's next block, now off the head branch, is still checked against A's count (3+1), not the head's (0+1).
+    // Branch B (empty, bob's transfer, empty; heavier) from genesis: D133 adopts it by work alone; its counters are its own.
+    let mut hb=net(&c);let b1=fallback(&hb,g);import(&mut hb,&b1);let b2=signed(&hb,b1.hash(),vec![pay(&devnet::account_key("bob"),0,0)]);import(&mut hb,&b2);
+    let b3=fallback(&hb,b2.hash());import(&mut hb,&b3);
+    // A is the head: B's block carrying one transaction fits B's room (3), not A's (0), and is valid.
+    n.import(b1.clone(),None).unwrap();assert_eq!(n.chain.head,a2.hash());
+    let r=n.import(b2.clone(),None);assert!(r.is_ok(),"b2 is checked against B's count (0+1), not the head's (3+1): {r:?}");
+    n.import(b3.clone(),None).unwrap();assert_eq!(n.chain.head,b3.hash(),"reorganized to B");assert_eq!(n.chain.head().cum_txs,1);
+    // B is the head: A's next block fits B's room (2), not A's (0), and is "16 caps" (A's count 3+1, not the head's 1+1).
     assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"),"item 16 on A after the reorg");
     assert_eq!(n.pool.txs.iter().map(|x|x.1.clone()).collect::<Vec<_>>(),t,"A's transactions are detached back into the pool (A11)");
-    // On B the builder fills B's room (3) and skips the fourth, which is then past the cap on B too.
-    let head=n.chain.head().meta_clone();assert_eq!(n.template_txs(&head),t[..3].to_vec());
-    let sizes=mine_templates(&mut n,&mut hb,3);assert_eq!(sizes,vec![3,0,0]);assert_within_caps(&n);
-    let over=signed(&hb,n.chain.head,vec![t[3].clone()]);assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"));
+    // On B the builder fills B's room (2) and skips the rest, which is then past the cap on B too.
+    let head=n.chain.head().meta_clone();assert_eq!(n.template_txs(&head),t[..2].to_vec());
+    let sizes=mine_templates(&mut n,&mut hb,3);assert_eq!(sizes,vec![2,0,0]);assert_within_caps(&n);assert_eq!(n.chain.head().cum_txs,3);
+    let over=signed(&hb,n.chain.head,vec![t[2].clone()]);assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"));
+    println!("CAPS {}",serde_json::json!({"profile":"reorg tx_cap=3","cumTxsA":3,"cumTxsB":1,"roomA":0,"roomB":2,"templateSizesOnB":sizes}));
     let _=std::fs::remove_dir_all(&dir);
     // TXBYTES_CAP = big+b0-1. A (big) is left one byte short of b0; B (empty, b0, empty; heavier) forks at
     // genesis. Whichever branch is the head, a block is checked against its own branch's byte counter.
@@ -196,7 +236,8 @@ fn mine_templates(n:&mut Node,h:&mut Net,count:usize)->Vec<usize>{
 /// build_signed_template, miner, import) until `stop_at`, or for at most 240 s.
 fn live(tag:&str,tx_cap:u64,txbytes_cap:u64,pool:u64,stop_at:u64)->Node{
     let g=pocold::node::now_s();let mut c=DevnetConfig::new(CHAIN,g,&["a"]);c.hash_rate=1024;c.d_att=73;c.tau=40;c.c=8;c.tx_cap=tx_cap;c.txbytes_cap=txbytes_cap;
-    let (mut n,dir)=node(&c,tag,Some(devnet::miner_identity("a").key),Some(stop_at));let alice=devnet::account_key("alice");
+    // Own data directory: the tag is shared with an in-process test of the same binary (same PID).
+    let (mut n,dir)=node(&c,&format!("live-{tag}"),Some(devnet::miner_identity("a").key),Some(stop_at));let alice=devnet::account_key("alice");
     n.cfg.log=true;// the production trace (locks, own-block rejections, attempt expiry) goes to stderr
     for i in 0..pool{n.submit_tx(pay(&alice,i,0),false).unwrap();}
     let t=Instant::now();let run=std::thread::spawn(move||{n.run();n});
