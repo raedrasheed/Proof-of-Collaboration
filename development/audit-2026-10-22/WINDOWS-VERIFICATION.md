@@ -1,6 +1,6 @@
 # Windows verification of the repair scope (round 2)
 
-Status (2026-10-24): **Run 22 (c959379, the last code commit) PASS on every check**. Run 21 (1cc96c4) confirmed the fix of
+Status (2026-10-24): **Run 26 (43e7e0f, code 462fffc, the last code commit) PASS on every check**. Before it, Run 22 (c959379) PASS. Run 21 (1cc96c4) confirmed the fix of
 the one flaky test that Run 20 found. Earlier: **Run 16 (25bec25) PASS on every check**, on the round-3 integration: RpcGuard r3
 (poll/WSAPoll pacer and P2P reader), caps r3 tests and journal r3 measurements. Earlier: Run 9 (29fd44a) PASS on every check
 of the repair scope. That covers the
@@ -356,3 +356,12 @@ Run 20 is a timing flake, not a code difference: Run 19 passed on the same code.
 
 Their artifacts are not copied. The workflow's own artifacts hold them for 14 days; Runs 16 and 9 are the
 copied references.
+
+### Runs 24–26: all PASS
+| run | commit | content | counted as |
+|---|---|---|---|
+| 24 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40090047292 | c104e64 | docs only (code as in c959379) | repeat of Run 22 |
+| 25 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40090138075 | 8ce75c4 | docs only (code as in c959379) | repeat of Run 22 |
+| 26 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40092151252 | 43e7e0f | evidence for 462fffc (the prototypes/ tree is 462fffc's): the A11 reorg walk (pocold/src/node.rs) and the R14/R19 calibration (lp4-execution/src/admission.rs) | **the last code commit has run on Windows**. The new calibration test runs there. The new deep-reorg test is `#[ignore]` (release only) and does not |
+
+Their artifacts are not copied.

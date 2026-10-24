@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 WIN = ("Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): "
        "runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; "
        "a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). "
-       "PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit before 462fffc; 462fffc not yet run). "
+       "PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379) and run 26 (43e7e0f, code 462fffc, the last code commit). "
        "Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed")
 WIN_GAP = ("Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests")
 WIT = "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)"

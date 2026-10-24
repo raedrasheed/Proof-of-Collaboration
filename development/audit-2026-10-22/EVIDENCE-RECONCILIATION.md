@@ -21,7 +21,9 @@ Ran on `462fffc` (release, Linux; evidence/pr27-review-threads/):
 - the ignored consensus tests 3/3;
 - e2e_devnet 38/38.
 
-Not yet run on `462fffc`: Windows CI, the debug runs, the mutation controls of other tracks, and the
+Windows CI run 26 (PR head `43e7e0f`, same prototypes/ tree as `462fffc`): PASS.
+
+Not yet run on `462fffc`: the debug runs, the mutation controls of other tracks, and the
 LP10/Chrome integration.
 
 ## Round 3 (2026-10-24): code at `c959379`
