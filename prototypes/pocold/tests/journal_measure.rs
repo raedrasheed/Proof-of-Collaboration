@@ -1,7 +1,10 @@
 //! TRACK journal (audit-2026-10-22): measurement of the on-disk journal growth and the cost of
-//! re-execution from genesis (open replay, deep-fork rebuild, restore), with peak RSS. This test
-//! only MEASURES the existing code (store::encode_record/encode_frame, Node::open replay,
+//! re-execution from genesis (open replay, deep-fork rebuild, restore), the re-execution cost per gas
+//! and per block by block kind and state size, and the open memory. This test only MEASURES the
+//! existing code (store::encode_record/encode_frame, Node::open replay, Chain::validate,
 //! Chain::ensure_state, Chain::restore_canonical); it does not change behaviour and does not attack.
+//! The harness profile is DevnetConfig::new with hash_rate 1024, d_att 73, tau 40, c 8 (cfg()): the
+//! devnet caps, GAS_LIMIT, BODY_MAX and H_END, with an easier PoW and a wider attempt window.
 //! It prints machine-readable `JM-*` lines consumed by development/audit-2026-10-22/JOURNAL-GROWTH-
 //! AND-REPLAY.md. The heavy variants are `#[ignore]` and run in release:
 //!   flock <cpu.lock> cargo test --release --test journal_measure -- --ignored --nocapture
@@ -73,6 +76,116 @@ fn log_deploy(key:&Key,nonce:u64,n:u16)->Vec<u8>{log_deploy_gas(key,nonce,n,8_00
 fn compute_oog(key:&Key,nonce:u64,gas:u64)->Vec<u8>{
     Tx{chain_id:777910,nonce,max_priority:U256::from(1u64),max_fee:U256::from(1_000_000_000_000_000u64),gas,to:None,value:U256::ZERO,data:vec![0x5b,0x60,0x00,0x56].into()}.sign_1559(key)}
 
+// ---- full-gas compute kinds (J2-B1): one creation tx whose init code loops one operation until it runs
+// out of its 7.95M gas. Like compute_oog, each is one tx with a body of at most 4.4 KB, so TX_CAP (1 tx)
+// and TXBYTES_CAP bound how many a chain holds only weakly; the kinds differ in re-execution time per gas. ----
+/// The tx gas of every compute kind (as compute_oog in JM-KIND/JM-BYTES; GAS_LIMIT is 8,000,000).
+const FULL_GAS:u64=7_950_000;
+fn deploy(key:&Key,nonce:u64,gas:u64,value:u64,init:Vec<u8>)->Vec<u8>{Tx{chain_id:777910,nonce,max_priority:U256::from(1u64),max_fee:U256::from(1_000_000_000_000_000u64),gas,to:None,value:U256::from(value),data:init.into()}.sign_1559(key)}
+/// CODECOPY `input` to memory 0, then STATICCALL(GAS, addr, 0, args, ret_off, ret) until OOG. `args` >=
+/// input.len() (the rest is zero memory). A precompile is warm (100 gas per call) and runs to its end.
+fn precompile_loop(addr:u8,input:&[u8],args:u16,ret:u16)->Vec<u8>{
+    let (len,ro)=(input.len() as u16,args.div_ceil(32)*32);assert!(args>=len);
+    let c0=[0x61,(len>>8) as u8,len as u8,0x61,0x00,30,0x60,0x00,0x39,0x5b,0x61,(ret>>8) as u8,ret as u8,0x61,(ro>>8) as u8,ro as u8,
+        0x61,(args>>8) as u8,args as u8,0x60,0x00,0x60,addr,0x5a,0xfa,0x50,0x61,0x00,0x09,0x56];
+    let mut c=c0.to_vec();c.extend_from_slice(input);c
+}
+/// KECCAK256(0, n) in a loop (the memory expansion is paid once).
+fn keccak_loop(n:u16)->Vec<u8>{vec![0x5b,0x61,(n>>8) as u8,n as u8,0x60,0x00,0x20,0x50,0x60,0x00,0x56]}
+/// MSTORE at a rising offset: memory grows one word per iteration until the quadratic cost exhausts gas.
+fn mem_grow_loop()->Vec<u8>{vec![0x60,0x00,0x5b,0x80,0x80,0x52,0x60,0x20,0x01,0x60,0x02,0x56]}
+/// MCOPY(n, 0, n) in a loop.
+fn mcopy_loop(n:u16)->Vec<u8>{vec![0x5b,0x61,(n>>8) as u8,n as u8,0x60,0x00,0x61,(n>>8) as u8,n as u8,0x5e,0x60,0x00,0x56]}
+/// STATICCALL(GAS, helper, 0, 32, 0, 0) in a loop with calldata `x`: each call is a fresh frame whose
+/// memory expands to x+32 bytes (MEM_HELPER).
+fn mem_frame_loop(helper:Address,x:u32)->Vec<u8>{
+    let mut c=vec![0x62,(x>>16) as u8,(x>>8) as u8,x as u8,0x60,0x00,0x52,0x5b,0x60,0x00,0x60,0x00,0x60,0x20,0x60,0x00,0x73];
+    c.extend_from_slice(helper.as_slice());c.extend([0x5a,0xfa,0x50,0x60,0x07,0x56]);c
+}
+/// Init code deploying the runtime PUSH1 0 CALLDATALOAD MLOAD STOP.
+const MEM_HELPER:[u8;17]=[0x60,0x05,0x60,0x0c,0x60,0x00,0x39,0x60,0x05,0x60,0x00,0xf3,0x60,0x00,0x35,0x51,0x00];
+fn h32(s:&str)->[u8;32]{let mut o=[0u8;32];for (i,b) in o.iter_mut().enumerate(){*b=u8::from_str_radix(&s[2*i..2*i+2],16).unwrap();}o}
+fn hexv(s:&str)->Vec<u8>{(0..s.len()/2).map(|i|u8::from_str_radix(&s[2*i..2*i+2],16).unwrap()).collect()}
+/// A valid ecrecover input (bob's signature of a fixed hash).
+fn ecrecover_input()->Vec<u8>{
+    let k=devnet::account_key("bob");let sig=k.sign_hash(&B256::from([7u8;32]));
+    let mut v=[7u8;32].to_vec();let mut w=[0u8;32];w[31]=27+sig[64];v.extend(w);v.extend(&sig[..64]);v
+}
+/// `pairs` copies of (G1 generator, G2 generator): a valid input (the check returns 0).
+fn pairing_input(pairs:usize)->Vec<u8>{
+    let mut g1=[0u8;64];g1[31]=1;g1[63]=2;
+    let g2=["198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2","1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed",
+        "090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b","12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa"];
+    let mut v=vec![];for _ in 0..pairs{v.extend(g1);for x in g2{v.extend(h32(x));}}v
+}
+fn g1_add_input()->Vec<u8>{let mut v=vec![0u8;128];v[31]=1;v[63]=2;v[95]=1;v[127]=2;v}
+fn g1_mul_input()->Vec<u8>{let mut v=vec![0u8;96];v[31]=1;v[63]=2;for b in &mut v[64..]{*b=0xff;}v}
+fn blake2f_input(rounds:u32)->Vec<u8>{let mut v=vec![0u8;213];v[..4].copy_from_slice(&rounds.to_be_bytes());v[212]=1;v}
+/// The c-kzg-4844 verify_kzg_proof_case_correct_proof_31ebd010e6098750 vector (revm-precompile's own test).
+fn kzg_input()->Vec<u8>{
+    use sha2::Digest;let commitment=hexv("8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7");
+    let mut vh=sha2::Sha256::digest(&commitment).to_vec();vh[0]=1;
+    [vh,hexv("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000"),hexv("1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9"),commitment,
+     hexv("a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c")].concat()
+}
+/// MODEXP(base, exp, mod) with `b`, `e`, `m` byte lengths: exponent all ones (the maximum iteration count
+/// for its length), base and modulus pseudo-random with the top bit set (the base even when b <= 8); the
+/// modulus odd, even (odd part times 2: CRT, two exponentiations) or a power of two ("pow2").
+fn modexp_input(b:usize,e:usize,m:usize,md_kind:&str)->Vec<u8>{
+    let mut v=vec![];for l in [b,e,m]{let mut w=[0u8;32];w[24..].copy_from_slice(&(l as u64).to_be_bytes());v.extend(w);}
+    let fill=|n:usize,s:u8|->Vec<u8>{(0..n).map(|i|(i as u8).wrapping_mul(37).wrapping_add(s)).collect()};
+    let mut base=fill(b,11);if let Some(x)=base.first_mut(){*x|=0x80;}if b<=8{if let Some(x)=base.last_mut(){*x&=!1}}
+    let mut md=fill(m,101);if let Some(x)=md.first_mut(){*x|=0x80;}
+    match md_kind{"odd"=>{if let Some(x)=md.last_mut(){*x|=1}},"even"=>{if let Some(x)=md.last_mut(){*x=(*x|3)&!1}},_=>{md=vec![0u8;m];md[0]=0x80;}}
+    v.extend(base);v.extend(vec![0xffu8;e]);v.extend(md);v
+}
+const MODEXP_SHAPES:[(usize,usize,usize,&str);23]=[(1,32,1,"odd"),(8,32,8,"odd"),(8,32,8,"even"),(32,32,32,"odd"),(8,256,8,"even"),
+    (1,1024,1,"odd"),(1,1024,1,"even"),(2,1024,2,"even"),(4,1024,4,"even"),(8,1024,8,"odd"),(8,1024,8,"even"),(8,1024,8,"pow2"),(8,4096,8,"even"),
+    (16,1024,16,"odd"),(16,1024,16,"even"),(24,1024,24,"even"),(32,1024,32,"odd"),(32,1024,32,"even"),(64,1024,64,"odd"),(64,64,64,"odd"),
+    (128,128,128,"odd"),(256,256,256,"odd"),(512,512,512,"odd")];
+/// Every self-contained full-gas compute kind: (name, precompile address or 0, the whole call input, init code).
+fn compute_kinds()->Vec<(String,u8,Vec<u8>,Vec<u8>)>{
+    let pre=|name:&str,addr:u8,input:Vec<u8>,args:u16,ret:u16|{let mut full=input.clone();full.resize(args as usize,0);(name.to_string(),addr,full,precompile_loop(addr,&input,args,ret))};
+    let op=|name:&str,init:Vec<u8>|(name.to_string(),0u8,vec![],init);
+    let mut v=vec![op("jump_loop",vec![0x5b,0x60,0x00,0x56]),
+        pre("ecrecover",1,ecrecover_input(),128,32),pre("ecrecover_invalid_v",1,vec![0u8;128],128,32),
+        pre("sha256_32KiB",2,vec![],32768,32),pre("ripemd160_32KiB",3,vec![],32768,32),pre("identity_32KiB",4,vec![],32768,32768),pre("identity_0B",4,vec![],0,0),
+        pre("bn_add",6,g1_add_input(),128,64),pre("bn_mul",7,g1_mul_input(),96,64),
+        pre("bn_pair_1",8,pairing_input(1),192,32),pre("bn_pair_2",8,pairing_input(2),384,32),pre("bn_pair_10",8,pairing_input(10),1920,32),
+        pre("blake2f_100k",9,blake2f_input(100_000),213,64),pre("blake2f_12",9,blake2f_input(12),213,64),
+        pre("kzg_point_eval",0x0a,kzg_input(),192,64),
+        op("keccak_32B",keccak_loop(32)),op("keccak_1KiB",keccak_loop(1024)),op("keccak_32KiB",keccak_loop(32768)),
+        op("mem_grow_mstore",mem_grow_loop()),op("mcopy_32KiB",mcopy_loop(32768))];
+    for (b,e,m,mk) in MODEXP_SHAPES{let input=modexp_input(b,e,m,mk);let n=input.len() as u16;
+        v.push(pre(&format!("modexp_b{b}_e{e}_m{m}_{mk}"),5,input,n,m as u16));}
+    v
+}
+fn compute_init(kind:&str)->Option<Vec<u8>>{if kind=="full_gas_compute"{return Some(vec![0x5b,0x60,0x00,0x56])}compute_kinds().into_iter().find(|k|k.0==kind).map(|k|k.3)}
+/// One block body of `kind` at alice's `nonce` (advanced): the JM-KIND kinds or any compute kind.
+fn kind_body(kind:&str,alice:&Key,nonce:&mut u64,transfers_k:u64,bodymax_len:usize)->Body{
+    let txs=match kind{
+        "empty"=>vec![],
+        "full_gas_transfers"=>(0..transfers_k).map(|i|pay(alice,*nonce+i)).collect(),
+        "log_heavy_546"=>vec![log_deploy(alice,*nonce,546)],
+        "full_body_max"=>vec![big_call(alice,*nonce,bodymax_len),big_call(alice,*nonce+1,bodymax_len)],
+        k=>vec![deploy(alice,*nonce,FULL_GAS,0,compute_init(k).unwrap_or_else(||panic!("unknown kind {k}")))],
+    };*nonce+=txs.len() as u64;Body{txs,evidence:vec![]}
+}
+/// A block of `kind` on `parent` (a fallback block for "empty").
+fn kind_block(n:&Net,parent:[u8;32],kind:&str,alice:&Key,nonce:&mut u64,transfers_k:u64,bodymax_len:usize)->Block{
+    if kind=="empty"{return fallback(n,parent,0)}let body=kind_body(kind,alice,nonce,transfers_k,bodymax_len);signed(n,parent,body)}
+/// The two big_call lengths that fill a body to just under BODY_MAX.
+fn bodymax_len(n:&Net,alice:&Key)->usize{let max=n.chain.spec.cp().BODY_MAX as usize;let mut len=max/2-200;
+    loop{let e=(Body{txs:vec![big_call(alice,0,len),big_call(alice,1,len)],evidence:vec![]}).encode().len();
+        if e>max{len-=64;}else if (Body{txs:vec![big_call(alice,0,len+64),big_call(alice,1,len+64)],evidence:vec![]}).encode().len()<=max{len+=64;}else{break}}len}
+fn median(mut v:Vec<f64>)->f64{v.sort_by(|a,b|a.partial_cmp(b).unwrap());v[v.len()/2]}
+/// Validate time of `b` on its (resident) parent, `reps` runs: (min ms, median ms, gasUsed).
+fn validate_ms(chain:&Chain,b:&Block,reps:usize)->(f64,f64,u64){
+    let mut ts=vec![];let mut gas=0;
+    for _ in 0..reps{let t=Instant::now();let (e,_)=chain.validate(b,None,0).unwrap_or_else(|e|panic!("validate: {e:?}"));ts.push(t.elapsed().as_secs_f64()*1e3);gas=e.gas_used;}
+    (ts.iter().cloned().fold(f64::MAX,f64::min),median(ts),gas)
+}
+
 #[cfg(target_os="linux")]
 fn rss_bytes()->i64{let s=std::fs::read_to_string("/proc/self/statm").unwrap();s.split_whitespace().nth(1).unwrap().parse::<i64>().unwrap()*4096}
 #[cfg(not(target_os="linux"))]
@@ -143,15 +256,18 @@ fn jm_journal_bytes_per_record(){
 
 // ============================ (a2) replay-at-open + RSS, empty blocks ============================
 /// Builds up to `JM_HEIGHT` empty (fallback) blocks into an on-disk journal, snapshots the data dir
-/// at the devnet checkpoints, then reopens each snapshot and times the replay-at-open (every record
-/// re-executed from genesis) and records VmHWM across the largest replay. Demonstrates replay time is
-/// linear in the record count, giving the per-block cost used to extrapolate to the network H_END.
-/// Release only. `JM_HEIGHT` env overrides the max height (default 20000 = devnet H_END).
+/// at the checkpoints, then reopens each snapshot and times the replay-at-open (every record re-executed
+/// from genesis). Replay time is NOT linear in the record count: per-record retain and rebuild_canonical
+/// grow with the height (jm_replay_component_split), so open(H) ~ a*H + b*H^2/2; the checkpoints are the
+/// points of that fit. VmHWM/RSS here are in-process (the build phase dominates them; jm_open_memory
+/// measures the open alone). Release only. `JM_HEIGHT` overrides the max height (default 20000 = devnet
+/// H_END); `JM_CHECKPOINTS` (comma list, default 1000,5000,20000) the snapshot heights.
 #[test]
 #[ignore="measurement: run in release with --ignored --nocapture"]
 fn jm_replay_empty_blocks(){
     let h_max:u64=std::env::var("JM_HEIGHT").ok().and_then(|s|s.parse().ok()).unwrap_or(20_000);
-    let checkpoints:Vec<u64>=[1000u64,5000,20000].into_iter().filter(|c|*c<=h_max).collect();
+    let cps:Vec<u64>=std::env::var("JM_CHECKPOINTS").ok().map(|s|s.split(',').filter_map(|x|x.trim().parse().ok()).collect()).unwrap_or_else(||vec![1000,5000,20000]);
+    let checkpoints:Vec<u64>=cps.into_iter().filter(|c|*c<=h_max).collect();
     let (mut n,dir,_)=mnode("replay");
     let mut harness=net();let mut parent=harness.chain.head;
     let t_build=Instant::now();let mut snaps:Vec<(u64,PathBuf)>=vec![];
@@ -185,36 +301,31 @@ fn jm_replay_empty_blocks(){
 }
 
 // ============================ (a3) per-block replay cost by block kind ============================
-/// Per-record replay cost for each heavy block kind, from a modest run (building 20k full blocks is
-/// infeasible: each full block executes ~380 transactions). Replay re-executes each record on its
-/// parent independently, so the open time at height H is H * perRecord + a small constant; the report
-/// uses these per-record figures to project the 1k/5k/20k/129600 totals for the full/log/body-max
-/// profiles. Release only.
+/// Per-record replay cost for each block kind, from a modest run (building 20k full blocks is
+/// infeasible). Each record is re-executed on its parent, so the open time at height H is H * perRecord
+/// plus the super-linear retain/index term of jm_replay_empty_blocks plus the fixed open cost; that fixed
+/// cost (spec admission, store open; `admitted()` is inside the timer) is measured first as JM-OPEN0, the
+/// open of an empty journal, so steady per-record = (openSeconds - JM-OPEN0) / records. JM_KINDS (comma
+/// list) picks the kinds: the defaults, or any compute kind of compute_kinds(). Release only.
 #[test]
 #[ignore="measurement: run in release with --ignored --nocapture"]
 fn jm_replay_by_kind(){
     let count:u64=std::env::var("JM_KIND_COUNT").ok().and_then(|s|s.parse().ok()).unwrap_or(40);
-    for kind in ["empty","full_gas_transfers","log_heavy_546","full_body_max","full_gas_compute"]{
+    let kinds:Vec<String>=std::env::var("JM_KINDS").map(|s|s.split(',').map(str::to_string).collect())
+        .unwrap_or_else(|_|["empty","full_gas_transfers","log_heavy_546","full_body_max","full_gas_compute"].map(str::to_string).to_vec());
+    {let (n,dir,conf)=mnode("kind-open0");drop(n);let mut ts=vec![];
+        for _ in 0..5{let t=Instant::now();let r=Node::open(conf(),admitted()).unwrap();ts.push(t.elapsed().as_secs_f64());drop(r);}
+        println!("JM-OPEN0 {}",serde_json::json!({"records":0,"openSecondsMedian":median(ts.clone()),"openSecondsMin":ts.iter().cloned().fold(f64::MAX,f64::min),"runs":5}));
+        let _=std::fs::remove_dir_all(&dir);}
+    for kind in kinds{let kind=kind.as_str();
         let (mut n,dir,_)=mnode(&format!("kind-{kind}"));
         let mut harness=net();let mut parent=harness.chain.head;
-        // alice funds 380 transfers per block across `count` blocks; give each block its own sender set
-        // by using distinct accounts is unnecessary — nonces simply continue.
-        let alice=devnet::account_key("alice");let mut nonce=0u64;
-        let bodymax_len={let max=n.chain.spec.cp().BODY_MAX as usize;let mut len=max/2-200;
-            loop{let e=(Body{txs:vec![big_call(&alice,0,len),big_call(&alice,1,len)],evidence:vec![]}).encode().len();
-                if e>max{len-=64;}else if (Body{txs:vec![big_call(&alice,0,len+64),big_call(&alice,1,len+64)],evidence:vec![]}).encode().len()<=max{len+=64;}else{break}}len};
+        let alice=devnet::account_key("alice");let mut nonce=0u64;let bl=bodymax_len(&harness,&alice);
         // The per-block transfer count is fixed (constant gas limit); compute once from the first parent.
         let transfers_k=if kind=="full_gas_transfers"{pack_transfers(&harness,parent,&alice).len() as u64}else{0};
         let t_build=Instant::now();
         for _ in 0..count{
-            let b=match kind{
-                "empty"=>fallback(&harness,parent,0),
-                "full_gas_transfers"=>{let txs:Vec<Vec<u8>>=(0..transfers_k).map(|i|pay(&alice,nonce+i)).collect();nonce+=transfers_k;signed(&harness,parent,Body{txs,evidence:vec![]})}
-                "log_heavy_546"=>{let b=signed(&harness,parent,Body{txs:vec![log_deploy(&alice,nonce,546)],evidence:vec![]});nonce+=1;b}
-                "full_body_max"=>{let b=signed(&harness,parent,Body{txs:vec![big_call(&alice,nonce,bodymax_len),big_call(&alice,nonce+1,bodymax_len)],evidence:vec![]});nonce+=2;b}
-                "full_gas_compute"=>{let b=signed(&harness,parent,Body{txs:vec![compute_oog(&alice,nonce,7_950_000)],evidence:vec![]});nonce+=1;b}
-                _=>unreachable!(),
-            };
+            let b=kind_block(&harness,parent,kind,&alice,&mut nonce,transfers_k,bl);
             import(&mut harness,&b);parent=b.hash();n.import(b,None).unwrap();
         }
         let build_s=t_build.elapsed().as_secs_f64();
@@ -263,19 +374,29 @@ fn jm_deep_fork_rebuild_vs_height(){
 /// A legal deep reorg whose fork point is below the K_hist window pays the genesis rebuild TWICE on the
 /// single consensus thread (J-V1): once when the first competing block is validated (its parent, the
 /// canonical fork point, has a pruned state -> NeedsRebuild -> ensure_state_with from genesis), and
-/// again inside restore_canonical when the branch is adopted (import_with runs retain() BEFORE
-/// restore_canonical, and retain re-prunes the still-canonical fork point, so restore's ensure_state_with
-/// rebuilds it from genesis a second time). Plus d re-executions to validate the suffix and d to restore
-/// it. This measures each phase so the report can state latency ~= 2*rebuild(f) + 2*d*a, not
-/// rebuild(f) + d*a. The resulting journal is then reopened to show open replay re-pays both rebuilds.
-/// Release only. JM_REORG_HEIGHT sets the canonical height (fork point = half of it).
+/// again inside restore_canonical when the branch is adopted (restore re-executes the adopted suffix
+/// from the fork point's state). The cause of the second rebuild (J2-M2): Chain::retain prunes EVERY
+/// canonical state below head-K_hist (canonical.iter().skip(1).take(cut)), the fork point included, at
+/// the end of the very import that rebuilt it, although a resident side branch still builds on it; the
+/// side_max states are kept only for non-canonical blocks. So the fork point is pruned again long before
+/// adoption, and the order of retain and restore_canonical inside the adopting import is irrelevant
+/// (moving restore before retain still gives 300 + 300). JM-REORG-MECH shows it on a bare chain: the fork
+/// point holds a state after the rebuild and the side insert, and none after the next retain(). Plus d
+/// re-executions to validate the suffix and d to restore it: latency ~= 2*rebuild(f) + 2*d*a. The
+/// resulting journal is then reopened to show open replay re-pays both rebuilds. Release only.
+/// JM_REORG_HEIGHT sets the canonical height (fork point = half of it); JM_REORG_KIND (default empty)
+/// builds the canonical chain C from blocks of that kind (kind_block), so the rebuilds re-execute loaded
+/// blocks.
 #[test]
 #[ignore="measurement: run in release with --ignored --nocapture"]
 fn jm_deep_reorg_latency(){
     let n_c:u64=std::env::var("JM_REORG_HEIGHT").ok().and_then(|s|s.parse().ok()).unwrap_or(600);let f=n_c/2;
+    let kind=std::env::var("JM_REORG_KIND").unwrap_or_else(|_|"empty".into());
     // Builder keeps every state resident (k_hist=MAX, side_cap huge) so both branches build cleanly.
     let mut h=net();h.chain.k_hist=u64::MAX;h.chain.side_cap=n_c as usize*4+64;
-    let mut c=vec![];let mut p=h.chain.head;for _ in 0..n_c{let b=fallback(&h,p,0);import(&mut h,&b);p=b.hash();c.push(b);}
+    let alice=devnet::account_key("alice");let mut nonce=0u64;let bl=bodymax_len(&h,&alice);
+    let tk=if kind=="full_gas_transfers"{pack_transfers(&h,h.chain.head,&alice).len() as u64}else{0};
+    let mut c=vec![];let mut p=h.chain.head;for _ in 0..n_c{let b=kind_block(&h,p,&kind,&alice,&mut nonce,tk,bl);import(&mut h,&b);p=b.hash();c.push(b);}
     let fp=c[f as usize-1].hash(); // canonical block at height f
     // Competing branch T from the fork point: a signed first block (distinct from C's fallback
     // continuation, so no duplicate) whose PATH is still lighter than C until T grows past it, then
@@ -287,6 +408,15 @@ fn jm_deep_reorg_latency(){
     let b=fallback(&h,p,0);import(&mut h,&b);t.push(b); // one past the crossover: a clean strict margin
     assert!(h.chain.get(&t.last().unwrap().hash()).unwrap().total_work>cw,"T must be heavier");
     drop(h);
+    // J2-M2 on a bare chain (default k_hist): the fork point's state after the rebuild, after the side
+    // insert of T's first block, and after the retain() that follows it (no adoption involved).
+    let mech={let mut b=Chain::new(admitted());for x in &c{let (e,_)=b.validate(x,None,0).unwrap();b.insert(e);b.retain();}
+        let pruned0=b.get(&fp).unwrap().pruned;b.ensure_state(&fp).unwrap();let rebuilt=!b.get(&fp).unwrap().pruned;
+        let (e,_)=b.validate(&t[0],None,0).unwrap();b.insert(e);let inserted=!b.get(&fp).unwrap().pruned;let side=!b.is_canonical(&t[0].hash());
+        b.retain();
+        serde_json::json!({"kHist":b.k_hist,"headHeight":b.head().height,"forkPointHeight":f,"forkPointPrunedBefore":pruned0,"stateAfterRebuild":rebuilt,"stateAfterSideInsert":inserted,
+            "t0NonCanonical":side,"stateAfterNextRetain":!b.get(&fp).unwrap().pruned,"t0KeepsItsState":!b.get(&t[0].hash()).unwrap().pruned})};
+    println!("JM-REORG-MECH {mech}");
     // Node under test: default single-host limits (k_hist=32, side_max=8, side_cap=2048).
     let (mut n,dir,_)=mnode("reorg");
     for b in &c{n.import(b.clone(),None).unwrap();}
@@ -296,14 +426,14 @@ fn jm_deep_reorg_latency(){
     for (i,b) in t.iter().enumerate(){
         let (rb,rs)=(n.chain.rebuilds,n.stats.restored);let ti=Instant::now();let nh=n.import(b.clone(),None).unwrap();
         let (dt,dr)=(ti.elapsed().as_secs_f64(),n.chain.rebuilds-rb);
-        if i==0{first=Some((dt,dr));}
+        if i==0{first=Some((dt,dr,n.chain.get(&fp).map(|e|e.pruned)));}
         if nh&&adopt.is_none()&&n.chain.head==b.hash(){adopt=Some((i,dt,dr,n.stats.restored-rs));}
     }
     let (total_s,total_rebuilds)=(t_all.elapsed().as_secs_f64(),n.chain.rebuilds-r0);
     assert_eq!(n.chain.head,t.last().unwrap().hash(),"T adopted");
-    let (fi,fr)=first.unwrap();let (ai,at,ar,arest)=adopt.unwrap();
-    println!("JM-REORG {}",serde_json::json!({"canonicalHeight":n_c,"forkPointHeight":f,"kHist":n.chain.k_hist,"reorgDepth":n_c-f,"theirBlocks":t.len(),
-        "firstSideImport":{"seconds":fi,"rebuilds":fr},"adoptingImport":{"index":ai,"seconds":at,"rebuilds":ar,"restoredBlocks":arest},
+    let (fi,fr,fpp)=first.unwrap();let (ai,at,ar,arest)=adopt.unwrap();
+    println!("JM-REORG {}",serde_json::json!({"kind":kind,"canonicalHeight":n_c,"forkPointHeight":f,"kHist":n.chain.k_hist,"reorgDepth":n_c-f,"theirBlocks":t.len(),
+        "firstSideImport":{"seconds":fi,"rebuilds":fr,"forkPointPrunedAfter":fpp},"adoptingImport":{"index":ai,"seconds":at,"rebuilds":ar,"restoredBlocks":arest},
         "allImports":{"seconds":total_s,"rebuilds":total_rebuilds},"stageAModelRebuilds":f,"actualRebuilds":total_rebuilds}));
     drop(n);
     // Reopen: replay re-imports T as a side branch then adopts, re-paying both rebuilds.
@@ -313,52 +443,221 @@ fn jm_deep_reorg_latency(){
     drop(r);let _=std::fs::remove_dir_all(&dir);
 }
 
-// ============================ (a6) open-time memory transient (fresh process) ============================
-/// Peak RSS of Node::open ALONE, in a fresh process (J-V4, J-V5). store::open reads the whole journal
-/// into memory (read_to_end) and parse_v2 copies each payload, so the whole journal and the sum of
-/// payloads coexist: the open transient is ~2x the journal. The stage-A VmHWM (237 MB) was the
-/// process-lifetime peak of the in-process BUILD phase, not the open; measuring in a child process that
-/// only opens (VmHWM reset via /proc/self/clear_refs, or counted from process start) isolates the open
-/// peak. JM_MEM_OPEN=<dir> makes this process OPEN that dir only and print; absent, it builds a
-/// full-BODY_MAX journal up to the devnet TXBYTES_CAP and reopens with VmHWM reset. Release only.
+// ============================ (a6) open-time memory: peak, steady, transient (fresh process) ============================
+/// Returns freed heap to the OS (glibc malloc_trim), so RSS shows what is live; a no-op elsewhere.
+#[cfg(all(target_os="linux",target_env="gnu"))]
+fn trim_heap(){unsafe{libc::malloc_trim(0);}}
+#[cfg(not(all(target_os="linux",target_env="gnu")))]
+fn trim_heap(){}
+/// Node::open memory in a fresh process (J-V4, J-V5, J2-M3). store::open reads the whole journal
+/// (read_to_end) and parse_v2 copies each payload, and Node::open holds every payload for the whole
+/// replay; after open the node keeps its resident chain. JM_MEM_OPEN=<dir> makes this process only open
+/// that dir: the journal size comes from metadata (nothing is read before the baseline), freed heap is
+/// trimmed, then baseline = RSS before open; peak = VmHWM after open; steady = RSS after open with the
+/// node alive and freed heap trimmed (the post-open resident chain, which the A13 history terms already
+/// count); transient = peak - steady (the open-only working set the A13 bound excludes). Both ratios
+/// depend on the block kind (an empty-block journal is mostly headers and parentResult, a body-max one
+/// mostly bodies). Absent, it builds a journal of JM_MEM_KIND (default full_body_max, up to the devnet
+/// TXBYTES_CAP; other kinds JM_MEM_N blocks, default 3000 empty / 40 otherwise) into JM_MEM_DIR (kept
+/// for a fresh-process open) or a temp dir, and reopens it in-process with VmHWM reset (which
+/// UNDER-counts: the allocator reuses the build's freed memory). Linux only (procfs). Release only.
 #[test]
 #[ignore="measurement: run in release with --ignored --nocapture"]
 fn jm_open_memory(){
     fn vmrss()->i64{std::fs::read_to_string("/proc/self/status").ok().and_then(|s|s.lines().find(|l|l.starts_with("VmRSS:")).and_then(|l|l.split_whitespace().nth(1).and_then(|x|x.parse().ok()))).map(|k:i64|k*1024).unwrap_or(-1)}
+    let conf=|dir:&PathBuf|Config{dir:dir.clone(),name:"jm".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()};
     if let Ok(d)=std::env::var("JM_MEM_OPEN"){
-        let dir=PathBuf::from(d);let jbytes=disk_bytes(&dir);
+        let dir=PathBuf::from(d);let jbytes=std::fs::metadata(dir.join("blocks.journal")).map(|m|m.len()).unwrap_or(0) as i64;
+        let spec=admitted();trim_heap();
         let (rss0,hwm0)=(vmrss(),vmhwm_bytes());let t=Instant::now();
-        let r=Node::open(Config{dir:dir.clone(),name:"jm".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()},admitted()).unwrap();
-        let open_s=t.elapsed().as_secs_f64();let (rss1,hwm1)=(vmrss(),vmhwm_bytes());
-        println!("JM-OPENMEM-FRESH {}",serde_json::json!({"records":r.journal_records(),"journalBytes":jbytes,"openSeconds":open_s,
-            "rssBeforeBytes":rss0,"vmHwmBeforeBytes":hwm0,"vmHwmAfterBytes":hwm1,"rssAfterBytes":rss1,
-            "peakAboveBaselineBytes":(hwm1-rss0),"peakOverJournal":(hwm1-rss0) as f64/jbytes.max(1) as f64}));
+        let r=Node::open(conf(&dir),spec).unwrap();
+        let open_s=t.elapsed().as_secs_f64();let (rss1,hwm1)=(vmrss(),vmhwm_bytes());trim_heap();let rss2=vmrss();
+        let j=jbytes.max(1) as f64;
+        println!("JM-OPENMEM-FRESH {}",serde_json::json!({"kind":std::env::var("JM_MEM_KIND").unwrap_or_default(),"records":r.journal_records(),"journalBytes":jbytes,"openSeconds":open_s,
+            "baseline":"RSS after admitted() and malloc_trim, before Node::open; journal size from metadata",
+            "rssBeforeBytes":rss0,"vmHwmBeforeBytes":hwm0,"vmHwmAfterBytes":hwm1,"rssAfterBytes":rss1,"rssAfterTrimmedBytes":rss2,
+            "peakAboveBaselineBytes":(hwm1-rss0),"steadyAboveBaselineBytes":(rss2-rss0),"transientBytes":(hwm1-rss2),
+            "peakOverJournal":(hwm1-rss0) as f64/j,"steadyOverJournal":(rss2-rss0) as f64/j,"transientOverJournal":(hwm1-rss2) as f64/j}));
         return
     }
-    // JM_MEM_DIR builds into a persistent dir (not removed) so a second process can open it fresh
-    // (the only sound way to measure the open peak, J-V5); absent, build+open in one process (which
-    // UNDER-counts: the allocator reuses the build's freed memory).
+    let kind=std::env::var("JM_MEM_KIND").unwrap_or_else(|_|"full_body_max".into());
     let persist=std::env::var("JM_MEM_DIR").ok();
     let dir=persist.clone().map(PathBuf::from).unwrap_or_else(||tmp("openmem"));let _=std::fs::remove_dir_all(&dir);
-    let mut n=Node::open(Config{dir:dir.clone(),name:"jm".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()},admitted()).unwrap();
+    let mut n=Node::open(conf(&dir),admitted()).unwrap();
     let mut harness=net();let mut parent=harness.chain.head;let alice=devnet::account_key("alice");
-    let max=n.chain.spec.cp().BODY_MAX as usize;let mut len=max/2-200;
-    loop{let e=(Body{txs:vec![big_call(&alice,0,len),big_call(&alice,1,len)],evidence:vec![]}).encode().len();
-        if e>max{len-=64;}else if (Body{txs:vec![big_call(&alice,0,len+64),big_call(&alice,1,len+64)],evidence:vec![]}).encode().len()<=max{len+=64;}else{break}}
+    let len=bodymax_len(&harness,&alice);
     let (mut nonce,mut blocks)=(0u64,0u64);
-    loop{let body=Body{txs:vec![big_call(&alice,nonce,len),big_call(&alice,nonce+1,len)],evidence:vec![]};
-        let pe=harness.chain.get(&parent).unwrap().clone();
-        if pe.cum_tx_bytes+body.txs.iter().map(|t|t.len() as u64).sum::<u64>()>harness.chain.spec.cp().TXBYTES_CAP{break}
-        let b=signed(&harness,parent,body);import(&mut harness,&b);parent=b.hash();n.import(b,None).unwrap();nonce+=2;blocks+=1;}
+    if kind=="full_body_max"{
+        loop{let body=Body{txs:vec![big_call(&alice,nonce,len),big_call(&alice,nonce+1,len)],evidence:vec![]};
+            let pe=harness.chain.get(&parent).unwrap().clone();
+            if pe.cum_tx_bytes+body.txs.iter().map(|t|t.len() as u64).sum::<u64>()>harness.chain.spec.cp().TXBYTES_CAP{break}
+            let b=signed(&harness,parent,body);import(&mut harness,&b);parent=b.hash();n.import(b,None).unwrap();nonce+=2;blocks+=1;}
+    }else{
+        let count:u64=std::env::var("JM_MEM_N").ok().and_then(|s|s.parse().ok()).unwrap_or(if kind=="empty"{3000}else{40});
+        let tk=if kind=="full_gas_transfers"{pack_transfers(&harness,parent,&alice).len() as u64}else{0};
+        for _ in 0..count{let b=kind_block(&harness,parent,&kind,&alice,&mut nonce,tk,len);import(&mut harness,&b);parent=b.hash();n.import(b,None).unwrap();blocks+=1;}
+    }
     let jbytes=disk_bytes(&dir);drop(n);drop(harness);
     std::fs::write("/proc/self/clear_refs","5").unwrap();
     let (rss0,hwm0)=(vmrss(),vmhwm_bytes());let t=Instant::now();
-    let r=Node::open(Config{dir:dir.clone(),name:"jm".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits::default()},admitted()).unwrap();
+    let r=Node::open(conf(&dir),admitted()).unwrap();
     let open_s=t.elapsed().as_secs_f64();let (rss1,hwm1)=(vmrss(),vmhwm_bytes());
-    println!("JM-OPENMEM {}",serde_json::json!({"blocks":blocks,"records":r.journal_records(),"journalBytes":jbytes,"openSeconds":open_s,"inProcessUndercounts":true,
+    println!("JM-OPENMEM {}",serde_json::json!({"kind":kind,"blocks":blocks,"records":r.journal_records(),"journalBytes":jbytes,"openSeconds":open_s,"inProcessUndercounts":true,
         "rssBeforeBytes":rss0,"vmHwmAfterResetBytes":hwm0,"vmHwmAfterOpenBytes":hwm1,"rssAfterBytes":rss1,
         "peakAboveBaselineBytes":(hwm1-rss0),"peakOverJournal":(hwm1-rss0) as f64/jbytes.max(1) as f64}));
     drop(r);if persist.is_none(){let _=std::fs::remove_dir_all(&dir);}
+}
+
+// ============================ (a8) worst-case re-execution cost per gas (J2-B1) ============================
+/// Re-execution (Chain::validate, the work replay, rebuild and restore repeat per block) of one full-gas
+/// block of every compute kind, all on the same parent, plus the empty and the 380-transfer block: min and
+/// median of JM_EXEC_REPS (default 5) runs. nsPerGasNet = (median - empty median) / gasUsed is the cost per
+/// unit of gas above the fixed per-block work. The r2 compute kind (jump_loop, 9.6 ms/record) is the
+/// cheapest per gas of these, not the worst. The set is what was measured, not a proof of the maximum: an
+/// unmeasured operation may cost more per gas. JM_EXEC_KINDS (comma list; `x*` is a prefix) restricts the
+/// kinds (the empty block is always measured: it is the net baseline). Also times
+/// each precompile natively on the same input (JM-PRECOMPILE: validates the input, no EVM). Release only.
+#[test]
+#[ignore="measurement: run in release with --ignored --nocapture"]
+fn jm_exec_cost_per_gas(){
+    use revm::precompile as pc;
+    let reps:usize=std::env::var("JM_EXEC_REPS").ok().and_then(|s|s.parse().ok()).unwrap_or(5);
+    let only:Option<Vec<String>>=std::env::var("JM_EXEC_KINDS").ok().map(|s|s.split(',').map(str::to_string).collect());
+    let want=|k:&str|only.as_ref().map_or(true,|o|o.iter().any(|x|x==k||x.strip_suffix('*').is_some_and(|p|k.starts_with(p))));
+    let env=revm::primitives::Env::default();
+    for (k,addr,input,_) in compute_kinds(){
+        if addr==0||!want(&k){continue}let inp=revm::primitives::Bytes::from(input.clone());
+        let run=||->Result<u64,String>{let r=match addr{1=>pc::secp256k1::ec_recover_run(&inp,u64::MAX),2=>pc::hash::sha256_run(&inp,u64::MAX),
+            3=>pc::hash::ripemd160_run(&inp,u64::MAX),4=>pc::identity::identity_run(&inp,u64::MAX),5=>pc::modexp::berlin_run(&inp,u64::MAX),
+            6=>pc::bn128::run_add(&inp,150,u64::MAX),7=>pc::bn128::run_mul(&inp,6000,u64::MAX),8=>pc::bn128::run_pair(&inp,34_000,45_000,u64::MAX),
+            9=>pc::blake2::run(&inp,u64::MAX),0x0a=>pc::kzg_point_evaluation::run(&inp,u64::MAX,&env),_=>unreachable!()};r.map(|o|o.gas_used).map_err(|e|format!("{e:?}"))};
+        let res=run();if k!="ecrecover_invalid_v"{assert!(res.is_ok(),"{k}: precompile input must be valid: {res:?}");}
+        let gas=res.clone().unwrap_or(3000);
+        let t=Instant::now();let mut calls=0u64;while t.elapsed().as_secs_f64()<0.05||calls<3{let _=run();calls+=1;}
+        let ns=t.elapsed().as_secs_f64()*1e9/calls as f64;
+        println!("JM-PRECOMPILE {}",serde_json::json!({"kind":k,"address":addr,"inputBytes":input.len(),"ok":res.is_ok(),"gasPerCall":gas,"nsPerCall":ns,"nsPerGas":ns/gas as f64}));
+    }
+    let mut n=net();let g=n.chain.head;let alice=devnet::account_key("alice");
+    let p0=fallback(&n,g,0);import(&mut n,&p0);
+    // A parent holding the frame-memory helper, so every measured block runs on one parent.
+    let helper=alice.address().create(0);let p1=signed(&n,p0.hash(),Body{txs:vec![deploy(&alice,0,200_000,0,MEM_HELPER.to_vec())],evidence:vec![]});import(&mut n,&p1);
+    let head=n.chain.head;
+    let mut blocks:Vec<(String,Block)>=vec![("empty_fallback".into(),fallback(&n,head,1))];
+    if want("full_gas_transfers"){let mut nonce=1u64;let tr={let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+        let (mut lo,mut hi)=(1usize,400usize);let ok=|k:usize|n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower(),Body{txs:(0..k as u64).map(|i|pay(&alice,1+i)).collect(),evidence:vec![]},vec![]).is_ok();
+        while lo<hi{let mid=(lo+hi+1)/2;if ok(mid){lo=mid}else{hi=mid-1}}lo as u64};
+        blocks.push(("full_gas_transfers".into(),signed(&n,head,kind_body("full_gas_transfers",&alice,&mut nonce,tr,0))));}
+    let mut kinds:Vec<(String,Vec<u8>)>=compute_kinds().into_iter().map(|k|(k.0,k.3)).collect();
+    kinds.push(("mem_frame_32KiB".into(),mem_frame_loop(helper,32768)));kinds.push(("mem_frame_256KiB".into(),mem_frame_loop(helper,262144)));
+    for (k,init) in kinds{if want(&k){blocks.push((k,signed(&n,head,Body{txs:vec![deploy(&alice,1,FULL_GAS,0,init)],evidence:vec![]})));}}
+    let mut empty_med=0.0;
+    for (k,b) in &blocks{
+        let (min,med,gas)=validate_ms(&n.chain,b,reps);if k=="empty_fallback"{empty_med=med;}
+        let net_ns=if gas>0{(med-empty_med)*1e6/gas as f64}else{0.0};
+        println!("JM-EXEC {}",serde_json::json!({"kind":k,"txs":b.body.txs.len(),"bodyBytes":b.body.encode().len(),"gasUsed":gas,"validateMsMin":min,"validateMsMedian":med,"reps":reps,
+            "nsPerGasGross":if gas>0{med*1e6/gas as f64}else{0.0},"nsPerGasNet":net_ns,"projectedMsAt8M":empty_med+net_ns*8e6/1e6}));
+    }
+}
+
+// ============================ (a9) per-block cost vs state size (J2-B1) ============================
+/// apply_block clones the parent state, scans it several times (genesis check_caps and sum_balances
+/// twice, code_caps::validate_snapshot after every SYSTEM call, the USER phase live counts) and recomputes
+/// the whole world-state root from every account and slot (lp4-execution apply.rs `parent.clone()`,
+/// `state_root`), so the re-execution of ANY block grows with the live state, which SLOT_CAP/ACCT_CAP bound
+/// (devnet 50,000 / 20,000). This grows the user state with full-gas blocks of fresh SSTOREs and/or of
+/// 1-wei CALLs to fresh addresses, each followed by an empty block so the base fee does not outrun max_fee:
+/// series "slots" to JM_STATE_SLOTS (48,000), "accounts" to JM_STATE_ACCTS (19,000), "both" the first then
+/// the second on one chain. At each checkpoint it times the validate of an empty child, a full-gas bn_pair_2
+/// child and a full-gas JM_STATE_CHILD child (default modexp_b8_e1024_m8_even) of the head (median of 5 /
+/// 3 / 3), and state_root and clone of the head state alone. JM_STATE_SERIES picks the series.
+#[test]
+#[ignore="measurement: run in release with --ignored --nocapture"]
+fn jm_state_size_term(){
+    let env_n=|k:&str,d:u64|std::env::var(k).ok().and_then(|s|s.parse().ok()).unwrap_or(d);
+    let series:Vec<String>=std::env::var("JM_STATE_SERIES").map(|s|s.split(',').map(str::to_string).collect()).unwrap_or_else(|_|["slots","accounts","both"].map(str::to_string).to_vec());
+    let (slots_t,accts_t,points)=(env_n("JM_STATE_SLOTS",48_000),env_n("JM_STATE_ACCTS",19_000),env_n("JM_STATE_POINTS",6));
+    let child_kind=std::env::var("JM_STATE_CHILD").unwrap_or_else(|_|"modexp_b8_e1024_m8_even".into());let child_init=compute_init(&child_kind).expect("JM_STATE_CHILD kind");
+    let sys:Vec<Address>=(0..5).map(pocol_lp4_execution::apply::program_address).collect();
+    // SSTORE(i,1) for i = 0.. while gas >= 30,000, then STOP.
+    let fill_slots=vec![0x60,0x00,0x5b,0x61,0x75,0x30,0x5a,0x10,0x60,0x15,0x57,0x60,0x01,0x81,0x55,0x60,0x01,0x01,0x60,0x02,0x56,0x5b,0x00];
+    // CALL(0, base+i, 1 wei, 0,0,0,0) for i = 0.. while gas >= 40,000, then STOP.
+    let fill_accts=|base:u64|{let mut c=vec![0x67];c.extend(base.to_be_bytes());c.extend([0x5b,0x62,0x00,0x9c,0x40,0x5a,0x10,0x60,0x28,0x57,0x60,0x00,0x60,0x00,0x60,0x00,0x60,0x00,
+        0x60,0x01,0x85,0x60,0x00,0xf1,0x50,0x60,0x01,0x01,0x60,0x09,0x56,0x5b,0x00]);c};
+    let pair=precompile_loop(8,&pairing_input(2),384,32);
+    for s in series{
+        let (ts,ta)=match s.as_str(){"slots"=>(slots_t,0),"accounts"=>(0,accts_t),_=>(slots_t,accts_t)};
+        let mut n=net();let alice=devnet::account_key("alice");let mut nonce=0u64;
+        let p0=fallback(&n,n.chain.head,0);import(&mut n,&p0);
+        let live=|n:&Net|{let st=&n.chain.head().state;let (mut sl,mut ac)=(0u64,0u64);
+            for (a,x) in &st.accounts{if sys.contains(a)||x.info().is_none(){continue}ac+=1;sl+=x.storage.values().filter(|v|!v.is_zero()).count() as u64;}(sl,ac)};
+        let (mut next,mut blocks,t0)=(0u64,0u64,Instant::now());
+        loop{
+            let (sl,ac)=live(&n);let fill_s=sl+400<=ts;let fill_a=!fill_s&&ac+400<=ta;let done=!fill_s&&!fill_a;
+            if sl+ac>=next||done{
+                let head=n.chain.head;let (_,em,_)=validate_ms(&n.chain,&fallback(&n,head,1),5);
+                let child=|init:&Vec<u8>|signed(&n,head,Body{txs:vec![deploy(&alice,nonce,FULL_GAS,0,init.clone())],evidence:vec![]});
+                let (_,pm,_)=validate_ms(&n.chain,&child(&pair),3);let (_,cm,_)=validate_ms(&n.chain,&child(&child_init),3);
+                let st=n.chain.head().state.clone();let mut rt=vec![];let mut ct=vec![];
+                for _ in 0..3{let t=Instant::now();let _=pocol_lp4_execution::apply::state_root(&st).unwrap();rt.push(t.elapsed().as_secs_f64()*1e3);
+                    let t=Instant::now();let c=st.clone();ct.push(t.elapsed().as_secs_f64()*1e3);drop(c);}
+                println!("JM-STATE {}",serde_json::json!({"series":s,"height":n.chain.head().height,"liveUserSlots":sl,"liveUserAccounts":ac,"stateAccountsAll":st.accounts.len(),
+                    "emptyChildValidateMs":em,"pairChildValidateMs":pm,"childKind":child_kind,"childValidateMs":cm,"stateRootMs":median(rt),"stateCloneMs":median(ct),"buildSeconds":t0.elapsed().as_secs_f64()}));
+                next+=(ts+ta)/points;if done{break}
+            }
+            let init=if fill_s{fill_slots.clone()}else{fill_accts((blocks+1)<<40)};
+            let b=signed(&n,n.chain.head,Body{txs:vec![deploy(&alice,nonce,FULL_GAS,1_000_000,init)],evidence:vec![]});nonce+=1;import(&mut n,&b);
+            let f=fallback(&n,n.chain.head,0);import(&mut n,&f);blocks+=1;
+        }
+    }
+}
+/// The dominant state term of (a9) at network-scale caps without a chain: state_root and clone of a
+/// synthetic state of JM_SYN_ACCTS user accounts (default 1,000,000 = network ACCT_CAP) holding
+/// JM_SYN_SLOTS live slots (default 4,000,000 = network SLOT_CAP) in contracts of 359 slots (the "slots"
+/// fill of (a9)), on the devnet genesis state, at 1/16, 1/4 and 1/1 of both. pocold cannot admit these
+/// caps (the network profile is refused by resources::check); this measures only the two functions.
+#[test]
+#[ignore="measurement: run in release with --ignored --nocapture"]
+fn jm_state_root_synthetic(){
+    use revm::primitives::AccountInfo;
+    let env_n=|k:&str,d:u64|std::env::var(k).ok().and_then(|s|s.parse().ok()).unwrap_or(d);
+    let (slots,accts)=(env_n("JM_SYN_SLOTS",4_000_000),env_n("JM_SYN_ACCTS",1_000_000));const PER:u64=359;
+    let base=net().chain.head().state.clone();
+    for div in [16u64,4,1]{
+        let (sl,ac)=(slots/div,accts/div);let contracts=sl.div_ceil(PER);assert!(contracts<=ac,"slots need {contracts} contracts > {ac} accounts");
+        let mut db=base.clone();let t=Instant::now();
+        for i in 0..ac{let a=Address::from_word(U256::from((1u64<<40)+i).into());
+            db.insert_account_info(a,AccountInfo{balance:U256::from(1u64),nonce:u64::from(i<contracts),..Default::default()});
+            if i<contracts{for k in 0..PER.min(sl-i*PER){db.insert_account_storage(a,U256::from(k),U256::from(1u64)).unwrap();}}}
+        let build_s=t.elapsed().as_secs_f64();let mut rt=vec![];let mut ct=vec![];
+        for _ in 0..3{let t=Instant::now();let _=pocol_lp4_execution::apply::state_root(&db).unwrap();rt.push(t.elapsed().as_secs_f64()*1e3);
+            let t=Instant::now();let c=db.clone();ct.push(t.elapsed().as_secs_f64()*1e3);drop(c);}
+        println!("JM-STATE-SYN {}",serde_json::json!({"userSlots":sl,"userAccounts":ac,"contracts":contracts,"stateAccountsAll":db.accounts.len(),"buildSeconds":build_s,
+            "stateRootMs":median(rt.clone()),"stateRootMsMin":rt.iter().cloned().fold(f64::MAX,f64::min),"stateCloneMs":median(ct)}));
+    }
+}
+
+// ============================ (a10) genesis rebuild over loaded blocks (J2-M1) ============================
+/// TrieRebuild from genesis (ensure_state: the deep-fork, re-fetch and restore path, §5) over a chain of
+/// JM_REBUILD_COUNT (default 20) blocks of each kind in JM_REBUILD_KINDS on one empty parent: the per-block
+/// rebuild cost under load (on the small devnet genesis state: the (a9) state term comes on top).
+/// jm_deep_fork_rebuild_vs_height measures it for empty blocks only. Release only.
+#[test]
+#[ignore="measurement: run in release with --ignored --nocapture"]
+fn jm_rebuild_by_kind(){
+    let count:u64=std::env::var("JM_REBUILD_COUNT").ok().and_then(|s|s.parse().ok()).unwrap_or(20);
+    let kinds:Vec<String>=std::env::var("JM_REBUILD_KINDS").map(|s|s.split(',').map(str::to_string).collect())
+        .unwrap_or_else(|_|["empty","full_gas_transfers","full_gas_compute","bn_pair_2"].map(str::to_string).to_vec());
+    for kind in kinds{
+        let mut h=net();h.chain.k_hist=u64::MAX;h.chain.side_cap=1024;let alice=devnet::account_key("alice");let mut nonce=0u64;
+        let p0=fallback(&h,h.chain.head,0);import(&mut h,&p0);
+        let tk=if kind=="full_gas_transfers"{pack_transfers(&h,h.chain.head,&alice).len() as u64}else{0};let bl=bodymax_len(&h,&alice);
+        for _ in 0..count{let b=kind_block(&h,h.chain.head,&kind,&alice,&mut nonce,tk,bl);import(&mut h,&b);}
+        // Prune every state above the empty parent p0, so the rebuild re-executes exactly the `count` loaded blocks.
+        let tip=h.chain.head;let hs:Vec<[u8;32]>=h.chain.canonical.iter().skip(2).copied().collect();
+        for x in hs{let e=h.chain.blocks.get_mut(&x).unwrap();e.state=revm::InMemoryDB::default();e.pruned=true;}
+        let before=h.chain.rebuilds;let t=Instant::now();h.chain.ensure_state(&tip).unwrap();let s=t.elapsed().as_secs_f64();let n=h.chain.rebuilds-before;
+        println!("JM-REBUILD-KIND {}",serde_json::json!({"kind":kind,"blocks":count,"reExecutions":n,"seconds":s,"perBlockMillis":s*1e3/n as f64}));
+    }
 }
 
 // ============================ (a7) open replay cost by component ============================
@@ -366,12 +665,15 @@ fn jm_open_memory(){
 /// super-linear open (J-V10): both Chain::retain (scans all resident blocks per record) and
 /// Chain::insert -> rebuild_canonical (walks head->genesis on every head change) grow O(H) per record,
 /// so the per-record cost is validate (flat) + insert (O(H)) + retain (O(H)). Mirrors Node::open's loop
-/// on a bare Chain (replaying=true). Release only. JM_SPLIT_N sets the chain length.
+/// on a bare Chain (replaying=true); it omits Node::open's own per-record work (record decode, the
+/// events/protect bookkeeping, parentResult check), so it need not explain all of the open slope.
+/// Release only. JM_SPLIT_N sets the chain length (the builder keeps the default K_hist window: it only
+/// extends its head, so a 20,000-block run does not hold 20,000 states).
 #[test]
 #[ignore="measurement: run in release with --ignored --nocapture"]
 fn jm_replay_component_split(){
     let n_c:u64=std::env::var("JM_SPLIT_N").ok().and_then(|s|s.parse().ok()).unwrap_or(6000);
-    let mut harness=net();harness.chain.k_hist=u64::MAX;harness.chain.side_cap=n_c as usize+64;
+    let mut harness=net();
     let mut cb=vec![];let mut p=harness.chain.head;for _ in 0..n_c{let b=fallback(&harness,p,0);import(&mut harness,&b);p=b.hash();cb.push(b);}
     drop(harness);
     let mut c=Chain::new(admitted());c.replaying=true;
