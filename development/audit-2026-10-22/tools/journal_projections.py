@@ -203,6 +203,45 @@ def main(ev):
     for name, e in (('1 item/block (storage.md inventory)', ev_blk), ('one item per identity ever (resources.rs:98-101; binding)', ev_id), ('E_max per block (not binding)', ev_emax)):
         print('  evidence %-58s %.3f -> total %.2f GiB' % (name, e / GIB, (hdr + tx + pr + fr + e) / GIB))
 
+    # ---- 10/11. round 3b: state-interacting blocks and the at-cap / network state term (J-REV3-1/2/3) ----
+    r3b = os.path.join(ev, 'journal-r3b')
+    P3B = lambda n: os.path.join(r3b, n)
+    cr = lines(P3B('create.log'), 'JM-CREATE')
+    if cr:
+        print('\n[10] JM-CREATE (r3b): create-heavy block re-execution vs live accounts (J-REV3-1)')
+        print('  create-term = create2ChildMs - emptyChildMs (the create-specific cost ON TOP of the (a9) root term).')
+        xs = []; ys = []
+        for d in cr:
+            spec = d['create2ChildMs'] - d['emptyChildMs']; c = max(d['create2Creates'], 1)
+            print('  A=%6d  empty %7.1f  create2 %7.1f ms (create-term %7.1f ms, %4d creates, %7.1f us/create)  cold-call %6.1f ms (ctrl)  many-small %7.1f ms / %d txs (%7.1f us/create)' % (
+                d['liveUserAccounts'], d['emptyChildMs'], d['create2ChildMs'], spec, d['create2Creates'], spec * 1e3 / c,
+                d['coldCallChildMs'], d['manySmallCreateMs'], d['manySmallCreateTxs'], (d['manySmallCreateMs'] - d['emptyChildMs']) * 1e3 / max(d['manySmallCreateTxs'], 1)))
+            if d['liveUserAccounts'] > 0:
+                xs.append(float(d['liveUserAccounts'])); ys.append(spec * 1e3 / c)  # us/create
+        creates = cr[-1]['create2Creates']
+        if len(xs) >= 2:
+            mx = sum(xs) / len(xs); my = sum(ys) / len(ys)
+            k = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs); base = my - k * mx
+            print('  LS fit (per create): us/create = %.1f + %.4e * A  (A = live user accounts); the slope IS the current_total O(accounts) scan.' % (base, k))
+            for prof, cap in (('devnet', DEV['ACCT_CAP']), ('network', NET['ACCT_CAP'])):
+                perc = base + k * cap; blk = perc * creates / 1e6
+                print('    %-7s ACCT_CAP %8d: %9.0f us/create x %d creates = %7.2f s/block of current_total scan (create-specific; additive to the root term)' % (prof, cap, perc, creates, blk))
+            print('  NOTE the network per-block figure is an extrapolation of an extrapolation: (1) create-term/creates fit linear in A, measured only to A=%d (= %.0f%% of the devnet ACCT_CAP); (2) extended linearly to the network ACCT_CAP (10^6, ~%.0fx beyond the measured range); creates per block (%d) assumed unchanged.' % (
+                int(xs[-1]), 100 * xs[-1] / DEV['ACCT_CAP'], NET['ACCT_CAP'] / xs[-1], creates))
+    # at-cap devnet state term (J-REV3-3): the (a9) "both" series ended at ~95% of the caps; extend by the measured slopes.
+    both2 = [d for d in lines(P('state.log'), 'JM-STATE') if d['series'] == 'both'] if cr else []
+    if both2:
+        slot_pts = [d for d in both2 if d['liveUserAccounts'] < 1000]  # the slot-fill leg (accounts ~flat)
+        if len(slot_pts) >= 2:
+            s0, s1 = slot_pts[0], slot_pts[-1]
+            per_slot = (s1['emptyChildValidateMs'] - s0['emptyChildValidateMs']) / max(s1['liveUserSlots'] - s0['liveUserSlots'], 1)
+            a0, a1 = both2[-2], both2[-1]
+            per_acct = (a1['emptyChildValidateMs'] - a0['emptyChildValidateMs']) / max(a1['liveUserAccounts'] - a0['liveUserAccounts'], 1)
+            meas = both2[-1]; at_cap = meas['emptyChildValidateMs'] + per_slot * (DEV['SLOT_CAP'] - meas['liveUserSlots']) + per_acct * (DEV['ACCT_CAP'] - meas['liveUserAccounts'])
+            print('\n[11] devnet state term at the caps (J-REV3-3): measured empty-child %.1f ms at %d slots (%.0f%% of SLOT_CAP) + %d accts (%.0f%% of ACCT_CAP); slopes ~%.1f us/slot, ~%.1f us/acct -> at-cap empty-child ~%.0f ms (state term ~+%.0f ms vs the %.0f ms at the measured fill: the measured figure is a slight under-estimate).' % (
+                meas['emptyChildValidateMs'], meas['liveUserSlots'], 100 * meas['liveUserSlots'] / DEV['SLOT_CAP'], meas['liveUserAccounts'], 100 * meas['liveUserAccounts'] / DEV['ACCT_CAP'],
+                per_slot * 1e3, per_acct * 1e3, at_cap, at_cap - meas['emptyChildValidateMs'], meas['emptyChildValidateMs']))
+
 
 def ex_body(ex, k):
     d = next((x for x in ex if x['kind'] == (k if k != 'full_gas_compute' else 'jump_loop')), None)
