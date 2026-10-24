@@ -37,9 +37,12 @@ fn try_seal(n:&Net,mut h:Header,body:Body,attempt:u32,start:u64)->Option<Block>{
     Some(Block{header:h,body})}
 fn fallback(n:&Net,parent:[u8;32],a:u32)->Block{let p=n.chain.get(&parent).unwrap().clone();
     for a in a..a+16{let (h,_,_)=n.chain.build_fallback(&p,a).unwrap();if let Some(b)=try_seal(n,h,Body::default(),a,0){return b}}panic!("no fallback solution")}
+/// A signed a=0 block at ts = parent ts + T_blk (the window starts at parent ts + 1): on the ASERT schedule,
+/// like a fallback a=0 block (lower + dFbWait), so a long run of signed blocks does not harden the target
+/// (at parent ts + 1 each one ran 3 s ahead and the PoW work doubled every ~13 blocks).
 fn signed(n:&Net,parent:[u8;32],body:Body)->Block{
     let p=n.chain.get(&parent).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
-    for off in 0..u64::from(n.chain.spec.cp().D_att){let (h,_,_)=n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower()+off,body.clone(),vec![]).unwrap_or_else(|e|panic!("build_signed: {e:?}"));
+    for off in u64::from(n.chain.spec.cp().T_blk).saturating_sub(1)..u64::from(n.chain.spec.cp().D_att){let (h,_,_)=n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower()+off,body.clone(),vec![]).unwrap_or_else(|e|panic!("build_signed: {e:?}"));
         if let Some(b)=try_seal(n,h,body.clone(),0,0){return b}}panic!("no signed solution")}
 fn import(n:&mut Net,b:&Block){let (e,_)=n.chain.validate(b,None,0).unwrap_or_else(|e|panic!("h={} {e:?}",b.header.h));n.chain.insert(e);n.chain.retain();}
 
