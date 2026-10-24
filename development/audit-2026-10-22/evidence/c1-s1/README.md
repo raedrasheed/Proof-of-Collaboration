@@ -62,9 +62,10 @@ intact node.
   - model 105.83 → **90.93 GiB**, gate **103.92 GiB**.
 - `history-integrity.log`: the full check takes about 0.7–1.4 s per GiB of store with a warm cache. The
   file was at most 4.1 times its stored bytes; the A13 allocator term counts 8.
-- `mutants.log` / `mutants.json`: 12 mutants, each applied to a copy of the tree and built in its own
-  target directory, against the two S1 tests.
-- `suite-*.log`: the full suites on this tree.
+- `mutants.log` / `mutants.json`: 12 mutants, each applied to a copy of the `b517b0f` tree and built in its
+  own target directory, against the two S1 tests. The base passes and **all 12 are killed**.
+- `suite-lp4.log`, `suite-pocold.log` (release, `b517b0f`): **lp4 173 passed / 0 failed; pocold 189
+  passed / 0 failed / 17 ignored**. The ignored tests include the new integrity-cost measurement.
 
 ## Open
 
