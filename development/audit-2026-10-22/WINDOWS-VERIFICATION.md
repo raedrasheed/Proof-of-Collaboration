@@ -1,6 +1,7 @@
 # Windows verification of the repair scope (round 2)
 
-Status (2026-10-24): **Run 16 (25bec25) PASS on every check**, on the round-3 integration: RpcGuard r3
+Status (2026-10-24): **Run 22 (c959379, the last code commit) PASS on every check**. Run 21 (1cc96c4) confirmed the fix of
+the one flaky test that Run 20 found. Earlier: **Run 16 (25bec25) PASS on every check**, on the round-3 integration: RpcGuard r3
 (poll/WSAPoll pacer and P2P reader), caps r3 tests and journal r3 measurements. Earlier: Run 9 (29fd44a) PASS on every check
 of the repair scope. That covers the
 integrated caps-r2 and rpcguard-r2 code and the Windows fixes found by Runs 1–7. Not covered: the e2e
@@ -345,3 +346,13 @@ Run 20 is a timing flake, not a code difference: Run 19 passed on the same code.
 - Linux: 8 of 8 runs reach busy in round 1, with 10–14 busy answers
   (`evidence/integration-r3/abandoned-queued-8x-linux.log`).
 - The next Windows run decides.
+
+### Runs 21–23: all PASS
+| run | commit | content | counted as |
+|---|---|---|---|
+| 21 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40084357701 | 1cc96c4 | the abandoned-queue test settings (Run 20's flake) | **verifies the flaky-test fix on Windows** |
+| 22 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40088225658 | c959379 | merge of wf/e2e-r3c: tests/consensus.rs (16bebfd, the deterministic long catch-up test) and tests/e2e_devnet.py (not run by this workflow) | **the last code commit: every Rust change of round 3 has now run on Windows** |
+| 23 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40088664386 | d91d141 | evidence only | repeat of Run 22 |
+
+Their artifacts are not copied. The workflow's own artifacts hold them for 14 days; Runs 16 and 9 are the
+copied references.

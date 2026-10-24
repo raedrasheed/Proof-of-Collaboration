@@ -178,7 +178,7 @@
    "a Nagle/delayed-ACK stall of about 200 ms on every RPC answer (run 2)",
    "kernel absorption of unread RPC answers (runs 3, 5, 7): SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call (29fd44a)"
   ],
-  "notCovered": "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows",
+  "notCovered": "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests",
   "record": "WINDOWS-VERIFICATION.md"
  },
  "e2eDevnetMutation": [
@@ -315,12 +315,12 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": [
      "D-BODY-MAX (encoded body on every path; found while reviewing this repair)"
@@ -363,7 +363,7 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [
     "Only an experimental-devnet admission is possible: Specification scope refuses every current profile (rpc-absent, calibration-synthetic, timing-not-a-bound, gas-monotonicity-assumed, gate-deferred LP3 items)",
@@ -373,7 +373,7 @@
    ],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": [
      "D-A02-PROFILE (devnet parameters; engineering, approved under the standing authorization)"
@@ -415,12 +415,12 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": [
      "LOG-ACCT-01",
@@ -463,7 +463,7 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [
     "Real power loss is not tested (simulated by file edits only)",
@@ -471,7 +471,7 @@
    ],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": [
      "D-A04-FORMAT journal v2 (local storage format, engineering)"
@@ -544,7 +544,7 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [
     "RpcGuard is mapped item by item in RPCGUARD.md (ENFORCED, EQUIVALENT, PARTIAL, NOT ENFORCED). Not enforced or partial: SCRATCH outside the log handlers and light SCRATCH (absent), RPC_MEM_TOTAL as a field (absent; bounded by A13), CANCEL_MAX for precompile runs (absent; proposal P2), PacerTrace, chunked batch streaming, the numeric log range before admission, pocol_getLogs anchors, the unlisted-method rule (PARTIAL; proposal P4), the conditional light entries' lane (they run on the heavy lane, with the light deadline and answer limit), the aggregate rate across reconnects (proposal P1); RPC runs on the consensus thread (no separate runtime)",
@@ -553,7 +553,7 @@
    ],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": [
      "RpcGuard implementation in pocold (owner approved: the 2026-10-23 instruction to complete the authorized works, RpcGuard and the Windows verification; a local service policy, D87, no validity effect)",
@@ -593,14 +593,14 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [
     "After a request is initiated it may be broadcast; it is reported as initiated/broadcast, never as cancelled (by design)"
    ],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": [
      "D-A06-CONFLICT (engineering)",
@@ -638,12 +638,12 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": []
    },
@@ -677,12 +677,12 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": []
    },
@@ -715,12 +715,12 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": []
    },
@@ -753,12 +753,12 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": []
    },
@@ -793,12 +793,12 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": []
    },
@@ -831,12 +831,12 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": []
    },
@@ -893,7 +893,7 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [
     "OPEN: gas monotonicity in the domain fields (§4.1)",
@@ -913,7 +913,7 @@
    ],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": [
      "D-A13-BUDGET (owner approved option 1: local limits reduced, 6 GiB kept)",
@@ -952,12 +952,12 @@
      "realChrome": "3c3792e (not re-run on the round-3 code)",
      "windows": "1cc96c4 (Windows CI run 21, PASS; windowsVerification)"
     },
-    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
+    "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
    "partiallyResolved": [],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": []
    },
@@ -1010,7 +1010,7 @@
    ],
    "blocked": {
     "environment": [
-     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows"
+     "Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests"
     ],
     "decision": [
      "CAPS-SUSTAINABILITY N1-N8 (proposals/CAPS-SUSTAINABILITY.md): PROPOSED, not approved"

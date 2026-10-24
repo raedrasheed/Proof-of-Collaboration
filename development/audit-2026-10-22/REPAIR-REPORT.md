@@ -29,7 +29,7 @@
 | Integration-tested commit | Round-3 suites: `2b1a571` (pocold, lp4-execution, caps-test build) and `c959379` (e2e_devnet, e2e_site, consensus), evidence/integration-r3/. The full LP10 integration (extension, real Chrome, integrated Chrome) last ran on `3c3792e` and was not re-run on the round-3 code |
 | Witness-tested commit | `3c3792e` (not re-run on the round-3 code) |
 | Real-Chrome-tested commit | `3c3792e` (in the integration; not re-run on the round-3 code) |
-| Windows-tested commit | `1cc96c4` (CI run 21, PASS); earlier `2b1a571` (run 19), `25bec25` (run 16), `29fd44a` (run 9). `c959379`'s test-only changes have not run on Windows |
+| Windows-tested commit | `c959379` (CI run 22, PASS; the last code commit, including its test-only changes); earlier `1cc96c4` (run 21), `2b1a571` (run 19), `25bec25` (run 16), `29fd44a` (run 9) |
 | Mutation-controlled commits | `3342af3` for D-REORG-REDB (Rust sources equal to `3c3792e`); round 3: caps `e985ce1`, RpcGuard `dd7d1ec`, e2e test `ad84942` (each on its track branch) |
 | PR head | latest commit on `claude/audit-repair-a01-a14` (docs and evidence only after `c959379`; see EVIDENCE-RECONCILIATION.md) |
 | Tree equivalence | [EVIDENCE-RECONCILIATION.md](EVIDENCE-RECONCILIATION.md) |
@@ -444,8 +444,8 @@ The owner's 2026-10-23 instruction was taken as authorizing a pull_request trigg
   `abandoned_queued_bodies_are_capped_and_released`. `1cc96c4` changed only that test's settings
   (HEAVY_QUEUE 2, QUEUE_WAIT 5 ms, up to 12 rounds; assertions unchanged), and run 21 passed.
 - **Not covered on Windows:** the real-Chrome and Python e2e suites, pocold's thread-count assertions
-  (they read /proc) and the `#[ignore]` measurement tests. `c959379`'s test-only changes
-  (tests/consensus.rs from `16bebfd`, tests/e2e_devnet.py) have not run on Windows.
+  (they read /proc) and the `#[ignore]` measurement tests. `c959379`'s Rust test change (tests/consensus.rs
+  from `16bebfd`) ran on Windows in run 22 (PASS); tests/e2e_devnet.py is a Python e2e test the workflow does not run.
 
 ### Corrections within round 3 (each withdrawn by a later pass, history kept in the track documents)
 
@@ -519,8 +519,8 @@ weakened a consensus rule, and no review constitutes acceptance.
   - PASS on every check: runs 9 (`29fd44a`), 16 (`25bec25`), 19 (`2b1a571`) and 21 (`1cc96c4`). Run 20
     failed one timing test on the code of run 19; `1cc96c4` fixed the test's settings (§3c).
   - Not covered on Windows: the real-Chrome and Python e2e suites, pocold's thread-count assertions
-    (they read /proc, THREADS-NOT-MEASURED), the `#[ignore]` measurement tests, and `c959379`'s
-    test-only changes.
+    (they read /proc, THREADS-NOT-MEASURED), the `#[ignore]` measurement tests, and the Python e2e test
+    (tests/e2e_devnet.py). Run 22 (`c959379`) passed the Rust test change of `16bebfd`.
   - Directory fsync is skipped on Windows after a rename (store::sync_dir, retention.rkeep).
 - **lp1-node `store_journal` (11 tests):** executed on Linux and **failed** with UnsupportedPlatform.
   This is the expected platform limitation (Windows-only atomic journal), identical on 090eae4, and is

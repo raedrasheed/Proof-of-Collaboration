@@ -25,10 +25,9 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 WIN = ("Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): "
        "runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; "
        "a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). "
-       "PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571) and run 21 (1cc96c4). "
+       "PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379, the last code commit). "
        "Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed")
-WIN_GAP = ("Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests; "
-           "the test-only changes merged at c959379 (tests/consensus.rs from 16bebfd, tests/e2e_devnet.py) have not run on Windows")
+WIN_GAP = ("Not covered on Windows: the real-Chrome and Python e2e suites (not in the workflow), pocold's thread-count assertions (they read /proc), and the #[ignore] measurement tests")
 WIT = "reconstructed witness (independently written from REPORT.md; the original audit programs were not received)"
 NOREV = ("round-2 changes reviewed by independent agent instances (two passes: the F1-F9 review of df63725 and the review of the D-A13-BUDGET range); "
          "round 3: per-track reviews by separate agent instances (caps: three; RpcGuard: three; journal: four; e2e: three); the last pass of each track (caps r3b, RpcGuard r3c, journal r3c, e2e round 4) is not reviewed yet; no external human audit")
