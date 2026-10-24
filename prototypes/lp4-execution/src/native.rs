@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use revm::{Evm, InMemoryDB};
 use revm::primitives::{Address, B256, EVMError, InvalidTransaction, ResultAndState, SpecId, TxEnv, U256};
-use crate::{pay::{self,NativeContext},pay_address,CHAIN_ID};
+use crate::{pay::{self,NativeContext},pay_address,CHAIN_ID,state_view::StateRef};
 
 pub fn execute(snapshot:&InMemoryDB, tx:TxEnv) -> Result<ResultAndState,EVMError<core::convert::Infallible>> {
     execute_at(snapshot,tx,U256::ZERO)
@@ -37,25 +37,30 @@ pub struct NativeBlockContext {
 /// This chain-only API retains baseline Cancun code limits for old controls.
 /// PoCol candidates must use execute_for_profile for approved CODE-01 limits.
 pub fn execute_in_context(snapshot:&InMemoryDB, tx:TxEnv, block:&NativeBlockContext) -> Result<ResultAndState,EVMError<core::convert::Infallible>> {
-    execute_on_chain(snapshot,tx,block,CHAIN_ID,None)
+    execute_on_chain(snapshot,tx,block,CHAIN_ID,None,None)
 }
 /// Bound to the same accepted LP3 identity used by signed decoding. P5 still
 /// must supply validated parent/header context; no schema check authorizes boot.
 pub fn execute_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
     crate::code_caps::validate_snapshot(snapshot,limits).map_err(EVMError::Custom)?;
-    execute_on_chain(snapshot,tx,block,profile.spec().chain_id,Some(limits))
+    execute_on_chain(snapshot,tx,block,profile.spec().chain_id,Some(limits),None)
 }
 /// `execute_for_profile` on a state already known to pass `validate_snapshot`: the USER phase
 /// validates its snapshot once, then changes it only by committing this engine's results. Within the
 /// phase code enters only through CREATE, whose `create_return` hook enforces B_code_max and CODE_CAP,
 /// and under Cancun (EIP-6780) code leaves only within its creating transaction, so the check holds
 /// after every commit and the per-transaction scan is redundant (decision package C-2, item 1).
-/// Debug builds still run the full check, so a broken invariant panics there.
-pub(crate) fn execute_on_validated(state:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+/// `code_total` is the state's logical code total (`code_caps::inventory`), kept by the phase, so a
+/// create does not rescan the state (item 2). Debug builds still run the full checks, so a broken
+/// invariant panics there.
+/// Also the transaction pool's path (pocold): its pending state is the head state, checked once per
+/// new head, changed only by `user_phase::commit_tx` of this engine's results.
+pub fn execute_on_validated(state:&InMemoryDB,code_total:u64,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
     debug_assert_eq!(crate::code_caps::validate_snapshot(state,limits),Ok(()),"USER-phase state left the code limits");
-    execute_on_chain(state,tx,block,profile.spec().chain_id,Some(limits))
+    debug_assert_eq!(crate::code_caps::inventory(state),Ok(code_total),"USER-phase running code total");
+    execute_on_chain(state,tx,block,profile.spec().chain_id,Some(limits),Some(code_total))
 }
 /// The EVMError::Custom text of a simulation that `stop` ended.
 pub const SIMULATION_STOPPED:&str="rpc simulation stopped";
@@ -74,10 +79,10 @@ pub fn simulate_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockCont
     let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
     crate::code_caps::validate_snapshot(snapshot,limits).map_err(EVMError::Custom)?;
     validate_nonce(snapshot,tx.caller,tx.nonce)?;
-    build_engine(snapshot,tx,block,profile.spec().chain_id,Some(limits)).modify()
+    build_engine(snapshot,None,tx,block,profile.spec().chain_id,Some(limits)).modify()
         .append_handler_register_box(Box::new(move|h|stop_register(h,stop.clone()))).build().transact()
 }
-fn stop_register<EXT:'static>(h:&mut revm::handler::register::EvmHandler<'_,EXT,InMemoryDB>,stop:std::rc::Rc<dyn Fn()->bool>){
+fn stop_register<EXT:'static,DB:revm::Database>(h:&mut revm::handler::register::EvmHandler<'_,EXT,DB>,stop:std::rc::Rc<dyn Fn()->bool>){
     use revm::interpreter::{opcode::*,InstructionResult};
     // `n` counts hooked instructions; `mark` is the frame gas remaining at the last poll (a frame
     // switch changes it abruptly, which only adds a poll).
@@ -93,14 +98,16 @@ fn stop_register<EXT:'static>(h:&mut revm::handler::register::EvmHandler<'_,EXT,
         });
     }
 }
-fn execute_on_chain(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+fn execute_on_chain(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>,code_total:Option<u64>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     validate_nonce(snapshot,tx.caller,tx.nonce)?;
-    build_engine(snapshot,tx,block,chain_id,limits).transact()
+    build_engine(snapshot,code_total,tx,block,chain_id,limits).transact()
 }
 
-/// Shared hooks only. SYSTEM uses direct frames; USER retains transact().
-pub(crate) fn build_engine(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>)->Evm<'static,NativeContext,InMemoryDB>{
-    Evm::builder().with_db(snapshot.clone()).with_external_context(NativeContext::default())
+/// Shared hooks only. SYSTEM uses direct frames; USER retains transact(). The engine reads `snapshot`
+/// through a borrowed `StateRef` instead of a clone (decision package C-2, item 3); `code_total` is the
+/// snapshot's logical code total when the caller knows it.
+pub(crate) fn build_engine<'a>(snapshot:&'a InMemoryDB,code_total:Option<u64>,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>)->Evm<'a,NativeContext,StateRef<'a>>{
+    Evm::builder().with_db(StateRef::new(snapshot,code_total)).with_external_context(NativeContext::default())
         .with_spec_id(SpecId::CANCUN)
         .modify_cfg_env(|cfg|cfg.chain_id=chain_id)
         .modify_block_env(|b|{b.number=block.height;b.timestamp=block.timestamp;b.gas_limit=block.gas_limit;b.basefee=block.base_fee;b.prevrandao=Some(block.prevrandao);b.coinbase=pay::escrow_address();b.blob_excess_gas_and_price=Some(revm::primitives::BlobExcessGasAndPrice::new(0,false));})

@@ -110,6 +110,7 @@ mod tests {
 
 pub mod pay;
 pub mod native;
+pub mod state_view;
 
 pub mod collision;
 pub mod wire;

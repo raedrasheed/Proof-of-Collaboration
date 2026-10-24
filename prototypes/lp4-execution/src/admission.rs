@@ -322,7 +322,11 @@ fn scratch_address(tag:&str)->Address{Address::from_slice(&keccak256(tag.as_byte
 /// in a compute loop, with full parent results. Ordinary blocks come first; then
 /// timestamps at T_END drive closing (RET records per block) and the final block.
 /// Every block is applied `repeats` times; the largest time per phase class is recorded.
-pub fn measure(spec_bytes:&[u8],alloc:&InMemoryDB,repeats:u32)->Result<Timing,String>{
+pub fn measure(spec_bytes:&[u8],alloc:&InMemoryDB,repeats:u32)->Result<Timing,String>{measure_with_gas(spec_bytes,alloc,repeats).map(|(t,_)|t)}
+/// `measure`, also returning the gas each sampled block used (in height order), so tests can check
+/// the workload of every sample independently of measure's own guard (PR #27 review R5-2).
+pub(crate) fn measure_with_gas(spec_bytes:&[u8],alloc:&InMemoryDB,repeats:u32)->Result<(Timing,Vec<u64>),String>{
+    let mut gas_log=Vec::new();
     let hash=gs::genesis_hash(spec_bytes);let spec=gs::verify_hash(spec_bytes,&hash).map_err(|e|format!("{e:?}"))?;
     let profile=fact_identity(spec_bytes,&hash,spec.chain_id)?;let cp=profile.cp().clone();
     let genesis=Genesis::build(alloc,&profile,&SystemPrograms::v1()).map_err(|e|format!("{e:?}"))?;
@@ -356,7 +360,7 @@ pub fn measure(spec_bytes:&[u8],alloc:&InMemoryDB,repeats:u32)->Result<Timing,St
             let t0=std::time::Instant::now();let o=apply::apply_block(&state,&genesis,&profile,&input).map_err(|e|format!("calibration h={h}: {e:?}"))?;
             worst=worst.max(u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX).max(1));samples+=1;out=Some(o);
         }
-        let o=out.unwrap();
+        let o=out.unwrap();gas_log.push(o.gas_used);
         if o.gas_used<cp.GAS_LIMIT{return Err(format!("calibration h={h}: the block used {} gas, not the GAS_LIMIT workload",o.gas_used))}
         let class=if o.is_final{2}else if o.facts.closing{1}else{0};
         phase_ms[class]=phase_ms[class].max(worst);seen[class]=true;
@@ -369,7 +373,7 @@ pub fn measure(spec_bytes:&[u8],alloc:&InMemoryDB,repeats:u32)->Result<Timing,St
     // measured phase (conservative), so R14/R19 still cover every reachable block.
     if !seen[0]&&cp.H_CLOSE<=1{phase_ms[0]=phase_ms[1].max(phase_ms[2]);seen[0]=true;}
     if !seen.iter().all(|s|*s){return Err(format!("calibration: phase classes reached {seen:?}"))}
-    Ok(Timing{genesis_hash:hash,phase_ms,samples})
+    Ok((Timing{genesis_hash:hash,phase_ms,samples},gas_log))
 }
 fn spec_ts(cp:&ConsensusParams,h:u64)->u64{cp.g_ts.saturating_add(h.saturating_mul(u64::from(cp.T_blk)))}
 

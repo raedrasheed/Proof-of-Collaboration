@@ -45,8 +45,11 @@ fn sh()->NodeLocal{NodeLocal::single_host()}
 /// refuses a block that does not).
 #[test] fn calibration_keeps_the_full_gas_workload_through_a_long_closing_sequence(){
     let mut c=cfg();c.d=30;let n=net(&c);
-    let t=measure(&n.spec_bytes,&n.alloc,1).unwrap_or_else(|e|panic!("{e}"));
+    let (t,gas)=measure_with_gas(&n.spec_bytes,&n.alloc,1).unwrap_or_else(|e|panic!("{e}"));
     assert!(t.samples>=30,"the sequence runs past the ~24 blocks the old fee cap covered: {t:?}");
+    // Independently of measure's guard: every sampled block, closing and final included, ran the workload.
+    let gl=n.profile.cp().GAS_LIMIT;
+    assert!(gas.len()>=30&&gas.iter().all(|g|*g>=gl),"every sample used GAS_LIMIT ({gl}): {gas:?}");
 }
 #[test] fn audit_reproductions_are_rejected_with_their_rules(){
     let (_,t)=base();

@@ -227,6 +227,17 @@ fn apply_halt(state:&mut InMemoryDB,m:&mut BlockMeter,tx:&TxEnv,price:U256,tip:U
  if !existed{if let Some((_,acct_cap,_))=m.caps{if m.live_accts+1>acct_cap{return Err(UserError::AcctCap(i))}}m.live_accts+=1;}
  m.dirty_accts.extend(touched);Ok(())
 }
+/// Logical code at `touched` before a commit (C-2 item 2; no work on the profile-free control path,
+/// where `touched` is empty).
+fn code_change_start(state:&InMemoryDB,touched:&[Address],i:usize)->Result<u64,UserError>{
+ crate::code_caps::code_of(state,touched).map_err(|e|UserError::Execution(i,e))
+}
+/// The running code total after a commit that changed only `touched`.
+fn code_change_end(state:&InMemoryDB,touched:&[Address],total:u64,before:u64,i:usize)->Result<u64,UserError>{
+ if touched.is_empty(){return Ok(total)}
+ let after=crate::code_caps::code_of(state,touched).map_err(|e|UserError::Execution(i,e))?;
+ total.checked_sub(before).and_then(|t|t.checked_add(after)).ok_or_else(||UserError::Execution(i,"logical code overflow".into()))
+}
 fn execute_user_phase_inner(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&NativeBlockContext,byte_budget:usize,entry_budget:usize,profile:Option<&crate::profile::ProfileIdentity>)->Result<UserCandidate,UserError>{
  execute_user_phase_inner_ctx(snapshot,raw,block,byte_budget,entry_budget,profile,UserContext::default())
 }
@@ -238,6 +249,8 @@ fn execute_user_phase_inner_ctx(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&Nativ
  let mut meter=BlockMeter{log_bytes:0,log_count:0,cum_log:ctx.cum_log_bytes,dirty_keys:HashSet::new(),dirty_accts:HashSet::new(),sys_keys:HashSet::new(),sys_accts:HashSet::new(),
   live_slots,live_accts,closing:ctx.closing,caps:profile.map(|p|(p.cp().SLOT_CAP,p.cp().ACCT_CAP,u64::from(p.cp().SYS_KEYS_USER_MAX)))};
  let mut halts=Vec::new();
+ // C-2 item 2: the state's logical code total, set at the first transaction and kept by each commit.
+ let mut code_total=0u64;
  for (i,bytes) in raw.iter().enumerate(){
   let signed=match profile{Some(p)=>wire::decode_for_profile(bytes,p),None=>wire::decode_signed(bytes,byte_budget)}.map_err(|e|UserError::Wire(i,e))?;let tx=signed.tx_env();
   // Cancun reserves declared transaction gas against remaining block gas, not
@@ -249,14 +262,18 @@ fn execute_user_phase_inner_ctx(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&Nativ
   // from committing this engine's results, so the later per-transaction scans could not fail.
   if let (Some(p),0)=(profile,i){
    let limits=crate::code_caps::CodeLimits{runtime:p.cp().B_code_max,logical:p.cp().CODE_CAP};
-   crate::code_caps::validate_snapshot(&state,limits).map_err(|e|UserError::Execution(0,format!("{:?}",revm::primitives::EVMError::<core::convert::Infallible>::Custom(e))))?;
+   let custom=|e|UserError::Execution(0,format!("{:?}",revm::primitives::EVMError::<core::convert::Infallible>::Custom(e)));
+   crate::code_caps::validate_snapshot(&state,limits).map_err(custom)?;
+   code_total=crate::code_caps::inventory(&state).map_err(custom)?;
   }
-  let result=match profile{Some(p)=>native::execute_on_validated(&state,tx.clone(),block,p),None=>native::execute_in_context(&state,tx.clone(),block)}.map_err(|e|UserError::Execution(i,format!("{e:?}")))?;
+  let result=match profile{Some(p)=>native::execute_on_validated(&state,code_total,tx.clone(),block,p),None=>native::execute_in_context(&state,tx.clone(),block)}.map_err(|e|UserError::Execution(i,format!("{e:?}")))?;
   let e=effects(&state,&result.state);
   // The caps are PoCol execution: the profile-free Cancun control path stays geth-equivalent.
   if let Some(why)=profile.and_then(|_|meter.check(result.result.logs(),&e)){
    // Exceptional halt (A03): all gas, no logs, status 0; only nonce and fee remain.
+   let touched=[tx.caller,crate::pay::escrow_address()];let before=code_change_start(&state,&touched,i)?;
    apply_halt(&mut state,&mut meter,&tx,price,tip,i)?;halts.push((i,why));
+   code_total=code_change_end(&state,&touched,code_total,before,i)?;
    used=used.checked_add(tx.gas_limit).ok_or(UserError::Gas)?;if used>limit{return Err(UserError::Gas)}
    tips=tips.checked_add(tip.checked_mul(U256::from(tx.gas_limit)).ok_or(UserError::Arithmetic)?).ok_or(UserError::Arithmetic)?;
    encoded.push(receipts::encode(signed.kind(),false,used,&[]).map_err(|_|UserError::Root)?);
@@ -267,7 +284,10 @@ fn execute_user_phase_inner_ctx(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&Nativ
   tips=tips.checked_add(tip.checked_mul(U256::from(gas)).ok_or(UserError::Arithmetic)?).ok_or(UserError::Arithmetic)?;
   encoded.push(receipts::encode(signed.kind(),result.result.is_success(),used,result.result.logs()).map_err(|_|UserError::Root)?);
   for (a,b) in bloom.iter_mut().zip(receipts::bloom(result.result.logs())){*a|=b}
+  let touched:Vec<Address>=if profile.is_some(){result.state.keys().copied().collect()}else{vec![]};
+  let before=code_change_start(&state,&touched,i)?;
   commit_tx(&mut state,result.state,profile.is_some());
+  code_total=code_change_end(&state,&touched,code_total,before,i)?;
  }
  let commitments=UserCommitments{transactions_root:receipts::ordered_root(raw,entry_budget).map_err(|_|UserError::Root)?,receipts_root:receipts::ordered_root(&encoded,entry_budget).map_err(|_|UserError::Root)?,gas_used:used,logs_bloom:bloom};
  Ok(UserCandidate{state,commitments,receipts:encoded,tips,log_bytes:meter.log_bytes,halts,dirty_accounts:meter.dirty_accts.len() as u64})

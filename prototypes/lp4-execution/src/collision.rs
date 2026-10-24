@@ -4,7 +4,8 @@
 //! LP4-CREATE-01: development/LP4-COLLISION-APPROVAL.md.
 //! Complete local state backend only, never a generic partial Database cache.
 use std::sync::Arc;
-use revm::{handler::register::EvmHandler, Context, FrameOrResult, FrameResult, InMemoryDB};
+use revm::{handler::register::EvmHandler, Context, Database, FrameOrResult, FrameResult};
+use crate::state_view::LocalState;
 use revm::primitives::{Address,U256};
 use revm::interpreter::{CreateOutcome,Gas,InstructionResult,InterpreterResult};
 
@@ -12,11 +13,11 @@ use revm::interpreter::{CreateOutcome,Gas,InstructionResult,InterpreterResult};
 /// is the complete base state, overlaid by all current journal values. Newly
 /// created accounts have cleared base storage. Reading this fact does not warm
 /// any account/slot or mutate the journal.
-pub fn storage_nonempty<EXT>(context:&Context<EXT,InMemoryDB>,address:Address)->bool {
+pub fn storage_nonempty<EXT,DB:Database+LocalState>(context:&Context<EXT,DB>,address:Address)->bool {
     let journal=context.evm.journaled_state.state.get(&address);
     if journal.map(|a|a.storage.values().any(|s|s.present_value()!=U256::ZERO)).unwrap_or(false){return true;}
     if journal.map(|a|a.is_created()).unwrap_or(false){return false;}
-    context.evm.db.accounts.get(&address).map(|a|a.storage.iter().any(|(key,value)|{
+    context.evm.db.local().accounts.get(&address).map(|a|a.storage.iter().any(|(key,value)|{
         journal.and_then(|a|a.storage.get(key)).map(|s|s.present_value()).unwrap_or(*value)!=U256::ZERO
     })).unwrap_or(false)
 }
@@ -25,7 +26,7 @@ pub fn storage_nonempty<EXT>(context:&Context<EXT,InMemoryDB>,address:Address)->
 // MIT; source: revm/src/context/evm_context.rs. The added complete
 // storage check occurs at the ordinary collision boundary, before any account
 // creation/value checkpoint. No Ethereum geth implementation code is used.
-pub fn register<EXT:'static>(handler:&mut EvmHandler<'_,EXT,InMemoryDB>){
+pub fn register<EXT:'static,DB:Database+LocalState>(handler:&mut EvmHandler<'_,EXT,DB>){
     assert_eq!(handler.cfg.spec_id,revm::primitives::SpecId::CANCUN);
     handler.execution.create=Arc::new(move |context,inputs|{
         use revm::interpreter::{Contract,Interpreter};

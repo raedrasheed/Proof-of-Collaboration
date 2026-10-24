@@ -442,26 +442,59 @@ fn branch(h:&mut Net,parent:[u8;32],count:usize,bodies:&[Body])->Vec<Block>{
     for d in [dir,dir2,dir3]{let _=std::fs::remove_dir_all(&d);}
 }
 
-/// A reorg whose two sides total more than 2048 blocks (PR #27 review): the walk back to the common
-/// ancestor stopped after 2·1024 steps, so only the newest detached blocks were restored and a
-/// transaction in the oldest one was lost from the pool. Release only: about 2,200 blocks are
-/// validated twice. Run with `cargo test --release --test consensus -- --ignored a11_deep_reorg`.
+/// A reorg at the spec depth whose two sides total more than 2·R_keep blocks (PR #27 review threads;
+/// review R5-3): the walk back to the common ancestor stopped after 2·1024 steps, so only the newest
+/// detached blocks were restored and a transaction in the oldest one was lost from the pool. Ours is
+/// R_keep blocks deep, theirs is heavier and longer (side cap 2·R_keep, so it is held as side blocks
+/// until it overtakes), so the walk is longer than 4096 steps and any step bound up to that fails.
+/// Release only: about 4,100 blocks are validated twice. Run with
+/// `cargo test --release --test consensus -- --ignored a11_deep_reorg`.
 #[test] #[ignore="deep-reorg test: run in release with --ignored"]
 fn a11_deep_reorg_restores_the_oldest_detached_transaction(){
+    let rk=pocold::chain::R_KEEP;
     let alice=devnet::account_key("alice");let t0=pay(&alice,0,7);
     let mut a=net();let g=a.chain.head;let first=t0.clone();
-    let ours=grow(&mut a,g,1101,&move|n,p|signed(n,p,Body{txs:vec![first.clone()],evidence:vec![]},0));
+    let ours=grow(&mut a,g,rk as usize,&move|n,p|signed(n,p,Body{txs:vec![first.clone()],evidence:vec![]},0));
     // Theirs also starts with a signed block (a signed block outweighs many fallback blocks), then
-    // fallback blocks until its work exceeds ours.
+    // fallback blocks until its work exceeds ours, then one more, so it is longer than ours.
     let mut b=net();let s0=signed(&b,g,Body::default(),1);import(&mut b,&s0);
-    let theirs:Vec<Block>=std::iter::once(s0.clone()).chain(heavier(&mut b,s0.hash(),a.chain.head().total_work,0)).collect();
-    assert!(ours.len()+theirs.len()>2048,"the two sides total {} blocks",ours.len()+theirs.len());
-    let (mut node,dir)=a11_node("deep");
+    let theirs:Vec<Block>=std::iter::once(s0.clone()).chain(heavier(&mut b,s0.hash(),a.chain.head().total_work,1)).collect();
+    assert!(ours.len()+theirs.len()>2*rk as usize,"the two sides total {} blocks",ours.len()+theirs.len());
+    let (mut node,dir,_)=rnode("a11-deep",rk,2*pocold::chain::SIDE_BLOCKS_MAX);
     for x in &ours{node.import(x.clone(),None).unwrap();}
     assert!(pool(&node).is_empty(),"t0 is included in the oldest block of our branch");
     for x in &theirs{node.import(x.clone(),None).unwrap_or_else(|e|panic!("h={}: {e:?}",x.header.h));}
-    assert_eq!(node.chain.head,theirs.last().unwrap().hash(),"reorganized to the heavier branch");
+    assert_eq!(node.chain.head,theirs.last().unwrap().hash(),"reorganized to the heavier branch at depth R_keep");
     assert_eq!(pool(&node),vec![t0],"the oldest detached block's transaction is back in the pool");
+    let _=std::fs::remove_dir_all(&dir);
+}
+/// Review R5-7: the transactions of one detached block return in block order (a reversed walk inside
+/// a block survived every earlier test).
+#[test] fn a11_detached_transactions_keep_their_order_inside_a_block(){
+    let alice=devnet::account_key("alice");let (t0,t1)=(pay(&alice,0,1),pay(&alice,1,2));
+    let (mut node,dir)=a11_node("inblock");let mut h=net();let g=h.chain.head;
+    let old=branch(&mut h,g,1,&[Body{txs:vec![t0.clone(),t1.clone()],evidence:vec![]}]);node.import(old[0].clone(),None).unwrap();
+    let mut h2=net();let new=branch(&mut h2,g,2,&[]);for b in &new{node.import(b.clone(),None).unwrap();}
+    assert_eq!(node.chain.head,new[1].hash());assert_eq!(pool(&node),vec![t0,t1],"both, in block order");
+    let _=std::fs::remove_dir_all(&dir);
+}
+/// Review R5-7: the abandoned branch's oldest block is removed by retention (it is R_keep below the new
+/// head) at the retain() that follows the adopting import, before the pool is rebuilt. Its
+/// transactions still return: the rebuild reads them from the journal by the offsets taken before
+/// retain(), not from the chain's entries.
+#[test] fn a11_detached_transactions_return_after_retention_removed_their_block(){
+    let rk=8u64;let alice=devnet::account_key("alice");let t0=pay(&alice,0,7);
+    let mut a=net();let g=a.chain.head;let first=t0.clone();
+    let ours=grow(&mut a,g,rk as usize,&move|n,p|signed(n,p,Body{txs:vec![first.clone()],evidence:vec![]},0));
+    let mut b=net();let s0=signed(&b,g,Body::default(),1);import(&mut b,&s0);
+    let mut theirs:Vec<Block>=std::iter::once(s0.clone()).chain(heavier(&mut b,s0.hash(),a.chain.head().total_work,0)).collect();
+    while theirs.len()<=rk as usize{let p=theirs.last().unwrap().hash();let x=fallback(&b,p,0);import(&mut b,&x);theirs.push(x);}
+    let (mut node,dir,_)=rnode("a11-evicted",rk,4*rk as usize);
+    for x in &ours{node.import(x.clone(),None).unwrap();}
+    for x in &theirs{node.import(x.clone(),None).unwrap_or_else(|e|panic!("h={}: {e:?}",x.header.h));}
+    assert_eq!(node.chain.head,theirs.last().unwrap().hash());
+    assert!(node.chain.get(&ours[0].hash()).is_none(),"positive control: the block carrying t0 was removed by retention");
+    assert_eq!(pool(&node),vec![t0],"its transaction is back in the pool all the same");
     let _=std::fs::remove_dir_all(&dir);
 }
 

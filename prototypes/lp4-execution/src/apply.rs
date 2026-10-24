@@ -187,7 +187,9 @@ impl Genesis{
     pub fn initial_supply(&self)->U256{self.image.initial_supply()}
 }
 
-struct Exec<'a>{state:InMemoryDB,profile:&'a ProfileIdentity,block:NativeBlockContext,origin:Address,used:u64,limits:CodeLimits,meter:Meter}
+/// `code_total`: the state's logical code total once the first SYSTEM call has fully checked it
+/// (decision package C-2, item 2).
+struct Exec<'a>{state:InMemoryDB,profile:&'a ProfileIdentity,block:NativeBlockContext,origin:Address,used:u64,limits:CodeLimits,meter:Meter,code_total:Option<u64>}
 /// CapsTracker (P7): distinct storage keys changed and accounts touched by SYSTEM
 /// calls in one block, plus the largest single-call gas.
 #[derive(Clone,Debug,Default)]
@@ -201,7 +203,7 @@ impl<'a> Exec<'a>{
         let allocation=remaining.min(PER_CALL_GAS);if allocation==0{return Err(ApplyError::Budget("G_SYS"))}
         let tx=TxEnv{caller:self.origin,transact_to:TxKind::Call(to),gas_limit:allocation,gas_price:U256::ZERO,value:U256::ZERO,
             data:Bytes::from(data),chain_id:Some(self.profile.spec().chain_id),..Default::default()};
-        let mut evm=native::build_engine(&self.state,tx,&self.block,self.profile.spec().chain_id,Some(self.limits));
+        let mut evm=native::build_engine(&self.state,self.code_total,tx,&self.block,self.profile.spec().chain_id,Some(self.limits));
         evm.handler.pre_execution.load_accounts(&mut evm.context).map_err(|e|err(format!("{e:?}")))?;
         let precompiles=evm.handler.pre_execution.load_precompiles();evm.context.evm.set_precompiles(precompiles);
         for a in [system_address(),to,escrow()]{evm.context.evm.journaled_state.warm_preloaded_addresses.insert(a);}
@@ -217,8 +219,17 @@ impl<'a> Exec<'a>{
         if !logs.is_empty(){return Err(ApplyError::Logs)}
         for (a,acct) in state.iter(){ if acct.is_touched(){self.meter.accounts.insert(*a);} for (k,v) in acct.storage.iter(){ if v.is_changed(){self.meter.keys.insert((*a,*k));} } }
         self.meter.max_call_gas=self.meter.max_call_gas.max(result.gas.spent());self.meter.calls+=1;self.meter.call_gas.push((name,result.gas.spent()));
+        drop(evm);
+        // C-2 item 2: the first call checks the whole state, as before; later calls check what they
+        // touched against the running total (the same Ok/Err and texts as a full scan).
+        let touched:Vec<Address>=state.keys().copied().collect();
+        let before=match self.code_total{Some(_)=>code_caps::code_of(&self.state,&touched).map_err(ApplyError::Caps)?,None=>0};
         commit_epoch(&mut self.state,state);
-        code_caps::validate_snapshot(&self.state,self.limits).map_err(ApplyError::Caps)?;
+        self.code_total=Some(match self.code_total{
+            Some(total)=>code_caps::revalidate_touched(&self.state,self.limits,&touched,total,before).map_err(ApplyError::Caps)?,
+            None=>{code_caps::validate_snapshot(&self.state,self.limits).map_err(ApplyError::Caps)?;code_caps::inventory(&self.state).map_err(ApplyError::Caps)?}});
+        debug_assert_eq!(code_caps::validate_snapshot(&self.state,self.limits),Ok(()));
+        debug_assert_eq!(code_caps::inventory(&self.state),Ok(self.code_total.unwrap()));
         Ok(result.output)
     }
 }
@@ -262,7 +273,7 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
         state.block_hashes.insert(U256::from(*n),*hash);
     }
     let block=NativeBlockContext{height:U256::from(h),timestamp:U256::from(input.timestamp),gas_limit:U256::from(input.gas_limit),base_fee:input.base_fee,prevrandao:input.prevrandao};
-    let mut ex=Exec{state,profile,block,origin,used:0,limits,meter:Meter::default()};
+    let mut ex=Exec{state,profile,block,origin,used:0,limits,meter:Meter::default(),code_total:None};
 
     // Phase 0.
     for e in &input.evidence{
@@ -291,6 +302,8 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
     ex.state=users.state().clone();
     let tips=users.tips();
     code_caps::validate_snapshot(&ex.state,limits).map_err(ApplyError::Caps)?;
+    // The USER phase replaced the state: the next SYSTEM call checks it whole again, as before C-2.
+    ex.code_total=None;
 
     // Phase 2: issuance + closeBlock, or finalize (no subsidy, tips burned).
     let mut issued=U256::ZERO;

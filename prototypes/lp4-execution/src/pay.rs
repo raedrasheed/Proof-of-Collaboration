@@ -17,11 +17,9 @@ pub struct NativeContext {
     pub(crate) active_code: Option<Address>,
 }
 /// Durability is judged on the pre-transaction database, never the mutable execution journal.
-/// That database is the engine's own: during `transact()` revm writes only to its journaled state,
-/// and the database gains nothing but cache entries for accounts that do not exist
-/// (`AccountState::NotExisting`), which are not durable either. So it answers exactly as the copy
-/// of the snapshot this context used to own (decision package C-2, item 3: one whole-state clone
-/// per transaction less). Callers still cannot submit an eligibility/success flag.
+/// That database is the snapshot the engine borrows (`state_view::StateRef`), which nothing writes
+/// while the engine runs, so it answers exactly as the copy of the snapshot this context used to own
+/// (decision package C-2, item 3). Callers still cannot submit an eligibility/success flag.
 fn durable(pre_transaction: &InMemoryDB, recipient: Address) -> bool {
     pre_transaction.accounts.get(&recipient).map(|account| {
         account.account_state != revm::db::AccountState::NotExisting
@@ -41,7 +39,7 @@ fn outcome(inputs: &CallInputs, result: InstructionResult) -> FrameOrResult {
 
 /// Called before revm's ordinary value transfer/frame creation. No PAY recipient
 /// code is ever entered. All state changes use the enclosing revm journal.
-pub(crate) fn call(context: &mut Context<NativeContext,InMemoryDB>, inputs: &CallInputs)
+pub(crate) fn call(context: &mut Context<NativeContext,crate::state_view::StateRef<'_>>, inputs: &CallInputs)
  -> Result<FrameOrResult,EVMError<core::convert::Infallible>> {
     let fail=|| outcome(inputs,InstructionResult::InvalidOperandOOG);
     if inputs.bytecode_address != pay_address() || inputs.target_address != pay_address()
@@ -54,7 +52,7 @@ pub(crate) fn call(context: &mut Context<NativeContext,InMemoryDB>, inputs: &Cal
         || inputs.gas_limit<PAY_GAS { return Ok(fail()); }
     let recipient=Address::from_slice(&inputs.input[12..32]);
     let amount=U256::from_be_slice(&inputs.input[32..64]);
-    if recipient==Address::ZERO || !durable(&context.evm.db, recipient) { return Ok(fail()); }
+    if recipient==Address::ZERO || !durable(context.evm.db.db, recipient) { return Ok(fail()); }
     let evm=&mut context.evm.inner;
     evm.journaled_state.load_account(inputs.caller,&mut evm.db)?;
     evm.journaled_state.load_account(recipient,&mut evm.db)?;

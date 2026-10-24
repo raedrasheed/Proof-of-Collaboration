@@ -1,7 +1,8 @@
 //! LP4-CODE-01: development/LP4-CODE-APPROVAL.md.
 //! Complete EmptyDB-backed inventory only; not a partial/persisted state proof.
 use std::sync::Arc;
-use revm::{Context, InMemoryDB, handler::register::EvmHandler};
+use revm::{Context, Database, InMemoryDB, handler::register::EvmHandler};
+use crate::state_view::LocalState;
 use revm::primitives::{AccountInfo, EVMError, KECCAK_EMPTY};
 use revm::interpreter::InstructionResult;
 
@@ -10,7 +11,7 @@ pub struct CodeLimits { pub runtime: u32, pub logical: u64 }
 
 /// Resolve actual runtime bytes and verify their content address. An unknown
 /// nonempty hash must never silently resolve to EmptyDB's empty-code fallback.
-fn code_len(db:&InMemoryDB, info:&AccountInfo)->Result<u64,String> {
+pub(crate) fn code_len(db:&InMemoryDB, info:&AccountInfo)->Result<u64,String> {
     let code=info.code.as_ref().or_else(||db.contracts.get(&info.code_hash));
     match code {
         Some(code) if code.hash_slow()==info.code_hash =>
@@ -29,6 +30,32 @@ pub fn inventory(db:&InMemoryDB)->Result<u64,String> {
     })
 }
 
+/// Logical code of the given addresses' current accounts (absent or NotExisting: 0).
+pub fn code_of(db:&InMemoryDB,addresses:&[revm::primitives::Address])->Result<u64,String> {
+    addresses.iter().filter_map(|a|db.accounts.get(a).and_then(|x|x.info())).try_fold(0u64,|sum,info|{
+        sum.checked_add(code_len(db,&info)?).ok_or_else(||"logical code overflow".into())
+    })
+}
+/// The checks of `validate_snapshot` for a state that passed it before and has since changed only at
+/// `touched`, whose logical code was `before`; `total` is the inventory before the change. Returns the
+/// new inventory. Untouched accounts are unchanged, so checking the touched ones and the updated total
+/// gives the same Ok/Err, with the same texts, as a full scan (decision package C-2, item 2).
+pub(crate) fn revalidate_touched(db:&InMemoryDB,limits:CodeLimits,touched:&[revm::primitives::Address],total:u64,before:u64)->Result<u64,String> {
+    if limits.runtime<24577 {return Err("R9: B_code_max below 24577".into());}
+    let mut after=0u64;
+    for info in touched.iter().filter_map(|a|db.accounts.get(a).and_then(|x|x.info())) {
+        let n=code_len(db,&info)?;
+        if n>u64::from(limits.runtime) {return Err("snapshot exceeds B_code_max".into());}
+        after=after.checked_add(n).ok_or_else(||"logical code overflow".to_string())?;
+    }
+    let total=total.checked_sub(before).and_then(|t|t.checked_add(after)).ok_or_else(||"logical code overflow".to_string())?;
+    if total>limits.logical {return Err("snapshot exceeds CODE_CAP".into());}
+    Ok(total)
+}
+
+/// `validate_snapshot`, then the inventory: the code total of a state that passes the limits.
+pub fn checked_total(db:&InMemoryDB,limits:CodeLimits)->Result<u64,String> {validate_snapshot(db,limits)?;inventory(db)}
+
 pub fn validate_snapshot(db:&InMemoryDB,limits:CodeLimits)->Result<(),String> {
     if limits.runtime<24577 {return Err("R9: B_code_max below 24577".into());}
     for a in db.accounts.values().filter_map(|a|a.info()) {
@@ -38,9 +65,20 @@ pub fn validate_snapshot(db:&InMemoryDB,limits:CodeLimits)->Result<(),String> {
     Ok(())
 }
 
-fn current_total<EXT>(context:&Context<EXT,InMemoryDB>)->Result<u64,String> {
-    let db=&context.evm.db;
+fn current_total<EXT,DB:Database+LocalState>(context:&Context<EXT,DB>)->Result<u64,String> {
+    let db=context.evm.db.local();
     let state=&context.evm.journaled_state.state;
+    // A known base total (decision package C-2, item 2): the base accounts outside the journal are
+    // the base total less the base accounts the journal holds, so only journaled accounts are read.
+    if let Some(total)=context.evm.db.code_total() {
+        let mut sum=total;
+        for address in state.keys() {
+            if let Some(info)=db.accounts.get(address).and_then(|a|a.info()) {
+                sum=sum.checked_sub(code_len(db,&info)?).ok_or_else(||"logical code total below a member".to_string())?;
+            }
+        }
+        return state.values().try_fold(sum,|sum,a|sum.checked_add(code_len(db,&a.info)?).ok_or_else(||"logical code overflow".into()));
+    }
     let base=db.accounts.iter().filter(|(address,_)|!state.contains_key(*address))
         .filter_map(|(_,a)|a.info());
     // SELFDESTRUCT schedules end-of-transaction deletion. Its code remains
@@ -55,7 +93,7 @@ fn current_total<EXT>(context:&Context<EXT,InMemoryDB>)->Result<u64,String> {
 /// Only the existing deposit handler sees the amended runtime limit. This leaves
 /// EIP3860's 49152 limit, word gas, and exact error ordering untouched, without
 /// copying or modifying the interpreter or its transaction validator.
-pub fn register<EXT:'static>(handler:&mut EvmHandler<'_,EXT,InMemoryDB>,limits:CodeLimits) {
+pub fn register<EXT:'static,DB:Database+LocalState>(handler:&mut EvmHandler<'_,EXT,DB>,limits:CodeLimits) {
     assert_eq!(handler.cfg.spec_id,revm::primitives::SpecId::CANCUN);
     let previous=handler.execution.create_return.clone();
     handler.execution.create_return=Arc::new(move |context,frame,mut result| {
@@ -63,7 +101,7 @@ pub fn register<EXT:'static>(handler:&mut EvmHandler<'_,EXT,InMemoryDB>,limits:C
             && result.output.len()<=limits.runtime as usize {
             let total=current_total(context).map_err(EVMError::Custom)?;
             let old=context.evm.journaled_state.state.get(&frame.created_address)
-                .map(|a|code_len(&context.evm.db,&a.info)).transpose()
+                .map(|a|code_len(context.evm.db.local(),&a.info)).transpose()
                 .map_err(EVMError::Custom)?.unwrap_or(0);
             let proposed=total.checked_sub(old).and_then(|n|n.checked_add(result.output.len() as u64))
                 .ok_or_else(||EVMError::Custom("logical code overflow".into()))?;

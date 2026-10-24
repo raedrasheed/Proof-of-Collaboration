@@ -93,7 +93,14 @@ struct Production{parent:[u8;32],height:u64,attempt:u32,mode:Mode,shares:BTreeSe
 /// the head state (pending state), so several nonces per sender are allowed. The pending
 /// state is normalized after every transaction and follows the block caps (`PoolMeter`), so
 /// it is bounded like a snapshot (A13).
-pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending_state:InMemoryDB,pub bytes:usize,meter:PoolMeter}
+/// The code total of a state that passes the profile's code limits, or None (then every submission runs
+/// the full checks, as before).
+fn checked_code_total(state:&InMemoryDB,spec:&Spec)->Option<u64>{
+    let cp=spec.cp();pocol_lp4_execution::code_caps::checked_total(state,pocol_lp4_execution::code_caps::CodeLimits{runtime:cp.B_code_max,logical:cp.CODE_CAP}).ok()
+}
+/// `code_total`: the pending state's logical code total once it is known to pass the code limits (the head
+/// state is checked once per new head; decision package C-2), so a submission does not rescan the state.
+pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending_state:InMemoryDB,pub bytes:usize,meter:PoolMeter,code_total:Option<u64>}
 /// D-A13-BUDGET: 64 -> 32 MiB (network.md: pool <= 64 MiB); 256 transactions of TX_MAX.
 pub const POOL_MAX_BYTES:usize=32*1024*1024;
 /// Local limit on pooled transactions (about ten blocks of plain transfers): every new head
@@ -229,11 +236,11 @@ impl Node{
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
         let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.light_queue);let resp=crate::rpc::RespPools::new(&cfg.limits.rpc);
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
-        let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());
+        let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());let pool_code=checked_code_total(&head_state,&chain.spec);
         let net=net::Net::new(cfg.limits.net.clone());
         let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
-            pool:Pool{txs:vec![],pending_state:head_state,bytes:0,meter},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
+            pool:Pool{code_total:pool_code,txs:vec![],pending_state:head_state,bytes:0,meter},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;node.stats.replay_skipped=skipped;node.stats.restored=restored as u64;
         if rec.torn_tail{node.log("recovered torn journal tail into a new journal");}
         if rec.migrated_v1{node.log("migrated a fully verified v1 journal to format v2 (original kept as blocks.journal.v1-n)");}
@@ -404,12 +411,19 @@ impl Node{
         if self.pool.txs.iter().any(|(h,_)|*h==hash){return Ok(hash)}
         if self.pool.bytes+raw.len()>POOL_MAX_BYTES||self.pool.txs.len()>=POOL_MAX_TXS{return Err("-32016 pool full".into())}
         let ctx=self.next_block_ctx();
-        let r=native::execute_for_profile(&self.pool.pending_state,env.tx_env(),&ctx,self.chain.spec.profile()).map_err(|e|format!("-32000 {e:?}"))?;
+        let r=match self.pool.code_total{
+            Some(total)=>native::execute_on_validated(&self.pool.pending_state,total,env.tx_env(),&ctx,self.chain.spec.profile()),
+            None=>native::execute_for_profile(&self.pool.pending_state,env.tx_env(),&ctx,self.chain.spec.profile())}.map_err(|e|format!("-32000 {e:?}"))?;
         // A13: the effects must stay within the caps a block enforces; then only live entries are kept.
         self.pool.meter.admit(&self.pool.pending_state,&r.state).map_err(|h|format!("-32000 pending state would exceed a cap ({h:?})"))?;
         // The same commit as a block's USER phase (EIP-161 cleanup, normalization), so the meter
         // follows the pending state exactly (second review: touched empty accounts were kept).
+        let touched:Vec<Address>=r.state.keys().copied().collect();
+        let before=pocol_lp4_execution::code_caps::code_of(&self.pool.pending_state,&touched);
         user_phase::commit_tx(&mut self.pool.pending_state,r.state,true);user_phase::drop_unreferenced_code(&mut self.pool.pending_state);
+        // The running total follows the commit; any failure (unreachable for an engine result) falls back to full checks.
+        self.pool.code_total=match(self.pool.code_total,before,pocol_lp4_execution::code_caps::code_of(&self.pool.pending_state,&touched)){
+            (Some(t),Ok(b),Ok(a))=>t.checked_sub(b).and_then(|t|t.checked_add(a)),_=>None};
         self.pool.bytes+=raw.len();self.pool.txs.push((hash,raw.clone()));
         if relay{self.broadcast(&Msg::Tx{raw},None);}
         Ok(hash)
@@ -431,6 +445,7 @@ impl Node{
     }
     fn rebuild_pool(&mut self,detached:Vec<u64>){
         let old=std::mem::take(&mut self.pool.txs);self.pool.bytes=0;self.pool.pending_state=self.chain.head().state.clone();
+        self.pool.code_total=checked_code_total(&self.pool.pending_state,&self.chain.spec);
         self.pool.meter=PoolMeter::of(&self.pool.pending_state,self.chain.spec.profile());
         // Transactions in abandoned blocks return to the pool (consensus §10), before the previous
         // pool, oldest block first and in block order; each is re-executed on the new head (nonce,
@@ -440,9 +455,12 @@ impl Node{
         for off in detached{
             let txs=match self.journal.read_at(off).map_err(|e|format!("{e:?}")).and_then(|(_,bb,_)|Body::decode(&bb,body_max).map_err(|e|format!("{e:?}"))){
                 Ok(b)=>b.txs,Err(e)=>{self.log(&format!("journal read of a detached block at {off}: {e}"));continue}};
-            for raw in txs{let _=self.submit_tx(raw,false);}
+            for raw in txs{if self.pool.txs.len()>=POOL_MAX_TXS{return}let _=self.submit_tx(raw,false);}
         }
-        for (_,raw) in old{let _=self.submit_tx(raw,false);}
+        // A pool full by count refuses every further submission (-32016) without a state change, so the
+        // rebuild stops there instead of decoding the rest (PR #27 review R5-6; full by bytes cannot stop:
+        // a smaller transaction may still fit).
+        for (_,raw) in old{if self.pool.txs.len()>=POOL_MAX_TXS{return}let _=self.submit_tx(raw,false);}
     }
     /// Pool transactions that still execute in order (for a signed template on `p`). execution.md:83: a
     /// transaction that would pass TX_CAP or TXBYTES_CAP on p's branch (item 16, the accounting of
