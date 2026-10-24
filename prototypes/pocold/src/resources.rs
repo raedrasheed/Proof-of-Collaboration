@@ -13,6 +13,9 @@ use crate::{chain::{self,Entry},header::Header,net,node::{self,Limits},types::{B
 /// clones of the parent (begin_attempt, lock), the pool's pending state and its execution
 /// copies, and the rolling rebuild (two). Counted generously: 10.
 pub const TRANSIENT_SNAPSHOTS:u128=10;
+/// Gas per byte of deployed runtime (EIP-170 code deposit, 200): an execution of g gas deploys at
+/// most g/200 bytes.
+pub const CODE_DEPOSIT:u128=200;
 /// glibc keeps up to 40 MiB of exited threads' stacks for reuse (the nptl stack cache);
 /// counted on every platform.
 pub const STACK_CACHE:u128=40<<20;
@@ -80,15 +83,29 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let accounts=u128::from(cp.ACCT_CAP).checked_add(5)?;let slots=u128::from(cp.SLOT_CAP).checked_add(u128::from(cp.SYS_SLOT_MAX))?;
     let snapshot_bytes=memory::snapshot(accounts,slots,accounts.checked_add(2)?)?;
     let snapshots=add(&[1,u128::from(k_hist),u128::from(side_max),TRANSIENT_SNAPSHOTS])?;
-    // Code: CODE_CAP logical bytes per snapshot (code_caps), with analysis, unshared at worst.
-    let code_per=memory::code_bytes(u128::from(cp.CODE_CAP),accounts)?;let code=mul(snapshots,code_per)?;
+    // Code (decision package C-1 S2). A runtime is held in refcounted buffers (revm Bytecode: Bytes and
+    // an Arc jump table) that a state copy shares (journal_measure::retained_states_of_one_lineage_
+    // share_their_code_buffers). Each block's state is its parent's copy plus that block's changes, and
+    // under Cancun code leaves a state only within its creating transaction. So the states of one
+    // lineage hold one set of buffers, at most CODE_CAP logical bytes with analysis (code_caps).
+    // A separate execution of the same code makes separate buffers. Counted as a full set each:
+    // - every side-branch state (unshared at worst: rebuilt from an older state);
+    // - a rebuild or restore in progress, which re-creates the code it re-executes;
+    // - the pool's pending state, which holds its own creates.
+    // The per-copy containers (map entries, Bytecode headers) are in every snapshot, and the
+    // execution in progress makes at most its gas / CODE_DEPOSIT bytes of new runtime.
+    let code_set=memory::code_bytes(u128::from(cp.CODE_CAP),0)?;let code_entries=memory::code_bytes(0,accounts)?;
+    let exec_code=memory::code_bytes(memory::execution_gas(cp.GAS_LIMIT)/CODE_DEPOSIT,0)?;
     let (retained,side_states)=(1+u128::from(k_hist),u128::from(side_max));
+    let code=add(&[code_set,mul(side_states,code_set)?,code_set,code_set,mul(snapshots,code_entries)?,mul(EXECUTIONS,exec_code)?])?;
     let mut items=vec![("snapshots/head and K_hist retained states",mul(retained,snapshot_bytes)?),("snapshots/side_max side-branch states",mul(side_states,snapshot_bytes)?),
         ("snapshots/transient working copies",mul(TRANSIENT_SNAPSHOTS,snapshot_bytes)?),
         // A table that grows in a working copy keeps its old allocation until the new one is filled:
         // one table at a time (single consensus thread), at most a whole snapshot's tables.
         ("snapshots/table growth in a working copy",snapshot_bytes),
-        ("code/head and K_hist retained states",mul(retained,code_per)?),("code/side_max side-branch states",mul(side_states,code_per)?),("code/transient working copies",mul(TRANSIENT_SNAPSHOTS,code_per)?)];
+        ("code/one set for the canonical lineage (its states share the buffers)",code_set),("code/side_max side-branch states (a set each)",mul(side_states,code_set)?),
+        ("code/a rebuild or restore in progress (a set)",code_set),("code/the pool's pending state (a set)",code_set),
+        ("code/containers in every snapshot",mul(snapshots,code_entries)?),("code/new runtime of the execution in progress",mul(EXECUTIONS,exec_code)?)];
     // Per block kept in memory: the map slot (Entry inline), the canonical index, header heap
     // (encoded, ut_raw, bloom, proposer, sig, share nonces), ParentResult shares, nonce ranges
     // (members <= M_max), an empty pruned state and evidence (E_max items <= EVID_BYTES_MAX).

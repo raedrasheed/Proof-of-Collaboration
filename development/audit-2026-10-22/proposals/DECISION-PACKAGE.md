@@ -91,6 +91,21 @@ lands.
 **Recommendation: (a), in stages.** I am starting with S2 and S1 now, under C-1. You decide whether the
 work continues through S5, or stops at S3 with (b).
 
+**S2 status (2026-10-24, done; measured by `derive()`):**
+- The test `journal_measure::retained_states_of_one_lineage_share_their_code_buffers` shows that a
+  state copy shares its runtime buffers. Its control shows that a separate execution makes its own.
+- The code term is now:
+  - one set for the canonical lineage;
+  - one set per side state, one for a rebuild or restore in progress, and one for the pool's pending
+    state (unshared at worst);
+  - plus the per-copy containers.
+- Network code group: 54.69 → 9.69 GiB. Model total: 150.83 → **105.83 GiB**, so the gate needs
+  **120.95 GiB** (evidence/decision-package/a13-network-profile-s2.log). Still far over 6 GiB.
+- Devnet model total: 5,581,426,268 → 5,487,223,178 B, which leaves 163.4 MiB unused under the 6 GiB
+  gate.
+- The real remaining terms are the 45 full state copies (75.12 GiB, S3/S5) and the in-memory history
+  (19.19 GiB, S1).
+
 ---
 
 ## 2. Priority 2: block validation time
@@ -136,6 +151,16 @@ rebuilds the world root.
    totals, on every block of the suites.
 5. Mutation controls: a stale cache, a skipped dirty account, a wrong running total.
 
+**Status (2026-10-24):**
+- Items 1–3 landed in `49b2bc2` and `2ce03c1`. Measured against `3a52ae6` on the same states
+  ([evidence/c2-execution](../evidence/c2-execution/README.md)), at the near-cap state:
+  - 380 transfers: 22,553 ms → 655 ms;
+  - 247 CREATE2 creates: 4,862 ms → 562 ms;
+  - an empty child: 777 ms → 465 ms.
+- Acceptance test 2 (< 2 s, aim ≤ 1 s) is met for that block, at a load average of 2–3 on 4 CPUs. It
+  will be re-measured unloaded with the final code.
+- Item 4 (the state root, most of the empty child's 465 ms) waits for C-1; see §6.
+
 ### D-2 [NORMATIVE / profile]: the per-gas worst case (MODEXP)
 
 C-2 does not change the cost of a MODEXP block, which is pure precompile work.
@@ -153,6 +178,34 @@ still exceeds the devnet budget after C-2.
 
 **Acceptance tests:** admission passes with the new devnet timing; the R14/R19 calibration on a MODEXP
 block stays ≤ t_exec; the vectors are unchanged.
+
+### D-7 [NORMATIVE / local pool policy]: bounding the pool's work per new head (review R3-6)
+
+**Problem:**
+- Every new head re-executes every pooled transaction (`rebuild_pool`) on the consensus thread.
+- The pool is bounded by count (POOL_MAX_TXS = 4096) and bytes (32 MiB), not by gas. So 4,096 pooled
+  MODEXP transactions near GAS_LIMIT cost about 68 min per new head on an idle host (the reviewer
+  measured 1.39 s per pooled transaction under load).
+- C-2 removed the per-submission scan and clone, but not the EVM work itself.
+- network.md does not specify the pool. Which transactions it accepts is RPC-visible (an
+  eth_sendRawTransaction error), so a bound is a policy choice that needs your approval.
+
+| option | effect | consensus | genesisHash | compatibility | resources |
+|---|---|---|---|---|---|
+| **(a) a pool gas bound**: Σ gas_limit of pooled transactions ≤ POOL_GAS_MAX = 4·GAS_LIMIT; a submission beyond it is −32016 {pool full} | the per-head work is at most about 4 blocks of execution | none | none | a wallet sees −32016 earlier under load (an existing code) | per-head re-execution bounded by about 4·t_exec (devnet ≈ 4 s, network ≈ 12 s), down from about 68 min |
+| (b) incremental revalidation: on a new head, re-execute only the pooled transactions of senders the block touched, then rebuild the pending state lazily | none for validity; the pool's cap meter must be recomputed, which needs care | none | none | none | depends on the block; no bound in the worst case |
+| (c) both | (a)'s bound, (b)'s typical cost | none | none | as (a) | as (a), lower typically |
+| (d) keep as is | — | — | — | — | about 68 min per head in the worst case |
+
+**Recommendation: (a) now, with POOL_GAS_MAX = 4·GAS_LIMIT.** It is a small change with a clear
+bound. Add (b) later as an optimisation; it needs no approval because it is result-equivalent.
+
+**Acceptance tests:**
+- A submission past POOL_GAS_MAX is −32016, and nothing is pooled.
+- The rebuild after a new head, with a full pool of near-GAS_LIMIT transactions, takes ≤ 4·t_exec plus
+  the per-transaction state term (measured).
+- A mutant without the bound fails the test.
+- The A13 note for the pool (item 7) gets the figure.
 
 ---
 
@@ -305,14 +358,29 @@ controls.
 
 ## 6. What is being done now under the current authorization
 
-Order, by dependency and by gain against risk:
-1. **C-2 items 1–3.**
-   - They are small and in one module.
-   - They cut the measured 10.2 s and also remove two of the transient state copies of C-1.
-2. **C-1 S2.** A measurement test of code sharing in a snapshot clone, then the code term changes.
-3. **C-1 S1.** Canonical history off the heap, reusing the D-REORG-REDB offload.
-4. **C-2 item 4.** The incremental state root.
-5. **C-1 S3 together with C-3 item 1** (diffs), then C-3 items 2–5, then C-1 S4–S5 if you choose D-1 (a).
+**Done:**
+- **C-2 items 1–3** (`49b2bc2`, `2ce03c1`). Measured in §2.
+- **C-1 S2** (code counted once per lineage; §1).
+- **consensus.md:101, "the peer is punished"** (R1-5). The drawn proposer's signed template for this
+  node's parent that fails item 16, its evidence or its rebuild closes its sender's connection
+  (`templatePenalties` in pocol_status). Test: `consensus::an_invalid_template_from_the_drawn_proposer_punishes_its_peer`.
+- **Fixes for the review findings** (`6e99b19`, `af2f3a8`): R1-1, R1-2, R1-4, R2-1 to R2-5, R3-3, R5-1,
+  and R4-1/R4-2 (the unit test and the e2e checks). Details are in §7.
+
+**Next, in order (by dependency and by gain against risk):**
+1. **C-1 S1.** Canonical history off the heap, reusing the D-REORG-REDB offload.
+2. **C-1 S3 together with C-3 item 1** (diffs), then C-3 items 2–5, then C-1 S4–S5 if you choose D-1 (a).
+3. **C-2 item 4, the incremental state root, moved after C-1.**
+   - Caching account storage roots beside every retained state costs about 52 B per account. At the
+     network's 10⁶ accounts and K_hist = 32 states, that is about 1.7 GiB, which the 6 GiB budget cannot
+     take while the states are full copies.
+   - It is therefore built on C-1's shared or on-disk state (S3/S5, the spec's persistent trie,
+     storage.md:63–73), not before it.
+   - Until then the root stays a full recomputation per block: 465 ms on the near-cap devnet state.
+4. **Smaller conformance items:**
+   - R1-3 (a TXBYTES test for received templates).
+   - The R3 study corrections (R3-1, R3-2, R3-7, R3-8, R3-13), in a new note; the study itself stays
+     unchanged.
 
 Each lands with:
 - a fail-before or measurement test;
@@ -324,29 +392,36 @@ Each lands with:
 None changes validity, roots, receipts, genesisHash or RPC results. If one would, it stops and comes
 back here as [NORMATIVE].
 
-## 7. Independent reviews still missing (requested 2026-10-24, results in REPAIR-REPORT.md when done)
+## 7. Independent reviews (requested 2026-10-24; done)
 
-| review | subject |
-|---|---|
-| R1 | caps round 3b (final `e985ce1`) on the current head |
-| R2 | RpcGuard round 3c (`dd7d1ec`), including the Windows socket code |
-| R3 | the journal round-3c measurements and projections, and the effect of `462fffc` |
-| R4 | e2e round 4: does the test really detect non-convergence and the wrong branch (new mutants) |
-| R5 | `462fffc` (the A11 reorg walk and the R14/R19 calibration) |
+The five reviews are done. Each was made by a separate agent, given the code and the spec but not this
+track's conclusions. The reports and the disposition of every finding rated MEDIUM or above are in
+[evidence/reviews-2026-10-24](../evidence/reviews-2026-10-24/README.md).
+
+| review | subject | findings ≥ MEDIUM | state |
+|---|---|---|---|
+| R1 | caps round 3b | R1-1, R1-2 | fixed (`6e99b19`) |
+| R2 | RpcGuard round 3c, Windows socket code | R2-1 | fixed (`af2f3a8`); the LOWs R2-2 to R2-5 too |
+| R3 | journal round 3c, `462fffc` | R3-2, R3-3 (HIGH); R3-1, R3-6, R3-7 | R3-2 and R3-7 by C-2; R3-3 fixed (`af2f3a8`); R3-1 a study correction; **R3-6 needs your decision (D-7)** |
+| R4 | e2e round 4 | R4-1, R4-2 | fixed: unit test (`af2f3a8`) and e2e checks; base 42/42 twice, and the reviewer's three mutants each fail at the check aimed at them (evidence/reviews-2026-10-24/r4-fixes) |
+| R5 | `462fffc` | R5-1 | fixed by C-2 |
+
+No review found a deviation that needs a normative change, apart from R3-6 (D-7).
 
 ## 8. Tests to re-run on the final code (and why)
 
 | test | last run | why it must be re-run |
 |---|---|---|
-| lp4 and pocold suites, release | `462fffc` | every C-1/C-2 change |
-| debug runs (assert-release and pure debug, the consensus tests one at a time, spec depth included) | `3c3792e` | node.rs changed in round 3 and in `462fffc` |
-| the ignored consensus tests (spec depth 2048/2049, D133 at 400, the A11 deep reorg) | `462fffc` | C-1 S1/S3 touch the same paths |
-| D-REORG-REDB mutation controls (30) | `3342af3` | the reorg restore path changed in `462fffc`; C-1 changes storage |
-| caps.rs, caps_identity, log_cap, the caps-test build | `2b1a571` / `462fffc` | C-2 changes USER execution |
-| e2e_devnet, e2e_site | `462fffc` / `c959379` | every code change |
+| lp4 and pocold suites, release | the decision-package commit after `af2f3a8` (lp4 173/0, pocold 184/0) | every later change |
+| debug runs (assert-release and pure debug, the consensus tests one at a time, spec depth included) | `3c3792e` | node.rs changed in round 3, in `462fffc`, in C-2 and in the replay restore (R3-3) |
+| the ignored consensus tests (spec depth 2048/2049, D133 at 400, the A11 deep reorg) | `2ce03c1` | R3-3 changed replay; C-1 S1/S3 touch the same paths |
+| D-REORG-REDB mutation controls (30) | `3342af3` | R3-3 changed the replay restore; `462fffc` the reorg restore; C-1 changes storage |
+| RpcGuard mutation pass | `dd7d1ec` round 3c | R2-1 to R2-4 changed rpc.rs and the batch loop |
+| caps.rs, caps_identity, log_cap, the caps-test build | `6e99b19` | C-2 item 4 will change block execution |
+| e2e_devnet, e2e_site | e2e_devnet with the R4 checks on `af2f3a8` binaries, 42/42 twice; e2e_site on `c959379` | the R1-5 penalty and the S2 model landed after that e2e run (node.rs, resources.rs); e2e_site has not run since round 3 |
 | the full LP10 integration: extension build and 234 unit tests, real Chrome e2e, integrated Chrome | `3c3792e` | round-3 RPC changes (RpcGuard, −32020) and every later change |
 | witnesses: 17 observations and 15 positive controls (scratch only) | `3c3792e` | round-3 and later code |
-| RSS measurement | `3c3792e` | C-1 changes memory |
+| RSS measurement | `3c3792e` | C-1 changes memory; S2 lowered the code term, so the measured RSS must be checked against the new model |
 | journal measurements (validation time, reorg restore, open) | round 3c | C-2 and C-1 change the measured paths |
 | R14/R19 admission calibration | `462fffc` | C-2 changes the timing |
 | Windows CI | `462fffc` (run 26) | runs on every push of the PR |

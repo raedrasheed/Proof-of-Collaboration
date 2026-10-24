@@ -856,3 +856,26 @@ fn jm_tx_state_term(){
         }
     }
 }
+
+/// Decision package C-1 S2: a state copy shares its code buffers with the state it was copied from.
+/// Every state the chain holds along one canonical lineage (each block's state is its parent's copy
+/// plus that block's changes) points at the same code bytes for a code hash, so that lineage holds each
+/// runtime once. Not a measurement: it runs by default. The A13 code term (resources.rs) relies on it.
+#[test] fn retained_states_of_one_lineage_share_their_code_buffers(){
+    let mut n=net();let alice=devnet::account_key("alice");
+    for k in 0..3u64{let b=signed(&n,n.chain.head,Body{txs:vec![deploy(&alice,k,7_900_000,0,zero_code_init(32768-k as u16))],evidence:vec![]});import(&mut n,&b);}
+    for _ in 0..3{let b=signed(&n,n.chain.head,Body::default());import(&mut n,&b);}
+    let ptrs=|st:&revm::db::InMemoryDB|->HashMap<B256,usize>{st.accounts.values().filter_map(|a|a.info.code.as_ref().filter(|c|c.original_bytes().len()>=32000).map(|c|(a.info.code_hash,c.original_bytes().as_ptr() as usize))).collect()};
+    let head=ptrs(&n.chain.head().state);assert_eq!(head.len(),3,"positive control: three 32 KiB runtimes at the head");
+    let mut states=0;let mut shared=0;
+    for e in n.chain.blocks.values().filter(|e|!e.pruned&&n.chain.is_canonical(&e.hash)){
+        let p=ptrs(&e.state);if p.is_empty(){continue}states+=1;
+        for (h,ptr) in &p{assert_eq!(head.get(h),Some(ptr),"h={}: code {h} shares the head's buffer",e.height);shared+=1;}
+        for (h,c) in &e.state.contracts{if c.original_bytes().len()>=32000{assert_eq!(head.get(h),Some(&(c.original_bytes().as_ptr() as usize)),"h={}: contracts map entry {h} shares it too",e.height);}}
+    }
+    assert!(states>=6&&shared>=12,"{states} states with code, {shared} shared runtimes");
+    // Control: an independent execution of the same deploy (another chain object) makes its own buffer.
+    let mut m=net();for k in 0..1u64{let b=signed(&m,m.chain.head,Body{txs:vec![deploy(&alice,k,7_900_000,0,zero_code_init(32768))],evidence:vec![]});import(&mut m,&b);}
+    let other=ptrs(&m.chain.head().state);let (h,ptr)=other.iter().next().unwrap();
+    assert!(head.get(h).is_some_and(|p|p!=ptr),"the same runtime executed elsewhere is a separate buffer (what a rebuilt or side state holds)");
+}

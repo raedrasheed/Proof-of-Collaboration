@@ -291,6 +291,28 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     assert_eq!(eff,vec![apply::EvidenceEffect::Punish{accused:ctx.proposer}]);
 }
 
+/// Review R1-5, consensus.md:101: a template that the drawn proposer signed for this node's parent but
+/// whose block would be invalid is as if absent, and the peer is punished (its connection is closed;
+/// counted in templatePenalties). A valid template, and one for another parent, are not punished.
+#[test] fn an_invalid_template_from_the_drawn_proposer_punishes_its_peer(){
+    use pocold::{node::{Config,Event,Node},net::{Msg,NetEvent}};
+    let c=cfg(&["a","b","c"]);let d=devnet::build(&c).unwrap();
+    let keys:HashMap<Address,Key>=d.miners.iter().map(|m|(m.id,Key::from_secret(&m.key.secret()).unwrap())).collect();
+    let node=|tag:&str|{let dir=std::env::temp_dir().join(format!("pocold-tplpen-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+        let mut n=Node::open(Config{dir,name:"t".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},admitted(&c)).unwrap();n.start_production();n};
+    let net2=Net{chain:Chain::new(admitted(&c)),keys};
+    let g=net2.chain.head;let p=net2.chain.get(&g).unwrap().clone();let ctx=net2.chain.child_ctx(&p,0).unwrap();
+    let (good,_,_)=net2.chain.build_signed(&p,&net2.keys[&ctx.proposer],ctx.window.lower(),Body::default(),vec![]).unwrap();
+    // The drawn proposer signs a template whose stateRoot is not the parent's result: its rebuild differs.
+    let mut bad=good.clone();bad.state_root[0]^=1;reseal(&mut bad);
+    bad.sig=net2.keys[&ctx.proposer].sign_hash(&B256::from(hashes::sig_msg(&template_id(&bad.ut_raw)))).to_vec();reseal(&mut bad);
+    let send=|n:&mut Node,h:&lp1hdr::Header|n.handle(Event::Net(NetEvent::Message(1,Msg::Template{shell:h.encoded.clone(),body:Body::default().encode()})));
+    let mut a=node("bad");send(&mut a,&bad);assert_eq!(a.stats.template_penalties,1,"the invalid signed template punishes its peer");
+    let mut b=node("good");send(&mut b,&good);assert_eq!(b.stats.template_penalties,0,"positive control: a valid template is not punished");
+    let mut other=bad.clone();other.parent_hash[0]^=1;reseal(&mut other);
+    let mut e=node("other");send(&mut e,&other);assert_eq!(e.stats.template_penalties,0,"a template for another parent does not apply here");
+}
+
 #[test] fn journal_replay_rebuilds_pruned_state_for_a_journaled_fork(){
     // LP10 finding: a node that imported a fork child of a block below the K_hist window
     // (live TrieRebuild) must replay that journal; replay applies the same TrieRebuild.
@@ -743,7 +765,7 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     // small-answer term counts SMALL_REPLY_PEAK per connection, +4,082,688 B). Some terms are type sizes
     // (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
     // target checks that it boots within the budget with its reserve.
-    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,5_581_426_268,"the A13 model total changed");}
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,5_487_223_178,"the A13 model total changed");}
     assert!(pocold::resources::budget_required(d.total).unwrap()<=u128::from(pocold::node::MEM_BUDGET));
     assert_eq!(d.items.iter().find(|x|x.0.starts_with("rpc/small answers")).map(|x|x.1),Some(32*pocold::rpc::SMALL_REPLY_PEAK as u128));
     println!("A13-BREAKDOWN {}",serde_json::json!({"total":d.total.to_string(),"items":d.items.iter().map(|(k,v)|serde_json::json!([k,v.to_string()])).collect::<Vec<_>>()}));

@@ -14,6 +14,14 @@
 >   (MODEXP) takes about 1.0 s, over the devnet t_exec = 1 s; the state root is recomputed on every
 >   block; the worst devnet open at H_END takes about 7.3 h. The three journal obligations (disk
 >   growth, re-execution from genesis, the open-time memory transient) stay OPEN.
+> - **Since then (§3d, decision package):**
+>   - C-2 items 1–3 cut that 380-transfer block to 655 ms, against 22,553 ms for the earlier code, both
+>     under the same load. The MODEXP block, the state root and the journal obligations are unchanged
+>     and stay OPEN.
+>   - The five independent reviews of the round-3 tracks are done, and their MEDIUM-and-above findings
+>     are fixed, except R3-6 (decision D-7) (§3d).
+>   - The network profile still does not boot within 6 GiB. It needs 120.95 GiB after C-1 S2, against
+>     172.4 GiB before (C-1, D-1).
 > - Windows: the repair-scope CI passes on the last code commit `462fffc` (run 26, PR head `43e7e0f`; the
 >   review-thread fix, §3c); earlier runs 9, 16, 19, 21 and 22. The CI does not
 >   cover the real-Chrome and Python e2e suites, the thread-count assertions or the `#[ignore]`
@@ -490,6 +498,48 @@ change is normative.
   instead of :101.
 - **Windows:** run 5's diagnosis (the client's receive window) was refuted by run 7.
 
+## 3d. Decision package (2026-10-24): conformance work and the five independent reviews
+
+The owner asked for one decision package ([proposals/DECISION-PACKAGE.md](proposals/DECISION-PACKAGE.md),
+Arabic summary [DECISION-PACKAGE-AR.md](proposals/DECISION-PACKAGE-AR.md)). It separates conformance fixes
+within the current authorization, which are being done, from normative changes, which are shown with a
+recommendation and are not approved or implemented. The priorities are: booting the network profile, block
+validation time, sustainable caps, journal growth and recovery.
+
+**Measured facts:**
+- The network profile needs 172.4 GiB against 6 GiB (`tests/network_budget.rs`, which asserts that it
+  does not fit).
+
+**Conformance work done:**
+- C-2 items 1–3 (`49b2bc2`, `2ce03c1`; evidence/c2-execution/):
+  - the snapshot is checked once per USER phase;
+  - running code totals;
+  - the engine borrows the state instead of cloning it, and PAY reads the engine's database.
+- Measured against `3a52ae6` on the same near-cap state:
+  - 380 transfers: 22,553 → 655 ms;
+  - 247 CREATE2 creates: 4,862 → 562 ms;
+  - an empty child: 777 → 465 ms.
+
+**The five reviews (evidence/reviews-2026-10-24/)** and what was done:
+
+| review | findings ≥ MEDIUM | done |
+|---|---|---|
+| R1 caps r3b | R1-1 builder starvation, R1-2 LOG_CAP unpinned | fixed in `6e99b19`, with R1-4 |
+| R2 RpcGuard r3c | R2-1 a batch held the consensus thread | fixed in `af2f3a8`, with the LOWs R2-2 to R2-5 |
+| R3 journal r3c | R3-2, R3-3 (HIGH); R3-1, R3-6, R3-7 | R3-3 fixed in `af2f3a8`; R3-2, R3-7 by C-2; R3-1, R3-8, R3-13 in [JOURNAL-GROWTH-CORRECTIONS-2026-10-24.md](JOURNAL-GROWTH-CORRECTIONS-2026-10-24.md); R3-6 is decision D-7 |
+| R4 e2e round 4 | R4-1 shared W(t) bug passes, R4-2 relay and Status refresh unneeded | fixed: unit test in `af2f3a8`; e2e checks with base 42/42 twice and the reviewer's three mutants each caught at its check (evidence/reviews-2026-10-24/r4-fixes/) |
+| R5 `462fffc` | R5-1 a full scan and clone per shared reorg transaction | fixed by C-2 |
+
+Also done in this pass:
+- **C-1 S2.** The code term counts one set per lineage, since a state copy shares its runtime buffers
+  (a test proves it). The network model falls from 150.83 to 105.83 GiB, still far over 6 GiB. The
+  devnet model total is 5,487,223,178 B (A13-DERIVATION.md).
+- **consensus.md:101 "the peer is punished"** (R1-5): a local disconnect, with a test and a mutation
+  control.
+
+Each fix has a fail-before log or a killed mutant. Suites on `af2f3a8`: lp4 173/0 and pocold 181/0
+(15 ignored).
+
 ## 4. Independent review
 
 Round 1:
@@ -524,8 +574,9 @@ fix pass:
 - journal: four reviews (J-V1..J-V13, J2-*, J-REV3-1..3, JV3B-1..4);
 - e2e: three reviews (F1–F10, E2E-R3-1..9, E2E-R4-1..3).
 
-The last pass of each track (caps r3b, RpcGuard r3c, journal r3c, e2e round 4) has not been reviewed
-yet.
+The last pass of each track (caps r3b, RpcGuard r3c, journal r3c, e2e round 4) and `462fffc` were
+reviewed on 2026-10-24 (R1–R5, §3d; evidence/reviews-2026-10-24/). The reviewers were given the code and
+the spec, not this track's conclusions.
 
 These are agent reviews, not an external human audit, and the shared GitHub account is not an
 independent approval. The owner has not yet reviewed the consensus proposals.

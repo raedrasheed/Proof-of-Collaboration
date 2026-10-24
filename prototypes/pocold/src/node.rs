@@ -140,7 +140,7 @@ pub struct Node{
     future:Vec<Block>,
     /// Own sealed blocks waiting in `future` for their timestamp (Φ=2φ may be 0 on one host).
     own_future:HashSet<[u8;32]>,
-    templates:HashMap<[u8;32],(Header,Body,u128)>,
+    templates:HashMap<[u8;32],(Header,Body,u128,PeerId)>,
     received:HashMap<[u8;32],u128>,
     pub pool:Pool,
     pub rejects:VecDeque<(String,String)>,
@@ -155,7 +155,9 @@ pub struct Node{
 pub struct Stats{pub imported:u64,pub mined:u64,pub signed_templates:u64,pub fallback_templates:u64,pub shares_seen:u64,pub hashes:u64,pub reorgs:u64,
     /// Sync sessions started and rounds asked; solicited imports of blocks retention had removed
     /// (re-fetch); canonical blocks made whole after adoptions (restore); journal records replay skipped.
-    pub sync_sessions:u64,pub sync_rounds:u64,pub refetched:u64,pub restored:u64,pub replay_skipped:u64}
+    pub sync_sessions:u64,pub sync_rounds:u64,pub refetched:u64,pub restored:u64,pub replay_skipped:u64,
+    /// Peers whose template from Draw(h,0) for this node's parent failed its checks (consensus.md:101).
+    pub template_penalties:u64}
 
 fn orphan_size(b:&Block)->usize{b.header.encoded.len()+b.body.txs.iter().chain(b.body.evidence.iter()).map(|x|x.len()).sum::<usize>()}
 fn result_bytes(r:&Option<ParentResult>)->Vec<u8>{
@@ -542,6 +544,8 @@ impl Node{
     }
 
     // ---------------- production (consensus §4) ----------------
+    /// Starts producing on the current head, as `run` does first: for a node driven in process.
+    pub fn start_production(&mut self){self.restart_production()}
     fn restart_production(&mut self){
         if let Some(p)=self.prod.take(){if let Some(m)=p.miner{m.stop();}}
         let head=self.chain.head().clone_light();
@@ -571,7 +575,7 @@ impl Node{
             let deadline=ctx.window.deadline_ms(received,u64::from(self.chain.spec.local().delta_rel),self.chain.spec.cp().dFbWait).unwrap_or(0);
             if let Some(pr)=&mut self.prod{pr.mode=Mode::Wait{deadline_ms:deadline};}
             // A signed template may already have arrived for this parent.
-            if let Some((h,b,arr))=self.templates.remove(&parent_hash){if arr<=deadline{self.try_lock_signed(h,b);}}
+            if let Some((h,b,arr,from))=self.templates.remove(&parent_hash){if arr<=deadline{self.try_lock_signed(h,b,from);}}
         }else{
             self.lock_fallback(&p,a);
         }
@@ -622,7 +626,13 @@ impl Node{
     /// Validates a received signed template for the current parent: signature,
     /// proposer = Draw(h,0), a=0, window, and UT equal to the template rebuilt
     /// from apply(parent, body) (1b independence). Locks on success.
-    fn try_lock_signed(&mut self,shell:Header,body:Body)->bool{
+    /// Locks a signed template from Draw(h,0) for the production parent (consensus.md §4(a)). One that
+    /// does not apply here (another parent or attempt, a missing or foreign signature, a timestamp
+    /// outside the window or in the future) is ignored. One that the drawn proposer signed for this
+    /// parent but whose block would be invalid (item 16, its evidence, or a rebuild that differs) is "as if
+    /// absent, and the peer is punished" (consensus.md:101, review R1-5): its sender's connection is
+    /// closed, a local penalty. Templates are not relayed, so the sender is the peer that made it fail.
+    fn try_lock_signed(&mut self,shell:Header,body:Body,from:PeerId)->bool{
         let parent=match &self.prod{Some(p)=>p.parent,None=>return false};
         if shell.parent_hash!=parent||shell.a!=0||shell.proposer.len()!=20{return false}
         let p=self.chain.get(&parent).unwrap().clone_light();
@@ -631,10 +641,15 @@ impl Node{
         let ok_sig=matches!(hashes::recover_address(&hashes::sig_msg(&tid),&shell.sig),Ok(a) if a[..]==shell.proposer[..]);
         if !ok_sig||shell.proposer[..]!=ctx.proposer[..]||!ctx.window.contains(shell.ts)||crate::timing::is_future(shell.ts,now_s(),self.capital_phi()){return false}
         // consensus.md:101, §4(a): a template whose block would fail item 16 is as if absent (no lock).
-        if !self.chain.within_caps(&p,&body.txs){return false}
-        let Ok(effects)=self.chain.evidence_effects(&p,&body,shell.h) else{return false};
+        if !self.chain.within_caps(&p,&body.txs){return self.punish_template(from,"over a cap (item 16)")}
+        let Ok(effects)=self.chain.evidence_effects(&p,&body,shell.h) else{return self.punish_template(from,"invalid evidence")};
         let rebuilt=self.chain.rebuild_signed(&p,&ctx,shell.ts,Address::from_slice(&shell.proposer),&body,effects);
-        match rebuilt{Ok(ut) if ut==shell.ut_raw=>{self.lock(shell,body,false);true},_=>false}
+        match rebuilt{Ok(ut) if ut==shell.ut_raw=>{self.lock(shell,body,false);true},_=>self.punish_template(from,"its rebuild differs")}
+    }
+    fn punish_template(&mut self,from:PeerId,why:&str)->bool{
+        self.stats.template_penalties+=1;self.log(&format!("invalid template from Draw(h,0) ({why}): closing its peer"));
+        if let Some(p)=self.peers.get(&from){p.close();}
+        false
     }
     // ---------------- sync sessions (network.md D38; D-REORG-REDB re-fetch) ----------------
     /// Locator (network.md:8, <= 32 hashes, highest first): the head and the 9 blocks below it, then
@@ -774,9 +789,9 @@ impl Node{
                 if equivocated{
                     // Second template from the same proposer: evidence type 1, then sticky FB.
                     if matches!(&self.prod,Some(p) if p.parent==h.parent_hash&&p.attempt==0){let p=self.chain.get(&h.parent_hash).unwrap().clone();self.lock_fallback(&p,0);}
-                }else if waiting{self.try_lock_signed(h,b);}
+                }else if waiting{self.try_lock_signed(h,b,from);}
                 else if !self.chain.blocks.contains_key(&h.parent_hash)||self.prod.as_ref().map(|p|p.parent!=h.parent_hash).unwrap_or(true){
-                    if self.templates.len()>TEMPLATES_MAX{self.templates.clear();}self.templates.insert(h.parent_hash,(h,b,now_ms()));
+                    if self.templates.len()>TEMPLATES_MAX{self.templates.clear();}self.templates.insert(h.parent_hash,(h,b,now_ms(),from));
                 }
             }
             Msg::Share{tid,nonce}=>{
@@ -840,7 +855,7 @@ impl Node{
             "a13":crate::resources::derive(self.chain.spec.cp(),self.chain.spec.local().k_hist,self.chain.spec.local().side_max,&self.cfg.limits,self.cfg.peers.len()).map(|b|serde_json::json!({
                 "boundBytes":b.total.to_string(),"budgetBytes":self.cfg.limits.mem_budget,"conditions":crate::resources::CONDITIONS.iter().map(|(id,d)|serde_json::json!({"id":id,"detail":d})).collect::<Vec<_>>()})),
             "stats":{"imported":self.stats.imported,"mined":self.stats.mined,"signedTemplates":self.stats.signed_templates,"fallbackTemplates":self.stats.fallback_templates,"sharesSeen":self.stats.shares_seen,"hashesInExhaustedRanges":self.stats.hashes,"reorgs":self.stats.reorgs,
-                "syncSessions":self.stats.sync_sessions,"syncRounds":self.stats.sync_rounds,"refetched":self.stats.refetched,"restored":self.stats.restored,"replaySkipped":self.stats.replay_skipped},
+                "syncSessions":self.stats.sync_sessions,"syncRounds":self.stats.sync_rounds,"refetched":self.stats.refetched,"restored":self.stats.restored,"replaySkipped":self.stats.replay_skipped,"templatePenalties":self.stats.template_penalties},
             "retention":{"rKeep":self.chain.r_keep,"sideCap":self.chain.side_cap,"side":self.chain.side_counts().0,"protected":self.chain.protect.len(),"evicted":self.chain.evicted_total}})
     }
     pub fn template_json(&self)->serde_json::Value{

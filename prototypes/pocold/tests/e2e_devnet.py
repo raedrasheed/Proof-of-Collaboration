@@ -30,6 +30,11 @@ Gates exercised (LOCAL-DEVNET-PLAN.md LP5/LP7):
     Hello does not); a corrupted block sent after a valid Hello adds exactly one reject entry, for
     a block a does not store; a keeps producing
   * user transactions submitted over RPC are included and their receipts match
+  * work: every canonical block's difficulty and totalDifficulty, and the heavier/lighter
+    precondition, are checked against W computed here from the committed targets, not the nodes'
+    own totalWork (review R4-1)
+  * relay and Status refresh: a listening test peer receives every block a imported from the relay
+    peer, and a second Hello on that connection claiming more work starts a session (review R4-2)
   * convergence: identical canonical hash, stateRoot and receiptsRoot at every confirmed height on
     every node while mining; after the miners stop, the frozen tips have one totalWork and the
     canonical chains agree up to at most one block below the heads; full restart replays to the
@@ -138,6 +143,33 @@ def status_claims(ps):
     the node reverts it before its head is read."""
     return [("0x" + it[3].hex(), int.from_bytes(it[5], "big")) for it in (rlp_items(p) for p in ps if msg_type(p) == 0)]
 def status_heads(ps): return [x for x, _ in status_claims(ps)]
+def rlp_decode(b):
+    """A whole RLP item: bytes, or a list of items (nested)."""
+    def item(i):
+        c = b[i]
+        if c < 0x80: return b[i:i + 1], i + 1
+        if c <= 0xb7: return b[i + 1:i + 1 + c - 0x80], i + 1 + c - 0x80
+        if c <= 0xbf: k = c - 0xb7; n = int.from_bytes(b[i + 1:i + 1 + k], "big"); return b[i + 1 + k:i + 1 + k + n], i + 1 + k + n
+        if c <= 0xf7: k, n = 0, c - 0xc0
+        else: k = c - 0xf7; n = int.from_bytes(b[i + 1:i + 1 + k], "big")
+        j, end, out = i + 1 + k, i + 1 + k + n, []
+        while j < end: x, j = item(j); out.append(x)
+        return out, end
+    x, _ = item(0); return x
+def target_of(i, n):
+    """The target committed in canonical block n's header on node i: item 8 of the UT list (after TAG,
+    chainId, genesisHash, parentHash, h, a, protocolVersion, ts), read from the header RLP."""
+    return int.from_bytes(rlp_decode(bytes.fromhex(dn.rpc(8540 + i, "pocol_getBlockRlp", [hex(n)])["header"][2:]))[0][0][8], "big")
+def pywork(i, top):
+    """Review R4-1: W(t) computed here, independently of the node: Σ floor(2^256/(target+1)) over node i's
+    canonical blocks 1..top (consensus.md:117, §9). Every block's totalDifficulty and difficulty over RPC
+    must equal it; the first block where one differs is returned with the sum."""
+    total, bad = 0, None
+    if int(dn.rpc(8540 + i, "eth_getBlockByNumber", ["0x0", False])["totalDifficulty"], 16) != 0: bad = 0
+    for n in range(1, top + 1):
+        w = 2**256 // (target_of(i, n) + 1); total += w; b = dn.rpc(8540 + i, "eth_getBlockByNumber", [hex(n), False])
+        if bad is None and (int(b["difficulty"], 16) != w or int(b["totalDifficulty"], 16) != total): bad = n
+    return total, bad
 
 def main():
     busy = [p for p in (30300, 30301, 30302, 30303, 30305, 8540, 8541, 8542, 8543, 8544, 8545) if port_open(p)]
@@ -260,11 +292,16 @@ def main():
         stop_node("c"); run_node("c", miner=False, connect=False); c_tip = tip(2)
         fork = next(n for n in range(ab_tip["number"], -1, -1) if canon(0, n) == canon(2, n))
         late = [dn.rpc(8542, "eth_getBlockByNumber", [hex(n), False]) for n in range(c0["number"] + 1, c_tip["number"] + 1)]  # c's late blocks
-        ok("partition: a/b's tip is strictly heavier than c's tip and at least 2 blocks lower, both >= 2 blocks past the fork",
-           up and ab_tip["work"] > c_tip["work"] and ab_tip["number"] + 2 <= c_tip["number"] and fork + 2 <= ab_tip["number"],
+        # The work is computed here from the committed targets (R4-1), not taken from the nodes' totalWork.
+        (w_ab, bad_ab), (w_c, bad_c) = pywork(0, ab_tip["number"]), pywork(2, c_tip["number"])
+        ok("work: on a's and c's branches every block's difficulty and totalDifficulty equal W computed here from its committed target",
+           bad_ab is None and bad_c is None and (w_ab, w_c) == (ab_tip["work"], c_tip["work"]), f"first mismatch a: {bad_ab}, c: {bad_c}")
+        ok("partition: a/b's tip is strictly heavier than c's tip (by the W computed here) and at least 2 blocks lower, both >= 2 blocks past the fork",
+           up and w_ab > w_c and ab_tip["number"] + 2 <= c_tip["number"] and fork + 2 <= ab_tip["number"],
            f"a/b={short(ab_tip)} c={short(c_tip)} fork={fork}; work above c0 in c tip blocks: a/b {(ab_tip['work']-c0['work'])/d_c:.2f}, "
            f"late c {(c_tip['work']-c0['work'])/d_c:.2f}; {len(late)} late blocks, attempts {[b['pocol']['attempt'] for b in late]} in {t_up:.0f}s")
         relay = [dn.rpc(8542, "pocol_getBlockRlp", [hex(n)]) for n in range(fork + 1, c_tip["number"] + 1)]  # c's branch, parents first
+        relay_h = [canon(2, n) for n in range(fork + 1, c_tip["number"] + 1)]  # their hashes (c's branch is canonical on c only until the heal)
         r0 = st(2)["stats"]["reorgs"]
         # 4. Heal: c rejoins without a miner. Nothing is mined, so no block is broadcast and the heal can
         #    only start from Status sync (consensus.md:235): c sees a and b claim more work and fetches
@@ -332,10 +369,20 @@ def main():
         #    each new head) must name a/b's tip. The connect Status is the control that the peer reads.
         ok("relay: a holds none of c's late blocks", all(blk(0, b["hash"]) is None for b in late), f"{len(late)} blocks h={c0['number']+1}..{c_tip['number']}")
         a0 = counters(0)
+        # Review R4-2: a second test peer, claiming genesis, only reads. a must forward to it every block it
+        # imports from the relay peer (network.md "استلام block" step 3, then the broadcast): no node of the
+        # full mesh needs relay, this peer does.
+        #    A block a already holds is a duplicate and is not imported again, so only the others are expected.
+        new_to_a = [blk(0, x) is None for x in relay_h[:-1]]
+        lis = socket.create_connection(("127.0.0.1", 30300)); lis.sendall(hello(info["chainId"], genesis, genesis, 0, 0, b"e2e-listen")); frames(lis, 1)
         s = socket.create_connection(("127.0.0.1", 30300)); s.sendall(hello(info["chainId"], genesis, genesis, 0, 0, b"e2e-relay"))
         for b in relay[:-1]: s.sendall(block_frame(b))
         stored = waited(lambda: blk(0, late[-2]["hash"]) is not None, 60, "a stores c's branch below c's tip")
-        seen, _ = frames(s, 2); s.close(); ann = status_heads(seen)
+        seen, rest = frames(s, 2); seen5 = seen; ann = status_heads(seen)
+        got, _ = frames(lis, 3); lis.close(); fwd = {bytes(rlp_items(p)[1]) for p in got if msg_type(p) == 1}
+        sent = [bytes.fromhex(b["header"][2:]) for b, new in zip(relay[:-1], new_to_a) if new]
+        ok("relay: a forwards every block it imported from the relay peer to its other peers (a listening test peer receives each one)",
+           sent and all(x in fwd for x in sent), f"{sum(1 for x in sent if x in fwd)}/{len(sent)} blocks new to a received by the listening peer")
         a_now = tip(0); a1 = counters(0)
         ok("relay: a stores c's lighter branch below c's tip (higher than a's head), keeps its head, the branch is not canonical (head = maximum of ≻, consensus.md:215), no reorganization and no session",
            stored and a_now["hash"] == ab_tip["hash"] and canon(0, c_tip["number"] - 1) != late[-2]["hash"] and a1 == a0,
@@ -346,19 +393,23 @@ def main():
         #    a opens a session with it and asks (GetFrom); the peer answers with all of c's branch. a
         #    stores c's tip and keeps its head: the work of the blocks decides, not the peer's claim.
         #    Every Status a sends this peer must name a/b's tip, as in step 5.
+        #    Review R4-2: the claim is a SECOND Hello on step 5's connection (a Status refresh), not a first
+        #    Hello on a new one: a must take it into its round-robin and ask within SESSION_GAP_MS (1 s) and
+        #    a tick. 15 s is the bound.
         a0 = counters(0)
-        s = socket.create_connection(("127.0.0.1", 30300))
-        s.sendall(hello(info["chainId"], genesis, bytes.fromhex(c_tip["hash"][2:]), c_tip["number"], ab_tip["work"] + 1, b"e2e-session"))
-        seen, rest = frames(s, 15, until=7); asked = any(msg_type(p) == 7 for p in seen)  # 7 = GetFrom
+        s.sendall(hello(info["chainId"], genesis, bytes.fromhex(c_tip["hash"][2:]), c_tip["number"], ab_tip["work"] + 1, b"e2e-relay"))
+        t_ask = time.time(); seen, rest = frames(s, 15, until=7, buf=rest); asked = any(msg_type(p) == 7 for p in seen); t_ask = time.time() - t_ask  # 7 = GetFrom
+        ok("relay: a Status refresh (a second Hello on the same connection) claiming more work starts a session: a asks with GetFrom",
+           asked, f"GetFrom after {t_ask:.1f}s")
         if asked:
             for b in relay: s.sendall(block_frame(b))
         stored = asked and waited(lambda: blk(0, c_tip["hash"]) is not None, 60, "a stores c's tip from the session")
-        more, _ = frames(s, 2, buf=rest); s.close(); ann = status_heads(seen + more)
+        more, _ = frames(s, 2, buf=rest); s.close(); ann = status_heads(seen5 + seen + more)  # one connection: its connect Status came in step 5
         a_now = tip(0); a1 = counters(0)
         ok("relay: a syncs c's tip in one session from a peer claiming more work, keeps its head, c's tip is not canonical, no reorganization",
            stored and a1["syncSessions"] == a0["syncSessions"] + 1 and a1["reorgs"] == a0["reorgs"] and a_now["hash"] == ab_tip["hash"] and canon(0, c_tip["number"]) != c_tip["hash"],
            f"GetFrom={asked} stored={stored} a counters {a0} -> {a1} a head={short(a_now)}")
-        ok("relay: every Status a sent the session peer names a/b's tip",
+        ok("relay: every Status a sent the session peer on that connection (the connect Status of step 5 and any later one) names a/b's tip",
            ann and all(x == ab_tip["hash"] for x in ann), f"{len(ann)} Status heads {[x[:12] for x in ann]}")
         # 7. a restarts alone (no peers, no miner) and replays a journal whose last records are c's
         #    branch: the replayed head is still a/b's tip, whatever the order of the records (consensus.md:215).
@@ -442,6 +493,9 @@ def main():
         same = waited(lambda: len({tip(i)["work"] for i in range(3)}) == 1, 60, "one totalWork on the frozen tips")
         heads = [tip(i) for i in range(3)]
         ok("frozen tips: a, b and c reach the same totalWork", same, f"heads a/b/c={[short(t) for t in heads]}")
+        pw = [pywork(i, heads[i]["number"]) for i in range(3)]
+        ok("frozen tips: each head's totalWork is the W computed here from the committed targets of its canonical chain",
+           all(bad is None and w == heads[i]["work"] for i, (w, bad) in enumerate(pw)), f"first mismatch a/b/c: {[bad for _, bad in pw]}")
         low = min(t["number"] for t in heads)
         shared = next(n for n in range(low, -1, -1) if len({canon(i, n) for i in range(3)}) == 1)
         mism = []

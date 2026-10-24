@@ -27,10 +27,16 @@ repository. Only these reports are committed.
 | R2-1: one RPC batch holds the consensus thread (a P2P Hello waited 14.3 s; up to about 35 s by construction) | MEDIUM | fixed: queued P2P, miner and timer events run between batch members; a Hello came 442 ms into a 5.7 s batch, against 4.85 s into 5.05 s before ([r2-fixes/](r2-fixes/README.md)) |
 | R1-1: near the TXBYTES room the builder offers transactions that depend on a skipped one and can starve an independent valid transaction | MEDIUM | fixed (`6e99b19`): the builder executes its selection on the parent state ([r1-fixes/](r1-fixes/README.md)) |
 | R1-2: no committed test pins LOG_CAP accumulation within a block, its per-branch scope, or `cum_log_bytes` in `meta_clone` (L1, L2 and L4 survive) | MEDIUM | fixed (`6e99b19`): `tests/log_cap_scope.rs` (caps-test build) |
-| R4-1: the e2e's only measure of "heavier" is the node's own totalWork, so a work-accounting bug that every node shares passes | MEDIUM | **OPEN**: test change queued |
-| R4-2: relay and Hello-refresh breakage pass (full mesh; every sync starts from a new connection) | MEDIUM | **OPEN**: test change queued |
+| R4-1: the e2e's only measure of "heavier" is the node's own totalWork, so a work-accounting bug that every node shares passes | MEDIUM | fixed: an independent W check in the unit test and the e2e; mutant Nworkpar is caught ([r4-fixes/](r4-fixes/README.md)) |
+| R4-2: relay and Hello-refresh breakage pass (full mesh; every sync starts from a new connection) | MEDIUM | fixed: a listening peer and a second Hello in the e2e; mutants Nnorelay and Nhello1 are caught ([r4-fixes/](r4-fixes/README.md)) |
 
 The LOW and NOTE findings are listed in each report. Those that need code or test changes are queued
 after the items above, in the order of the decision package priorities.
 
-LOW findings fixed so far: R1-4 (`6e99b19`), and R2-2 to R2-5 ([r2-fixes/](r2-fixes/README.md)).
+LOW and NOTE findings fixed so far:
+- R1-4 (`6e99b19`);
+- R2-2 to R2-5 ([r2-fixes/](r2-fixes/README.md));
+- R1-5: consensus.md:101 "the peer is punished" (a local disconnect; test
+  `an_invalid_template_from_the_drawn_proposer_punishes_its_peer`, killed mutant `r1-fixes/r1-5-mutant.log`);
+- the study corrections R3-1, R3-8 and R3-13, in
+  [../../JOURNAL-GROWTH-CORRECTIONS-2026-10-24.md](../../JOURNAL-GROWTH-CORRECTIONS-2026-10-24.md).
