@@ -424,6 +424,6 @@ No review found a deviation that needs a normative change, apart from R3-6 (D-7)
 | RSS measurement | `3c3792e` | C-1 changes memory; S2 lowered the code term, so the measured RSS must be checked against the new model |
 | journal measurements (validation time, reorg restore, open) | round 3c | C-2 and C-1 change the measured paths |
 | R14/R19 admission calibration | `462fffc` | C-2 changes the timing |
-| Windows CI | `462fffc` (run 26) | runs on every push of the PR |
+| Windows CI | `d567ce1` (run 33, PASS; also runs 29–32 on `49b2bc2`, `c5fbd00`, `6e99b19`, `af2f3a8`) | runs on every push of the PR. A pass covers the repair-scope suites on Windows only; it is not acceptance |
 
 A Windows pass covers the repair-scope suites on Windows only. It is not acceptance.

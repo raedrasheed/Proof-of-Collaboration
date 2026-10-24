@@ -22,7 +22,8 @@
 >     are fixed, except R3-6 (decision D-7) (§3d).
 >   - The network profile still does not boot within 6 GiB. It needs 120.95 GiB after C-1 S2, against
 >     172.4 GiB before (C-1, D-1).
-> - Windows: the repair-scope CI passes on the last code commit `462fffc` (run 26, PR head `43e7e0f`; the
+> - Windows: the repair-scope CI passes on the last code commit `d567ce1` (run 33; runs 29–32 on the earlier
+>   decision-package commits). Before them it passed on `462fffc` (run 26, PR head `43e7e0f`; the
 >   review-thread fix, §3c); earlier runs 9, 16, 19, 21 and 22. The CI does not
 >   cover the real-Chrome and Python e2e suites, the thread-count assertions or the `#[ignore]`
 >   measurement tests (§5). Until 2026-10-23 this box said "Windows was not run"; that was true then.
