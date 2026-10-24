@@ -418,7 +418,7 @@ No review found a deviation that needs a normative change, apart from R3-6 (D-7)
 | D-REORG-REDB mutation controls (30) | `3342af3` | R3-3 changed the replay restore; `462fffc` the reorg restore; C-1 changes storage |
 | RpcGuard mutation pass | `dd7d1ec` round 3c | R2-1 to R2-4 changed rpc.rs and the batch loop |
 | caps.rs, caps_identity, log_cap, the caps-test build | `6e99b19` | C-2 item 4 will change block execution |
-| e2e_devnet, e2e_site | e2e_devnet with the R4 checks on `af2f3a8` binaries, 42/42 twice; e2e_site on `c959379` | the R1-5 penalty and the S2 model landed after that e2e run (node.rs, resources.rs); e2e_site has not run since round 3 |
+| e2e_devnet, e2e_site | e2e_devnet with the R4 checks: 42/42 on `d567ce1` (and twice on `af2f3a8`); e2e_site on `c959379` | every later code change; e2e_site has not run since round 3 |
 | the full LP10 integration: extension build and 234 unit tests, real Chrome e2e, integrated Chrome | `3c3792e` | round-3 RPC changes (RpcGuard, −32020) and every later change |
 | witnesses: 17 observations and 15 positive controls (scratch only) | `3c3792e` | round-3 and later code |
 | RSS measurement | `3c3792e` | C-1 changes memory; S2 lowered the code term, so the measured RSS must be checked against the new model |

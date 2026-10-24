@@ -37,3 +37,8 @@ the sha256 of the script and binaries. The mutant diffs are `mutant-*.diff`.
   `attempt1-base-1.log` and `attempt2-base-1.log`:
   - attempt 1 read c's late blocks after the heal, when they are no longer canonical on c;
   - attempt 2 expected a connect Status on a connection that already had one.
+
+## On the final code
+
+After the R1-5 penalty and the C-1 S2 model landed (`d567ce1`), the same test ran once on that commit's
+own build: PASS 42/42 in 284 s (`final-d567ce1.log`; the header has the HEAD and the hashes).
