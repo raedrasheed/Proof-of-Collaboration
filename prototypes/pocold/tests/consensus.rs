@@ -1482,6 +1482,19 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
     assert_eq!(ld(&b.chain.trie_derived)+ld(&b.chain.trie_built)+ld(&b.chain.trie_refused),0);
 }
 
+/// C-1 E1: a rolling rebuild carries each re-executed block's trie to the next block, so a rebuild of many
+/// blocks builds one trie (for its root block) and refuses none.
+#[test] fn e1_a_rolling_rebuild_carries_the_trie(){
+    let mut h=net();let g=h.chain.head;let x=branch(&mut h,g,40,&[]);
+    let mut n=net();for b in &x{import(&mut n,b);}n.chain.retain();
+    let ld=|x:&std::sync::atomic::AtomicU64|x.load(std::sync::atomic::Ordering::Relaxed);
+    let target=x[6].hash();assert!(n.chain.get(&target).unwrap().pruned,"positive control: the state is pruned");
+    let (r0,b0,f0)=(n.chain.rebuilds,ld(&n.chain.trie_built),ld(&n.chain.trie_refused));
+    n.chain.ensure_state(&target).unwrap();
+    assert!(n.chain.rebuilds-r0>=5,"positive control: a rolling rebuild of {} blocks",n.chain.rebuilds-r0);
+    assert_eq!((ld(&n.chain.trie_built)-b0,ld(&n.chain.trie_refused)-f0),(1,0),"one build for the rebuild's first block, none refused");
+}
+
 /// C-1 E1: a trie that is not the parent state's is never used. The head's trie is replaced by another
 /// state's (genesis's); a child of the head and a sibling of the head (derived through the head's trie)
 /// must both still validate with the right root, the wrong trie refused and the root computed from the

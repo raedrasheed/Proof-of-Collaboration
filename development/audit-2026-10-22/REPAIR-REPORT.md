@@ -20,8 +20,10 @@
 >     and stay OPEN.
 >   - The five independent reviews of the round-3 tracks are done, and their MEDIUM-and-above findings
 >     are fixed, except R3-6 (decision D-7) (§3d).
->   - The network profile still does not boot within 6 GiB. It needs 103.92 GiB after C-1 S1 and S2,
->     against 172.4 GiB before (C-1, D-1 approved as option (a)). S3–S5 remain.
+>   - The network profile still does not boot within 6 GiB. Its model is 40.20 GiB (gate 45.94 GiB) after
+>     C-1 S2, S1, S3a, S4 and E1, against 150.83 GiB before them (C-1, D-1 approved as option (a)). E1 also
+>     cut the near-cap validation of 380 transfers to 349 ms. S3b and S5 remain: E2–E5 of the executor
+>     on a layered state.
 > - Windows: the repair-scope CI passes on the last code commit `d567ce1` (run 33; runs 29–32 on the earlier
 >   decision-package commits). Before them it passed on `462fffc` (run 26, PR head `43e7e0f`; the
 >   review-thread fix, §3c); earlier runs 9, 16, 19, 21 and 22. The CI does not
@@ -546,6 +548,25 @@ Also done in this pass:
   - the devnet model total is 4,323,240,949 B.
   Evidence: [evidence/c1-s1/](evidence/c1-s1/README.md); design and status:
   [proposals/C1-STORAGE-DESIGN.md](proposals/C1-STORAGE-DESIGN.md).
+- **C-1 S3a** (2026-10-24). Retained canonical states are diffs from their parents, materialized from a
+  full state on demand. Only the head, genesis and the side states within side_max are held full.
+  - Every retained state equals the full state it replaces (8,388 states compared).
+  - Every state RPC answers as before, live, after reorgs and after reopen.
+  - Network model 90.93 → 41.41 GiB; devnet 3,601,500,638 B.
+  - Mutation controls: 9 of 11 killed; SM8 is equivalent; SM10 guards a case that no longer occurs.
+  - Evidence: [evidence/c1-s3a/](evidence/c1-s3a/README.md).
+- **C-1 S4** (2026-10-24). Old canonical entries are slimmed in memory, and their header, ParentResult and
+  nonce ranges are restored exactly from the journal and history.redb.
+  - Network model 41.41 → 37.96 GiB; devnet 3,322,680,105 B.
+  - Mutation controls: 9 of 9 killed.
+  - Evidence: [evidence/c1-s4/](evidence/c1-s4/README.md).
+- **C-1 E1** (2026-10-24; also C-2 item 4). The state root is updated incrementally from a trie shared
+  between versions, used only when its root equals the parent's committed one.
+  - Every root in the tests is compared with the whole-state computation.
+  - Near-cap validation: an empty child 491 → 262 ms; 380 transfers 672 → 349 ms.
+  - A13 adds a trie group (2.23 GiB at the network profile): network model 37.96 → 40.20 GiB; devnet
+    3,486,909,657 B.
+  - Evidence: [evidence/c1-e1/](evidence/c1-e1/README.md).
 - **consensus.md:101 "the peer is punished"** (R1-5): a local disconnect, with a test and a mutation
   control.
 

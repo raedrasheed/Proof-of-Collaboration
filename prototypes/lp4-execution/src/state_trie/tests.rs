@@ -129,3 +129,13 @@ fn stats_count_every_node(){
     assert_eq!(s.leaves,200+slots);
     assert!(s.branches<s.leaves&&s.kid_slots==s.leaves+s.branches-1-db.accounts.values().filter(|a|a.storage.values().any(|v|*v!=U256::ZERO)).count() as u64);
 }
+
+#[test]
+fn a_code_hash_change_alone_is_touched(){
+    // Not reachable under Cancun (a CREATE also sets the nonce), but the touched set must not depend on it.
+    let mut db=InMemoryDB::default();let a=Address::from([3;20]);
+    db.insert_account_info(a,AccountInfo{balance:U256::from(5),nonce:1,code_hash:B256::from([1;32]),code:None});
+    let t=StateTrie::build(&db);let mut next=db.clone();next.accounts.get_mut(&a).unwrap().info.code_hash=B256::from([2;32]);
+    let touched=Touched::between(&db,&next);assert_eq!(touched.len(),1);
+    assert_eq!(t.update(&next,&touched).root(),crate::genesis_builder::world_root(&next).unwrap());
+}

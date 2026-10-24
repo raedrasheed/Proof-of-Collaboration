@@ -428,6 +428,66 @@ is left to E4, where a trie costs disk rather than heap.
   - With the right trie back, the sibling's parent trie is derived.
 - **Every other test** (the suites, replay equals live, 2048/2049, D133, the S1, S3a and S4 equivalence
   tests) now runs with the reference comparison on every block.
+- **Added after the mutation pass:**
+  - `a_code_hash_change_alone_is_touched` (lp4);
+  - `e1_a_rolling_rebuild_carries_the_trie`: a rebuild of 5 or more blocks builds one trie and refuses
+    none.
+- **Mutation controls:** 13 of 13 killed (evidence/c1-e1/mutants.log).
+
+### E2 design (2026-10-24, before code): the per-block whole-state checks from a state summary
+
+**What it replaces.** `apply_block` walks the whole state at least five times per block, apart from the
+root:
+1. `verify_candidate(parent)`;
+2. the first SYSTEM call's full `validate_snapshot` and `inventory` (`code_total` starts as None);
+3. `validate_snapshot` after the USER phase, plus the full check of the next SYSTEM call;
+4. `verify_candidate(state)` at the end (`check_caps`, the system slots and the balance sum);
+5. `drop_unreferenced_code`.
+
+**The summary.** `state_summary::Summary` is a few numbers per state:
+- the logical code total;
+- the accounts whose code fails verification (missing bytes or a hash mismatch);
+- the accounts over B_code_max;
+- the user accounts and their nonzero slots;
+- the system programs' nonzero slots;
+- the balance sum, as a 512-bit number so that no intermediate sum can overflow.
+
+`Summary::scan(db)` computes it from the whole state, exactly as the walks above count. `Summary::moved(from,
+to, touched)` subtracts each touched account's contribution in `from` and adds its contribution in `to`.
+It recounts slots per touched slot, and a whole account's storage only when the account appears or
+disappears. The touched set is `Touched::between`, which is complete by construction.
+
+**Where it is used.** `apply_block_with` takes the parent's summary next to its trie. With the summary:
+- the parent's `verify_candidate` and the first SYSTEM call's full check read the summary;
+  `code_total` starts from it;
+- after the USER phase, the summary is moved through `Touched::between(parent, user state)`. That walk
+  compares values without keccak-ing any code. The USER-phase check reads the new summary, and the
+  following SYSTEM calls start from its code total;
+- the final `verify_candidate` reads the summary moved to the final state. That move reuses E1's touched
+  set;
+- `drop_unreferenced_code` is a no-op when the contracts map did not grow and no touched account lost
+  its code. During a block the map only grows (revm's commit inserts, only the drop removes), so equal
+  sizes mean equal keys. Otherwise the drop runs as before. The capacity rule is unchanged.
+
+Without a summary, every walk runs as before. `BlockOutput.summary` carries the child's summary. pocold
+keeps it on every entry, since it is a few words, and computes genesis's with `scan`.
+
+**Equivalence:**
+- the Ok/Err outcome of every check is unchanged;
+- when several accounts fail at once, the old scans reported whichever came first in HashMap order. The
+  summary reports a code failure first, then B_code_max, then CODE_CAP. The block is invalid either way,
+  and only the local rejection text differs;
+- under `root_check()`, every summary is compared with `Summary::scan`, and every outcome and the
+  contracts map with the old walks.
+
+**Tests:**
+- unit tests: random state sequences, with `moved` equal to `scan` at every step, including removed,
+  not-existing and storage-cleared accounts, code created and destroyed, and system slots;
+- a candidate that fails each check (an over-cap slot count, too many system slots, a balance over the
+  supply bound, code over B_code_max) is refused with the summary as without it;
+- the suites with the reference comparison on;
+- mutation controls: a stale field, a skipped touched account, a drop skipped when the contracts map
+  grew.
 
 ## S4: per-block metadata off the heap
 
