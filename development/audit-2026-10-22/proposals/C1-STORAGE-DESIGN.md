@@ -375,7 +375,9 @@ The journal already holds the header and ParentResult bytes, so nothing else had
     - the same holds after reopen.
   - `s4_evidence_against_a_slimmed_ancestor_restores_it_first`: type-2 evidence whose ancestor is slimmed
     is accepted after the restore, with the same tombstone and state root as the reference.
-  - Mutation controls: `evidence/c1-s4/mutants.log`.
+  - Mutation controls: 9 of 9 killed (`evidence/c1-s4/mutants.log`). Suites, release, `13aeba7`: lp4 173
+    passed / 0 failed; pocold 196 passed / 0 failed / 17 ignored. The ignored deep-reorg tests (2048/2049,
+    D133 at 400, A11): 3 of 3 pass.
 
 ## D-6: local state checkpoints (owner approved)
 
