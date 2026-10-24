@@ -16,8 +16,8 @@ Gates exercised (LOCAL-DEVNET-PLAN.md LP5/LP7):
     a/b's tip once. Then a, which holds none of c's late blocks, is sent c's branch twice: below
     c's tip by a peer claiming genesis (no session; the branch ends above a's head), and in full in
     a sync session with a peer claiming more work than a; a stores it and keeps its head (the head
-    is the maximum of ≻ whatever the order of arrival, consensus.md:215), with no reorganization
-    and no other session, also after replaying its journal alone
+    is the maximum of ≻ whatever the order of arrival, consensus.md:215), with no reorganization,
+    no other session and no Status naming another head, also after replaying its journal alone
   * heal while the miners run: node e, a second copy of c's store from before the heal, joins the
     mining a, b and c and must follow their chain (bounded wait)
   * SIGKILL crash of node b during production: b replays its journal alone (to its pre-kill
@@ -99,21 +99,39 @@ def msg_type(p):
     """The message type of a frame payload (an RLP list whose first item is the type)."""
     k = 1 if p[0] <= 0xf7 else 1 + p[0] - 0xf7; b = p[k]
     return 0 if b == 0x80 else b if b < 0x80 else None
-def await_msg(s, t, want):
-    """Reads the node's frames until one of type `want` arrives: True, or False after t s or a close."""
-    end = time.time() + t; buf = b""
+def frames(s, t, until=None, buf=b""):
+    """Reads the node's frames for t s, or until one of type `until` arrives or the node closes:
+    (the frame payloads read, the bytes of a partial frame left over)."""
+    end = time.time() + t; out = []
     try:
-        while time.time() < end:
-            s.settimeout(max(0.05, end - time.time()))
-            try: chunk = s.recv(65536)
-            except socket.timeout: return False
-            if not chunk: return False
-            buf += chunk
+        while True:
             while len(buf) >= 4 and len(buf) >= 4 + struct.unpack(">I", buf[:4])[0]:
                 n = struct.unpack(">I", buf[:4])[0]; p, buf = buf[4:4 + n], buf[4 + n:]
-                if p and msg_type(p) == want: return True
-    except OSError: return False
-    return False
+                if p: out.append(p)
+                if p and until is not None and msg_type(p) == until: return out, buf
+            if time.time() >= end: break
+            s.settimeout(max(0.05, end - time.time()))
+            try: chunk = s.recv(65536)
+            except socket.timeout: break
+            if not chunk: break
+            buf += chunk
+    except OSError: pass
+    return out, buf
+def rlp_items(p):
+    """The items of an RLP list of byte strings (a frame payload)."""
+    i, out = (1 if p[0] <= 0xf7 else 1 + p[0] - 0xf7), []
+    while i < len(p):
+        b = p[i]
+        if b < 0x80: out.append(p[i:i + 1]); i += 1
+        elif b <= 0xb7: out.append(p[i + 1:i + 1 + b - 0x80]); i += 1 + b - 0x80
+        elif b <= 0xbf: k = b - 0xb7; n = int.from_bytes(p[i + 1:i + 1 + k], "big"); out.append(p[i + 1 + k:i + 1 + k + n]); i += 1 + k + n
+        else: raise ValueError("nested list")
+    return out
+def status_heads(ps):
+    """The head hash of every Status (Hello, network.md:7) among frame payloads. pocold sends one on
+    connect and one on every new head (its Status refresh), so a head change shows here even if the
+    node reverts it before its head is read."""
+    return ["0x" + rlp_items(p)[3].hex() for p in ps if msg_type(p) == 0]
 
 def main():
     busy = [p for p in (30300, 30301, 30302, 30303, 8540, 8541, 8542, 8543, 8544) if port_open(p)]
@@ -279,30 +297,39 @@ def main():
         #    with it) delivers c's branch below c's tip, parents first, to a, which holds none of c's late
         #    blocks (c mined them isolated; c0 itself may be a side block a holds). The last block sent
         #    is higher than a's head (precondition) and lighter. a must not reorganize at all, not even
-        #    for a moment (the head changes only at import, at most once per import, consensus.md:220).
+        #    for a moment (the head changes only at import, at most once per import, consensus.md:220):
+        #    its counters must not move, and every Status it sends the test peer (on connect, then on
+        #    each new head) must name a/b's tip. The connect Status is the control that the peer reads.
         ok("relay: a holds none of c's late blocks", all(blk(0, b["hash"]) is None for b in late), f"{len(late)} blocks h={c0['number']+1}..{c_tip['number']}")
         a0 = counters(0)
         s = socket.create_connection(("127.0.0.1", 30300)); s.sendall(hello(info["chainId"], genesis, genesis, 0, 0, b"e2e-relay"))
         for b in relay[:-1]: s.sendall(block_frame(b))
-        stored = waited(lambda: blk(0, late[-2]["hash"]) is not None, 60, "a stores c's branch below c's tip"); s.close()
+        stored = waited(lambda: blk(0, late[-2]["hash"]) is not None, 60, "a stores c's branch below c's tip")
+        seen, _ = frames(s, 2); s.close(); ann = status_heads(seen)
         a_now = tip(0); a1 = counters(0)
         ok("relay: a stores c's lighter branch below c's tip (higher than a's head), keeps its head, the branch is not canonical (head = maximum of ≻, consensus.md:215), no reorganization and no session",
            stored and a_now["hash"] == ab_tip["hash"] and canon(0, c_tip["number"] - 1) != late[-2]["hash"] and a1 == a0,
            f"stored={stored} up to h={c_tip['number']-1} a head={short(a_now)} a counters {a0} -> {a1}")
+        ok("relay: every Status a sent the relay peer names a/b's tip (no head change, not even one reverted later)",
+           ann and all(x == ab_tip["hash"] for x in ann), f"{len(ann)} Status heads {[x[:12] for x in ann]} a/b tip={ab_tip['hash'][:12]}")
         # 6. Relay in a sync session: a second test peer claims c's tip with more work than a's head, so
         #    a opens a session with it and asks (GetFrom); the peer answers with all of c's branch. a
         #    stores c's tip and keeps its head: the work of the blocks decides, not the peer's claim.
+        #    Every Status a sends this peer must name a/b's tip, as in step 5.
         a0 = counters(0)
         s = socket.create_connection(("127.0.0.1", 30300))
         s.sendall(hello(info["chainId"], genesis, bytes.fromhex(c_tip["hash"][2:]), c_tip["number"], ab_tip["work"] + 1, b"e2e-session"))
-        asked = await_msg(s, 15, 7)  # 7 = GetFrom
+        seen, rest = frames(s, 15, until=7); asked = any(msg_type(p) == 7 for p in seen)  # 7 = GetFrom
         if asked:
             for b in relay: s.sendall(block_frame(b))
-        stored = asked and waited(lambda: blk(0, c_tip["hash"]) is not None, 60, "a stores c's tip from the session"); s.close()
+        stored = asked and waited(lambda: blk(0, c_tip["hash"]) is not None, 60, "a stores c's tip from the session")
+        more, _ = frames(s, 2, buf=rest); s.close(); ann = status_heads(seen + more)
         a_now = tip(0); a1 = counters(0)
         ok("relay: a syncs c's tip in one session from a peer claiming more work, keeps its head, c's tip is not canonical, no reorganization",
            stored and a1["syncSessions"] == a0["syncSessions"] + 1 and a1["reorgs"] == a0["reorgs"] and a_now["hash"] == ab_tip["hash"] and canon(0, c_tip["number"]) != c_tip["hash"],
            f"GetFrom={asked} stored={stored} a counters {a0} -> {a1} a head={short(a_now)}")
+        ok("relay: every Status a sent the session peer names a/b's tip",
+           ann and all(x == ab_tip["hash"] for x in ann), f"{len(ann)} Status heads {[x[:12] for x in ann]}")
         # 7. a restarts alone (no peers, no miner) and replays a journal whose last records are c's
         #    branch: the replayed head is still a/b's tip, whatever the order of the records (consensus.md:215).
         stop_node("a"); run_node("a", miner=False, connect=False)
