@@ -185,6 +185,7 @@ fn boundary_matrix(bytes:bool){
     n.import(b3.clone(),None).unwrap();assert_eq!(n.chain.head,b3.hash(),"reorganized to B");assert_eq!(n.chain.head().cum_txs,1);
     // B is the head: A's next block fits B's room (2), not A's (0), and is "16 caps" (A's count 3+1, not the head's 1+1).
     assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"),"item 16 on A after the reorg");
+    n.pool_settle();
     assert_eq!(n.pool.txs.iter().map(|x|x.1.clone()).collect::<Vec<_>>(),t,"A's transactions are detached back into the pool (A11)");
     // On B the builder fills B's room (2) and skips the rest, which is then past the cap on B too.
     let head=n.chain.head().meta_clone();assert_eq!(n.template_txs(&head),t[..2].to_vec());
@@ -209,6 +210,7 @@ fn boundary_matrix(bytes:bool){
     let over=signed(&ha,a2.hash(),vec![next.clone()]);assert!(matches!(ha.chain.validate(&over,None,0),Err(Reject::Block(ref w)) if w=="16 caps"));
     assert!(matches!(n.import(over,None),Err(Reject::Block(ref w)) if w=="16 caps"),"item 16 on A reads A's counter ({}), not the head's ({})",l(&big),l(&b0));
     // On B the builder keeps A's detached transaction pooled: B's room is one byte short of it.
+    n.pool_settle();
     assert_eq!(n.pool.txs.iter().map(|x|x.1.clone()).collect::<Vec<_>>(),vec![big.clone()],"detached (A11)");
     let head=n.chain.head().meta_clone();assert!(n.template_txs(&head).is_empty());assert_within_caps(&n);
     println!("CAPS {}",serde_json::json!({"profile":format!("reorg txbytes_cap=big+b0-1={cap}"),"cumTxBytesA":l(&big),"cumTxBytesB":l(&b0),"roomA":l(&b0)-1,"roomB":l(&big)-1}));

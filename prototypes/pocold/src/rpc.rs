@@ -939,6 +939,8 @@ fn call(n:&mut Node,m:&str,p:&[Value],b:&mut Budget)->R{
             // Admission runs under the request's COMPUTE_DEADLINE (review R2-2); past it nothing is pooled.
             n.submit_tx_by(raw,true,Some(b.compute_by)).map(|h|json!(format!("{h}"))).map_err(|e|{
                 if e==crate::node::SUBMIT_DEADLINE{b.late();return Fail(-32020,"compute deadline".into(),Some(json!({"reason":"deadline"})))}
+                // D-7: the pool was still revalidating a new head at the deadline; nothing was pooled.
+                if e==crate::node::SUBMIT_BUSY{COUNTERS.busy.fetch_add(1,Ordering::SeqCst);return Fail(-32021,"busy".into(),Some(json!({"reason":"busy","retryAfterMs":250})))}
                 let code=e.split(' ').next().and_then(|c|c.parse().ok()).unwrap_or(-32000);Fail(code,e,None)})}
         "eth_getBlockByNumber"=>{let e=block_by_tag(n,p.first().unwrap_or(&Value::Null));Ok(e.map(|e|block_json(n,e,p.get(1).and_then(|x|x.as_bool()).unwrap_or(false))).unwrap_or(Value::Null))}
         "eth_getBlockByHash"=>{let h=p.first().and_then(|x|x.as_str()).and_then(|s|unhex(s).ok()).ok_or(bad("hash"))?;

@@ -39,8 +39,16 @@ pub struct Limits{pub net:net::Limits,pub rpc:crate::rpc::Limits,
     /// Local retention (consensus.md:29, governance.md:15; never validity): R_keep and the cap on
     /// unprotected non-canonical metadata (chain::R_KEEP, chain::SIDE_BLOCKS_MAX). Live import and
     /// replay must use the same values; tests lower them to reach the boundaries quickly.
-    pub r_keep:u64,pub side_cap:usize}
-impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX}}}
+    pub r_keep:u64,pub side_cap:usize,
+    /// Decision D-7 (local pool policy): the longest one slice of pool revalidation runs on the
+    /// consensus thread before the next event is taken (POOL_SLICE), and an optional bound on the
+    /// pooled transactions' summed gas limits (None: no bound; the value is the owner's decision).
+    pub pool_slice:Duration,pub pool_gas_max:Option<u64>}
+impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None}}}
+/// D-7: one slice of pool revalidation. The consensus thread is held for at most this, plus the
+/// execution of the one transaction in progress when it ends (one transaction is at most GAS_LIMIT,
+/// which the R14/R19 gate bounds by t_exec).
+pub const POOL_SLICE:Duration=Duration::from_millis(50);
 /// Default memory budget of one single-host devnet node.
 pub const MEM_BUDGET:u64=6<<30;
 /// Blocks waiting for their timestamp, buffered templates, equivocation observations,
@@ -83,6 +91,8 @@ pub const LIGHT_TURN:usize=8;
 pub const EVENT_TURN:usize=8;
 /// `submit_tx_by`'s refusal when the request's COMPUTE_DEADLINE passed before the transaction was pooled.
 pub const SUBMIT_DEADLINE:&str="-32020 compute deadline (not pooled)";
+/// `submit_tx_by`'s refusal when the pool's revalidation backlog (D-7) did not finish by the request's deadline.
+pub const SUBMIT_BUSY:&str="-32021 pool revalidation in progress (not pooled)";
 
 pub fn now_ms()->u128{SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()}
 pub fn now_s()->u64{(now_ms()/1000) as u64}
@@ -104,7 +114,16 @@ fn checked_code_total(state:&InMemoryDB,spec:&Spec)->Option<u64>{
 }
 /// `code_total`: the pending state's logical code total once it is known to pass the code limits (the head
 /// state is checked once per new head; decision package C-2), so a submission does not rescan the state.
-pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending_state:InMemoryDB,pub bytes:usize,meter:PoolMeter,code_total:Option<u64>}
+pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending_state:InMemoryDB,pub bytes:usize,meter:PoolMeter,code_total:Option<u64>,
+    /// D-7: what a new head left to revalidate, in pool order. An abandoned block (its journal
+    /// offset) expands to its transactions when reached; a transaction is re-executed on the pending
+    /// state. `backlog_bytes` counts the transactions held here against POOL_MAX_BYTES.
+    backlog:VecDeque<PoolItem>,backlog_bytes:usize,
+    /// Summed gas limits of `txs` (the optional pool_gas_max bound).
+    pub gas:u64}
+/// One backlog entry: an abandoned block's journal offset, or a transaction (and whether to relay it
+/// once admitted: a P2P transaction that arrived during the backlog is relayed then, as it would have been).
+enum PoolItem{Block(u64),Tx(Vec<u8>,bool)}
 /// D-A13-BUDGET: 64 -> 32 MiB (network.md: pool <= 64 MiB); 256 transactions of TX_MAX.
 pub const POOL_MAX_BYTES:usize=32*1024*1024;
 /// Local limit on pooled transactions (about ten blocks of plain transfers): every new head
@@ -157,7 +176,9 @@ pub struct Stats{pub imported:u64,pub mined:u64,pub signed_templates:u64,pub fal
     /// (re-fetch); canonical blocks made whole after adoptions (restore); journal records replay skipped.
     pub sync_sessions:u64,pub sync_rounds:u64,pub refetched:u64,pub restored:u64,pub replay_skipped:u64,
     /// Peers whose template from Draw(h,0) for this node's parent failed its checks (consensus.md:101).
-    pub template_penalties:u64}
+    pub template_penalties:u64,
+    /// D-7: pool revalidation slices run and the longest one (ms).
+    pub pool_slices:u64,pub pool_slice_max_ms:u64}
 
 fn orphan_size(b:&Block)->usize{b.header.encoded.len()+b.body.txs.iter().chain(b.body.evidence.iter()).map(|x|x.len()).sum::<usize>()}
 fn result_bytes(r:&Option<ParentResult>)->Vec<u8>{
@@ -255,7 +276,7 @@ impl Node{
         let net=net::Net::new(cfg.limits.net.clone());
         let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,deferred:VecDeque::new(),between:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
-            pool:Pool{code_total:pool_code,txs:vec![],pending_state:head_state,bytes:0,meter},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
+            pool:Pool{code_total:pool_code,txs:vec![],pending_state:head_state,bytes:0,meter,backlog:VecDeque::new(),backlog_bytes:0,gas:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;node.stats.replay_skipped=skipped;node.stats.restored=restored as u64;
         if rec.torn_tail{node.log("recovered torn journal tail into a new journal");}
         if rec.migrated_v1{node.log("migrated a fully verified v1 journal to format v2 (original kept as blocks.journal.v1-n)");}
@@ -279,9 +300,12 @@ impl Node{
     pub fn run(&mut self){
         self.restart_production();
         while !self.stopped{
-            let ev=match self.deferred.pop_front(){Some(e)=>e,None=>match self.rx.recv_timeout(Duration::from_millis(200)){Ok(e)=>e,Err(mpsc::RecvTimeoutError::Timeout)=>Event::Tick,Err(_)=>break}};
+            // D-7: while the pool has a backlog, one event (if any is waiting) and one slice alternate.
+            let ev=match self.deferred.pop_front(){Some(e)=>e,None=>if self.pool_pending(){match self.rx.try_recv(){Ok(e)=>e,Err(mpsc::TryRecvError::Empty)=>{self.drain_light();self.pool_step();continue}Err(_)=>break}}
+                else{match self.rx.recv_timeout(Duration::from_millis(200)){Ok(e)=>e,Err(mpsc::RecvTimeoutError::Timeout)=>Event::Tick,Err(_)=>break}}};
             if matches!(ev,Event::Wake){self.light.wake.store(false,std::sync::atomic::Ordering::SeqCst);}
             self.drain_light();self.handle(ev);
+            if self.pool_pending(){self.pool_step();}
         }
         if let Some(p)=&self.prod{if let Some(m)=&p.miner{m.stop();}}
     }
@@ -442,12 +466,54 @@ impl Node{
     /// transaction whose admission ends past it is refused with SUBMIT_DEADLINE before anything is
     /// pooled or relayed, so the -32020 {deadline} answer never hides an accepted transaction.
     pub fn submit_tx_by(&mut self,raw:Vec<u8>,relay:bool,by:Option<Instant>)->Result<B256,String>{
+        // D-7: a submission is executed after the backlog, in pool order. An RPC submission drives the
+        // backlog until its compute deadline and is answered busy if the backlog is still not done (nothing
+        // is pooled); an in-process caller (no deadline) settles it first.
+        if self.pool_pending(){match by{
+            Some(by)=>{while self.pool_pending()&&Instant::now()<by{self.pool_step_until(by);}if self.pool_pending(){return Err(SUBMIT_BUSY.into())}}
+            None=>self.pool_settle()}}
+        self.admit_tx(raw,relay,by)
+    }
+    /// A transaction from a peer: admitted now, or queued behind the backlog (D-7) and relayed once
+    /// admitted. A queued one is held within POOL_MAX_BYTES with the pool.
+    fn relay_tx(&mut self,raw:Vec<u8>){
+        if !self.pool_pending(){let _=self.submit_tx(raw,true);return}
+        if self.pool.bytes+self.pool.backlog_bytes+raw.len()>POOL_MAX_BYTES{return}
+        self.pool.backlog_bytes+=raw.len();self.pool.backlog.push_back(PoolItem::Tx(raw,true));
+    }
+    /// Whether a new head left pool revalidation to do (D-7).
+    pub fn pool_pending(&self)->bool{!self.pool.backlog.is_empty()}
+    /// Revalidates the whole backlog now (in-process callers and tests; `run` never does).
+    pub fn pool_settle(&mut self){while self.pool_pending(){self.pool_step_until(Instant::now()+Duration::from_secs(3600));}}
+    /// One slice of revalidation (D-7): at most `pool_slice`, checked between transactions.
+    pub fn pool_step(&mut self){let by=Instant::now()+self.cfg.limits.pool_slice;self.pool_step_until(by);}
+    fn pool_step_until(&mut self,by:Instant){
+        let t0=Instant::now();let body_max=self.chain.spec.cp().BODY_MAX as usize;
+        while let Some(item)=self.pool.backlog.pop_front(){
+            match item{
+                PoolItem::Block(off)=>match self.journal.read_at(off).map_err(|e|format!("{e:?}")).and_then(|(_,bb,_)|Body::decode(&bb,body_max).map_err(|e|format!("{e:?}"))){
+                    // An abandoned body is held one at a time; its transactions go first, in block order.
+                    Ok(b)=>{for raw in b.txs.into_iter().rev(){self.pool.backlog_bytes+=raw.len();self.pool.backlog.push_front(PoolItem::Tx(raw,false));}}
+                    Err(e)=>self.log(&format!("journal read of a detached block at {off}: {e}"))},
+                PoolItem::Tx(raw,relay)=>{self.pool.backlog_bytes-=raw.len();
+                    // A pool full by count refuses every further submission without a state change, so
+                    // the rest of the backlog is dropped (PR #27 review R5-6).
+                    if self.pool.txs.len()>=POOL_MAX_TXS{self.pool.backlog.clear();self.pool.backlog_bytes=0;break}
+                    let _=self.admit_tx(raw,relay,None);}
+            }
+            if Instant::now()>=by{break}
+        }
+        let ms=t0.elapsed().as_millis() as u64;self.stats.pool_slices+=1;self.stats.pool_slice_max_ms=self.stats.pool_slice_max_ms.max(ms);
+    }
+    fn admit_tx(&mut self,raw:Vec<u8>,relay:bool,by:Option<Instant>)->Result<B256,String>{
         let cp=self.chain.spec.cp();
         if raw.len()>cp.TX_MAX as usize{return Err("-32014 oversized".into())}
         let env=wire::decode_for_profile(&raw,self.chain.spec.profile()).map_err(|e|format!("{} {e:?}",e.specified_pool_code().unwrap_or(-32000)))?;
         let hash=env.hash();
         if self.pool.txs.iter().any(|(h,_)|*h==hash){return Ok(hash)}
-        if self.pool.bytes+raw.len()>POOL_MAX_BYTES||self.pool.txs.len()>=POOL_MAX_TXS{return Err("-32016 pool full".into())}
+        if self.pool.bytes+self.pool.backlog_bytes+raw.len()>POOL_MAX_BYTES||self.pool.txs.len()>=POOL_MAX_TXS{return Err("-32016 pool full".into())}
+        let gas_limit=env.tx_env().gas_limit;
+        if self.cfg.limits.pool_gas_max.is_some_and(|m|self.pool.gas.saturating_add(gas_limit)>m){return Err("-32016 pool full (gas)".into())}
         let ctx=self.next_block_ctx();
         let r=match(by,self.pool.code_total){
             (Some(by),total)=>native::admit_for_profile(&self.pool.pending_state,total,env.tx_env(),&ctx,self.chain.spec.profile(),std::rc::Rc::new(move||Instant::now()>=by)),
@@ -466,7 +532,7 @@ impl Node{
         // The running total follows the commit; any failure (unreachable for an engine result) falls back to full checks.
         self.pool.code_total=match(self.pool.code_total,before,pocol_lp4_execution::code_caps::code_of(&self.pool.pending_state,&touched)){
             (Some(t),Ok(b),Ok(a))=>t.checked_sub(b).and_then(|t|t.checked_add(a)),_=>None};
-        self.pool.bytes+=raw.len();self.pool.txs.push((hash,raw.clone()));
+        self.pool.bytes+=raw.len();self.pool.gas+=gas_limit;self.pool.txs.push((hash,raw.clone()));
         if relay{self.broadcast(&Msg::Tx{raw},None);}
         Ok(hash)
     }
@@ -486,23 +552,19 @@ impl Node{
         gone.reverse();gone
     }
     fn rebuild_pool(&mut self,detached:Vec<u64>){
-        let old=std::mem::take(&mut self.pool.txs);self.pool.bytes=0;self.pool.pending_state=self.chain.head().state.clone();
+        // D-7: the pending state restarts at the new head and everything is queued for revalidation in
+        // pool order, then one slice runs now. Transactions in abandoned blocks come first (consensus
+        // §10), oldest block first and in block order, then the previous pool (its admitted transactions,
+        // then its own backlog); each is re-executed on the new head (nonce, balance, fee), so one the
+        // new branch includes is not taken again.
+        let old=std::mem::take(&mut self.pool.txs);let rest=std::mem::take(&mut self.pool.backlog);
+        self.pool.bytes=0;self.pool.gas=0;self.pool.pending_state=self.chain.head().state.clone();
         self.pool.code_total=checked_code_total(&self.pool.pending_state,&self.chain.spec);
         self.pool.meter=PoolMeter::of(&self.pool.pending_state,self.chain.spec.profile());
-        // Transactions in abandoned blocks return to the pool (consensus §10), before the previous
-        // pool, oldest block first and in block order; each is re-executed on the new head (nonce,
-        // balance, fee), so one the new branch includes (its nonce is spent there) is not taken again.
-        // One abandoned body is held at a time, read from the journal (append-only, never compacted).
-        let body_max=self.chain.spec.cp().BODY_MAX as usize;
-        for off in detached{
-            let txs=match self.journal.read_at(off).map_err(|e|format!("{e:?}")).and_then(|(_,bb,_)|Body::decode(&bb,body_max).map_err(|e|format!("{e:?}"))){
-                Ok(b)=>b.txs,Err(e)=>{self.log(&format!("journal read of a detached block at {off}: {e}"));continue}};
-            for raw in txs{if self.pool.txs.len()>=POOL_MAX_TXS{return}let _=self.submit_tx(raw,false);}
-        }
-        // A pool full by count refuses every further submission (-32016) without a state change, so the
-        // rebuild stops there instead of decoding the rest (PR #27 review R5-6; full by bytes cannot stop:
-        // a smaller transaction may still fit).
-        for (_,raw) in old{if self.pool.txs.len()>=POOL_MAX_TXS{return}let _=self.submit_tx(raw,false);}
+        let mut q:VecDeque<PoolItem>=detached.into_iter().map(PoolItem::Block).collect();
+        for (_,raw) in old{self.pool.backlog_bytes+=raw.len();q.push_back(PoolItem::Tx(raw,false));}
+        q.extend(rest);self.pool.backlog=q;
+        self.pool_step();
     }
     /// Pool transactions that still execute in order (for a signed template on `p`). execution.md:83: a
     /// transaction that would pass TX_CAP or TXBYTES_CAP on p's branch (item 16, the accounting of
@@ -521,7 +583,10 @@ impl Node{
         // retry.) Without a checked parent state the selection is made as before.
         let profile=self.chain.spec.profile();let ctx=self.child_block_ctx(p);
         let mut sim=if p.pruned{None}else{checked_code_total(&p.state,&self.chain.spec).map(|t|(p.state.clone(),t))};
-        for (_,raw) in &self.pool.txs{
+        // D-7: candidates are the admitted transactions, then the backlog's (each is executed here on p's
+        // state anyway); an abandoned block not yet expanded is not a candidate.
+        let backlog=self.pool.backlog.iter().filter_map(|i|match i{PoolItem::Tx(r,_)=>Some(r),PoolItem::Block(_)=>None});
+        for raw in self.pool.txs.iter().map(|(_,r)|r).chain(backlog){
             let Ok(env)=wire::decode_for_profile(raw,profile) else{continue};let tx=env.tx_env();
             if skipped.contains(&tx.caller){continue}
             if room_txs==0||raw.len() as u64>room_bytes{skipped.insert(tx.caller);continue}
@@ -813,7 +878,7 @@ impl Node{
                 // Responses stop when the peer's queue is half full (offer); the peer asks again.
                 for hgt in start..start.saturating_add(count.min(512)){match self.chain.canonical_at(hgt){Some(e) if e.height>0=>{if !p.offer(&Msg::Block{header:e.header.encoded.clone(),body:e.body.encode()}){break}}_=>break}}
             }
-            Msg::Tx{raw}=>{let _=self.submit_tx(raw,true);}
+            Msg::Tx{raw}=>self.relay_tx(raw),
         }
     }
 }
@@ -855,7 +920,7 @@ impl Node{
             "a13":crate::resources::derive(self.chain.spec.cp(),self.chain.spec.local().k_hist,self.chain.spec.local().side_max,&self.cfg.limits,self.cfg.peers.len()).map(|b|serde_json::json!({
                 "boundBytes":b.total.to_string(),"budgetBytes":self.cfg.limits.mem_budget,"conditions":crate::resources::CONDITIONS.iter().map(|(id,d)|serde_json::json!({"id":id,"detail":d})).collect::<Vec<_>>()})),
             "stats":{"imported":self.stats.imported,"mined":self.stats.mined,"signedTemplates":self.stats.signed_templates,"fallbackTemplates":self.stats.fallback_templates,"sharesSeen":self.stats.shares_seen,"hashesInExhaustedRanges":self.stats.hashes,"reorgs":self.stats.reorgs,
-                "syncSessions":self.stats.sync_sessions,"syncRounds":self.stats.sync_rounds,"refetched":self.stats.refetched,"restored":self.stats.restored,"replaySkipped":self.stats.replay_skipped,"templatePenalties":self.stats.template_penalties},
+                "syncSessions":self.stats.sync_sessions,"syncRounds":self.stats.sync_rounds,"refetched":self.stats.refetched,"restored":self.stats.restored,"replaySkipped":self.stats.replay_skipped,"templatePenalties":self.stats.template_penalties,"poolSlices":self.stats.pool_slices,"poolSliceMaxMs":self.stats.pool_slice_max_ms,"poolBacklog":self.pool.backlog.len()},
             "retention":{"rKeep":self.chain.r_keep,"sideCap":self.chain.side_cap,"side":self.chain.side_counts().0,"protected":self.chain.protect.len(),"evicted":self.chain.evicted_total}})
     }
     pub fn template_json(&self)->serde_json::Value{

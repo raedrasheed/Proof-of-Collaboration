@@ -51,17 +51,26 @@ So the 6 GiB budget is the spec's assumption, and pocold's in-memory architectur
 ### C-1 [CONFORMANCE]: storage program toward storage.md / D30
 
 Five stages. Each stage is validity-neutral, and each is verified against the current implementation:
-the same roots, receipts and RPC answers on every suite and replay. The model figures below are
-**projections from the measured items**. They will be replaced by `derive()` output as each stage
-lands.
+the same roots, receipts and RPC answers on every suite and replay.
 
-| stage | change (spec text) | network model after it (projected) |
-|---|---|---:|
-| S1 | canonical bodies, receipts, logs and evidence off the heap, read from the journal on demand, as D-REORG-REDB already does for side blocks (storage.md:70) | ≈ 136 GiB |
-| S2 | code shared between snapshots and counted once, with a test that a snapshot clone does not copy code bytes or jump tables (revm `Bytes`/`Arc` sharing; under Cancun the retained canonical states share one code set) | ≈ 83 GiB |
-| S3 | retained and side states as reverse diffs from the head (storage.md:70 "diffs for 2048 blocks", D30), and transient copies replaced by copy-on-write overlays | ≈ 14 GiB |
-| S4 | per-block metadata older than R_keep off the heap (an index on disk) | ≈ 10 GiB |
-| S5 | live state on disk behind a bounded cache: the spec's redb live trie (storage.md:63–67) | under 5.25 GiB, the budget less the 1/8 reserve (target) |
+**Correction (2026-10-24, owner's instruction):** the figures first given here (≈ 136 / 83 / 14 / 10 GiB)
+were not results. The table below replaces them.
+- Each projection starts from the **measured `derive()` items after S2** (105.83 GiB,
+  evidence/decision-package/a13-network-profile-s2.log) and removes the items the stage moves.
+- What each stage adds back (caches, diffs, overlays) is a **new term not yet derived**, shown as "+ new".
+- A stage's figure becomes a result only when its code lands and `derive()` prints it.
+
+| stage | change (spec text) | items removed (GiB, measured) | network model after it |
+|---|---|---|---:|
+| S2 ✔ | code shared between snapshots (done, `d567ce1`) | code 54.69 → 9.69 | **105.83 (measured)** |
+| S1 | canonical bodies, receipts, logs and evidence off the heap, read from disk on demand (storage.md:70) | tx bytes 8.00, receipts and index 3.54, logs 1.03, evidence 1.99 = 14.56 | 91.27 + a bounded read cache (new) |
+| S3 | retained and side states as reverse diffs from the head (storage.md:70, D30); transient copies as copy-on-write overlays | 44 of the 45 full copies (73.49); the per-copy code containers and the extra code sets (8.48), since the states then share one code set | 9.30 + new: K_hist + side diffs, overlays (bounded by the written entries of the work in progress) |
+| S4 | per-block metadata off the heap (an index on disk) | per-block entries 4.63 | 4.67 + new: index cache |
+| S5 | live state on disk behind a bounded cache (redb live trie, storage.md:63–67) | the one full copy (1.63) | 3.05 + new: state cache, diffs, overlays; target ≤ 5.25 (budget less the 1/8 reserve) |
+
+What is left after S5 is measured, not projected: execution 1.10, one code set with its containers 1.22,
+side metadata 0.20, queues 0.24, RPC 0.20, threads 0.08. That is 3.05 GiB. The new terms must fit the
+remaining 2.2 GiB under the 5.25 GiB target. They are derived and pinned stage by stage.
 
 - **Consensus, genesisHash and validity:** none.
 - **Compatibility:** the journal and storage format change. This is a local migration; no on-chain or RPC
@@ -85,11 +94,12 @@ lands.
 | option | what it means | effect |
 |---|---|---|
 | **(a) full conformance S1–S5** | pocold boots the network profile within 6 GiB, as the spec's design intends | largest effort; no spec change |
-| (b) S1–S3 plus a larger node memory requirement (≈ 16 GiB) | stop at about 14 GiB | **[NORMATIVE]**: changes the node requirement behind D30 |
+| (b) S1–S3 plus a larger node memory requirement | stop after S3 (9.30 GiB + the diff terms, not yet derived) | **[NORMATIVE]**: changes the node requirement behind D30 |
 | (c) pocold stays devnet-only | the network node is a separate implementation | no work, but the network profile stays unverified |
 
-**Recommendation: (a), in stages.** I am starting with S2 and S1 now, under C-1. You decide whether the
-work continues through S5, or stops at S3 with (b).
+**Recommendation: (a), in stages.** **Approved by the owner on 2026-10-24**: complete S1–S5 so that the
+network profile runs within 6 GiB, with equivalence proofs, data preservation and crash tests, without
+waiting for routine approvals.
 
 **S2 status (2026-10-24, done; measured by `derive()`):**
 - The test `journal_measure::retained_states_of_one_lineage_share_their_code_buffers` shows that a
@@ -197,15 +207,37 @@ block stays ≤ t_exec; the vectors are unchanged.
 | (c) both | (a)'s bound, (b)'s typical cost | none | none | as (a) | as (a), lower typically |
 | (d) keep as is | — | — | — | — | about 68 min per head in the worst case |
 
-**Recommendation: (a) now, with POOL_GAS_MAX = 4·GAS_LIMIT.** It is a small change with a clear
-bound. Add (b) later as an optimisation; it needs no approval because it is result-equivalent.
+**Owner's decision (2026-10-24):** a local work bound is approved in principle. The value 4·GAS_LIMIT is
+not. The owner asked for a design that keeps revalidation from blocking the consensus thread, with a clear
+bound on its hold, measurements under load, and then a recommended value.
 
-**Acceptance tests:**
-- A submission past POOL_GAS_MAX is −32016, and nothing is pooled.
-- The rebuild after a new head, with a full pool of near-GAS_LIMIT transactions, takes ≤ 4·t_exec plus
-  the per-transaction state term (measured).
-- A mutant without the bound fails the test.
-- The A13 note for the pool (item 7) gets the figure.
+**Design, implemented** ([evidence/d7-pool](../evidence/d7-pool/README.md)):
+- Revalidation after a new head is queued in pool order and runs in slices of POOL_SLICE = 50 ms, with
+  one event between two slices.
+- **The consensus thread is held for at most POOL_SLICE plus one transaction** (≤ GAS_LIMIT, bounded by
+  t_exec).
+- An RPC submission during the backlog waits at most its own compute deadline, then gets −32021 busy
+  (nothing pooled).
+- Templates still see every transaction.
+- The sliced result equals the whole rebuild (a test with mutation controls).
+
+**Measured** (48 near-GAS_LIMIT BLAKE2F transactions):
+- revalidating at once held the thread for **7.97 s** idle and **7.93 s** under load;
+- sliced, the longest hold was **189 ms** idle and **214 ms** under load (one transaction).
+
+**Recommended value of the gas bound** (it limits the work and staleness per head, not the hold):
+- **POOL_GAS_MAX = max(1, ⌊T_blk / (2·t_exec)⌋) · GAS_LIMIT**, which gives 2·GAS_LIMIT on the devnet
+  and 10·GAS_LIMIT on the network.
+- It is derived from approved profile values, so that worst-case revalidation ends within half a block
+  interval.
+- Implemented as `Limits::pool_gas_max`, **off by default until you approve it**.
+
+**Acceptance tests** (all pass):
+- `sliced_pool_revalidation_equals_the_whole_rebuild`;
+- `a_submission_during_a_long_backlog_is_busy_at_its_deadline_and_not_pooled`;
+- `the_pool_gas_bound_refuses_past_it_and_is_recounted_on_a_new_head`;
+- the measurement `d7_pool_revalidation_hold_under_a_heavy_pool`;
+- the mutants in `mutants.log`.
 
 ---
 

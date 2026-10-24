@@ -429,25 +429,127 @@ fn a11_node(tag:&str)->(pocold::node::Node,std::path::PathBuf){
     (Node::open(Config{dir:dir.clone(),name:"a11".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},admitted(&cfg(&["a","b","c"]))).unwrap(),dir)
 }
 fn pay(key:&Key,nonce:u64,value:u64)->Vec<u8>{Tx{chain_id:777910,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:21000,to:Some(devnet::account_key("bob").address()),value:U256::from(value),data:Default::default()}.sign_1559(key)}
-fn pool(n:&pocold::node::Node)->Vec<Vec<u8>>{n.pool.txs.iter().map(|(_,r)|r.clone()).collect()}
+/// The pool after its revalidation backlog (decision D-7) is settled.
+fn pool(n:&mut pocold::node::Node)->Vec<Vec<u8>>{n.pool_settle();n.pool.txs.iter().map(|(_,r)|r.clone()).collect()}
 /// Builds `count` fallback blocks on `parent` in harness `h` (importing them there) and returns them.
 fn branch(h:&mut Net,parent:[u8;32],count:usize,bodies:&[Body])->Vec<Block>{
     let mut out=vec![];let mut p=parent;
     for i in 0..count{let b=match bodies.get(i){Some(body) if !body.txs.is_empty()=>signed(h,p,body.clone(),0),_=>fallback(h,p,0)};import(h,&b);p=b.hash();out.push(b);}
     out
 }
+fn slice_node(tag:&str,slice:std::time::Duration)->(pocold::node::Node,std::path::PathBuf){
+    use pocold::node::{Config,Limits,Node};
+    let dir=std::env::temp_dir().join(format!("pocold-slice-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    (Node::open(Config{dir:dir.clone(),name:tag.into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{pool_slice:slice,..Default::default()}},admitted(&cfg(&["a","b","c"]))).unwrap(),dir)
+}
+/// Decision D-7: pool revalidation after a new head runs in slices, one event between two slices. A
+/// node whose slice admits one item at a time ends, once its backlog is settled, with exactly the pool
+/// and pending state of a node that revalidates everything at once (the behaviour before D-7): the same
+/// transactions in the same order, through a reorg that detaches a block. While its backlog lasts, a
+/// template still sees every candidate, and an in-process submission waits for the backlog.
+#[test] fn sliced_pool_revalidation_equals_the_whole_rebuild(){
+    let (alice,bob)=(devnet::account_key("alice"),devnet::account_key("bob"));
+    let (mut a,da)=slice_node("one",std::time::Duration::ZERO);let (mut b,db)=slice_node("all",std::time::Duration::from_secs(3600));
+    let mut h=net();let g=h.chain.head;
+    let mined=pay(&alice,0,7);let ours=branch(&mut h,g,1,&[Body{txs:vec![mined.clone()],evidence:vec![]}]);
+    for n in [&mut a,&mut b]{assert!(n.import(ours[0].clone(),None).unwrap());}
+    let pooled:Vec<Vec<u8>>=(1..13).map(|k|pay(&alice,k,k)).chain((0..8).map(|k|pay(&bob,k,100+k))).collect();
+    for n in [&mut a,&mut b]{for t in &pooled{n.submit_tx(t.clone(),false).unwrap();}}
+    let mut h2=net();let theirs=branch(&mut h2,g,2,&[]);
+    for n in [&mut a,&mut b]{for x in &theirs{n.import(x.clone(),None).unwrap();}assert_eq!(n.chain.head,theirs[1].hash());}
+    assert!(a.pool_pending()&&!b.pool_pending(),"positive control: the one-item slice left a backlog, the whole rebuild did not");
+    let head=a.chain.head().meta_clone();assert_eq!(a.template_txs(&head),b.template_txs(&head),"a template during the backlog sees the same candidates");
+    a.pool_settle();
+    let expected:Vec<Vec<u8>>=std::iter::once(mined).chain(pooled.iter().cloned()).collect();
+    assert_eq!(pool(&mut b),expected,"the whole rebuild: the detached transaction first, then the pool in order");
+    assert_eq!(pool(&mut a),pool(&mut b),"sliced revalidation gives the same pool");
+    assert_eq!(apply::state_root(a.pool_state()).unwrap(),apply::state_root(b.pool_state()).unwrap(),"and the same pending state");
+    assert!(a.stats.pool_slices>1,"it ran in more than one slice: {}",a.stats.pool_slices);
+    // An in-process submission during a backlog is executed after it, in pool order.
+    let (mut c,dc)=slice_node("submit",std::time::Duration::ZERO);c.import(ours[0].clone(),None).unwrap();
+    for t in &pooled{c.submit_tx(t.clone(),false).unwrap();}for x in &theirs{c.import(x.clone(),None).unwrap();}
+    assert!(c.pool_pending());let late=pay(&alice,13,1);c.submit_tx(late.clone(),false).unwrap();
+    assert!(!c.pool_pending());assert_eq!(pool(&mut c).last(),Some(&late),"after the backlog, never before it");
+    for d in [da,db,dc]{let _=std::fs::remove_dir_all(&d);}
+}
+/// Decision D-7, measurement (release, --ignored): a pool of D7_K heavy transactions (BLAKE2F with
+/// 7.8M rounds, about GAS_LIMIT each, which no stop hook can cut short) is revalidated after a new head.
+/// With POOL_SLICE the import, and then every slice, holds the consensus thread for at most the slice
+/// plus one transaction; revalidating at once (the behaviour before D-7) holds it for the whole pool.
+#[test] #[ignore="D-7 measurement: run in release with --ignored --nocapture"]
+fn d7_pool_revalidation_hold_under_a_heavy_pool(){
+    use std::time::{Duration,Instant};
+    let k:u64=std::env::var("D7_K").ok().and_then(|s|s.parse().ok()).unwrap_or(12);
+    let alice=devnet::account_key("alice");
+    let input=pocold::types::unhex(&format!("{:08x}{}01",7_800_000u32,"00".repeat(64+128+16))).unwrap();
+    let heavy=|nonce:u64|Tx{chain_id:777910,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:7_900_000,to:Some(Address::with_last_byte(9)),value:U256::ZERO,data:input.clone().into()}.sign_1559(&alice);
+    let mut h=net();let g=h.chain.head;let blocks=branch(&mut h,g,2,&[]);
+    let mut out=serde_json::Map::new();
+    for (tag,slice) in [("sliced",pocold::node::POOL_SLICE),("whole",Duration::from_secs(3600))]{
+        let (mut n,dir)=slice_node(&format!("d7-{tag}"),slice);n.import(blocks[0].clone(),None).unwrap();
+        let mut max_tx=0f64;for i in 0..k{let t=Instant::now();n.submit_tx(heavy(i),false).unwrap();max_tx=max_tx.max(t.elapsed().as_secs_f64()*1e3);}
+        let t=Instant::now();n.import(blocks[1].clone(),None).unwrap();let import_ms=t.elapsed().as_secs_f64()*1e3;
+        let (mut steps,mut step_max,t)=(0u64,0f64,Instant::now());
+        while n.pool_pending(){let s0=Instant::now();n.pool_step();step_max=step_max.max(s0.elapsed().as_secs_f64()*1e3);steps+=1;}
+        let rest_ms=t.elapsed().as_secs_f64()*1e3;
+        assert_eq!(n.pool.txs.len() as u64,k,"{tag}: every heavy transaction is still valid and pooled");
+        if tag=="sliced"{let bound=slice.as_secs_f64()*1e3+max_tx+25.0;
+            assert!(step_max<=bound,"a slice held the thread {step_max:.0} ms, over the slice + one transaction ({bound:.0} ms)");}
+        out.insert(tag.into(),serde_json::json!({"poolTxs":k,"maxTxMs":max_tx,"importMs":import_ms,"slicesAfterImport":steps,"sliceMaxMs":step_max,"restMs":rest_ms,"sliceMs":slice.as_millis() as u64}));
+        let _=std::fs::remove_dir_all(&dir);
+    }
+    println!("D7-MEASURE {}",serde_json::Value::Object(out));
+}
+/// Decision D-7: the optional pool gas bound (`Limits::pool_gas_max`, off by default until the owner
+/// approves a value). A submission whose gas limit would take the pooled sum past it is -32016 and
+/// leaves no state change; a new head recounts the sum.
+#[test] fn the_pool_gas_bound_refuses_past_it_and_is_recounted_on_a_new_head(){
+    use pocold::node::{Config,Limits,Node};
+    let dir=std::env::temp_dir().join(format!("pocold-poolgas-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let mut n=Node::open(Config{dir:dir.clone(),name:"gas".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{pool_gas_max:Some(3*21000),..Default::default()}},admitted(&cfg(&["a","b","c"]))).unwrap();
+    let alice=devnet::account_key("alice");
+    for k in 0..3{n.submit_tx(pay(&alice,k,1),false).unwrap();}assert_eq!(n.pool.gas,63000);
+    let e=n.submit_tx(pay(&alice,3,1),false).unwrap_err();assert!(e.starts_with("-32016"),"{e}");assert_eq!(n.pool.txs.len(),3,"refused, nothing pooled");
+    // A block that includes the first two: the pool is revalidated and its gas recounted.
+    let mut h=net();let g=h.chain.head;let b=branch(&mut h,g,1,&[Body{txs:vec![pay(&alice,0,1),pay(&alice,1,1)],evidence:vec![]}]);
+    n.import(b[0].clone(),None).unwrap();n.pool_settle();assert_eq!((n.pool.txs.len(),n.pool.gas),(1,21000));
+    n.submit_tx(pay(&alice,3,1),false).unwrap();assert_eq!(n.pool.gas,42000);
+    let _=std::fs::remove_dir_all(&dir);
+}
+/// Decision D-7: an eth_sendRawTransaction that arrives during a pool backlog drives the backlog until
+/// its compute deadline. If the backlog is not done by then, the answer is -32021 {busy, retryAfterMs}
+/// and nothing is pooled; once the backlog is done the same request is admitted. In process.
+#[test] fn a_submission_during_a_long_backlog_is_busy_at_its_deadline_and_not_pooled(){
+    use pocold::{node::{Config,Limits,Node},rpc::{answer,Request}};use std::time::{Duration,Instant};
+    let dir=std::env::temp_dir().join(format!("pocold-busy-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let mut l=Limits{pool_slice:Duration::ZERO,..Default::default()};l.rpc.compute_light=Duration::from_millis(100);
+    let mut n=Node::open(Config{dir:dir.clone(),name:"busy".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:l},admitted(&cfg(&["a","b","c"]))).unwrap();
+    let alice=devnet::account_key("alice");
+    let input=pocold::types::unhex(&format!("{:08x}{}01",7_800_000u32,"00".repeat(64+128+16))).unwrap();
+    let heavy=|nonce:u64|Tx{chain_id:777910,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:7_900_000,to:Some(Address::with_last_byte(9)),value:U256::ZERO,data:input.clone().into()}.sign_1559(&alice);
+    for k in 0..4{n.submit_tx(heavy(k),false).unwrap();}
+    let mut h=net();let g=h.chain.head;let b=branch(&mut h,g,1,&[]);n.import(b[0].clone(),None).unwrap();assert!(n.pool_pending(),"a backlog of heavy transactions");
+    let body=format!(r#"{{"jsonrpc":"2.0","id":3,"method":"eth_sendRawTransaction","params":["0x{}"]}}"#,pocold::types::hex(&pay(&devnet::account_key("bob"),0,1)).trim_start_matches("0x"));
+    let req=||{let (t,_r)=std::sync::mpsc::channel();Request::local(body.as_bytes().to_vec(),t,Instant::now()+Duration::from_secs(30),true)};
+    let t=Instant::now();let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&req()).body).unwrap();let took=t.elapsed();
+    assert_eq!((v["error"]["code"].clone(),v["error"]["data"]["reason"].clone()),(serde_json::json!(-32021),serde_json::json!("busy")),"{v}");
+    assert!(took<Duration::from_millis(100)+Duration::from_millis(400),"held about its deadline plus one transaction: {took:?}");
+    assert!(n.pool.txs.iter().all(|(_,r)|*r!=pay(&devnet::account_key("bob"),0,1)),"not pooled");
+    n.pool_settle();let v:serde_json::Value=serde_json::from_str(&answer(&mut n,&req()).body).unwrap();assert!(v["result"].is_string(),"positive control: after the backlog it is admitted: {v}");
+    let _=std::fs::remove_dir_all(&dir);
+}
 #[test] fn a11_reorg_restores_detached_transactions_without_resubmission(){
     let alice=devnet::account_key("alice");let t0=pay(&alice,0,7);
     let (mut node,dir)=a11_node("restore");let mut h=net();let g=h.chain.head;
-    node.submit_tx(t0.clone(),false).unwrap();assert_eq!(pool(&node),vec![t0.clone()]);
+    node.submit_tx(t0.clone(),false).unwrap();assert_eq!(pool(&mut node),vec![t0.clone()]);
     // submit -> mine: the block carrying t0 becomes head and t0 leaves the pool.
     let old=branch(&mut h,g,1,&[Body{txs:vec![t0.clone()],evidence:vec![]}]);
-    assert!(node.import(old[0].clone(),None).unwrap());assert!(pool(&node).is_empty());
+    assert!(node.import(old[0].clone(),None).unwrap());assert!(pool(&mut node).is_empty());
     // A heavier competing branch without t0: t0 is detached and returns, still valid.
     let mut h2=net();let new=branch(&mut h2,g,2,&[]);
     for b in &new{node.import(b.clone(),None).unwrap();}
     assert_eq!(node.chain.head,new[1].hash(),"reorganized to the heavier branch");
-    assert_eq!(pool(&node),vec![t0],"the detached transaction is back in the pool");
+    assert_eq!(pool(&mut node),vec![t0],"the detached transaction is back in the pool");
     let _=std::fs::remove_dir_all(&dir);
 }
 #[test] fn a11_excludes_included_and_conflicting_transactions_and_keeps_order(){
@@ -458,11 +560,11 @@ fn branch(h:&mut Net,parent:[u8;32],count:usize,bodies:&[Body])->Vec<Block>{
     let (mut node,dir)=a11_node("order");let mut h=net();let g=h.chain.head;
     let old=branch(&mut h,g,2,&[Body{txs:vec![t0.clone()],evidence:vec![]},Body{txs:vec![t1.clone()],evidence:vec![]}]);
     for b in &old{node.import(b.clone(),None).unwrap();}
-    node.submit_tx(t2.clone(),false).unwrap();node.submit_tx(t2.clone(),false).unwrap();assert_eq!(pool(&node),vec![t2.clone()],"duplicates are kept once");
+    node.submit_tx(t2.clone(),false).unwrap();node.submit_tx(t2.clone(),false).unwrap();assert_eq!(pool(&mut node),vec![t2.clone()],"duplicates are kept once");
     // Multiple detached blocks, oldest first, then the previous pool.
     let mut h2=net();let new=branch(&mut h2,g,3,&[]);
     for b in &new{node.import(b.clone(),None).unwrap();}
-    assert_eq!(node.chain.head,new[2].hash());assert_eq!(pool(&node),vec![t0.clone(),t1.clone(),t2.clone()]);
+    assert_eq!(node.chain.head,new[2].hash());assert_eq!(pool(&mut node),vec![t0.clone(),t1.clone(),t2.clone()]);
     // The new canonical branch includes a different transaction with alice's nonce 0: every
     // detached transaction is revalidated on the new head.
     let (mut node,dir2)=a11_node("conflict");let mut h=net();let g=h.chain.head;
@@ -471,13 +573,13 @@ fn branch(h:&mut Net,parent:[u8;32],count:usize,bodies:&[Body])->Vec<Block>{
     let mut h2=net();let new=branch(&mut h2,g,3,&[Body{txs:vec![conflict.clone()],evidence:vec![]},Body::default(),Body::default()]);
     for b in &new{node.import(b.clone(),None).unwrap();}
     assert_eq!(node.chain.head,new[2].hash());
-    assert_eq!(pool(&node),vec![t1.clone()],"t0 conflicts with the included nonce 0 and is dropped; t1 (nonce 1) is valid again");
+    assert_eq!(pool(&mut node),vec![t1.clone()],"t0 conflicts with the included nonce 0 and is dropped; t1 (nonce 1) is valid again");
     // A branch that includes t0 itself: t0 is not restored (already canonical).
     let (mut node,dir3)=a11_node("included");let mut h=net();let g=h.chain.head;
     let old=branch(&mut h,g,1,&[Body{txs:vec![t0.clone()],evidence:vec![]}]);node.import(old[0].clone(),None).unwrap();
     let mut h2=net();let new=branch(&mut h2,g,2,&[Body::default(),Body{txs:vec![t0.clone()],evidence:vec![]}]);
     for b in &new{node.import(b.clone(),None).unwrap();}
-    assert_eq!(node.chain.head,new[1].hash());assert!(pool(&node).is_empty(),"included on the new branch: not restored");
+    assert_eq!(node.chain.head,new[1].hash());assert!(pool(&mut node).is_empty(),"included on the new branch: not restored");
     for d in [dir,dir2,dir3]{let _=std::fs::remove_dir_all(&d);}
 }
 
@@ -501,10 +603,10 @@ fn a11_deep_reorg_restores_the_oldest_detached_transaction(){
     assert!(ours.len()+theirs.len()>2*rk as usize,"the two sides total {} blocks",ours.len()+theirs.len());
     let (mut node,dir,_)=rnode("a11-deep",rk,2*pocold::chain::SIDE_BLOCKS_MAX);
     for x in &ours{node.import(x.clone(),None).unwrap();}
-    assert!(pool(&node).is_empty(),"t0 is included in the oldest block of our branch");
+    assert!(pool(&mut node).is_empty(),"t0 is included in the oldest block of our branch");
     for x in &theirs{node.import(x.clone(),None).unwrap_or_else(|e|panic!("h={}: {e:?}",x.header.h));}
     assert_eq!(node.chain.head,theirs.last().unwrap().hash(),"reorganized to the heavier branch at depth R_keep");
-    assert_eq!(pool(&node),vec![t0],"the oldest detached block's transaction is back in the pool");
+    assert_eq!(pool(&mut node),vec![t0],"the oldest detached block's transaction is back in the pool");
     let _=std::fs::remove_dir_all(&dir);
 }
 /// Review R5-7: the transactions of one detached block return in block order (a reversed walk inside
@@ -514,7 +616,7 @@ fn a11_deep_reorg_restores_the_oldest_detached_transaction(){
     let (mut node,dir)=a11_node("inblock");let mut h=net();let g=h.chain.head;
     let old=branch(&mut h,g,1,&[Body{txs:vec![t0.clone(),t1.clone()],evidence:vec![]}]);node.import(old[0].clone(),None).unwrap();
     let mut h2=net();let new=branch(&mut h2,g,2,&[]);for b in &new{node.import(b.clone(),None).unwrap();}
-    assert_eq!(node.chain.head,new[1].hash());assert_eq!(pool(&node),vec![t0,t1],"both, in block order");
+    assert_eq!(node.chain.head,new[1].hash());assert_eq!(pool(&mut node),vec![t0,t1],"both, in block order");
     let _=std::fs::remove_dir_all(&dir);
 }
 /// Review R5-7: the abandoned branch's oldest block is removed by retention (it is R_keep below the new
@@ -533,7 +635,7 @@ fn a11_deep_reorg_restores_the_oldest_detached_transaction(){
     for x in &theirs{node.import(x.clone(),None).unwrap_or_else(|e|panic!("h={}: {e:?}",x.header.h));}
     assert_eq!(node.chain.head,theirs.last().unwrap().hash());
     assert!(node.chain.get(&ours[0].hash()).is_none(),"positive control: the block carrying t0 was removed by retention");
-    assert_eq!(pool(&node),vec![t0],"its transaction is back in the pool all the same");
+    assert_eq!(pool(&mut node),vec![t0],"its transaction is back in the pool all the same");
     let _=std::fs::remove_dir_all(&dir);
 }
 
