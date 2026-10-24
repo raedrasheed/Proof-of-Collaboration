@@ -13,7 +13,10 @@ Gates exercised (LOCAL-DEVNET-PLAN.md LP5/LP7):
     head is exactly a/b's tip, c's tip is canonical on no node, and a and b neither reorganize nor
     start a session. Node d, a copy of c's store from before the heal, is sent a/b's branch tip
     first by a peer claiming genesis (no session, so through the orphan pool) and must switch to
-    a/b's tip once. Then a, which holds none of c's late blocks, is sent c's branch twice: below
+    a/b's tip once, never sending a Status lighter than c's tip. Node f, a copy of b's store after
+    the heal (head a/b's tip, none of c's late blocks), is sent c's lighter branch tip first the same
+    way and must keep a/b's tip: no reorganization and no Status naming another head (the orphan
+    path in both directions). Then a, which holds none of c's late blocks, is sent c's branch twice: below
     c's tip by a peer claiming genesis (no session; the branch ends above a's head), and in full in
     a sync session with a peer claiming more work than a; a stores it and keeps its head (the head
     is the maximum of ≻ whatever the order of arrival, consensus.md:215), with no reorganization,
@@ -21,7 +24,8 @@ Gates exercised (LOCAL-DEVNET-PLAN.md LP5/LP7):
   * heal while the miners run: node e, a second copy of c's store from before the heal, joins the
     mining a, b and c and must follow their chain (bounded wait)
   * SIGKILL crash of node b during production: b replays its journal alone (to its pre-kill
-    height, less a torn tail of at most one record), then rejoins
+    height, less a torn tail of at most one record, holding the pre-kill head's parent and the
+    pre-kill canonical block CONFIRM below that head), then rejoins
   * malicious peer: a garbage frame and a wrong-network Hello close the connection (a well-formed
     Hello does not); a corrupted block sent after a valid Hello adds exactly one reject entry, for
     a block a does not store; a keeps producing
@@ -40,8 +44,9 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import devnet as dn
 SIGN = os.environ.get("POCOL_SIGN", os.path.join(os.path.dirname(dn.BIN), "pocol-sign"))
 L = "abc"
-# Node index: RPC port 8540+i, P2P port 30300+i. d and e are copies of c's store taken before the heal.
-IDX = {l: i for i, l in enumerate("abcde")}
+# Node index: RPC port 8540+i, P2P port 30300+i. d and e are copies of c's store taken before the heal,
+# f a copy of b's store taken after it.
+IDX = {l: i for i, l in enumerate("abcdef")}
 # Partition: a/b's lead over frozen c, in works of c's tip block, and when c mines late (s after its
 # tip's timestamp; > D_att + Gamma = 46, so the first late block takes attempt >= 1).
 LEAD, PAUSE = 4, 120
@@ -127,14 +132,15 @@ def rlp_items(p):
         elif b <= 0xbf: k = b - 0xb7; n = int.from_bytes(p[i + 1:i + 1 + k], "big"); out.append(p[i + 1 + k:i + 1 + k + n]); i += 1 + k + n
         else: raise ValueError("nested list")
     return out
-def status_heads(ps):
-    """The head hash of every Status (Hello, network.md:7) among frame payloads. pocold sends one on
-    connect and one on every new head (its Status refresh), so a head change shows here even if the
-    node reverts it before its head is read."""
-    return ["0x" + rlp_items(p)[3].hex() for p in ps if msg_type(p) == 0]
+def status_claims(ps):
+    """(head hash, totalWork) of every Status (Hello, network.md:7) among frame payloads. pocold sends
+    one on connect and one on every new head (its Status refresh), so a head change shows here even if
+    the node reverts it before its head is read."""
+    return [("0x" + it[3].hex(), int.from_bytes(it[5], "big")) for it in (rlp_items(p) for p in ps if msg_type(p) == 0)]
+def status_heads(ps): return [x for x, _ in status_claims(ps)]
 
 def main():
-    busy = [p for p in (30300, 30301, 30302, 30303, 8540, 8541, 8542, 8543, 8544) if port_open(p)]
+    busy = [p for p in (30300, 30301, 30302, 30303, 30305, 8540, 8541, 8542, 8543, 8544, 8545) if port_open(p)]
     if busy: print(json.dumps({"result": "FAIL", "error": f"ports busy {busy}"})); return 1
     work = tempfile.mkdtemp(prefix="pocol-e2e-"); net = os.path.join(work, "net"); t_start = time.time()
     checks = []; procs = {}; mined = {l: 0 for l in L}
@@ -281,18 +287,42 @@ def main():
         # tip), listens with no peers and no miner. A test peer claiming genesis (so d starts no session)
         # sends a/b's branch above the fork TIP FIRST: each block arrives before its parent and waits
         # in the orphan pool until the lowest one, whose parent d holds, releases the chain. d must
-        # switch to a/b's tip with exactly one reorganization.
+        # switch to a/b's tip with exactly one reorganization, and every Status it sends the peer (on
+        # connect, then on each new head) must name c's tip or a head with at least its work: fork
+        # choice never takes a lighter block, even one released from the orphan pool.
         abr = [dn.rpc(8540, "pocol_getBlockRlp", [hex(n)]) for n in range(fork + 1, ab_tip["number"] + 1)]
         run_node("d", miner=False, listen=True, peers=[])
         d0 = st(IDX["d"])
         s = socket.create_connection(("127.0.0.1", 30300 + IDX["d"])); s.sendall(hello(info["chainId"], genesis, genesis, 0, 0, b"e2e-orphans"))
         for b in reversed(abr): s.sendall(block_frame(b))
-        adopted = waited(lambda: tip(IDX["d"])["hash"] == ab_tip["hash"], 60, "d adopts a/b's tip"); s.close(); d1 = st(IDX["d"])
+        adopted = waited(lambda: tip(IDX["d"])["hash"] == ab_tip["hash"], 60, "d adopts a/b's tip"); seen, _ = frames(s, 2); s.close(); d1 = st(IDX["d"]); ann = status_claims(seen)
         ok("heal without a session: d (c's pre-heal store), sent a/b's branch tip first by a peer claiming genesis, adopts a/b's tip through the orphan pool, reorganizing once",
            d0["head"]["hash"] == c_tip["hash"] and adopted and d1["stats"]["reorgs"] - d0["stats"]["reorgs"] == 1 and d1["stats"]["syncSessions"] == 0,
            f"{len(abr)} blocks h={fork+1}..{ab_tip['number']} sent tip first; d head {d0['head']['height']}->{d1['head']['height']} "
            f"reorgs {d0['stats']['reorgs']}->{d1['stats']['reorgs']} sessions {d1['stats']['syncSessions']}")
+        ok("heal without a session: every Status d sent the test peer names c's tip or a head with at least its work, the first c's tip, the last a/b's tip",
+           ann and ann[0] == (c_tip["hash"], c_tip["work"]) and ann[-1][0] == ab_tip["hash"] and all(w >= c_tip["work"] for _, w in ann),
+           f"{len(ann)} Status (head, work above c's tip in c tip blocks) {[(x[:12], round((w - c_tip['work']) / d_c, 2)) for x, w in ann]}")
         stop_node("d")
+        # 4c. The orphan path the other way: f, a copy of b's store after the heal (head a/b's tip, none
+        #     of c's late blocks), listens with no peers and no miner. A test peer claiming genesis sends
+        #     c's lighter branch above the fork TIP FIRST, so its late blocks, higher than f's head and
+        #     lighter, are released from the orphan pool. f must keep a/b's tip (the head is the maximum
+        #     of ≻ whatever the order of arrival, consensus.md:215): no reorganization, no session, and
+        #     every Status it sends the peer names a/b's tip.
+        i_f = IDX["f"]; stop_node("b"); shutil.copytree(os.path.join(work, "data", "b"), os.path.join(work, "data", "f")); run_node("b", miner=False)
+        run_node("f", miner=False, listen=True, peers=[]); f0 = st(i_f); held = sum(1 for b in late if blk(i_f, b["hash"]) is not None)
+        s = socket.create_connection(("127.0.0.1", 30300 + i_f)); s.sendall(hello(info["chainId"], genesis, genesis, 0, 0, b"e2e-orphans-light"))
+        for b in reversed(relay): s.sendall(block_frame(b))
+        fst = waited(lambda: blk(i_f, c_tip["hash"]) is not None, 60, "f stores c's tip"); seen, _ = frames(s, 2); s.close(); ann = status_heads(seen); f1 = st(i_f)
+        ok("heal without a session, lighter branch: f (b's store: head a/b's tip, none of c's late blocks), sent c's branch tip first by a peer claiming genesis, stores c's tip through the orphan pool and keeps a/b's tip, c's tip not canonical, no reorganization, no session",
+           f0["head"]["hash"] == ab_tip["hash"] and held == 0 and fst and f1["head"]["hash"] == ab_tip["hash"] and canon(i_f, c_tip["number"]) != c_tip["hash"]
+           and f1["stats"]["reorgs"] == f0["stats"]["reorgs"] and f1["stats"]["syncSessions"] == f0["stats"]["syncSessions"],
+           f"{len(relay)} blocks h={fork+1}..{c_tip['number']} sent tip first; f held {held}/{len(late)} late blocks; stored={fst} f head {short(tip(i_f))} "
+           f"reorgs {f0['stats']['reorgs']}->{f1['stats']['reorgs']} sessions {f0['stats']['syncSessions']}->{f1['stats']['syncSessions']}")
+        ok("heal without a session, lighter branch: every Status f sent the test peer names a/b's tip",
+           ann and all(x == ab_tip["hash"] for x in ann), f"{len(ann)} Status heads {[x[:12] for x in ann]}")
+        stop_node("f")
         # 5. Relay without a session: a test peer (valid Hello claiming genesis, so a starts no session
         #    with it) delivers c's branch below c's tip, parents first, to a, which holds none of c's late
         #    blocks (c mined them isolated; c0 itself may be a side block a holds). The last block sent
@@ -359,11 +389,16 @@ def main():
         stop_node("e")
         # Crash: SIGKILL b mid-production. b first replays its journal alone (no peers, no miner), so a
         # lost or truncated journal cannot be hidden by a resync: its replayed head is at least its
-        # pre-kill height less one (a torn tail of one record), on the chain it had. Then it rejoins.
-        kb = tip(1); kc = canon(1, kb["number"] - 1)
+        # pre-kill height less one (a torn tail of one record), it holds the pre-kill head's parent
+        # (journaled before that head, so never the torn record), and its canonical block CONFIRM below
+        # the pre-kill head is the one it had. b mines until the kill, so a tip race between these reads
+        # and the kill may replace its canonical block one below the head, not one CONFIRM deep.
+        # Then it rejoins.
+        kb = tip(1); kp = blk(1, kb["hash"])["parentHash"]; kc = canon(1, kb["number"] - CONFIRM)
         stop_node("b", signal.SIGKILL); run_node("b", miner=False, connect=False); rb = tip(1)
-        ok("SIGKILL crash: b replays its journal alone to at least its pre-kill height less one, on the chain it had",
-           rb["number"] >= kb["number"] - 1 and canon(1, kb["number"] - 1) == kc, f"pre-kill head {short(kb)}, replayed head {short(rb)}")
+        ok("SIGKILL crash: b replays its journal alone to at least its pre-kill height less one, holds the pre-kill head's parent, and keeps its canonical block CONFIRM below the pre-kill head",
+           rb["number"] >= kb["number"] - 1 and blk(1, kp) is not None and canon(1, kb["number"] - CONFIRM) == kc,
+           f"pre-kill head {short(kb)}, replayed head {short(rb)}; pre-kill parent canonical after replay: {canon(1, kb['number'] - 1) == kp}")
         stop_node("b"); run_node("b")
         wait(lambda: abs(h(1) - h(0)) <= 1, 90, "b recovers")
         ok("SIGKILL crash: b rejoins", True, f"b={h(1)}")
