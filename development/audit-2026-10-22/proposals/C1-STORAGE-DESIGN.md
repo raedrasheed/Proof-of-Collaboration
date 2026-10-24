@@ -231,6 +231,17 @@ the 45 copies: K_hist + 1 retained states and side_max side states, 55.5 GiB at 
   2. **No extra rebuild.** At first, after a fork below the cut, that re-execution rebuilt the adopted
      branch from genesis. Since no retained state lies below it, it is now skipped. The equivalence test
      shows the same rebuild count as the reference (20 and 20).
+  3. **Kept side states must be full** (found from a surviving mutant).
+     - The fault in the first version (`bef6c4f`): a side state kept within side_max could be held as a
+       diff only, for example a block of the abandoned branch protected by a sync session. Once its
+       neighbours were pruned it became unreachable. Had that branch been adopted again, its height
+       would have answered −32017 where the code before S3a answered.
+     - Fix: `settle` makes every kept side state full, materialized before the diffs that lead to it
+       are dropped. Before S3a every kept side state was full too, so A13 already counts side_max full
+       copies.
+     - Test: the equivalence test now protects such a block, requires identical pruned flags for every
+       block, and checks that the block answers again when it is canonical. It fails on `bef6c4f`'s
+       behaviour (mutant SM11).
 - **A13, measured by `derive()`:**
 
   | | before S3a | after S3a |

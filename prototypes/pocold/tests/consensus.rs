@@ -1373,34 +1373,39 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
     // is offloaded, so the restore re-executes only the adopted blocks without a diff).
     struct NoJournal;impl pocold::chain::BlockBytes for NoJournal{fn record_at(&self,_:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8>),Reject>{Err(Reject::Block("no journal".into()))}}
     // The deep branch arrives as a sync session's does: protected from the side cap while non-canonical.
-    let session:std::collections::HashSet<[u8;32]>=deep.iter().map(|x|x.hash()).collect();
+    let session:std::collections::HashSet<[u8;32]>=deep.iter().map(|x|x.hash()).collect();let m63=main[63].hash();
     let step=|n:&mut Net,x:&Block|{let r=match n.chain.validate(x,None,0){Err(Reject::NeedsRebuild(q))=>{n.chain.ensure_state(&q).unwrap();n.chain.validate(x,None,0)}r=>r};
         let (e,_)=r.unwrap_or_else(|e|panic!("h={} {e:?}",x.header.h));let old=n.chain.head;n.chain.insert(e);
         if session.contains(&x.hash())&&!n.chain.is_canonical(&x.hash()){n.chain.protect.insert(x.hash());}
+        // The moment the main branch is left, its block at height 64 is protected (as a sync session's
+        // block is): its state is kept while its neighbours' are pruned.
+        if !n.chain.is_canonical(&m63)&&n.chain.get(&m63).map_or(false,|e|!e.pruned){n.chain.protect.insert(m63);}
         let fork_h=if n.chain.head!=old{n.chain.lca_height(&old,&n.chain.head).unwrap_or(0)}else{0};let adopted=n.chain.head!=old;
         n.chain.retain_unsettled();if adopted{n.chain.restore_canonical(fork_h,&NoJournal).unwrap();}n.chain.settle();};
-    let side_max=a.chain.spec.local().side_max as usize;let (mut compared,mut max_full,mut ref_max)=(0usize,0usize,0usize);
+    let side_max=a.chain.spec.local().side_max as usize;let (mut compared,mut max_full,mut ref_max)=(0usize,0usize,0usize);let mut protected_answered=false;let mut was_side=false;
     for (i,x) in seq.iter().enumerate(){
         let before=a.chain.head;step(&mut a,x);step(&mut b,x);
+        // The main branch is adopted again later: the protected block's height must then answer again.
+        if !a.chain.is_canonical(&main[63].hash()){was_side=true;}
         ref_max=ref_max.max(b.chain.blocks.values().filter(|e|!e.pruned).count());
         let full=a.chain.blocks.values().filter(|e|e.full&&!e.pruned).count();max_full=max_full.max(full);
         assert!(full<=2+side_max,"step {i}: {full} full states");
         assert_eq!(a.chain.head,b.chain.head,"step {i}");assert_eq!(a.chain.canonical,b.chain.canonical,"step {i}");
-        for hh in &b.chain.canonical{assert_eq!(a.chain.blocks[hh].pruned,b.chain.blocks[hh].pruned,"step {i}: canonical pruned flag at h={}",b.chain.blocks[hh].height);}
-        for (hh,eb) in &b.chain.blocks{assert!(a.chain.blocks[hh].pruned||!eb.pruned,"step {i}: S3a keeps a state the reference pruned (h={})",eb.height);}
+        for (hh,eb) in &b.chain.blocks{assert_eq!(a.chain.blocks[hh].pruned,eb.pruned,"step {i}: pruned flag at h={} (canonical {})",eb.height,b.chain.is_canonical(hh));}
         // Every state in full at each reorg (the head did not just extend), every 4th step and at the end.
         let reorg=a.chain.get(&a.chain.head).and_then(|e|e.parent)!=Some(before);
         if !(reorg||i%4==0||i+1==seq.len()){continue}
         for (hh,eb) in &b.chain.blocks{let ea=&a.chain.blocks[hh];
             if ea.pruned{continue}
-            assert!(!eb.pruned,"step {i}: S3a keeps a state the reference pruned (h={})",eb.height);
             let st=a.chain.state_of(hh).unwrap_or_else(||panic!("step {i}: h={} not reachable",eb.height));
             assert!(states_equal(&st,&eb.state),"step {i}: h={} materialized state differs",eb.height);
             if eb.height>0{assert_eq!(apply::state_root(&st).unwrap().0,eb.header.state_root,"step {i}: h={} stateRoot",eb.height);}
+            if *hh==m63&&was_side&&a.chain.is_canonical(hh){protected_answered=true;}
             compared+=1;}
     }
     let mats=a.chain.materializations.load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(a.chain.head,deep.last().unwrap().hash(),"positive control: the deep fork is adopted");
+    assert!(protected_answered,"positive control: the protected main block kept its state and was canonical again with it");
     assert!(a.chain.rebuilds>0&&mats>0,"positive control: a TrieRebuild ({}) and materializations ({mats})",a.chain.rebuilds);
     assert!(compared>1000&&ref_max>max_full*5,"positive control: {compared} states compared; the reference held up to {ref_max} full states, S3a at most {max_full}");
     println!("S3A-EQUIV {}",json!({"steps":seq.len(),"statesCompared":compared,"maxFull":max_full,"referenceMaxFull":ref_max,"materializations":mats,"rebuildsS3a":a.chain.rebuilds,"rebuildsRef":b.chain.rebuilds}));

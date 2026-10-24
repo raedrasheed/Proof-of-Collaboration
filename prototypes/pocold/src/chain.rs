@@ -537,15 +537,25 @@ impl Chain{
         let side_left:Vec<[u8;32]>=self.blocks.values().filter(|e|e.height>0&&!self.is_canonical(&e.hash)).map(|e|e.hash).collect();
         let mut with_state:Vec<(bool,U256,u64,[u8;32])>=side_left.into_iter().filter(|h|!self.blocks[h].pruned).map(|h|{let e=&self.blocks[&h];(self.protect.contains(&h),e.total_work,e.import_seq,h)}).collect();
         let side_max=self.spec.local().side_max as usize;
-        if with_state.len()>side_max{with_state.sort();let over=with_state.len()-side_max;
-            let drop:Vec<[u8;32]>=with_state.into_iter().take(over).map(|x|x.3).collect();
-            for h in drop{if let Some(e)=self.blocks.get_mut(&h){e.state=InMemoryDB::default();e.pruned=true;e.full=false;e.diff=None;}}}
+        with_state.sort();let over=with_state.len().saturating_sub(side_max);
+        let drop:Vec<[u8;32]>=with_state.iter().take(over).map(|x|x.3).collect();
+        let keep:Vec<[u8;32]>=with_state.iter().skip(over).map(|x|x.3).collect();
+        // The pruned side states' memory goes first; their diffs stay until the kept ones are full.
+        for h in &drop{if let Some(e)=self.blocks.get_mut(h){e.state=InMemoryDB::default();e.pruned=true;e.full=false;}}
+        // C-1 S3a: every side state kept within side_max is full (materialized while the diffs that lead
+        // to it are still here), as all of them were before S3a: none becomes unreachable when its
+        // neighbours are pruned, and one that is adopted again answers as it did.
+        if !self.keep_full_states{for h in &keep{if self.blocks.get(h).map_or(false,|e|!e.full&&!e.pruned){
+            match self.materialize(h){Some(st)=>{let e=self.blocks.get_mut(h).unwrap();e.state=st;e.full=true;self.materializations.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
+                None=>{self.blocks.get_mut(h).unwrap().pruned=true;}}}}}
+        for h in &drop{if let Some(e)=self.blocks.get_mut(h){e.diff=None;}}
         self.shed_full_states();
     }
     /// C-1 S3a: drops the full state of every canonical block above the K_hist cut but the head (its diff
-    /// is kept), then marks pruned any state that is no longer reachable from a full one through diffs,
-    /// and makes the head's state full. After it the full states are the head, genesis and the side
-    /// states within side_max.
+    /// is kept) and makes the head's state full. After it the full states are the head, genesis and the
+    /// side states within side_max. A state that is then unreachable from a full one is marked pruned;
+    /// none should be (side states are full, and the canonical window is linked by its diffs), so this is
+    /// a guard that keeps `pruned` truthful, never a source of answers.
     fn shed_full_states(&mut self){
         if self.keep_full_states{return}
         let head=self.head;
