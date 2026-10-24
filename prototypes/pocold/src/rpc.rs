@@ -373,9 +373,10 @@ pub fn answer(n:&mut Node,q:&Request)->Reply{
     let (pool,need)=if q.light{(n.resp_pools().light,LIGHT_RESP_MAX)}else if batch{(n.resp_pools().heavy,BATCH_BYTES_HARD)}else{(n.resp_pools().heavy,RESP_MAX)};
     let Some(mut resv)=RespPools::take(&pool,need) else{COUNTERS.busy.fetch_add(1,Ordering::SeqCst);return Reply::small(busy(&q.body))};
     let _active=Active::new(if q.light{&COUNTERS.light_active}else{&COUNTERS.heavy_active});
-    // The class's deadline by method (network.md (ب), :235), as for batch members: a light-table method
-    // whose body exceeds LIGHT_BODY_MAX runs on the heavy lane (and reservation) under the light deadline.
-    let light=q.light||(!batch&&light_method(&q.body));
+    // The class's deadline by method (network.md (ب), :235), as for batch members: a light-table entry
+    // whose body exceeds LIGHT_BODY_MAX, or a conditional one, runs on the heavy lane (and reservation)
+    // under the light deadline; its answer has the light limit (`member`).
+    let light=q.light||(!batch&&light_class(&q.body));
     let mut budget=Budget{compute_by:Instant::now()+if light{lr.compute_light}else{lr.compute_heavy},scratch_max:lr.scratch_heavy,scratch_used:0,walled:false};
     let wall_by=batch.then(||q.queued+lr.batch_wall);
     let mut body=handle_until_budgeted(n,&q.body,q.site,Some(q.deadline),wall_by,&mut budget);
@@ -516,7 +517,8 @@ impl LightLane{
 
 /// Methods the network.md classification table makes light unconditionally (worst encoded
 /// response <= LIGHT_RESP_MAX). Conditional entries (pocol_getHeaders by count, eth_getBlockBy*
-/// by the full flag), unlisted methods and batches are scheduled as heavy.
+/// by the full flag), unlisted methods and batches are scheduled on the heavy lane; the conditional
+/// entries still have the light class's deadline and answer limit (`light_class`, `light_value`).
 pub const LIGHT_METHODS:&[&str]=&["eth_chainId","net_version","web3_clientVersion","eth_blockNumber","eth_gasPrice","eth_maxPriorityFeePerGas","eth_getBalance",
     "eth_getStorageAt","eth_getTransactionCount","eth_sendRawTransaction","pocol_getTiming","pocol_getTarget","pocol_getCaps","pocol_syncStatus","pocol_getPot",
     "pocol_getSettlement","pocol_getBurnTotals","pocol_getEscrow","pocol_getRetention","pocol_getClosing","pocol_getRpcStats","pocol_submitShare","eth_getCode",
@@ -530,6 +532,53 @@ pub fn is_light(body:&[u8])->bool{body.len()<=LIGHT_BODY_MAX&&light_method(body)
 pub fn light_method(body:&[u8])->bool{
     #[derive(serde::Deserialize)] struct Probe<'a>{#[serde(borrow,default)] method:Option<std::borrow::Cow<'a,str>>}
     body.iter().find(|b|!b.is_ascii_whitespace())==Some(&b'{')&&matches!(serde_json::from_slice::<Probe>(body),Ok(Probe{method:Some(m)}) if LIGHT_METHODS.contains(&m.as_ref()))
+}
+/// The conditional light entries of network.md (ب), read as their handlers read params[1]:
+/// eth_getBlockBy* with hashes only (the full flag not `true`) and pocol_getHeaders with count <= 64.
+fn light_cond(m:&str,flag:Option<bool>,count:Option<u64>)->bool{
+    match m{"eth_getBlockByNumber"|"eth_getBlockByHash"=>flag!=Some(true),"pocol_getHeaders"=>count.is_some_and(|c|c<=64),_=>false}
+}
+/// params[1] of a probed body: its bool or its count (a number or a hex string, as `parse_u64`);
+/// any other value is skipped without allocating.
+#[derive(Default)] struct Arg1(Option<bool>,Option<u64>);
+impl<'de> serde::Deserialize<'de> for Arg1{fn deserialize<D:serde::Deserializer<'de>>(d:D)->Result<Self,D::Error>{d.deserialize_any(Arg1V)}}
+struct Arg1V;
+impl<'de> serde::de::Visitor<'de> for Arg1V{type Value=Arg1;
+    fn expecting(&self,f:&mut std::fmt::Formatter)->std::fmt::Result{f.write_str("a value")}
+    fn visit_bool<E>(self,b:bool)->Result<Arg1,E>{Ok(Arg1(Some(b),None))}
+    fn visit_u64<E>(self,c:u64)->Result<Arg1,E>{Ok(Arg1(None,Some(c)))}
+    fn visit_i64<E>(self,_:i64)->Result<Arg1,E>{Ok(Arg1::default())}
+    fn visit_f64<E>(self,_:f64)->Result<Arg1,E>{Ok(Arg1::default())}
+    fn visit_str<E>(self,s:&str)->Result<Arg1,E>{Ok(Arg1(None,u64::from_str_radix(s.trim_start_matches("0x"),16).ok()))}
+    fn visit_unit<E>(self)->Result<Arg1,E>{Ok(Arg1::default())}
+    fn visit_seq<S:serde::de::SeqAccess<'de>>(self,mut q:S)->Result<Arg1,S::Error>{while q.next_element::<serde::de::IgnoredAny>()?.is_some(){}Ok(Arg1::default())}
+    fn visit_map<M:serde::de::MapAccess<'de>>(self,mut q:M)->Result<Arg1,M::Error>{while q.next_entry::<serde::de::IgnoredAny,serde::de::IgnoredAny>()?.is_some(){}Ok(Arg1::default())}
+}
+/// A params array, of which only params[1] is kept (anything but an array or null is a parse error: heavy).
+struct Params(Arg1);
+impl<'de> serde::Deserialize<'de> for Params{fn deserialize<D:serde::Deserializer<'de>>(d:D)->Result<Self,D::Error>{d.deserialize_seq(ParamsV)}}
+struct ParamsV;
+impl<'de> serde::de::Visitor<'de> for ParamsV{type Value=Params;
+    fn expecting(&self,f:&mut std::fmt::Formatter)->std::fmt::Result{f.write_str("an array")}
+    fn visit_seq<S:serde::de::SeqAccess<'de>>(self,mut q:S)->Result<Params,S::Error>{
+        let a=if q.next_element::<serde::de::IgnoredAny>()?.is_some(){q.next_element::<Arg1>()?.unwrap_or_default()}else{Arg1::default()};
+        while q.next_element::<serde::de::IgnoredAny>()?.is_some(){}Ok(Params(a))
+    }
+}
+/// The class of a single object by the classification table (network.md (ب)): a listed light method,
+/// or a conditional light entry by its params[1]. Like `light_method` it borrows and skips, allocating
+/// nothing in proportion to the body; any parse error is heavy.
+pub fn light_class(body:&[u8])->bool{
+    #[derive(serde::Deserialize)] struct Probe<'a>{#[serde(borrow,default)] method:Option<std::borrow::Cow<'a,str>>,#[serde(default)] params:Option<Params>}
+    light_method(body)||body.iter().find(|b|!b.is_ascii_whitespace())==Some(&b'{')&&matches!(serde_json::from_slice::<Probe>(body),
+        Ok(Probe{method:Some(m),params})if{let (f,c)=params.as_ref().map_or((None,None),|p|(p.0.0,p.0.1));light_cond(&m,f,c)})
+}
+/// `light_class` of a parsed request or batch member.
+pub fn light_value(v:&Value)->bool{
+    let m=v.get("method").and_then(|m|m.as_str()).unwrap_or("");
+    LIGHT_METHODS.contains(&m)||match v.get("params"){None|Some(Value::Null)=>light_cond(m,None,None),
+        Some(Value::Array(p))=>{let x=p.get(1);light_cond(m,x.and_then(|x|x.as_bool()),x.and_then(|x|x.as_u64().or_else(||parse_u64(x))))}
+        Some(_)=>false}
 }
 /// Shared across one server's connections: the heavy admission queue depth (an abandoned heavy
 /// body stays here until the node dequeues it) and the light lane's (bounded by its capacity).
@@ -715,7 +764,7 @@ pub fn handle_until_budgeted(n:&mut Node,body:&[u8],site:bool,deadline:Option<In
             if deny[k]{site_err(i).to_string()}
             else if deadline.is_some_and(|d|Instant::now()>=d){COUNTERS.expired_members.fetch_add(1,Ordering::SeqCst);item_err(i,-32020,"work deadline","deadline")}
             else{
-                let lm=i.get("method").and_then(|m|m.as_str()).is_some_and(|m|LIGHT_METHODS.contains(&m));
+                let lm=light_value(i);
                 let by=Instant::now()+if lm{light}else{heavy};budget.compute_by=wall_by.map_or(by,|w|by.min(w));budget.scratch_used=0;member(n,i,budget)
             }
         });
@@ -767,13 +816,22 @@ fn item_err(i:&Value,code:i64,m:&str,reason:&str)->String{
 const EFFECTFUL:&[&str]=&["eth_sendRawTransaction","pocol_submitShare"];
 /// The log handlers: they check COMPUTE_DEADLINE themselves, so their -32020 carries resume data.
 const LOGS:&[&str]=&["eth_getLogs","pocol_getLogs"];
-/// One request or batch member, encoded. COMPUTE_DEADLINE includes encoding (network.md:235): any
-/// answer completed after the deadline, a result or an error (an eth_call that reverts or halts
-/// after an uninterruptible precompile run), is replaced by -32020 {deadline} (the log handlers' with
-/// resume data). Kept: a -32020 {deadline} the handler produced itself (it carries its own resume
-/// data), and the answers of EFFECTFUL methods, which are never lost.
+/// Test hook (a slow encoding): nonzero holds the answer of a request or member whose id is
+/// ENCODE_DELAY_ID this many ms once it is encoded, so the deadline check after encoding can be
+/// exercised. 0 in the node.
+pub static ENCODE_DELAY_MS:AtomicUsize=AtomicUsize::new(0);
+pub const ENCODE_DELAY_ID:&str="encode-delay";
+/// One request or batch member, encoded. Its class's answer limit (network.md (ب), :210): a light
+/// entry's answer over LIGHT_RESP_MAX is -32020 {resultBytes} on either lane, a heavy one's over
+/// RESP_MAX (`capped`). COMPUTE_DEADLINE includes encoding (network.md:235): any answer completed
+/// after the deadline, a result or an error (an eth_call that reverts or halts after an
+/// uninterruptible precompile run), is replaced by -32020 {deadline} (the log handlers' with resume
+/// data). Kept: a -32020 {deadline} the handler produced itself (it carries its own resume data), and
+/// the answers of EFFECTFUL methods, which are never lost.
 fn member(n:&mut Node,v:&Value,b:&mut Budget)->String{
-    let id=id_of(v);let r=one(n,v,b);let own=r["error"]["code"]==-32020&&r["error"]["data"]["reason"]=="deadline";let s=capped(r,&id);
+    let id=id_of(v);let r=one(n,v,b);let own=r["error"]["code"]==-32020&&r["error"]["data"]["reason"]=="deadline";let mut s=capped(r,&id);
+    if s.len()>LIGHT_RESP_MAX&&light_value(v){s=result_bytes(&id);}
+    let d=ENCODE_DELAY_MS.load(Ordering::SeqCst);if d>0&&id.as_str()==Some(ENCODE_DELAY_ID){std::thread::sleep(Duration::from_millis(d as u64));}
     let m=v.get("method").and_then(|m|m.as_str()).unwrap_or("");
     if !own&&b.expired()&&!EFFECTFUL.contains(&m){b.late();return fail_json(&id,deadline_fail(n,m,v)).to_string()}
     s
@@ -1056,6 +1114,28 @@ fn logs_from(n:&Node,m:&str,f:&Value)->Option<u64>{
 
 #[cfg(test)]
 mod tests{
+    /// Review 3 (RG3V-m1): the class by the table's rows (network.md (ب)), from the body probe and from
+    /// the parsed member alike: listed methods, the conditional entries by params[1] as their handlers
+    /// read it, and heavy for everything else (a probe parse error included).
+    #[test] fn the_class_probe_agrees_with_the_parsed_class(){
+        let rows:&[(&str,bool)]=&[(r#"{"method":"eth_blockNumber"}"#,true),(r#"{"method":"eth_call","params":[{},"latest"]}"#,false),
+            (r#"{"method":"eth_getBlockByNumber","params":["latest",false]}"#,true),(r#"{"method":"eth_getBlockByNumber","params":["latest"]}"#,true),
+            (r#"{"method":"eth_getBlockByNumber"}"#,true),(r#"{"method":"eth_getBlockByNumber","params":null}"#,true),
+            (r#"{"method":"eth_getBlockByNumber","params":["latest",true]}"#,false),(r#"{"method":"eth_getBlockByHash","params":["0x00",true,{"x":[1]}]}"#,false),
+            (r#"{"method":"eth_getBlockByHash","params":["0x00",{"a":true}]}"#,true),(r#"{"method":"eth_getBlockByNumber","params":{"full":true}}"#,false),
+            (r#"{"params":["latest",false],"method":"eth_getBlockByHash"}"#,true),
+            (r#"{"method":"pocol_getHeaders","params":[1,64]}"#,true),(r#"{"method":"pocol_getHeaders","params":[1,"0x40"]}"#,true),
+            (r#"{"method":"pocol_getHeaders","params":[1,65]}"#,false),(r#"{"method":"pocol_getHeaders","params":[1,"0x41"]}"#,false),
+            (r#"{"method":"pocol_getHeaders","params":[1]}"#,false),(r#"{"method":"pocol_getHeaders","params":[1,-1]}"#,false),
+            (r#"{"method":"pocol_getHeaders","params":[1,64.0]}"#,false),(r#"{"method":"pocol_getHeaders","params":[[1,2],64]}"#,true),
+            (r#"[{"method":"eth_blockNumber"}]"#,false),(r#"{"method":"pocol_status"}"#,false)];
+        for (b,want) in rows{
+            assert_eq!(super::light_class(b.as_bytes()),*want,"probe: {b}");
+            let v:serde_json::Value=serde_json::from_str(b).unwrap();assert_eq!(!v.is_array()&&super::light_value(&v),*want,"parsed: {b}");
+        }
+        // Duplicate keys are a probe parse error: heavy (the parsed form keeps the last key).
+        assert!(!super::light_class(br#"{"method":"pocol_status","method":"eth_getBlockByNumber","params":["latest",false]}"#));
+    }
     /// Review 2 (M4): an answer over RESP_MAX is -32020 {resultBytes} (network.md:210), not -32008.
     #[test] fn responses_above_resp_max_become_an_error(){
         let id=serde_json::json!(7);
