@@ -112,6 +112,8 @@ pub struct BlockOutput{
     pub halts:Vec<(usize,crate::user_phase::Halt)>,
     /// Accounts the USER phase made dirty (ACCT_DIRTY_BLOCK_MAX metering; reporting, not a root input).
     pub dirty_accounts:u64,
+    /// C-1 E1: the trie of `state` (its root is `state_root`), for the child's incremental root.
+    pub trie:crate::state_trie::StateTrie,
 }
 
 /// Parent-state facts used by consensus (finality, closing, membership).
@@ -253,6 +255,14 @@ pub fn is_final_block(parent:&InMemoryDB,profile:&ProfileIdentity,h:u64,ts:u64)-
 
 /// Executes block h on top of `parent` (never mutated). Deterministic.
 pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,input:&BlockInput<'_>)->Result<BlockOutput,ApplyError>{
+    apply_block_with(parent,None,genesis,profile,input)
+}
+/// C-1 E1: `apply_block` given the trie of `parent`, so that the state root is updated from the keys the
+/// block changed instead of recomputed over the whole state. The caller vouches that `parent_trie` is
+/// the trie of `parent` (pocold checks its root against the parent's committed stateRoot); with None the
+/// trie is built from the whole state. Either way the result is the same as `state_root`'s, which the
+/// tests (and the `root-check` feature) compare on every block.
+pub fn apply_block_with(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie::StateTrie>,genesis:&Genesis,profile:&ProfileIdentity,input:&BlockInput<'_>)->Result<BlockOutput,ApplyError>{
     let cp=profile.cp();
     let h=input.height;
     if h==0||h>cp.H_END{return Err(ApplyError::Context("height"))}
@@ -331,10 +341,18 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
     // Phase 3: roots.
     let c=users.commitments();
     let evidence_root=crate::trie::ordered_root(input.evidence_raw,usize::from(cp.E_max)).map(B256::from).map_err(|_|ApplyError::Root)?;
-    let state_root=state_root(&state)?;
+    let trie=match parent_trie{Some(t)=>t.update(&state,&crate::state_trie::Touched::between(parent,&state)),None=>crate::state_trie::StateTrie::build(&state)};
+    let state_root=trie.root();
+    if root_check(){assert_eq!(state_root,self::state_root(&state)?,"C-1 E1: the incremental state root differs from the full computation at height {h}")}
     let facts=chain_facts(&state);
     Ok(BlockOutput{state,state_root,transactions_root:c.transactions_root,receipts_root:c.receipts_root,evidence_root,logs_bloom:c.logs_bloom,gas_used:c.gas_used,
-        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts()})
+        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts(),trie})
+}
+/// Whether every computed root is compared with the full computation: in this crate's tests, and in
+/// builds with the `root-check` feature (pocold's tests) unless POCOL_ROOT_CHECK=0 (timing runs).
+pub fn root_check()->bool{
+    #[cfg(any(test,feature="root-check"))]{static ON:std::sync::OnceLock<bool>=std::sync::OnceLock::new();*ON.get_or_init(||std::env::var("POCOL_ROOT_CHECK").map_or(true,|v|v!="0"))}
+    #[cfg(not(any(test,feature="root-check")))]{false}
 }
 
 /// T17: Escrow surplus = balance-(Σpending+heldTotal+burnedTotal) >= 0, and

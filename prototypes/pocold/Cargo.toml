@@ -28,6 +28,10 @@ libc = "=0.2.191"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Networking_WinSock"] }
 
+[dev-dependencies]
+# C-1 E1: the tests compare every incremental state root with the full computation.
+pocol-lp4-execution = { path = "../lp4-execution", features = ["root-check"] }
+
 [features]
 # validation.md:2065 caps-test build constants (simnet only, absent from the release); see lp4-execution.
 caps-test = ["pocol-lp4-execution/caps-test"]

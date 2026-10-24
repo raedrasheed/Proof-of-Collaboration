@@ -867,10 +867,11 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     // small-answer term counts SMALL_REPLY_PEAK per connection, +4,082,688 B; C-1 S1: canonical history
     // below the resident window is off the heap, 5,487,223,178 -> 4,323,240,949 B; C-1 S3a: retained
     // canonical states as diffs, -> 3,601,500,638 B; C-1 S4: old canonical entries slimmed,
-    // -> 3,322,680,105 B). Some terms are type
+    // -> 3,322,680,105 B; C-1 E1: the head's state trie, one derived or built trie and a block's changed
+    // paths, and the entry's trie handle, -> 3,486,909,657 B). Some terms are type
     // sizes (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
     // target checks that it boots within the budget with its reserve.
-    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_322_680_105,"the A13 model total changed");}
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_486_909_657,"the A13 model total changed");}
     // C-1 S1: a window of the whole chain is the model before S1, plus history.redb's cache and allocator.
     let all=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits{history_window:Some(u64::MAX),..Default::default()},2).unwrap();
     let redb:u128=all.items.iter().filter(|x|x.0.starts_with("history/history.redb")).map(|x|x.1).sum();
@@ -1410,6 +1411,99 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
     assert!(a.chain.rebuilds>0&&mats>0,"positive control: a TrieRebuild ({}) and materializations ({mats})",a.chain.rebuilds);
     assert!(compared>1000&&ref_max>max_full*5,"positive control: {compared} states compared; the reference held up to {ref_max} full states, S3a at most {max_full}");
     println!("S3A-EQUIV {}",json!({"steps":seq.len(),"statesCompared":compared,"maxFull":max_full,"referenceMaxFull":ref_max,"materializations":mats,"rebuildsS3a":a.chain.rebuilds,"rebuildsRef":b.chain.rebuilds}));
+}
+
+/// C-1 E1: the incremental state root. The tests build with lp4's `root-check` feature, so every root a
+/// block execution computes from a parent's trie is also computed over the whole state and compared
+/// (apply_block_with panics on a difference). This test drives every way a parent's trie is obtained:
+/// - the head's own trie (a chain that extends);
+/// - derived from the head's trie through the diffs (a sibling, a side branch, the branch back, a fork
+///   below the K_hist cut, the rebuild of a pruned state close to the head);
+/// - built from the whole state (a parent more than TRIE_PATH_MAX diffs from the head: the rebuild of the
+///   deep fork's pruned parent);
+/// and checks that a node with the incremental root accepts exactly what one without it accepts, with the
+/// same heads, canonical chains, pruned flags and state roots, and that no trie was ever refused.
+#[test] fn e1_incremental_roots_are_the_full_roots_on_every_path(){
+    let alice=devnet::account_key("alice");let bob=devnet::account_key("bob");
+    let log_tx=|nonce:u64|Tx{chain_id:777910,nonce,max_priority:U256::from(1u64),max_fee:U256::from(100_000_000_000u64),gas:200_000,to:None,value:U256::ZERO,data:vec![0x61,0x00,0x10,0x5f,0xa0,0x00].into()}.sign_1559(&alice);
+    let mut h=net();let g=h.chain.head;
+    let mut main=vec![];let (mut p,mut nonce)=(g,0u64);
+    for i in 0..90u64{let body=if i%3==0{let t=vec![pay(&alice,nonce,1+i),log_tx(nonce+1)];nonce+=2;Body{txs:t,evidence:vec![]}}else{Body::default()};
+        let x=branch(&mut h,p,1,&[body]);p=x[0].hash();main.extend(x);}
+    let at=|v:&Vec<Block>,k:usize|v[k-1].hash();
+    let mut h2=net();for b in &main[..80]{import(&mut h2,b);}
+    let mut side=vec![signed(&h2,at(&main,80),Body{txs:vec![pay(&bob,0,7)],evidence:vec![]},0)];import(&mut h2,&side[0]);
+    side.extend(heavier(&mut h2,side[0].hash(),h.chain.get(&main[89].hash()).unwrap().total_work,1));
+    let mut h3=net();for b in &main{import(&mut h3,b);}
+    let back=heavier(&mut h3,main[89].hash(),h2.chain.head().total_work,1);
+    // A fork at height 15: more than TRIE_PATH_MAX blocks below the head when it arrives.
+    let mut h4=net();for b in &main[..15]{import(&mut h4,b);}
+    let d0=fallback(&h4,at(&main,15),1);import(&mut h4,&d0);
+    let mut deep=vec![d0.clone()];deep.extend(heavier(&mut h4,d0.hash(),h3.chain.head().total_work,1));
+    let seq:Vec<Block>=main.iter().chain(&side).chain(&back).chain(&deep).cloned().collect();
+    let mut a=net();let mut b=net();b.chain.incremental_root=false;
+    struct NoJournal;impl pocold::chain::BlockBytes for NoJournal{fn record_at(&self,_:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8>),Reject>{Err(Reject::Block("no journal".into()))}}
+    // The deep branch arrives as a sync session's does: protected from the side cap while non-canonical.
+    let session:std::collections::HashSet<[u8;32]>=deep.iter().map(|x|x.hash()).collect();
+    let step=|n:&mut Net,x:&Block|{let r=match n.chain.validate(x,None,0){Err(Reject::NeedsRebuild(q))=>{n.chain.ensure_state(&q).unwrap();n.chain.validate(x,None,0)}r=>r};
+        let (e,_)=r.unwrap_or_else(|e|panic!("h={} {e:?}",x.header.h));let old=n.chain.head;n.chain.insert(e);
+        if session.contains(&x.hash())&&!n.chain.is_canonical(&x.hash()){n.chain.protect.insert(x.hash());}
+        let fork_h=if n.chain.head!=old{n.chain.lca_height(&old,&n.chain.head).unwrap_or(0)}else{0};let adopted=n.chain.head!=old;
+        n.chain.retain_unsettled();if adopted{n.chain.restore_canonical(fork_h,&NoJournal).unwrap();}n.chain.settle();};
+    let ld=|x:&std::sync::atomic::AtomicU64|x.load(std::sync::atomic::Ordering::Relaxed);
+    let counts=|n:&Net|(ld(&n.chain.trie_derived),ld(&n.chain.trie_built),ld(&n.chain.trie_refused));
+    let mut phases=vec![];
+    for (i,x) in seq.iter().enumerate(){
+        step(&mut a,x);step(&mut b,x);
+        if [main.len(),main.len()+side.len(),main.len()+side.len()+back.len(),seq.len()].contains(&(i+1)){phases.push(counts(&a));}
+        assert_eq!(a.chain.head,b.chain.head,"step {i}");assert_eq!(a.chain.canonical,b.chain.canonical,"step {i}");
+        for (hh,eb) in &b.chain.blocks{let ea=&a.chain.blocks[hh];assert_eq!((ea.pruned,ea.header.state_root),(eb.pruned,eb.header.state_root),"step {i}");
+            // Only the head keeps a trie after settle, and it is the head state's.
+            assert_eq!(ea.trie.is_some(),*hh==a.chain.head,"step {i}: h={}",ea.height);}
+        let head=a.chain.head();assert_eq!(head.trie.as_ref().unwrap().root(),apply::state_root(&head.state).unwrap(),"step {i}");
+    }
+    // Production and a fallback child on the final head take the head's trie.
+    let before=counts(&a);let fb=fallback(&a,a.chain.head,0);step(&mut a,&fb);step(&mut b,&fb);assert_eq!(a.chain.head,fb.hash());
+    let (derived,built,refused)=counts(&a);
+    println!("E1-PATHS {}",json!({"blocks":seq.len()+1,"phases":{"main":phases[0],"side":phases[1],"back":phases[2],"deep":phases[3]},"rebuilds":a.chain.rebuilds,"restoreReexecs":a.chain.restore_reexecs,"side":side.len(),"back":back.len(),"deep":deep.len()}));
+    assert_eq!(refused,0,"no trie is refused when every trie belongs to its state");
+    // The main chain extends the head: every root from the head's own trie.
+    assert_eq!(phases[0],(0,0,0),"main: the head's own trie only");
+    // The side branch: its first block's parent is 10 blocks below the head, and while the branch is no
+    // deeper than side_max its parents keep their diffs, so their tries are derived from the head's. Past
+    // that, a side block whose state was pruned has lost its diff, the path breaks, and the root is built
+    // from the whole state, as before E1 (as for the branch back, and for the deep fork, whose parents are
+    // also more than TRIE_PATH_MAX diffs from the head).
+    let side_max=u64::from(a.chain.spec.local().side_max);
+    assert!(phases[1].0>=side_max,"positive control: tries derived from the head's ({phases:?})");
+    assert!(phases[1].1>=1&&phases[3].1>phases[2].1,"positive control: whole-state builds ({phases:?})");
+    // A child of the final head (a fallback block validated and produced) takes the head's trie again.
+    assert_eq!(counts(&a),before);let _=(derived,built);
+    assert_eq!(ld(&b.chain.trie_derived)+ld(&b.chain.trie_built)+ld(&b.chain.trie_refused),0);
+}
+
+/// C-1 E1: a trie that is not the parent state's is never used. The head's trie is replaced by another
+/// state's (genesis's); a child of the head and a sibling of the head (derived through the head's trie)
+/// must both still validate with the right root, the wrong trie refused and the root computed from the
+/// whole state instead.
+#[test] fn e1_a_trie_that_is_not_the_parents_is_never_used(){
+    let alice=devnet::account_key("alice");
+    let mut h=net();let g=h.chain.head;let x=branch(&mut h,g,6,&[Body{txs:vec![pay(&alice,0,5)],evidence:vec![]}]);
+    let mut n=net();for b in &x{import(&mut n,b);}
+    let wrong=n.chain.blocks[&g].trie.clone().unwrap();
+    let ld=|x:&std::sync::atomic::AtomicU64|x.load(std::sync::atomic::Ordering::Relaxed);
+    let head=n.chain.head;let child=fallback(&n,head,0);let sib=fallback(&n,x[4].hash(),1);
+    assert_eq!((ld(&n.chain.trie_refused),ld(&n.chain.trie_built),ld(&n.chain.trie_derived)),(0,0,0),"the blocks were built with the parents' own tries");
+    n.chain.blocks.get_mut(&head).unwrap().trie=Some(wrong.clone());
+    let (e,_)=n.chain.validate(&child,None,0).expect("child validates");assert_eq!(e.header.state_root,child.header.state_root);
+    assert_eq!((ld(&n.chain.trie_refused),ld(&n.chain.trie_built)),(1,1),"the head's wrong trie is refused, the root built");
+    // The sibling's parent (x[4]) has its own trie in this unsettled chain: drop it so that it is derived.
+    n.chain.blocks.get_mut(&x[4].hash()).unwrap().trie=None;
+    let (e,_)=n.chain.validate(&sib,None,0).expect("sibling validates");assert_eq!(e.header.state_root,sib.header.state_root);
+    assert_eq!((ld(&n.chain.trie_refused),ld(&n.chain.trie_built),ld(&n.chain.trie_derived)),(2,2,0),"the derivation through the wrong trie is refused");
+    // With the head's own trie back, the same sibling's parent trie is derived.
+    n.chain.blocks.get_mut(&head).unwrap().trie=None;let t=pocol_lp4_execution::state_trie::StateTrie::build(&n.chain.head().state);n.chain.blocks.get_mut(&head).unwrap().trie=Some(t);
+    n.chain.validate(&sib,None,0).expect("sibling validates");assert_eq!(ld(&n.chain.trie_derived),1);
 }
 
 /// C-1 S3a at the node: every state query (balance, nonce, code, storage, eth_call) at every height and

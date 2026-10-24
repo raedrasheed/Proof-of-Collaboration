@@ -16,3 +16,5 @@ sha2 = "=0.10.9"
 # Never a default. The same line's HIST_TRIE_BUDGET=64 MiB is not set: pocold has no historical trie or
 # K_eff (T18b L12/L13), so it would only change the R21 admission arithmetic.
 caps-test = []
+# C-1 E1: compare every incremental state root with the full computation (pocold's tests). Never a default.
+root-check = []

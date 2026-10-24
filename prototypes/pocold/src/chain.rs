@@ -26,6 +26,10 @@ pub const SIDE_BLOCKS_MAX:usize=R_KEEP as usize;
 pub const EVICTED_MAX:usize=1024;
 /// Bound of the invalid-block cache (A05). A forgotten entry is only re-validated.
 pub const INVALID_MAX:usize=4096;
+/// C-1 E1: the most diffs a parent's trie is derived through from the head's. A parent further away (a
+/// deep side branch, an old rebuild root) has its root computed from the whole state, as before E1: the
+/// derivation would cost more than that, and its distinct nodes are bounded by this many blocks' writes.
+pub const TRIE_PATH_MAX:usize=64;
 
 /// Immutable chain configuration: cfg = {chainId, genesisHash, ForkSchedule, CP, M_0}.
 /// Constructible only from a ParamGate admission (A02): nothing boots an unadmitted profile.
@@ -94,6 +98,9 @@ pub struct Entry{
     /// When true, `body`, `receipts`, `tx_hashes` and `header.encoded` have been dropped (empty) and
     /// are read on demand from the journal at `body_off`. State residence stays governed by `pruned`.
     pub offloaded:bool,
+    /// C-1 E1: the trie of this block's state, for its children's incremental state roots. Only the head
+    /// keeps one after `settle`; any other parent's trie is derived from the head's (`Chain::trie_for`).
+    pub trie:Option<pocol_lp4_execution::state_trie::StateTrie>,
 }
 
 /// Source of a block's bytes for the off-heap store: given a journal frame offset (an `Entry.body_off`),
@@ -128,7 +135,7 @@ impl Entry{
         Entry{hash:self.hash,header:self.header.clone(),body:self.body.clone(),height:self.height,parent:self.parent,total_work:self.total_work,import_seq:self.import_seq,
             signed:self.signed,ts:self.ts,target:self.target,base_fee:self.base_fee,gas_used:self.gas_used,seal:self.seal,state:InMemoryDB::default(),is_final:self.is_final,
             result:self.result.clone(),receipts:self.receipts.clone(),tx_hashes:self.tx_hashes.clone(),cum_txs:self.cum_txs,cum_tx_bytes:self.cum_tx_bytes,
-            cum_log_bytes:self.cum_log_bytes,pruned:true,full:false,diff:self.diff.clone(),slim:self.slim,drawn:self.drawn,ranges:self.ranges.clone(),body_off:self.body_off,offloaded:self.offloaded}
+            cum_log_bytes:self.cum_log_bytes,pruned:true,full:false,diff:self.diff.clone(),slim:self.slim,drawn:self.drawn,ranges:self.ranges.clone(),body_off:self.body_off,offloaded:self.offloaded,trie:self.trie.clone()}
     }
 }
 
@@ -183,6 +190,10 @@ pub struct Chain{
     /// `slim_cursor`: every canonical height below it was slimmed once; `unslimmed`: entries restored
     /// since, slimmed again when they are deep enough.
     pub slim_depth:Option<u64>,pub slim_cursor:u64,pub unslimmed:Vec<[u8;32]>,
+    /// C-1 E1: state roots from the parent's trie (false: built from the whole state, a test reference),
+    /// and how parents' tries were obtained: derived from the head's through the diffs, built from the
+    /// whole state, or derived but refused because the root did not match the committed one.
+    pub incremental_root:bool,pub trie_derived:std::sync::atomic::AtomicU64,pub trie_built:std::sync::atomic::AtomicU64,pub trie_refused:std::sync::atomic::AtomicU64,
     /// C-1 S1: when set (by a node whose receipts and transaction index live in `history.redb`), canonical
     /// journaled blocks more than this many blocks below the head are offloaded like side blocks; the
     /// last `history_window` canonical blocks stay resident. None for a bare chain: nothing canonical is
@@ -218,10 +229,11 @@ impl Chain{
         let mut h=blank_header();h.chain_id=spec.chain_id();h.genesis_hash=gh;h.ts=cp.g_ts;h.target=spec.target_g();
         let genesis=Entry{hash:gh,header:h,body:Body::default(),height:0,parent:None,total_work:U256::ZERO,import_seq:0,signed:false,ts:cp.g_ts,
             target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis().state().clone(),is_final:false,result:None,
-            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,full:true,diff:None,slim:false,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false};
+            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,full:true,diff:None,slim:false,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false,
+            trie:Some(pocol_lp4_execution::state_trie::StateTrie::build(spec.genesis().state()))};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
         let k_hist=u64::from(spec.local().k_hist);
-        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,materializations:Default::default(),keep_full_states:false,slim_depth:None,slim_cursor:1,unslimmed:Vec::new(),history_window:None,history_cursor:1,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
+        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,materializations:Default::default(),keep_full_states:false,slim_depth:None,slim_cursor:1,unslimmed:Vec::new(),incremental_root:true,trie_derived:Default::default(),trie_built:Default::default(),trie_refused:Default::default(),history_window:None,history_cursor:1,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
             r_keep:R_KEEP,side_cap:SIDE_BLOCKS_MAX,protect:Default::default(),replaying:false}
     }
     pub fn head(&self)->&Entry{&self.blocks[&self.head]}
@@ -268,7 +280,26 @@ impl Chain{
     fn execute(&self,p:&Entry,ctx:&ChildCtx,ts:u64,proposer:Proposer,body:&Body,effects:Vec<EvidenceEffect>)->Result<BlockOutput,Reject>{
         let input=BlockInput{height:ctx.height,timestamp:ts,base_fee:ctx.base_fee,gas_limit:self.spec.cp().GAS_LIMIT,prevrandao:ctx.prevrandao,proposer,
             parent_result:ctx.parent_result.clone(),evidence:effects,evidence_raw:&body.evidence,transactions:&body.txs,ancestors:ctx.ancestors.clone(),cum_log_bytes:p.cum_log_bytes};
-        apply::apply_block(&p.state,self.spec.genesis(),self.spec.profile(),&input).map_err(|e|Reject::Block(format!("apply {e:?}")))
+        let trie=if self.incremental_root{self.trie_for(p)}else{None};
+        if self.incremental_root&&trie.is_none(){self.trie_built.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
+        apply::apply_block_with(&p.state,trie.as_ref(),self.spec.genesis(),self.spec.profile(),&input).map_err(|e|Reject::Block(format!("apply {e:?}")))
+    }
+    /// The committed state root of a stored block (genesis: the built genesis image's).
+    fn committed_root(&self,e:&Entry)->[u8;32]{if e.height==0{self.spec.genesis().root().0}else{e.header.state_root}}
+    /// C-1 E1: the trie of `p`'s state (`p.state` must be its full state): its own, or the head's updated
+    /// through the diffs between the two blocks (at most TRIE_PATH_MAX of them). Either is used only when
+    /// its root equals p's committed state root, so a trie that does not belong to the state is never used;
+    /// None means the root is computed from the whole state, as before E1.
+    fn trie_for(&self,p:&Entry)->Option<pocol_lp4_execution::state_trie::StateTrie>{
+        let want=self.committed_root(p);
+        if let Some(t)=&p.trie{if t.root().0==want{return Some(t.clone())}self.trie_refused.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
+        let head=self.blocks.get(&self.head)?;let ht=head.trie.as_ref()?;if head.hash==p.hash{return None}
+        let (down,up)=self.path_between(&head.hash,&p.hash)?;if down.len()+up.len()>TRIE_PATH_MAX{return None}
+        let mut touched=pocol_lp4_execution::state_trie::Touched::default();
+        for h in down.iter().chain(&up){self.blocks[h].diff.as_ref()?.touch(&mut touched);}
+        let t=ht.update(&p.state,&touched);
+        if t.root().0!=want{self.trie_refused.fetch_add(1,std::sync::atomic::Ordering::Relaxed);return None}
+        self.trie_derived.fetch_add(1,std::sync::atomic::Ordering::Relaxed);Some(t)
     }
     fn fill_ut(&self,p:&Entry,ctx:&ChildCtx,ts:u64,out:&BlockOutput,proposer:&[u8])->Header{
         let mut h=blank_header();h.chain_id=self.spec.chain_id();h.genesis_hash=self.spec.genesis_hash();h.parent_hash=p.hash;h.h=ctx.height;h.a=ctx.attempt;
@@ -393,7 +424,7 @@ impl Chain{
             import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,full:true,diff,slim:false,
             result:Some(ParentResult{block_hash:B256::from(hash),winner:addr(&owner),shares}),receipts:out.receipts,tx_hashes,
             cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,cum_log_bytes:p.cum_log_bytes+out.log_bytes,pruned:false,drawn:ctx.proposer,
-            ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect(),body_off:None,offloaded:false};
+            ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect(),body_off:None,offloaded:false,trie:Some(out.trie)};
         Ok((entry,ctx))
     }
 
@@ -590,6 +621,8 @@ impl Chain{
                 None=>{self.blocks.get_mut(h).unwrap().pruned=true;}}}}}
         for h in &drop{if let Some(e)=self.blocks.get_mut(h){e.diff=None;}}
         self.shed_full_states();
+        // C-1 E1: only the head keeps its trie; any other parent's is derived from it when needed.
+        let head=self.head;for e in self.blocks.values_mut(){if e.hash!=head{e.trie=None;}}
     }
     /// C-1 S3a: drops the full state of every canonical block above the K_hist cut but the head (its diff
     /// is kept) and makes the head's state full. After it the full states are the head, genesis and the
@@ -733,7 +766,7 @@ impl Chain{
             if x.diff.is_none(){x.diff=Some(std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state)));}
             if x.offloaded{x.tx_hashes=body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();x.receipts=out.receipts;x.body=body;
                 x.header.encoded=hb.unwrap_or_default();x.offloaded=false;n+=1;}
-            let mut next=x.meta_clone();next.state=out.state;p=next;
+            let mut next=x.meta_clone();next.state=out.state;next.trie=Some(out.trie);p=next;
         }
         Ok(n)
     }
@@ -808,7 +841,7 @@ impl Chain{
             let out=self.reexec(&p,&e,&body)?;
             // C-1 S3a: the re-executed block gets its diff back (pruned blocks had none).
             if self.blocks[&h].diff.is_none(){let d=std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state));self.blocks.get_mut(&h).unwrap().diff=Some(d);}
-            let mut next=e;next.state=out.state;next.pruned=false;p=next;self.rebuilds+=1;
+            let mut next=e;next.state=out.state;next.trie=Some(out.trie);next.pruned=false;p=next;self.rebuilds+=1;
         }
         let x=self.blocks.get_mut(hash).ok_or_else(||Reject::Block("rebuild target".into()))?;x.state=p.state;x.pruned=false;x.full=true;
         Ok(())

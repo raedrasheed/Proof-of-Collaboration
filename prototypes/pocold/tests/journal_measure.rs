@@ -833,13 +833,23 @@ fn jm_tx_state_term(){
             // C-1 S3a: the diff each validate now computes (part of the times above), alone.
             let mut df=vec![];let mut dsz=(0,0);for _ in 0..3{let t=Instant::now();let d=pocold::statediff::StateDiff::between(&st,&e2.state);df.push(t.elapsed().as_secs_f64()*1e3);dsz=d.size();}
             let diff_ms=median(df);
+            // C-1 E1: the whole-state root (the reference), a trie built from the whole state, the touched set
+            // of the CREATE2 child and the incremental update from the parent's trie, and the trie's size.
+            use pocol_lp4_execution::state_trie::{StateTrie,Touched};
+            let (mut rf,mut tb,mut tt,mut tu)=(vec![],vec![],vec![],vec![]);let mut trie=StateTrie::default();
+            for _ in 0..3{let t=Instant::now();let _=pocol_lp4_execution::apply::state_root(&st).unwrap();rf.push(t.elapsed().as_secs_f64()*1e3);
+                let t=Instant::now();trie=StateTrie::build(&st);tb.push(t.elapsed().as_secs_f64()*1e3);
+                let t=Instant::now();let touched=Touched::between(&st,&e2.state);tt.push(t.elapsed().as_secs_f64()*1e3);
+                let t=Instant::now();let u=trie.update(&e2.state,&touched);tu.push(t.elapsed().as_secs_f64()*1e3);assert_eq!(u.root().0,e2.header.state_root);}
+            let ts=trie.stats();let e1=serde_json::json!({"rootFullMs":median(rf),"trieBuildMs":median(tb),"touchedMs":median(tt),"trieUpdateMs":median(tu),
+                "trieLeaves":ts.leaves,"trieBranches":ts.branches,"trieKidSlots":ts.kid_slots,"trieHeapBytes":ts.heap_bytes});
             let ms=pack_txs(n,head,nonce,200,|i|deploy(&alice,i,120_000,0,EMPTY_CHILD.to_vec()));let mk=ms.len();
             let (_,mm,_)=validate_ms(&n.chain,&signed(n,head,Body{txs:ms,evidence:vec![]}),3);
             println!("JM-TXSTATE {}",serde_json::json!({"series":s,"phase":phase,"fillBlocks":blocks,"height":n.chain.head().height,"liveUserSlots":sl,"liveUserAccounts":ac,"stateAccountsAll":st.accounts.len(),"logicalCode":inv,
                 "validateSnapshotMs":vs,"inventoryMs":iv,"stateCloneMs":cl,"s3aDiffCreate2Ms":diff_ms,"s3aDiffCreate2Size":[dsz.0,dsz.1],"predictedPerTxUs":(vs+2.0*cl)*1e3,"emptyChildMs":em,
                 "transferTxs":tk,"transferMs":tm,"transferPerTxUs":(tm-em)*1e3/tk as f64,
                 "create2Ms":c2m,"create2Creates":creates,"create2PerCreateUs":(c2m-em)*1e3/creates as f64,
-                "manySmallTxs":mk,"manySmallMs":mm,"manySmallPerTxUs":(mm-em)*1e3/mk as f64,"buildSeconds":t0.elapsed().as_secs_f64()}));
+                "manySmallTxs":mk,"manySmallMs":mm,"manySmallPerTxUs":(mm-em)*1e3/mk as f64,"e1":e1,"buildSeconds":t0.elapsed().as_secs_f64()}));
         };
         measure(&n,nonce,"start",0);
         // One fill block (+ a fallback, as the other fills) of each kind.

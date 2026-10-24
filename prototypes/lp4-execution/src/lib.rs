@@ -152,6 +152,8 @@ pub mod rpc_http;
 
 // Full block apply, devnet profiles and transaction signing (local devnet only).
 pub mod apply;
+// C-1 E1: the state root kept incrementally (world_root stays the reference).
+pub mod state_trie;
 pub mod devnet;
 pub mod txsign;
 pub mod resources;

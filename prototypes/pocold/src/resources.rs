@@ -72,12 +72,35 @@ pub const WARM_ADDRESSES:u128=32;
 /// inline size with Vec growth (×2).
 pub fn diff_max(cp:&ConsensusParams)->Option<u128>{
     use std::mem::size_of;use crate::statediff::{AccountDiff,StateDiff};use revm::primitives::{Address,Bytecode,B256,U256};
-    let spent=u128::from(cp.GAS_LIMIT).checked_mul(5)?/4;
-    let slots=add(&[spent/SLOT_WRITE_GAS_MIN,u128::from(cp.SYS_KEYS_BLOCK_MAX)])?;
-    let accounts=add(&[3*(spent/TX_GAS_MIN),spent/ACCOUNT_TOUCH_GAS_MIN,WARM_ADDRESSES,u128::from(cp.SYS_ACCT_BLOCK_MAX),1])?;
+    let (accounts,slots)=block_writes(cp)?;
     let vec2=|n:u128,sz:usize|mul(n,2*sz as u128);
     add(&[vec2(accounts,size_of::<(Address,AccountDiff)>())?,vec2(slots,size_of::<(U256,Option<U256>,Option<U256>)>())?,
         vec2(accounts,size_of::<(B256,Option<Bytecode>,Option<Bytecode>)>())?,vec2(257,size_of::<(U256,Option<B256>,Option<B256>)>())?,size_of::<StateDiff>() as u128+16])
+}
+/// The accounts and slots one block can change (diff_max's counts): (accounts, slots).
+pub fn block_writes(cp:&ConsensusParams)->Option<(u128,u128)>{
+    let spent=u128::from(cp.GAS_LIMIT).checked_mul(5)?/4;
+    let slots=add(&[spent/SLOT_WRITE_GAS_MIN,u128::from(cp.SYS_KEYS_BLOCK_MAX)])?;
+    let accounts=add(&[3*(spent/TX_GAS_MIN),spent/ACCOUNT_TOUCH_GAS_MIN,WARM_ADDRESSES,u128::from(cp.SYS_ACCT_BLOCK_MAX),1])?;
+    Some((accounts,slots))
+}
+/// C-1 E1: one state trie (lp4 `state_trie`) of a state with these accounts and nonzero slots: a leaf per
+/// account and per slot; every branch has at least two children, so a trie of n keys has at most n − 1
+/// branches and 2n − 2 child pointers. A world node is a `Node<Acct>`, a storage node a `Node<U256>`, each
+/// behind an Arc (`state_trie::node_bytes`); a child pointer is one word.
+pub fn trie_bytes(accounts:u128,slots:u128)->Option<u128>{
+    use pocol_lp4_execution::state_trie::node_bytes;
+    add(&[mul(2*accounts,u128::from(node_bytes(true)))?,mul(2*slots,u128::from(node_bytes(false)))?,mul(2*(accounts+slots),size_of::<usize>() as u128)?])
+}
+/// C-1 E1: nodes on the path from a trie's root to a leaf, at most: a branch at each of the 64 nibbles of
+/// a hashed key, and the leaf.
+pub const TRIE_PATH_NODES:u128=65;
+/// C-1 E1: the nodes a block's trie does not share with its parent's: the copied path of every changed
+/// slot (in its account's storage trie) and of every changed account (in the world trie). An account whose
+/// storage changes is one of the block's changed accounts (`block_writes`).
+pub fn trie_paths(cp:&ConsensusParams)->Option<u128>{
+    use pocol_lp4_execution::state_trie::node_bytes;let (accounts,slots)=block_writes(cp)?;let w=size_of::<usize>() as u128;
+    add(&[mul(mul(slots,TRIE_PATH_NODES)?,u128::from(node_bytes(false))+w)?,mul(mul(accounts,TRIE_PATH_NODES)?,u128::from(node_bytes(true))+w)?])
 }
 /// Receipt encoding without logs: status, cumulative gas, a 256-byte bloom, list headers.
 pub const RECEIPT_BASE:u128=300;
@@ -108,7 +131,7 @@ pub const CONDITIONS:&[(&str,&str)]=&[
 /// group fields are the sums of their items and `total` is the sum of all items.
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct Bound{
-    pub snapshots:u128,pub snapshot_bytes:u128,pub diffs:u128,pub code:u128,pub history:u128,pub side_blocks:u128,
+    pub snapshots:u128,pub snapshot_bytes:u128,pub diffs:u128,pub trie:u128,pub code:u128,pub history:u128,pub side_blocks:u128,
     pub queues:u128,pub rpc:u128,pub threads:u128,pub execution:u128,pub total:u128,
     pub items:Vec<(&'static str,u128)>,
 }
@@ -149,6 +172,12 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
         // one table at a time (single consensus thread), at most a whole snapshot's tables.
         ("snapshots/table growth in a working copy",snapshot_bytes),
         ("diffs/retained and side states as diffs (C-1 S3a: 2·K_hist + side_max + 1)",mul(diffs_held(k_hist,side_max),diff_max(cp)?)?),
+        // C-1 E1: only the head keeps its state's trie after settle (chain::Chain::settle). A parent that is
+        // not the head has its trie derived from the head's or built from its state, one at a time on the
+        // consensus thread (validation, production, a rebuild's rolling re-execution); its distinct nodes are
+        // counted as a whole trie. The block executed on it shares all but its changed paths.
+        ("trie/head state trie (C-1 E1)",trie_bytes(accounts,slots)?),("trie/a parent's trie derived or built (one at a time)",trie_bytes(accounts,slots)?),
+        ("trie/the changed paths of the block executed on it",trie_paths(cp)?),
         ("code/one set for the canonical lineage (its states share the buffers)",code_set),("code/side_max side-branch states (a set each)",mul(side_states,code_set)?),
         ("code/a rebuild or restore in progress (a set)",code_set),("code/the pool's pending state (a set)",code_set),
         ("code/containers in every snapshot",mul(snapshots,code_entries)?),("code/new runtime of the execution in progress",mul(EXECUTIONS,exec_code)?)];
@@ -271,9 +300,10 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let execution=mul(EXECUTIONS,memory::execution(gas,code_max)?)?;let fixed=mul(EXECUTIONS,memory::fixed_heap(gas,code_max)?)?;
     items.extend([("execution/frames, code analysis, preallocations, precompiles",fixed),("execution/memory and operation classes (worst gas split)",execution.checked_sub(fixed)?)]);
     let total=add(&items.iter().map(|x|x.1).collect::<Vec<_>>())?;
-    debug_assert_eq!(Some(total),add(&[mul(snapshots,snapshot_bytes)?,snapshot_bytes,mul(diffs_held(k_hist,side_max),diff_max(cp)?)?,code,history,side_blocks,queues,rpc,threads,execution]));
+    let trie=add(&[mul(2,trie_bytes(accounts,slots)?)?,trie_paths(cp)?])?;
+    debug_assert_eq!(Some(total),add(&[mul(snapshots,snapshot_bytes)?,snapshot_bytes,mul(diffs_held(k_hist,side_max),diff_max(cp)?)?,trie,code,history,side_blocks,queues,rpc,threads,execution]));
     let _=size_of::<Header>()+size_of::<Body>();
-    Some(Bound{snapshots,snapshot_bytes,diffs:mul(diffs_held(k_hist,side_max),diff_max(cp)?)?,code,history,side_blocks,queues,rpc,threads,execution,total,items})
+    Some(Bound{snapshots,snapshot_bytes,diffs:mul(diffs_held(k_hist,side_max),diff_max(cp)?)?,trie,code,history,side_blocks,queues,rpc,threads,execution,total,items})
 }
 /// The share of the budget kept outside the model (D-A13-BUDGET): allocator headers, size-class
 /// rounding and fragmentation are not modelled (CONDITIONS), so the model total must fit in

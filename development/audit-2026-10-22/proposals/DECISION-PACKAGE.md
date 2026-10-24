@@ -67,6 +67,7 @@ were not results. The table below replaces them.
 | S3a ✔ | retained canonical states as diffs from their parents, materialized from the head on demand (storage.md:70, D30) | 33 retained copies (53.89) less 4 added (genesis counted, 2 materialized), and their code containers (2.62); added: the diffs 0.46 | **41.41 (measured)**, gate 47.33 |
 | S3b (with S5) | transient working copies as copy-on-write overlays (an executor change) | the 10 transient copies and the growth copy (17.96) and their code containers (0.94) | ≈ 19.1 + new: overlays bounded by the written entries of the work in progress |
 | S4 ✔ | old canonical entries slimmed, restored exactly from the journal and history.redb | history 4.28 → 0.83 | **37.96 (measured)**, gate 43.38 |
+| E1 ✔ (S5 step 1) | incremental state root (C-2 item 4): the head's trie in memory, any other parent's derived from it through the diffs or built | added: the trie group 2.23 (the head's trie, one derived or built, a block's changed paths); it moves to state.redb with E4 | **40.20 (measured)**, gate 45.94 |
 | S5 | live state on disk behind a bounded cache (redb live trie, storage.md:63–67) | the remaining full copies: head, genesis, side_max, materialized (9.80), their containers (0.51) and the side code sets (2.25) | ≈ 6.5, or 6.0 with the diffs (0.46) in the store, + new: state cache, overlays; target ≤ 5.25 (budget less the 1/8 reserve) |
 
 After S3a the projections are taken from the measured S3a items (evidence/c1-s3a/a13-network-profile-s3a.log).
@@ -166,6 +167,17 @@ evidence/c1-s4/.
   model: 3,322,680,105 B.
 - What remains: the transient working copies and the full states (S3b and S5, an executor change).
 
+**E1 status (2026-10-24, done; measured by `derive()`):** proposals/C1-STORAGE-DESIGN.md "E1 status" and
+evidence/c1-e1/. This is the first step of S5 + S3b, and item 4 of C-2.
+- The state root is updated from the keys a block changed, using a trie of the parent's state that is
+  shared between versions.
+- A parent's trie is used only when its root equals the parent's committed stateRoot.
+- Every root in the tests is compared with the whole-state computation.
+- **A13:** a new trie group of 2.23 GiB at the network profile. Model 37.96 → **40.20 GiB** (gate 45.94
+  GiB). Devnet model: 3,486,909,657 B.
+- **Correction:** the design estimated 0.4–0.5 GiB. The bound counts two tries of 1.07 GiB each, at the
+  worst-case branch count. In E4 the nodes move to state.redb.
+
 ---
 
 ## 2. Priority 2: block validation time
@@ -220,6 +232,16 @@ rebuilds the world root.
 - Acceptance test 2 (< 2 s, aim ≤ 1 s) is met for that block, at a load average of 2–3 on 4 CPUs. It
   will be re-measured unloaded with the final code.
 - Item 4 (the state root, most of the empty child's 465 ms) waits for C-1; see §6.
+- **Item 4 landed as C-1 E1 (2026-10-24, evidence/c1-e1/).** At the near-cap state, with the S3a code as the
+  baseline:
+  - an empty child: 491 → **262 ms**;
+  - 380 transfers: 672 → **349 ms**;
+  - a CREATE2-heavy child: 554 → **290 ms**;
+  - the root alone: 314 ms → 3.6 ms, plus 12.9 ms to list the changed keys.
+
+  Acceptance test 4 (incremental against full root on every block of the suites) passes: the tests build
+  with lp4's `root-check` feature. A parent whose trie cannot be derived (more than 64 diffs from the head,
+  or a side block deeper than side_max) costs what it did before E1.
 
 ### D-2 [NORMATIVE / profile]: the per-gas worst case (MODEXP)
 

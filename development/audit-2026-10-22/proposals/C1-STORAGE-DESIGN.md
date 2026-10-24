@@ -333,6 +333,102 @@ If any step would change one of them, it stops and goes back to the decision pac
 **Reference.** The current executor stays in the tree as a test-only reference until E4 lands, so that
 every step is compared block by block against it, not only against vectors.
 
+### E1 status (2026-10-24): landed; evidence/c1-e1/
+
+**Unchanged:** validity, every root, every receipt, genesisHash, the wire format and every RPC answer.
+Only how the state root is computed changes.
+
+**What was built:**
+- **`lp4-execution/src/state_trie.rs` (new):** `StateTrie`, the world trie and the storage tries of a state,
+  as immutable nodes shared between versions.
+  - Every node is encoded as `p1_trie::node` encodes the same rows. Extensions are not stored: a branch
+    keeps the nibble it splits on, and its extension is encoded from the depth it hangs at.
+  - `Touched::between(parent, child)` lists every account and slot whose committed value differs.
+  - `update` copies and re-encodes only the paths of those keys.
+  - `genesis_builder::world_root` stays as the reference.
+- **`apply.rs`:** `apply_block_with(parent, parent_trie, …)`:
+  - with the parent's trie, the root is updated from `Touched::between`; without it, the trie is built from
+    the whole state;
+  - `BlockOutput.trie` carries the child's trie;
+  - in lp4's tests, and with the `root-check` feature that pocold's tests enable, every root is also
+    computed by `world_root` and compared (a difference panics).
+- **pocold `chain.rs`:**
+  - `Entry.trie`; after `settle` only the head keeps one;
+  - `trie_for(p)` gives p's own trie, or the head's moved through the S3a diffs between the two blocks (at
+    most `TRIE_PATH_MAX` = 64 diffs, via `StateDiff::touch`);
+  - either one is used **only if its root equals p's committed stateRoot**; otherwise the trie is built
+    from the whole state, which is the cost before E1;
+  - the rolling re-executions (rebuild, restore) carry the trie from block to block;
+  - counters `trie_derived`, `trie_built`, `trie_refused`.
+
+**A finding made during the work (fixed before the trie was used):** a batch that deletes a key not in the
+trie, where that key leaves a branch's prefix early, could put the branch's change runs out of nibble order.
+A valid change was then skipped and the root was wrong. The random-sequence unit test found it; such
+deletions are now dropped before grouping.
+
+**Validation time** at the near-cap devnet state (18,833 accounts, 46,636 slots;
+`validation-near-cap-e1.log`, reference check off):
+
+| | before E1 (S3a) | E1 |
+|---|---:|---:|
+| empty child | 491 ms | **262 ms** |
+| 380 transfers | 672 ms | **349 ms** |
+| CREATE2-heavy child | 554 ms | **290 ms** |
+| the root alone: whole state / incremental | 314 ms | **3.6 ms**, plus 12.9 ms for `Touched::between` |
+
+Most of what remains in an empty child is in the other whole-state walks (E2) and the state copies (E3).
+
+**A13:**
+- **The model:** a new trie group of three terms:
+  - the head's trie;
+  - one parent trie, derived or built, at most one at a time on the consensus thread (its distinct
+    nodes are counted as a whole trie);
+  - the changed paths of the block executed on it.
+- **Node count:** a trie of n keys is counted at 2n nodes (each branch has at least two children) of
+  168 B (world) or 88 B (storage), plus 2n child pointers.
+- **Measured** on the near-cap devnet state: 162 B per key, branches included.
+- **Totals:** devnet 3,322,680,105 → **3,486,909,657 B**. Network profile 37.96 → **40.20 GiB** (gate
+  45.94 GiB); the trie group is 2.23 GiB.
+- **Correction:** the design estimated about 0.4–0.5 GiB at the network caps. The bound is 1.07 GiB per
+  trie, because:
+  - it counts the worst case of n − 1 branches;
+  - a world branch is as large as a world leaf;
+  - two tries are counted (the head's and one being derived or built).
+- **In S5 (E4)** the nodes move to `state.redb` behind a bounded cache, as frozen.
+
+**What E1 does not speed up:** a parent whose trie cannot be derived has its root computed from the whole
+state, as before E1:
+- a side block more than side_max deep loses its diff when its state is pruned, and the path breaks;
+- a parent more than 64 diffs from the head.
+
+So a long competing branch is validated at the cost before E1, and a deep reorg too. Holding a second trie
+for the tip of such a branch would make it incremental, at the price of one more trie in A13. That choice
+is left to E4, where a trie costs disk rather than heap.
+
+**Acceptance tests (pass):**
+- **lp4 `state_trie` unit tests:**
+  - 300 rounds of raw-key insert and delete batches (keys drawn to share long prefixes), against
+    `p1_trie::root` after every batch;
+  - every two-key shape (shared prefix 0–63);
+  - 20 random state sequences of 30 blocks (accounts created, removed, marked not existing, storage
+    cleared), against `world_root` and a fresh build, with the old version unchanged;
+  - an incomplete touched set gives another root (the check that pocold relies on);
+  - the node counts.
+- **pocold `e1_incremental_roots_are_the_full_roots_on_every_path`:** 665 blocks: a main chain, a side
+  branch, the branch back, and a fork 559 blocks deep from height 15 with rebuilds and restores. It runs
+  against a reference with the incremental root off. The two have the same heads, canonical chains, pruned
+  flags and state roots, and every root is also compared with `world_root`. The test checks each phase:
+  - the main chain uses the head's own trie only;
+  - the side branch derives its tries while it is within side_max;
+  - the deep fork builds them;
+  - nothing is ever refused.
+- **pocold `e1_a_trie_that_is_not_the_parents_is_never_used`:** the head's trie is replaced by genesis's.
+  - A child of the head validates with the right root: the wrong trie is refused and the root built.
+  - A sibling validates too: the derivation through the wrong trie is refused.
+  - With the right trie back, the sibling's parent trie is derived.
+- **Every other test** (the suites, replay equals live, 2048/2049, D133, the S1, S3a and S4 equivalence
+  tests) now runs with the reference comparison on every block.
+
 ## S4: per-block metadata off the heap
 
 - Entries older than R_keep keep only what fork choice and contexts need for the heights still reachable

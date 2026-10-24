@@ -50,6 +50,15 @@ pub fn states_equal(a:&InMemoryDB,b:&InMemoryDB)->bool{
 }
 
 impl StateDiff{
+    /// C-1 E1: adds the accounts and slots this diff changes to `t` (an account that appears or disappears
+    /// is read whole), so that a trie can be moved across it.
+    pub fn touch(&self,t:&mut pocol_lp4_execution::state_trie::Touched){
+        let exists=|m:&Option<AccountMeta>|m.as_ref().map_or(false,|m|!matches!(m.state,AccountState::NotExisting));
+        for (a,d) in &self.accounts{
+            if exists(&d.before)!=exists(&d.after){t.whole_account(*a);continue}
+            t.account(*a);for (k,_,_) in &d.slots{t.slot(*a,*k)}
+        }
+    }
     /// The diff that turns `parent` into `child`.
     pub fn between(parent:&InMemoryDB,child:&InMemoryDB)->Self{
         let mut d=StateDiff::default();
