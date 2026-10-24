@@ -107,6 +107,39 @@ fn mem_frame_loop(helper:Address,x:u32)->Vec<u8>{
 }
 /// Init code deploying the runtime PUSH1 0 CALLDATALOAD MLOAD STOP.
 const MEM_HELPER:[u8;17]=[0x60,0x05,0x60,0x0c,0x60,0x00,0x39,0x60,0x05,0x60,0x00,0xf3,0x60,0x00,0x35,0x51,0x00];
+
+// ---- state-interacting full-gas compute kinds (J-REV3-1): the families the third review named (SSTORE
+// cold/warm, cold CALL to fresh accounts, EXTCODECOPY, LOG-heavy, CREATE2). Each is one init-code loop that
+// STOPs on a gas guard (so the create succeeds and any state it made persists), except log0_loop (which
+// halts at LOG_COUNT_MAX) and cold_call/extcodecopy (which touch cold accounts but create nothing). The
+// CREATE2 kind is the O(creates x live-accounts) regime: code_caps::register's create_return calls
+// current_total (an O(db.accounts) scan) on every successful create. ----
+/// SSTORE(i,1) at a rising slot i while gas >= 30000, then STOP: CREATES ~359 fresh storage slots in the
+/// newly deployed contract (identical to the "slots" fill of jm_state_size_term).
+fn sstore_fresh_loop()->Vec<u8>{vec![0x60,0x00,0x5b,0x61,0x75,0x30,0x5a,0x10,0x60,0x15,0x57,0x60,0x01,0x81,0x55,0x60,0x01,0x01,0x60,0x02,0x56,0x5b,0x00]}
+/// SSTORE(0,v) with a rising v while gas >= 5000, then STOP: rewrites ONE slot (warm after the first), so
+/// the state does not grow; measures the warm SSTORE-reset cost per gas.
+fn sstore_warm_loop()->Vec<u8>{vec![0x60,0x01,0x5b,0x80,0x60,0x00,0x55,0x61,0x13,0x88,0x5a,0x10,0x60,0x15,0x57,0x60,0x01,0x01,0x60,0x02,0x56,0x5b,0x00]}
+/// CALL(gas=0,addr=base+i,value=0,0,0,0,0) at a rising cold address while gas >= 3000, then STOP: touches a
+/// fresh cold account each iteration (2600 gas) but, value being 0, creates nothing (no current_total scan).
+fn cold_call_loop(base:u64)->Vec<u8>{let mut c=vec![0x67];c.extend(base.to_be_bytes());
+    c.extend([0x5b,0x61,0x0b,0xb8,0x5a,0x10,0x60,0x27,0x57,0x60,0x00,0x60,0x00,0x60,0x00,0x60,0x00,0x60,0x00,0x85,0x60,0x00,0xf1,0x50,0x60,0x01,0x01,0x60,0x09,0x56,0x5b,0x00]);c}
+/// EXTCODECOPY(addr=base+i,0,0,0) at a rising cold address while gas >= 3000, then STOP: cold account access
+/// (2600 gas) with no copy, no state change.
+fn extcodecopy_loop(base:u64)->Vec<u8>{let mut c=vec![0x67];c.extend(base.to_be_bytes());
+    c.extend([0x5b,0x61,0x0b,0xb8,0x5a,0x10,0x60,0x20,0x57,0x60,0x00,0x60,0x00,0x60,0x00,0x83,0x3c,0x60,0x01,0x01,0x60,0x09,0x56,0x5b,0x00]);c}
+/// LOG0(0,0) in a tight loop with no gas guard: the block meter halts the tx at LOG_COUNT_MAX (546) logs
+/// (exceptional halt, all gas charged, status 0, logs discarded), so LOG is NOT a per-gas worst case.
+fn log0_loop()->Vec<u8>{vec![0x5b,0x60,0x00,0x60,0x00,0xa0,0x60,0x00,0x56]}
+/// CREATE2 of the empty-returning child (PUSH1 0 DUP1 RETURN) with a rising salt while gas >= 40000, then
+/// STOP: CREATES ~248 fresh (empty-code, nonce 1) accounts, each paying a full current_total scan.
+fn create2_loop()->Vec<u8>{vec![0x63,0x60,0x00,0x80,0xf3,0x60,0x00,0x52,0x60,0x00,0x5b,0x61,0x9c,0x40,0x5a,0x10,0x60,0x22,0x57,0x80,0x60,0x04,0x60,0x1c,0x60,0x00,0xf5,0x50,0x60,0x01,0x01,0x60,0x0a,0x56,0x5b,0x00]}
+/// CALL(0,base+i,1 wei,0,0,0,0) at a rising fresh address while gas >= 40000, then STOP: CREATES ~230
+/// accounts (the account fill of jm_state_size_term; a value-bearing cold CALL creates the callee).
+fn fill_accts_init(base:u64)->Vec<u8>{let mut c=vec![0x67];c.extend(base.to_be_bytes());c.extend([0x5b,0x62,0x00,0x9c,0x40,0x5a,0x10,0x60,0x28,0x57,0x60,0x00,0x60,0x00,0x60,0x00,0x60,0x00,
+    0x60,0x01,0x85,0x60,0x00,0xf1,0x50,0x60,0x01,0x01,0x60,0x09,0x56,0x5b,0x00]);c}
+/// The empty-returning child init code used by create2_loop and the many-small-create blocks.
+const EMPTY_CHILD:[u8;4]=[0x60,0x00,0x80,0xf3];
 fn h32(s:&str)->[u8;32]{let mut o=[0u8;32];for (i,b) in o.iter_mut().enumerate(){*b=u8::from_str_radix(&s[2*i..2*i+2],16).unwrap();}o}
 fn hexv(s:&str)->Vec<u8>{(0..s.len()/2).map(|i|u8::from_str_radix(&s[2*i..2*i+2],16).unwrap()).collect()}
 /// A valid ecrecover input (bob's signature of a fixed hash).
@@ -158,7 +191,12 @@ fn compute_kinds()->Vec<(String,u8,Vec<u8>,Vec<u8>)>{
         pre("blake2f_100k",9,blake2f_input(100_000),213,64),pre("blake2f_12",9,blake2f_input(12),213,64),
         pre("kzg_point_eval",0x0a,kzg_input(),192,64),
         op("keccak_32B",keccak_loop(32)),op("keccak_1KiB",keccak_loop(1024)),op("keccak_32KiB",keccak_loop(32768)),
-        op("mem_grow_mstore",mem_grow_loop()),op("mcopy_32KiB",mcopy_loop(32768))];
+        op("mem_grow_mstore",mem_grow_loop()),op("mcopy_32KiB",mcopy_loop(32768)),
+        // State-interacting families (J-REV3-1); measured on the small genesis state here, their state
+        // dependence is in jm_create_state_term / jm_state_size_term.
+        op("sstore_fresh",sstore_fresh_loop()),op("sstore_warm",sstore_warm_loop()),
+        op("cold_call",cold_call_loop(1u64<<50)),op("extcodecopy_cold",extcodecopy_loop(1u64<<50)),
+        op("log0_loop",log0_loop()),op("create2_loop",create2_loop())];
     for (b,e,m,mk) in MODEXP_SHAPES{let input=modexp_input(b,e,m,mk);let n=input.len() as u16;
         v.push(pre(&format!("modexp_b{b}_e{e}_m{m}_{mk}"),5,input,n,m as u16));}
     v
@@ -584,8 +622,7 @@ fn jm_state_size_term(){
     // SSTORE(i,1) for i = 0.. while gas >= 30,000, then STOP.
     let fill_slots=vec![0x60,0x00,0x5b,0x61,0x75,0x30,0x5a,0x10,0x60,0x15,0x57,0x60,0x01,0x81,0x55,0x60,0x01,0x01,0x60,0x02,0x56,0x5b,0x00];
     // CALL(0, base+i, 1 wei, 0,0,0,0) for i = 0.. while gas >= 40,000, then STOP.
-    let fill_accts=|base:u64|{let mut c=vec![0x67];c.extend(base.to_be_bytes());c.extend([0x5b,0x62,0x00,0x9c,0x40,0x5a,0x10,0x60,0x28,0x57,0x60,0x00,0x60,0x00,0x60,0x00,0x60,0x00,
-        0x60,0x01,0x85,0x60,0x00,0xf1,0x50,0x60,0x01,0x01,0x60,0x09,0x56,0x5b,0x00]);c};
+    let fill_accts=fill_accts_init;
     let pair=precompile_loop(8,&pairing_input(2),384,32);
     for s in series{
         let (ts,ta)=match s.as_str(){"slots"=>(slots_t,0),"accounts"=>(0,accts_t),_=>(slots_t,accts_t)};
@@ -687,4 +724,135 @@ fn jm_replay_component_split(){
     }
     for (k,(v,ins,ret)) in acc.iter().enumerate(){let m=bucket as f64;
         println!("JM-SPLIT {}",serde_json::json!({"heights":format!("{}..{}",k*bucket+1,(k+1)*bucket),"validateMs":v*1e3/m,"insertMs":ins*1e3/m,"retainMs":ret*1e3/m}));}
+}
+
+// ============================ (a11) state-interacting block re-execution vs live state (J-REV3-1) ============================
+/// The additive state term of (a9) — per-block clone + a root recomputation linear in the state — does
+/// not capture the CREATE path. `code_caps::register`'s `create_return` handler calls
+/// `code_caps::current_total`, which iterates ALL `db.accounts` to re-total logical code, on EVERY
+/// successful CREATE/CREATE2. A create-heavy block of C creates on a state of A accounts therefore
+/// re-executes in O(C·A) on top of the (a9) term. This grows the live user-account state with the (a9)
+/// account fill (1-wei CALLs to fresh addresses) and at each checkpoint times the validate of: an empty
+/// child (the additive (a9) term), a CREATE2-heavy child (one tx, ~248 creates), a cold-CALL child (one
+/// tx, ~3000 value-0 cold CALLs — cold access but NO create, so no `current_total` scan), and a
+/// many-small-create block (many one-create txs — the same regime spread over txs, not one looping tx).
+/// `create2ChildMs - emptyChildMs` is the create-specific term; its growth with `liveUserAccounts` is the
+/// O(creates·state) regime. The cold-CALL child is the control: cold access of the same order of
+/// accounts, no `current_total`, so it must NOT grow with the state beyond the (a9) term. Release only.
+/// `JM_CREATE_ACCTS` (default 16,000, below ACCT_CAP with headroom for ~248 creates) is the target live
+/// account count; `JM_CREATE_POINTS` (default 6) the checkpoints.
+#[test]
+#[ignore="measurement: run in release with --ignored --nocapture"]
+fn jm_create_state_term(){
+    let env_n=|k:&str,d:u64|std::env::var(k).ok().and_then(|s|s.parse().ok()).unwrap_or(d);
+    let (accts_t,points)=(env_n("JM_CREATE_ACCTS",16_000),env_n("JM_CREATE_POINTS",6));
+    let sys:Vec<Address>=(0..5).map(pocol_lp4_execution::apply::program_address).collect();
+    let mut n=net();let alice=devnet::account_key("alice");let mut nonce=0u64;
+    let p0=fallback(&n,n.chain.head,0);import(&mut n,&p0);
+    let live=|n:&Net|{let st=&n.chain.head().state;let (mut sl,mut ac)=(0u64,0u64);
+        for (a,x) in &st.accounts{if sys.contains(a)||x.info().is_none(){continue}ac+=1;sl+=x.storage.values().filter(|v|!v.is_zero()).count() as u64;}(sl,ac)};
+    // The most one-create (to=None empty child) txs build_signed accepts on `head`, found by re-execution.
+    let pack_creates=|n:&Net,head:[u8;32],a:&Key,start:u64|->Vec<Vec<u8>>{
+        let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+        let ok=|k:usize|n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower(),
+            Body{txs:(0..k as u64).map(|i|deploy(a,start+i,120_000,0,EMPTY_CHILD.to_vec())).collect(),evidence:vec![]},vec![]).is_ok();
+        let (mut lo,mut hi)=(1usize,200usize);assert!(ok(lo));while lo<hi{let mid=(lo+hi+1)/2;if ok(mid){lo=mid}else{hi=mid-1}}
+        (0..lo as u64).map(|i|deploy(a,start+i,120_000,0,EMPTY_CHILD.to_vec())).collect()
+    };
+    let (mut next,mut blocks,t0)=(0u64,0u64,Instant::now());
+    loop{
+        let (sl,ac)=live(&n);let done=ac+400>accts_t;
+        if ac>=next||done{
+            let head=n.chain.head;let before=n.chain.head().state.accounts.len() as i64;
+            let (_,em,_)=validate_ms(&n.chain,&fallback(&n,head,1),5);
+            let c2=signed(&n,head,Body{txs:vec![deploy(&alice,nonce,FULL_GAS,0,create2_loop())],evidence:vec![]});
+            let (_,c2m,c2g)=validate_ms(&n.chain,&c2,3);
+            let (e2,_)=n.chain.validate(&c2,None,0).unwrap();let creates=e2.state.accounts.len() as i64-before;
+            let cc=signed(&n,head,Body{txs:vec![deploy(&alice,nonce,FULL_GAS,0,cold_call_loop(1u64<<50))],evidence:vec![]});
+            let (_,ccm,_)=validate_ms(&n.chain,&cc,3);
+            let msc=pack_creates(&n,head,&alice,nonce);let msc_k=msc.len();
+            let mscb=signed(&n,head,Body{txs:msc,evidence:vec![]});let (_,mscm,_)=validate_ms(&n.chain,&mscb,3);
+            println!("JM-CREATE {}",serde_json::json!({"liveUserSlots":sl,"liveUserAccounts":ac,"stateAccountsAll":before,
+                "emptyChildMs":em,"create2ChildMs":c2m,"create2GasUsed":c2g,"create2Creates":creates,"create2PerCreateMicros":(c2m-em)*1e3/creates.max(1) as f64,
+                "coldCallChildMs":ccm,"manySmallCreateTxs":msc_k,"manySmallCreateMs":mscm,"manySmallPerCreateMicros":(mscm-em)*1e3/msc_k.max(1) as f64,
+                "buildSeconds":t0.elapsed().as_secs_f64()}));
+            next+=accts_t/points;if done{break}
+        }
+        let b=signed(&n,n.chain.head,Body{txs:vec![deploy(&alice,nonce,FULL_GAS,1_000_000,fill_accts_init((blocks+1)<<40))],evidence:vec![]});nonce+=1;import(&mut n,&b);
+        let f=fallback(&n,n.chain.head,0);import(&mut n,&f);blocks+=1;
+    }
+}
+/// The most txs `mk(start..)` build_signed accepts on `head` (re-execution only, no PoW), for the caller to seal once.
+fn pack_txs<F:Fn(u64)->Vec<u8>>(n:&Net,head:[u8;32],start:u64,max:usize,mk:F)->Vec<Vec<u8>>{
+    let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    let ok=|k:usize|n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower(),Body{txs:(0..k as u64).map(|i|mk(start+i)).collect(),evidence:vec![]},vec![]).is_ok();
+    let (mut lo,mut hi)=(1usize,max);assert!(ok(lo));while lo<hi{let mid=(lo+hi+1)/2;if ok(mid){lo=mid}else{hi=mid-1}}
+    (0..lo as u64).map(|i|mk(start+i)).collect()}
+/// Init code returning `len` zero bytes (PUSH2 len, PUSH1 0, RETURN): a `len`-byte runtime, the code fill.
+fn zero_code_init(len:u16)->Vec<u8>{vec![0x61,(len>>8) as u8,len as u8,0x60,0x00,0xf3]}
+/// JV3B-1/2 (round 3c): the per-TRANSACTION and per-create state terms by state dimension. Each USER tx runs
+/// native::execute_for_profile, i.e. code_caps::validate_snapshot (a code_len pass then inventory: two
+/// keccaks of every account's runtime) and build_engine (two InMemoryDB clones: with_db and
+/// NativeContext::from_snapshot); each successful create runs code_caps::current_total (one code_len pass).
+/// So each scan is O(accounts + logical code bytes) (code_len) or O(accounts + slots) (clone). Series:
+/// "accts" (1-wei CALL fill to JM_TX_ACCTS, default 15,600), "code" (JM_TX_CODE_N, default 62, deploys of a
+/// 32,768-B runtime = B_code_max: ~97.6% of the devnet CODE_CAP on ~67 accounts), "slots" (SSTORE fill to
+/// JM_TX_SLOTS, default 47,000), "all" (code, then slots, then accounts to JM_TX_ALL_ACCTS, default 19,000:
+/// all three dimensions near the devnet caps on one state). At JM_TX_POINTS+1 checkpoints (default 4) it
+/// times validate_snapshot, inventory (~ one current_total) and one state clone alone, then the validate of an
+/// empty child, a block of the most 21k transfers, a CREATE2-heavy child and a block of the most one-create
+/// txs (median of 5 / 3 / 3 / 3). predictedPerTxUs = validate_snapshot + 2 clones (the per-tx scans only).
+/// Release only; it measures, it asserts nothing about time.
+#[test]
+#[ignore="measurement: run in release with --ignored --nocapture"]
+fn jm_tx_state_term(){
+    use pocol_lp4_execution::code_caps;
+    let env_n=|k:&str,d:u64|std::env::var(k).ok().and_then(|s|s.parse().ok()).unwrap_or(d);
+    let series:Vec<String>=std::env::var("JM_TX_SERIES").map(|s|s.split(',').map(str::to_string).collect()).unwrap_or_else(|_|["accts","code","slots","all"].map(str::to_string).to_vec());
+    let (accts_t,slots_t,code_n,all_a,points)=(env_n("JM_TX_ACCTS",15_600),env_n("JM_TX_SLOTS",47_000),env_n("JM_TX_CODE_N",62),env_n("JM_TX_ALL_ACCTS",19_000),env_n("JM_TX_POINTS",4));
+    let sys:Vec<Address>=(0..5).map(pocol_lp4_execution::apply::program_address).collect();
+    for s in series{
+        let mut n=net();let alice=devnet::account_key("alice");let mut nonce=0u64;
+        let p0=fallback(&n,n.chain.head,0);import(&mut n,&p0);
+        let lim=code_caps::CodeLimits{runtime:n.chain.spec.cp().B_code_max,logical:n.chain.spec.cp().CODE_CAP};
+        let live=|n:&Net|{let st=&n.chain.head().state;let (mut sl,mut ac)=(0u64,0u64);
+            for (a,x) in &st.accounts{if sys.contains(a)||x.info().is_none(){continue}ac+=1;sl+=x.storage.values().filter(|v|!v.is_zero()).count() as u64;}(sl,ac)};
+        let t0=Instant::now();let mut blocks=0u64;
+        let measure=|n:&Net,nonce:u64,phase:&str,blocks:u64|{
+            let head=n.chain.head;let st=n.chain.head().state.clone();let (sl,ac)=live(n);let inv=code_caps::inventory(&st).unwrap();
+            let (mut vs,mut iv,mut cl)=(vec![],vec![],vec![]);
+            for _ in 0..5{let t=Instant::now();code_caps::validate_snapshot(&st,lim).unwrap();vs.push(t.elapsed().as_secs_f64()*1e3);
+                let t=Instant::now();let _=code_caps::inventory(&st).unwrap();iv.push(t.elapsed().as_secs_f64()*1e3);
+                let t=Instant::now();let c=st.clone();cl.push(t.elapsed().as_secs_f64()*1e3);drop(c);}
+            let (vs,iv,cl)=(median(vs),median(iv),median(cl));
+            let (_,em,_)=validate_ms(&n.chain,&fallback(n,head,1),5);
+            let tr=pack_txs(n,head,nonce,400,|i|pay(&alice,i));let tk=tr.len();
+            let (_,tm,_)=validate_ms(&n.chain,&signed(n,head,Body{txs:tr,evidence:vec![]}),3);
+            let c2=signed(n,head,Body{txs:vec![deploy(&alice,nonce,FULL_GAS,0,create2_loop())],evidence:vec![]});let (_,c2m,_)=validate_ms(&n.chain,&c2,3);
+            let (e2,_)=n.chain.validate(&c2,None,0).unwrap();let creates=(e2.state.accounts.len() as i64-st.accounts.len() as i64).max(1);
+            let ms=pack_txs(n,head,nonce,200,|i|deploy(&alice,i,120_000,0,EMPTY_CHILD.to_vec()));let mk=ms.len();
+            let (_,mm,_)=validate_ms(&n.chain,&signed(n,head,Body{txs:ms,evidence:vec![]}),3);
+            println!("JM-TXSTATE {}",serde_json::json!({"series":s,"phase":phase,"fillBlocks":blocks,"height":n.chain.head().height,"liveUserSlots":sl,"liveUserAccounts":ac,"stateAccountsAll":st.accounts.len(),"logicalCode":inv,
+                "validateSnapshotMs":vs,"inventoryMs":iv,"stateCloneMs":cl,"predictedPerTxUs":(vs+2.0*cl)*1e3,"emptyChildMs":em,
+                "transferTxs":tk,"transferMs":tm,"transferPerTxUs":(tm-em)*1e3/tk as f64,
+                "create2Ms":c2m,"create2Creates":creates,"create2PerCreateUs":(c2m-em)*1e3/creates as f64,
+                "manySmallTxs":mk,"manySmallMs":mm,"manySmallPerTxUs":(mm-em)*1e3/mk as f64,"buildSeconds":t0.elapsed().as_secs_f64()}));
+        };
+        measure(&n,nonce,"start",0);
+        // One fill block (+ a fallback, as the other fills) of each kind.
+        let fill=|n:&mut Net,nonce:&mut u64,blocks:&mut u64,kind:&str|{
+            let tx=match kind{"code"=>deploy(&alice,*nonce,7_900_000,0,zero_code_init(32768)),"slots"=>deploy(&alice,*nonce,FULL_GAS,0,sstore_fresh_loop()),
+                _=>deploy(&alice,*nonce,FULL_GAS,1_000_000,fill_accts_init((*blocks+1)<<40))};
+            let b=signed(n,n.chain.head,Body{txs:vec![tx],evidence:vec![]});*nonce+=1;import(n,&b);let f=fallback(n,n.chain.head,0);import(n,&f);*blocks+=1;};
+        let legs:Vec<&str>=if s=="all"{vec!["code","slots","accts"]}else{vec![s.as_str()]};
+        for leg in legs{
+            let target=match leg{"code"=>code_n,"slots"=>slots_t,_=>if s=="all"{all_a}else{accts_t}};
+            let progress=|n:&Net,k:u64|match leg{"code"=>k,"slots"=>live(n).0,_=>live(n).1};
+            let room=|n:&Net,k:u64|match leg{"code"=>k<target,_=>progress(n,k)+400<=target};
+            let (mut k,mut next)=(0u64,target/points);
+            while room(&n,k){fill(&mut n,&mut nonce,&mut blocks,leg);k+=1;
+                if s!="all"&&progress(&n,k)>=next&&room(&n,k){measure(&n,nonce,leg,blocks);next+=target/points;}}
+            measure(&n,nonce,&format!("{leg}-end"),blocks);
+        }
+    }
 }

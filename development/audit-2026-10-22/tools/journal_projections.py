@@ -5,7 +5,8 @@ development/audit-2026-10-22. Reads the JM-* JSON lines of evidence/journal-r3/*
 JM-REPLAY points of evidence/journal-measure.log, the r2 JM-KIND of evidence/journal-measure-r2.log) and
 prints every number the report derives from them. Projections are arithmetic on measured per-block
 costs; they are not measurements of a chain of that height or of the network profile, which pocold
-refuses to boot.
+refuses to boot. Sections [10]-[11] (round 3b) and [12]-[15] (round 3c) are printed only when
+evidence/journal-r3b and evidence/journal-r3c are present, so earlier derived.log files stay reproducible.
 """
 import json
 import os
@@ -202,6 +203,133 @@ def main(ev):
     print('\n[9] canonical worst-case journal at network caps (GiB): headers %.3f + tx %.3f + parentResult %.3f + framing %.3f' % (hdr / GIB, tx / GIB, pr / GIB, fr / GIB))
     for name, e in (('1 item/block (storage.md inventory)', ev_blk), ('one item per identity ever (resources.rs:98-101; binding)', ev_id), ('E_max per block (not binding)', ev_emax)):
         print('  evidence %-58s %.3f -> total %.2f GiB' % (name, e / GIB, (hdr + tx + pr + fr + e) / GIB))
+
+    # ---- 10/11. round 3b: state-interacting blocks and the at-cap / network state term (J-REV3-1/2/3) ----
+    r3b = os.path.join(ev, 'journal-r3b')
+    P3B = lambda n: os.path.join(r3b, n)
+    cr = lines(P3B('create.log'), 'JM-CREATE')
+    if cr:
+        print('\n[10] JM-CREATE (r3b): create-heavy block re-execution vs live accounts (J-REV3-1)')
+        print('  create-term = create2ChildMs - emptyChildMs (the create-specific cost ON TOP of the (a9) root term).')
+        xs = []; ys = []
+        for d in cr:
+            spec = d['create2ChildMs'] - d['emptyChildMs']; c = max(d['create2Creates'], 1)
+            print('  A=%6d  empty %7.1f  create2 %7.1f ms (create-term %7.1f ms, %4d creates, %7.1f us/create)  cold-call %6.1f ms (ctrl)  many-small %7.1f ms / %d txs (%7.1f us/create)' % (
+                d['liveUserAccounts'], d['emptyChildMs'], d['create2ChildMs'], spec, d['create2Creates'], spec * 1e3 / c,
+                d['coldCallChildMs'], d['manySmallCreateMs'], d['manySmallCreateTxs'], (d['manySmallCreateMs'] - d['emptyChildMs']) * 1e3 / max(d['manySmallCreateTxs'], 1)))
+            if d['liveUserAccounts'] > 0:
+                xs.append(float(d['liveUserAccounts'])); ys.append(spec * 1e3 / c)  # us/create
+        creates = cr[-1]['create2Creates']
+        if len(xs) >= 2:
+            mx = sum(xs) / len(xs); my = sum(ys) / len(ys)
+            k = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs); base = my - k * mx
+            print('  LS fit (per create): us/create = %.1f + %.4e * A  (A = live user accounts); the slope IS the current_total O(accounts) scan.' % (base, k))
+            for prof, cap in (('devnet', DEV['ACCT_CAP']), ('network', NET['ACCT_CAP'])):
+                perc = base + k * cap; blk = perc * creates / 1e6
+                print('    %-7s ACCT_CAP %8d: %9.0f us/create x %d creates = %7.2f s/block of current_total scan (create-specific; additive to the root term)' % (prof, cap, perc, creates, blk))
+            print('  NOTE the network per-block figure is an extrapolation of an extrapolation: (1) create-term/creates fit linear in A, measured only to A=%d (= %.0f%% of the devnet ACCT_CAP); (2) extended linearly to the network ACCT_CAP (10^6, ~%.0fx beyond the measured range); creates per block (%d) assumed unchanged.' % (
+                int(xs[-1]), 100 * xs[-1] / DEV['ACCT_CAP'], NET['ACCT_CAP'] / xs[-1], creates))
+    # at-cap devnet state term (J-REV3-3): the (a9) "both" series ended at ~95% of the caps; extend by the measured slopes.
+    both2 = [d for d in lines(P('state.log'), 'JM-STATE') if d['series'] == 'both'] if cr else []
+    if both2:
+        slot_pts = [d for d in both2 if d['liveUserAccounts'] < 1000]  # the slot-fill leg (accounts ~flat)
+        if len(slot_pts) >= 2:
+            s0, s1 = slot_pts[0], slot_pts[-1]
+            per_slot = (s1['emptyChildValidateMs'] - s0['emptyChildValidateMs']) / max(s1['liveUserSlots'] - s0['liveUserSlots'], 1)
+            a0, a1 = both2[-2], both2[-1]
+            per_acct = (a1['emptyChildValidateMs'] - a0['emptyChildValidateMs']) / max(a1['liveUserAccounts'] - a0['liveUserAccounts'], 1)
+            meas = both2[-1]; at_cap = meas['emptyChildValidateMs'] + per_slot * (DEV['SLOT_CAP'] - meas['liveUserSlots']) + per_acct * (DEV['ACCT_CAP'] - meas['liveUserAccounts'])
+            print('\n[11] devnet state term at the caps (J-REV3-3): measured empty-child %.1f ms at %d slots (%.0f%% of SLOT_CAP) + %d accts (%.0f%% of ACCT_CAP); slopes ~%.1f us/slot, ~%.1f us/acct -> at-cap empty-child ~%.0f ms (state term ~+%.0f ms vs the %.0f ms at the measured fill: the measured figure is a slight under-estimate).' % (
+                meas['emptyChildValidateMs'], meas['liveUserSlots'], 100 * meas['liveUserSlots'] / DEV['SLOT_CAP'], meas['liveUserAccounts'], 100 * meas['liveUserAccounts'] / DEV['ACCT_CAP'],
+                per_slot * 1e3, per_acct * 1e3, at_cap, at_cap - meas['emptyChildValidateMs'], meas['emptyChildValidateMs']))
+
+    # ---- 12-15. round 3c: per-tx and code-byte state terms, create repeats, revised bounds (JV3B-1..3) ----
+    r3c = os.path.join(ev, 'journal-r3c')
+    P3C = lambda n: os.path.join(r3c, n)
+    ts = lines(P3C('txstate.log'), 'JM-TXSTATE')
+    if ts:
+        print('\n[12] JM-TXSTATE (r3c): per-tx / per-create / per-block terms by state dimension (JV3B-1/2)')
+        print('  perTx = (transferMs - emptyChildMs)/transferTxs; predicted = validate_snapshot + 2 clones (the per-tx scans alone).')
+        for d in ts:
+            print('  %-5s %-10s A=%6d S=%6d code=%8d B | vs %6.2f inv %6.2f clone %5.2f ms | pred %7.0f perTx %7.0f us | empty %7.1f  transfers %4d %8.1f  create2 %7.1f (%5.0f us/cr)  manySmall %3d %8.1f ms' % (
+                d['series'], d['phase'], d['liveUserAccounts'], d['liveUserSlots'], d['logicalCode'], d['validateSnapshotMs'], d['inventoryMs'], d['stateCloneMs'],
+                d['predictedPerTxUs'], d['transferPerTxUs'], d['emptyChildMs'], d['transferTxs'], d['transferMs'], d['create2Ms'], d['create2PerCreateUs'], d['manySmallTxs'], d['manySmallMs']))
+        ser = lambda s: [d for d in ts if d['series'] == s]
+        end = lambda s: ser(s)[-1] if ser(s) else None
+        print('  per-block worst at each series end (validate of the child, ms; devnet T_blk %d s, t_exec 1 s):' % DEV['T_blk'])
+        for s in ('accts', 'code', 'slots', 'all'):
+            d = end(s)
+            if d:
+                kinds = (('empty', d['emptyChildMs']), ('%d transfers' % d['transferTxs'], d['transferMs']), ('CREATE2 child', d['create2Ms']), ('%d one-create txs' % d['manySmallTxs'], d['manySmallMs']))
+                w = max(kinds, key=lambda k: k[1])
+                print('    %-5s (A=%d S=%d code=%d): worst = %s %.0f ms  [%s]' % (s, d['liveUserAccounts'], d['liveUserSlots'], d['logicalCode'], w[0], w[1], ', '.join('%s %.0f' % k for k in kinds)))
+        # slopes of one validate_snapshot per unit of each dimension (start -> end of its own series)
+        sl = {}
+        for s, key in (('accts', 'liveUserAccounts'), ('code', 'logicalCode'), ('slots', 'liveUserSlots')):
+            v = ser(s)
+            if len(v) >= 2:
+                a, b = v[0], v[-1]; dx = max(b[key] - a[key], 1)
+                sl[s] = dict(vs=(b['validateSnapshotMs'] - a['validateSnapshotMs']) / dx, cl=(b['stateCloneMs'] - a['stateCloneMs']) / dx,
+                             empty=(b['emptyChildMs'] - a['emptyChildMs']) / dx, pertx=(b['transferPerTxUs'] - a['transferPerTxUs']) / dx)
+                print('  slope per %-13s validate_snapshot %.3e ms, clone %.3e ms, empty child %.3e ms, perTx %.3e us' % (key, sl[s]['vs'], sl[s]['cl'], sl[s]['empty'], sl[s]['pertx']))
+        c = end('code')
+        if c and len(ser('code')) >= 2:
+            c0 = ser('code')[0]
+            k_scan = (c['emptyChildMs'] - c0['emptyChildMs']) / max(c['validateSnapshotMs'] - c0['validateSnapshotMs'], 1e-9)
+            print('  empty-block code term = %.1f validate_snapshot-equivalents per block (code series end; the SYSTEM calls and the USER-phase check each scan)' % k_scan)
+        if 'accts' in sl and 'code' in sl:
+            vs_net = sl['accts']['vs'] * NET['ACCT_CAP'] + sl['code']['vs'] * (1 << 30)
+            syn = lines(P('state-syn.log'), 'JM-STATE-SYN'); cl_net = syn[-1]['stateCloneMs'] if syn else float('nan')
+            pertx = vs_net + 2 * cl_net
+            print('  NETWORK PROJECTION (not measured; pocold refuses the profile): validate_snapshot at ACCT_CAP 10^6 + CODE_CAP 2^30 ~ %.1f s (linear: %.3e ms/acct, %.3e ms/B);' % (vs_net / 1e3, sl['accts']['vs'], sl['code']['vs']))
+            print('    + 2 clones (synthetic network-caps clone %.2f s, journal-r3/state-syn.log) -> ~%.1f s per USER tx; a 380-transfer block ~%.0f s (= %.1f min) vs T_blk %d s;' % (cl_net / 1e3, pertx / 1e3, 380 * pertx / 1e3, 380 * pertx / 6e4, NET['T_blk']))
+            if c and len(ser('code')) >= 2:
+                print('    empty block code term ~%.0f x %.1f s = ~%.0f s (on top of the 14.4 s+ root term, [5]); filling CODE_CAP 2^30 at one 32,768-B deploy per block = %d blocks (< H_END %d).' % (
+                    k_scan, vs_net / 1e3, k_scan * vs_net / 1e3, (1 << 30) // 32768, NET['H_END']))
+            print('    each step is a linear extension far beyond the measured range (code to 2 MiB, accounts to ~16k): a projection, labelled as such.')
+        a = end('all')
+        if a:
+            a0 = ser('all')[0]; dst = (a['emptyChildMs'] - a0['emptyChildMs']) / 1e3
+            H = DEV['H_END']; bterm = c_r3 * H * H; k = 'modexp_b8_e256_m8_even'; hf = a['height']
+            print('\n[13] devnet bounds with all three dimensions near the caps ("all" end: A=%d S=%d code=%d, after %d fill blocks = height %d)' % (a['liveUserAccounts'], a['liveUserSlots'], a['logicalCode'], a['fillBlocks'], hf))
+            print('  per-block state term (empty child) +%.0f ms (vs the [5] slots/accounts-only +%.0f ms)' % (dst * 1e3, (dstate_dev or 0) * 1e3))
+            if k in steady:
+                t = (H - hf) * (steady[k] + dst) + bterm + o0
+                print('  open at H_END, %s on that state for the remaining %d blocks -> %s' % (k, H - hf, hms(t)))
+            ntr = DEV['TX_CAP'] // max(a['transferTxs'], 1)
+            print('  %d-transfer block on that state %.2f s (> T_blk %d s); TX_CAP %d bounds such blocks to ~%d per chain (+~%.0f s of open in total)' % (
+                a['transferTxs'], a['transferMs'] / 1e3, DEV['T_blk'], DEV['TX_CAP'], ntr, ntr * (a['transferMs'] - a['emptyChildMs']) / 1e3))
+    crs = [lines(P3B('create.log'), 'JM-CREATE')] + [lines(P3C(n), 'JM-CREATE') for n in ('create-r1.log', 'create-r2.log')]
+    crs = [r for r in crs if r]
+    if len(crs) >= 2:
+        print('\n[14] JM-CREATE repeats (JV3B-3): r3b create.log + r3c create-r1/r2; us/create = (create2ChildMs - emptyChildMs)/creates')
+        n = min(len(r) for r in crs); fitp = []
+        for i in range(n):
+            A = [r[i]['liveUserAccounts'] for r in crs]; pc = sorted((r[i]['create2ChildMs'] - r[i]['emptyChildMs']) * 1e3 / max(r[i]['create2Creates'], 1) for r in crs)
+            med = pc[len(pc) // 2]; fitp.append((sorted(A)[len(A) // 2], med))
+            print('  A~%6d  runs (sorted) %s us/create  median %6.0f  (many-small r3b/r1/r2: %s ms)' % (fitp[-1][0], ' '.join('%6.0f' % x for x in pc), med, ' '.join('%6.0f' % r[i]['manySmallCreateMs'] for r in crs)))
+        def lsq(pts):
+            xs = [x for x, _ in pts if x > 0]; ys = [y for x, y in pts if x > 0]; mx = sum(xs) / len(xs); my = sum(ys) / len(ys)
+            k = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs); return my - k * mx, k
+        fits = [('median', lsq(fitp))] + [('run %d' % j, lsq([(d['liveUserAccounts'], (d['create2ChildMs'] - d['emptyChildMs']) * 1e3 / max(d['create2Creates'], 1)) for d in r[:n]])) for j, r in enumerate(crs)]
+        creates = crs[-1][-1]['create2Creates']
+        for name, (b0, kk) in fits:
+            print('  fit %-7s us/create = %7.1f + %.4e * A -> devnet ACCT_CAP %.2f s/block, network ACCT_CAP %.1f s/block (%d creates; accounts dimension only)' % (
+                name, b0, kk, (b0 + kk * DEV['ACCT_CAP']) * creates / 1e6, (b0 + kk * NET['ACCT_CAP']) * creates / 1e6, creates))
+        dv = [(b0 + kk * DEV['ACCT_CAP']) * creates / 1e6 for _, (b0, kk) in fits]; nv = [(b0 + kk * NET['ACCT_CAP']) * creates / 1e6 for _, (b0, kk) in fits]
+        print('  RANGE over the fits: devnet %.2f-%.2f s/block, network %.1f-%.1f s/block (accounts only; the code dimension is [12], the network figure an extrapolation of an extrapolation)' % (min(dv), max(dv), min(nv), max(nv)))
+
+    mut = [(m, lines(P3C('mutants/mut-%s.log' % m), 'JM-TXSTATE')) for m in ('none', 'A', 'B', 'C', 'D')]
+    mut = [(m, v) for m, v in mut if v]
+    if mut:
+        what = {'none': 'mutant build, no mutant enabled (control)', 'A': 'current_total -> Ok(0)', 'B': 'no validate_snapshot in execute_for_profile',
+                'C': '+1 extra snapshot clone per engine', 'D': 'code_len skips hash_slow'}
+        print('\n[15] scratch timing mutants on jm_tx_state_term (JM_TX_SERIES=accts,code JM_TX_POINTS=1; series ends; ms)')
+        for m, v in mut:
+            for d in v:
+                if d['phase'].endswith('-end'):
+                    print('  %-4s %-45s %-5s empty %7.1f  380 transfers %8.1f (%6.0f us/tx)  CREATE2 %7.1f  many-small %7.1f' % (
+                        m, what[m], d['series'], d['emptyChildMs'], d['transferMs'], d['transferPerTxUs'], d['create2Ms'], d['manySmallMs']))
 
 
 def ex_body(ex, k):

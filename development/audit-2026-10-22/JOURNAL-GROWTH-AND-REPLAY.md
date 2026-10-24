@@ -35,6 +35,54 @@ fork choice or RPC-visible data — see §7); every option in §7 is **PROPOSED*
    docstrings, the measured profile and the open intercept are corrected (J2-m6, J2-m7). J2-m1 (setup) is
    acknowledged: this round is based on `fa97594`, which contains the journal r2 merge `0d6f9dd`.
 
+**Round 3b note.** This second fix pass answers the third review (J-REV3-1 … J-REV3-3, resolved in §11),
+measurement and documentation only; no `src` file changed.
+1. **State-interacting blocks (J-REV3-1, major).** The round-3 per-gas search omitted the state-touching
+   opcode families. Six are now measured (§3.2a) and, crucially, the **CREATE path** is shown to carry an
+   O(creates × live-accounts) term that the §3.2b additive model misses: `code_caps::current_total` scans
+   all accounts on every successful create. §3.2c measures it (≈ 0.54 s per block at the devnet ACCT_CAP,
+   ≈ 27.6 s projected at the network ACCT_CAP), so on a full state a **create-heavy** block, not MODEXP,
+   is the per-block worst. §7 option 7 and §8 are updated. *[Corrected in round 3c: the create-heavy
+   block is not the per-block worst and the term is not O(creates × live-accounts) alone; see the
+   round-3c note and §3.2d.]*
+2. **Network state term labelled (J-REV3-2, minor).** The ≈ 15–18 s/block and multi-week figures are now
+   stated inline as an **extrapolation of an extrapolation**, with the chain of steps (§3.2b, §3.3, §5.4).
+3. **Devnet state term at the fill vs the caps (J-REV3-3, minor).** §3.2b now states that the +0.23 s is
+   measured at ≈ 95% of the caps; the at-cap value is ≈ +0.25 s (a slight under-estimate).
+All three obligations stay OPEN; every mitigation stays PROPOSED. Round-3b evidence: the committed test at
+`e3dfb47` (base `256428f`), logs in `evidence/journal-r3b/` (`INDEX.md`), derived figures in
+`evidence/journal-r3b/derived.log` (`tools/journal_projections.py` [10]/[11]).
+
+**Round 3c note.** This third fix pass answers the fourth review (JV3B-1 … JV3B-4, resolved in §12),
+measurement and documentation only; no `src` file changed.
+1. **The per-block worst is a many-transaction block, not a create-heavy one (JV3B-1, blocker).** The
+   round-3b conclusion "on a full state a create-heavy block, not MODEXP, is the per-block worst" is
+   **withdrawn**, as is the §3.2b wording "a fixed per-block cost, independent of what the block does".
+   Every USER transaction does O(state) work: `native::execute_for_profile` runs
+   `code_caps::validate_snapshot` over the whole snapshot and `native::build_engine` clones it twice
+   (`with_db(snapshot.clone())`, `NativeContext::from_snapshot`). New `#[ignore]` test
+   `jm_tx_state_term` (§3.2d): on a state with all three dimensions near the devnet caps
+   (18,828 accounts, 46,636 slots, 2.05 MB of logical code) a block of 380 21k-gas transfers validates in
+   **10.2 s** (≈ 26 ms per tx; > devnet T_blk = 4 s), against 2.4 s for the CREATE2-heavy child and
+   0.41 s for an empty block.
+2. **Every state scan is also O(logical code bytes) (JV3B-2, major).** `code_len` keccaks each account's
+   runtime (`hash_slow`), so `validate_snapshot` and `current_total` cost O(accounts + code bytes), and
+   code bytes are bounded by CODE_CAP (2 MiB devnet, 1 GiB network), not ACCT_CAP. With only 67 accounts
+   but 2.05 MB of code the transfer block takes 5.3 s and the CREATE2 child 1.85 s (≈ 7 ms per create).
+   The re-execution model is restated as per-block term + txs × (validate_snapshot + 2 clones) +
+   creates × current_total, each scan O(accounts + slots + code bytes) (§3.2d); §7 option 7 lists the
+   new scans. Four env-gated scratch mutants attribute each term (§3.2d).
+3. **Create-term fit repeated (JV3B-3, minor).** `jm_create_state_term` ran twice more; the fit on the
+   medians gives ≈ 0.49 s per 247-create block at the devnet ACCT_CAP (range 0.47–0.54 s over the three
+   runs) and 23.0–27.6 s at the network ACCT_CAP (projection); the within-transaction O(creates²) part is
+   stated (§3.2c).
+4. **Index reference (JV3B-4, minor).** `evidence/journal-r3c/INDEX.md` records the correction of
+   `evidence/journal-r3b/INDEX.md` (which cites §10 for the round-3b resolutions: they are in §11, with
+   §3.2a–§3.2c); the round-3b file itself is not edited (evidence discipline).
+All three obligations stay OPEN and are strengthened; every mitigation stays PROPOSED. Round-3c evidence:
+the committed test at `1d094de` (base `11f8e89`), logs in `evidence/journal-r3c/` (`INDEX.md`), derived
+figures in `evidence/journal-r3c/derived.log` (`tools/journal_projections.py` [12]–[14]).
+
 **Round 2 note (history).** Round 2 carried the stage-A model forward and corrected it against the first
 review (J-V1…J-V13, §9): a legal deep reorg pays the genesis rebuild twice (§5.3); open time under
 transaction load is bounded by TX_CAP, not TXBYTES_CAP (§3.2–§3.3); the super-linear open is
@@ -49,7 +97,13 @@ journal r2 merge `0d6f9dd`). This track changes no `src` file. Round-3 measureme
 `prototypes/pocold/tests/journal_measure.rs` at `7f587bb` (two test-only commits on fa97594, `346246e` and
 `7f587bb`; every `src` file is fa97594's), logs in
 `evidence/journal-r3/` (commands and runs: `evidence/journal-r3/INDEX.md`), derived figures in
-`evidence/journal-r3/derived.log` printed by `tools/journal_projections.py` (stdlib). Earlier rounds:
+`evidence/journal-r3/derived.log` printed by `tools/journal_projections.py` (stdlib). Round-3b measurements
+(the state-interacting families and the create-path term, §3.2a/§3.2c): the same test extended at `e3dfb47`
+(branch `wf/journal-r3b`, base `256428f`; still no `src` change from fa97594), logs in
+`evidence/journal-r3b/` (`INDEX.md`), figures in `evidence/journal-r3b/derived.log`. Round-3c measurements
+(the per-tx and code-byte terms, §3.2d, and the create repeats, §3.2c): `jm_tx_state_term` added at
+`1d094de` (branch `wf/journal-r3c`, base `11f8e89`; still no `src` change from fa97594), logs in
+`evidence/journal-r3c/` (`INDEX.md`), figures in `evidence/journal-r3c/derived.log`. Earlier rounds:
 stage A `86b339e` (`evidence/journal-measure.log`), round 2 `47bfc11` (`evidence/journal-measure-r2.log`,
 `evidence/witness-refetch-below-khist.log`). All runs: release, this host (Linux 6.18.44-fc-v153, 4 CPUs),
 under `cpu.lock`, the test binary run directly. The test only measures existing code (`store`,
@@ -353,6 +407,29 @@ Readings:
   (another MODEXP shape, a different exponent pattern) may cost more per gas, so the worst figure is a
   lower bound on the worst case.
 
+**State-interacting kinds (round 3b, J-REV3-1).** The third review asked for the opcode families that
+touch the state: SSTORE (cold-fresh and warm-reset), CALL to many cold accounts, EXTCODECOPY, LOG-heavy
+and CREATE2. Six were added to `compute_kinds` and measured by `jm_exec_cost_per_gas` **on the small
+genesis state** (`evidence/journal-r3b/exec.log`, repeat `exec-repeat.log`, on `e3dfb47`):
+
+| kind | body B | validate median | net ns/gas | note |
+|---|--:|--:|--:|---|
+| create2_loop | 135 | 17.5–18.0 ms | 1.9–2.0 | 247 creates/block; the state dependence is §3.2c |
+| sstore_warm | 122 | 11.1 ms | 1.16 | rewrites one slot (no state growth) |
+| cold_call | 140 | 6.4–7.4 ms | 0.6–0.7 | ~3,000 value-0 cold CALLs (no creates) |
+| extcodecopy_cold | 133 | 4.0–4.7 ms | 0.3–0.4 | ~3,000 cold account reads |
+| sstore_fresh | 122 | 3.3–3.4 ms | 0.18 | CREATES ~359 slots; the state dependence is §3.2c |
+| log0_loop | 108 | 2.5–3.0 ms | 0.07–0.15 | halts at LOG_COUNT_MAX (546), all gas charged |
+
+On a near-empty state **none of these is the per-gas worst case: MODEXP (≈ 134 ns/gas) stays ≈ 65–180×
+above them**. Logs are bounded by `LOG_COUNT_MAX` (546/block, a block meter halt) so LOG is never a per-gas
+vector; cold access (CALL/EXTCODECOPY) and warm SSTORE are below the jump loop. **But two of these grow
+the state** (`sstore_fresh` ≈ 359 slots, `create2_loop` ≈ 247 accounts per block), and the CREATE path
+carries a cost that is NOT a per-gas constant: it is **linear in the live-account count** (§3.2c), because
+`code_caps::register`'s create-return handler calls `code_caps::current_total`, an O(`db.accounts`) scan,
+on every successful create. So whether a state-interacting block is the per-block worst depends on the
+state, not on the gas alone (J-REV3-1).
+
 ### 3.2b Re-execution cost vs state size (`JM-STATE`, `JM-STATE-SYN`, new in round 3)
 
 `apply_block` (lp4-execution `apply.rs`) does `parent.clone()` of the whole state, scans it several times
@@ -394,16 +471,218 @@ the validate of an empty, a bn_pair_2 and a modexp_b8_e1024_m8_even child of the
   clone is small.
 - Filling the devnet caps takes ≈ 225 full blocks (≈ 140 for SLOT_CAP, ≈ 87 for ACCT_CAP); every
   later block, empty or not, then pays ≈ 0.23 s more on every re-execution (live import, replay,
-  TrieRebuild, restore).
+  TrieRebuild, restore). **The ≈ 0.23 s is measured at the end of the "both" series, 47,704 slots and
+  18,769 accounts — ≈ 95% of SLOT_CAP and ≈ 94% of ACCT_CAP, not the caps themselves (J-REV3-3).**
+  Extending by the measured slopes (≈ 2.5 µs/slot, ≈ 4.3 µs/account) gives an at-cap empty-child of
+  ≈ 246 ms, i.e. a state term of ≈ +0.25 s per block; the measured figure under-states the at-cap value
+  by ≈ 11 ms. (`evidence/journal-r3b/derived.log` [11].)
 - **Network caps (synthetic, `jm_state_root_synthetic`).** pocold cannot hold these caps, so the dominant
   part is measured without a chain: `state_root` and `clone` of a state of 4·10^6 slots in 11,143
   contracts and 10^6 accounts (`evidence/journal-r3/state-syn.log`): `state_root` **14.4 s** and `clone` 0.87 s (0.83 s / 3.38 s for the root at 1/16 and 1/4 of both caps: linear). Scaled by the devnet
   ratio of the validate increment to the root increment (1.23 at the end of the devnet "both" series), a block at the network caps would
   re-execute in **≈ 15–18 s**, empty or not — against T_blk = 60 s. Filling them takes ≈ 11,100 +
   ≈ 4,300 full blocks.
+  **This ≈ 15–18 s is an extrapolation of an extrapolation (J-REV3-2), from three compounding steps:**
+  (1) `state_root` + `clone` are measured on a **synthetic** state with **no chain** (no `apply_block`,
+  no per-block scans) — itself an extrapolation of how a real block's root recomputation behaves;
+  (2) the non-root per-block scans are assumed to scale with the root and are added via the **devnet**
+  validate/root increment ratio 1.23, applied at a state ≈ 1,000× larger than where it was measured;
+  (3) the result is extended linearly to the whole block. Each step is reasonable; none is measured at
+  network scale (pocold refuses that profile). Where the resulting multi-week open and ≈ 15–18 s/block
+  figures appear below (§3.3, §5.4, §8) they carry this qualifier.
 - This is an implementation property (no incremental trie: the root is recomputed from all accounts each
   block), not a spec requirement; storage.md:73–77 inventories a live trie. An incremental state root is
   proposed in §7 (option 7).
+- **The additive model above is the per-block term only (corrected in round 3c, JV3B-1/2).** What this
+  section measures (clone + root recomputation + the per-block scans) is what an *empty* block pays.
+  Round 3b called it "a *fixed* per-block cost, independent of what the block does" — **withdrawn**:
+  every USER transaction re-scans and clones the whole snapshot (§3.2d), and every successful create
+  re-totals it (§3.2c), so a block's re-execution grows with txs × state and creates × state on top of
+  this term. The state model here is also incomplete: it varies only slots and accounts, while the
+  `validate_snapshot` run after every SYSTEM call is O(accounts + **logical code bytes**). On a
+  code-filled state (2.05 MB of code, 67 accounts) the empty-block term is ≈ 124 ms; with all three
+  dimensions near the devnet caps it is ≈ 413 ms, not the ≈ 246 ms extended above (§3.2d).
+
+### 3.2c Re-execution of a create-heavy block: the `current_total` term (`JM-CREATE`, J-REV3-1, round 3b; corrected in round 3c)
+
+`code_caps::register` installs a `create_return` handler that, on every successful CREATE/CREATE2, calls
+`code_caps::current_total` — which iterates **all** `db.accounts` (`code_caps.rs:44`:
+`db.accounts.iter()…filter_map(|(_,a)|a.info())`, chained with the journal diff) to re-total the logical
+code against CODE_CAP. A block that performs C creates on a state of A live accounts therefore re-executes
+in **O(C · A)** from this scan alone — a term that §3.2b's root-based additive model does not represent,
+and that §7's incremental-root option (option 7) does not list among the per-block scans it would remove.
+**Round 3c correction (JV3B-2):** `current_total` calls `code_len`, which keccaks each account's runtime
+(`code.hash_slow()`, `code_caps.rs:13–22`), so the scan is O(A + logical code bytes) and the term is
+O(C · (A + code bytes)); the code bytes are bounded by CODE_CAP, not ACCT_CAP. The account-only fit below
+therefore does not predict a code-filled state (§3.2d: ≈ 7 ms per create at 67 accounts and 2.05 MB).
+
+`jm_create_state_term` grows the live user-account state (the §3.2b account fill) and at each checkpoint
+times, on the head: an empty child (the §3.2b root term), a **CREATE2-heavy** child (one tx, 247 creates
+of a tiny empty-code contract), a **cold-CALL control** (one tx, ~3,000 value-0 cold CALLs — cold access
+but no creates, so no `current_total` scan) and a **many-small-create** block (149 one-create txs — the
+same regime spread across transactions, not one looping tx). `evidence/journal-r3b/create.log`
+(on `e3dfb47`):
+
+| live user accounts | empty child | CREATE2 child (247 creates) | create-term (= CREATE2 − empty) | µs per create | cold-CALL control | many-small (149 txs) |
+|--:|--:|--:|--:|--:|--:|--:|
+| 5 | 1.8 ms | 17.4 ms | 15.6 ms | 63 | 7.5 ms | 35.6 ms |
+| 2,765 | 17.9 ms | 85.2 ms | 67.3 ms | 273 | 25.4 ms | 167.1 ms |
+| 5,525 | 37.3 ms | 153.6 ms | 116.3 ms | 471 | 40.3 ms | 338.1 ms |
+| 8,055 | 53.8 ms | 263.4 ms | 209.6 ms | 849 | 107.3 ms | 544.6 ms |
+| 10,815 | 68.2 ms | 358.2 ms | 290.0 ms | 1,174 | 78.9 ms | 635.6 ms |
+| 13,345 | 88.8 ms | 380.2 ms | 291.4 ms | 1,180 | 96.7 ms | 696.5 ms |
+| 15,645 | 102.2 ms | 589.3 ms | 487.0 ms | 1,972 | 125.3 ms | 895.7 ms |
+
+- **The create-specific term rises with the live-account count** — ≈ 63 µs/create at 5 accounts to
+  ≈ 1,972 µs/create at 15,645 — while the **cold-CALL control tracks the empty child** (cold access of a
+  similar number of accounts, but no `current_total`, so no extra growth). That isolates
+  `current_total` as the cause, exactly as the review predicted. Round 3c confirms it with a mutant
+  (`current_total` returning 0, §3.2d): the CREATE2 child falls from
+  515 to 125 ms at 15,415 accounts and from 1,845 to 136 ms on the code-filled state, while the
+  380-transfer block stays within noise (1.80 → 2.03 s, 5.18 → 4.90 s; `evidence/journal-r3c/mutants/`).
+- **Within one transaction the term is O(C²) as well (JV3B-3).** `current_total` also iterates the
+  journaled state, which gains one account per create inside the same transaction, so even on a tiny
+  state the 247 creates of one tx cost ≈ 63–70 µs each; with `current_total` disabled the same child on the genesis state
+  takes 4.4 ms instead of 18.0 ms on the same build (`mutants/mut-A.log` vs `mut-none.log`, start point),
+  so ≈ 55 µs per create at A = 5 is
+  this within-transaction part. The round-3b fit's negative intercept (−42 µs) is a fitting artefact.
+- A least-squares fit (`derived.log` [10]) gives per-create ≈ (base) + 0.112 µs/account · A: the slope is
+  the scan. At the **devnet** ACCT_CAP (20,000) a 247-create block would add ≈ **0.54 s** of
+  `current_total` scan to its re-execution, on top of the ≈ 0.25 s root term — so ≈ 0.8 s for the create
+  work alone (its total ≈ 1.1 s, comparable to MODEXP at the caps).
+  **Round 3c (JV3B-3): that fit came from one run whose last point is its high outlier.** Two repeats on
+  `1d094de` (`evidence/journal-r3c/create-r1.log`, `create-r2.log`) give, at A ≈ 15,645, 1,596 and
+  1,691 µs/create against round 3b's 1,972. Fit on the per-checkpoint medians of the three runs
+  (`evidence/journal-r3c/derived.log` [14]): ≈ 25 + 0.098 µs/account · A, i.e. ≈ **0.49 s** per 247-create
+  block at the devnet ACCT_CAP; the three single-run fits give **0.47–0.54 s**. This is the
+  accounts dimension only (code bytes, §3.2d, add to it).
+- **The many-small-create form is not the same regime (corrected in round 3c).** Round 3b said it "shows
+  the same regime … slower per create because each tx re-enters the create handler and the pending-pool
+  scan" — **withdrawn**: block validation has no pending pool, and most of that block's cost is the
+  per-transaction snapshot scans and clones of §3.2d (with `current_total` disabled the 149-tx block only falls from 967 to 776 ms
+  on 15,415 accounts and from 2,896 to 2,070 ms on the code-filled state, while disabling the per-tx
+  `validate_snapshot` instead brings it to 766 ms and 1,170 ms; `evidence/journal-r3c/mutants/`).
+- **At the network ACCT_CAP (10^6) the projection is ≈ 27.6 s per block of `current_total` scan**
+  (247 creates × ≈ 112 ms/create; **23.0–27.6 s** over the round-3c fits, ≈ 24 s on the medians),
+  additive to the ≈ 15–18 s root term (§3.2b) — so a create-heavy block at the network caps would
+  re-execute in **tens of seconds**, above the MODEXP ≈ 1.0 s per-gas worst and the empty-block root
+  term (and below the many-transaction block of §3.2d). **This network figure is an extrapolation of an extrapolation
+  (J-REV3-2):** (1) the per-create cost is fit linear in A, measured only to A = 15,645 (≈ 78% of the
+  devnet ACCT_CAP); (2) extended linearly to 10^6, ≈ 64× beyond the measured range, with the per-block
+  create count held at 247. pocold cannot admit the network profile, so it is a projection about the
+  spec's targets, not this node.
+- Classification: an **implementation property**, not a spec requirement — `current_total` is PoCol's
+  CODE_CAP enforcement (`code_caps.rs`, LP4-CODE-01), and a complete re-total per create is O(accounts)
+  only because there is no incremental code-size index. It strengthens the re-execution obligation (§8)
+  and is added to §7 option 7's scan list. The §3.2a worst-per-gas figure (MODEXP) remains a lower bound.
+  Round 3b concluded that this makes a *create-heavy* block the per-block worst once the state is large;
+  **that conclusion is withdrawn (round 3c, JV3B-1)**: on every grown state measured, a block of 380
+  plain transfers costs more than the CREATE2-heavy child (§3.2d).
+
+### 3.2d Re-execution per transaction and per code byte (`JM-TXSTATE`, JV3B-1/2, round 3c)
+
+**Mechanism (verified in the code at fa97594).** Three whole-state operations run far more often than once
+per block:
+- **per USER transaction**: `user_phase` executes each transaction with `native::execute_for_profile(&state, …)`
+  (`user_phase.rs:247`), which first runs `code_caps::validate_snapshot` over the whole snapshot
+  (`native.rs:46`: a `code_len` pass over every account, then `inventory`, a second pass) and then
+  `build_engine` (`native.rs:92`), which clones the whole `InMemoryDB` twice — `with_db(snapshot.clone())`
+  and `NativeContext::from_snapshot` (`pay.rs:24`, the PAY pre-transaction view) — both dropped at the end
+  of the transaction;
+- **per SYSTEM call** (`apply.rs` `Exec::call`, several per block): the same `build_engine` clones and a
+  `validate_snapshot` after the call (`apply.rs:221`), and one more after the USER phase (`apply.rs:293`);
+- **per successful create**: `code_caps::current_total` (§3.2c).
+`code_len` (`code_caps.rs:13–22`) checks the content address with `code.hash_slow()`, a keccak of the
+account's full runtime, on every call. So `validate_snapshot` and `current_total` are
+O(accounts + **logical code bytes**), and a clone is O(accounts + slots) (runtime bytes are
+reference-counted, not copied). Logical code is bounded by CODE_CAP (2^21 B devnet, 2^30 B network,
+validation.md:2062 and governance.md:13), not by ACCT_CAP: 62–63 deploys of a 32,768-B runtime
+(= B_code_max) fill the devnet CODE_CAP to ≈ 98–99% on ≈ 70 accounts.
+
+**Model (replaces round 3b's "fixed per-block cost").** With the state σ = (accounts, slots, code bytes):
+
+    T(block) ≈ T_block(σ) + Σ_tx [ validate_snapshot(σ) + 2·(clone + drop)(σ) + exec(tx) ] + Σ_create current_total(σ)
+
+T_block(σ) is the §3.2b term (root, per-block scans, the SYSTEM calls' scans and clones). A block holds
+at most ⌊GAS_LIMIT / 21,000⌋ = 380 transactions (BODY_MAX binds later), and the devnet TX_CAP (20,000
+cumulative) bounds the per-tx term over a whole chain to ≈ 52 full blocks; the network TX_CAP (10^7)
+does not bound it in practice.
+
+**Measurement.** `jm_tx_state_term` (committed `#[ignore]`, `1d094de`) fills four states and, at
+checkpoints, times `validate_snapshot`, `inventory` and one clone alone, then the validate of an empty
+child, a block of the most 21k-gas transfers (380), a CREATE2-heavy child (247 creates) and a block of
+the most one-create txs (149) (`evidence/journal-r3c/txstate.log`; every checkpoint in `derived.log` [12]):
+
+| state (series end) | live accounts | live slots | logical code | validate_snapshot | clone | empty child | 380 transfers (per tx) | CREATE2 child (per create) | 149 one-create txs |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| genesis (start) | 5 | 0 | 15,509 B | 0.09 ms | 0.00 ms | 2.1 ms | 61 ms (0.15 ms) | 18 ms (63 µs) | 34 ms |
+| accounts | 15,415 | 0 | 15,509 B | 1.87 ms | 0.95 ms | 133 ms | 2.25 s (5.6 ms) | 529 ms (1.6 ms) | 1.08 s |
+| code | 67 | 0 | 2,047,125 B | 11.5 ms | 0.02 ms | 124 ms | 5.30 s (13.6 ms) | 1.85 s (7.0 ms) | 2.99 s |
+| slots | 136 | 46,636 | 15,509 B | 0.10 ms | 0.31 ms | 132 ms | 0.50 s (0.97 ms) | 154 ms (89 µs) | 302 ms |
+| **all three** | **18,828** | **46,636** | **2,047,125 B** | 13.9 ms | 2.51 ms | **413 ms** | **10.25 s (25.9 ms)** | 2.38 s (8.0 ms) | 5.75 s |
+
+The "all" state is ≈ 94% of ACCT_CAP, ≈ 93% of SLOT_CAP and ≈ 97.6% of CODE_CAP, reached in 274 fill
+blocks (each followed by a fallback block, height 549).
+
+- **The per-block worst on every grown state is the 380-transfer block** — no creates, no compute. It
+  costs 2–4× the CREATE2-heavy child and, at the all-caps state, **10.2 s: above devnet T_blk = 4 s and
+  t_exec = 1 s** for one valid block (§5.4). Round 3b's "create-heavy block is the per-block worst" is
+  withdrawn. On the slots-only state the per-tx term is small (≈ 1 ms: the clones), so the slot
+  dimension matters mostly through T_block.
+- **The code dimension dominates the per-tx and per-create scans.** Slopes (start → end of each series,
+  [12]): `validate_snapshot` ≈ 5.6 ns per code byte and ≈ 0.12 µs per account; per tx ≈ 6.6 ns per code
+  byte, ≈ 0.35 µs per account, ≈ 0.017 µs per slot; the empty block ≈ 60 ns per code byte, i.e. ≈ 10.7
+  `validate_snapshot`-equivalents per block (the SYSTEM calls' and the USER phase's scans). At the
+  all-caps state the dimensions add super-linearly (per tx 25.9 ms against ≈ 13.6 + 5.6 + 1 ms from the
+  single-dimension states).
+- **Predicted vs measured per tx.** `validate_snapshot` + two standalone clones predicts 3.8 / 11.6 /
+  18.9 ms per tx (accounts / code / all) against 5.6 / 13.6 / 25.9 ms measured; the standalone timings
+  are a lower bound on the in-block cost (mutant C below), and two standalone `validate_snapshot`
+  samples are ≈ 2× outliers (23.2 ms at the code checkpoint A = 65, 21.8 ms at the all/slots-end point)
+  while the in-block per-tx at those points is not, so the report uses the in-block figures.
+- **Attribution by scratch mutants** (env-gated edits to lp4-execution `src` in a scratch build, run on
+  `jm_tx_state_term` with `JM_TX_SERIES=accts,code JM_TX_POINTS=1`, then reverted; logs in
+  `evidence/journal-r3c/mutants/`, the mutant sources stay in scratch; [15]):
+
+| mutant (timing only) | accounts state: empty / 380 transfers / CREATE2 / 149 creates | code state: empty / 380 transfers / CREATE2 / 149 creates |
+|---|---|---|
+| none (the mutant build, control) | 109 ms / 1.80 s / 515 ms / 967 ms | 124 ms / 5.18 s / 1.85 s / 2.90 s |
+| A: `current_total` returns 0 | 105 ms / 2.03 s / **125 ms** / 776 ms | 128 ms / 4.90 s / **136 ms** / 2.07 s |
+| B: no `validate_snapshot` in `execute_for_profile` | 116 ms / **1.07 s** / 537 ms / 766 ms | 140 ms / **0.19 s** / 1.77 s / **1.17 s** |
+| C: one extra whole-snapshot clone + drop per engine | **205 ms / 4.30 s** / 553 ms / 1.18 s | 120 ms / 4.92 s / 1.68 s / 3.03 s |
+| D: `code_len` skips `hash_slow` | 110 ms / 1.68 s / 503 ms / 993 ms | **1.6 ms / 35 ms / 7.9 ms / 20 ms** |
+
+  A removes the CREATE2 child's state term and leaves the transfer block unchanged: `current_total` is
+  the create term and only that. B removes ≈ 97% of the code-state transfer block (5.18 → 0.19 s) and
+  ≈ 40% of the accounts-state one: the per-tx `validate_snapshot` is the per-tx term on a code-filled
+  state, and the remainder on an account-filled state is the clones. C (one more clone + drop per
+  engine) adds ≈ 6 ms per tx and ≈ 96 ms per empty block at 15,415 accounts — far more than the 0.95 ms
+  of a warm standalone clone, so a clone's in-block cost (allocation, first touch, drop) is larger than
+  `stateCloneMs` suggests — and nothing on the 67-account code state. D removes the whole code dimension
+  (the code-state empty block 124 → 1.6 ms, the transfer block 5.18 s → 35 ms): it is the keccak in
+  `code_len`, nothing else. (B and D are timing mutants only: they drop a check; no claim is made that
+  either is a valid optimisation.) The review's mutant-B run on the accounts state did not show B's
+  reduction (2.05 s against 1.78 s there); this run does (1.80 → 1.07 s); both agree that the code-state
+  transfer block is the per-tx `validate_snapshot`.
+- **Devnet bounds.** The empty-block state term at the all-caps state is ≈ +411 ms (not +0.23–0.25 s,
+  §3.2b), so the worst devnet open (modexp_b8_e256_m8_even on that state) is ≈ 7.3 h, plus ≈ 8.5 min for
+  the ≤ 52 TX_CAP-bounded 380-transfer blocks (`derived.log` [13]; §3.3). The per-create term at that
+  state is ≈ 8 ms per create. Whether the cumulative number of creates over a chain is bounded is not
+  analysed here.
+- **Network (projection only; pocold refuses this profile).** Extending the slopes linearly to ACCT_CAP
+  10^6 and CODE_CAP 2^30 gives `validate_snapshot` ≈ 6.2 s; with two clones of the synthetic network-caps
+  state (0.87 s each, `evidence/journal-r3/state-syn.log`) ≈ **7.9 s per USER tx**, ≈ 50 min for a
+  380-transfer block, and ≈ 11 × 6.2 ≈ 66 s of code scans in an empty block on top of the ≥ 14.4 s root
+  term (≈ 80 s, above T_blk = 60 s). Filling CODE_CAP 2^30 at one 32,768-B deploy per block takes
+  32,768 blocks, within H_END = 129,600. **These are linear extensions ≈ 512× (code) and ≈ 65×
+  (accounts) beyond the measured range, combined with a synthetic clone: projections, not
+  measurements.**
+- Classification: an **implementation property**, not a spec requirement. CODE_CAP and B_code_max must
+  fail the deposit (execution.md:81), which `current_total` enforces; nothing in the spec requires a
+  full re-validation and two full clones of the state per transaction or a keccak of every runtime per
+  scan. It strengthens the re-execution obligation (§8). The mitigations (cached code length/hash, a
+  running logical total validated once per block, a copy-on-write overlay instead of the clones) are
+  added to §7 option 7, PROPOSED only.
 
 ### 3.3 Open-time bounds at H_END (projections; J2-B1, J-V6 reopened)
 
@@ -431,6 +710,8 @@ rest with empty blocks). These are sums of measured per-block costs, not measure
 | **modexp_b8_e256_m8_even** | **937 ms** | all (503 B body: 10.1 MB < 16 MiB) | **≈ 5.2 h** | **≈ 34.8 h** |
 | modexp_b8_e1024_m8_even | 1.03 s | devnet 13,200 (TXBYTES_CAP; rest empty), network all | ≈ 3.8 h | ≈ 38.0 h |
 | modexp_b8_e256_m8_even on a state at SLOT_CAP/ACCT_CAP | 937 ms + the §3.2b state term | after ≈ 225 (devnet) / ≈ 15,500 (network) fill blocks | **≈ 6.5 h** (+0.23 s per block) | ≈ 21–25 days (+15–18 s per block, linear projection) |
+| modexp_b8_e256_m8_even on a state with accounts, slots **and code** near the devnet caps (round 3c, §3.2d) | 937 ms + 411 ms (measured empty-block term on that state) | after 549 heights of fill (274 fill blocks, each with a fallback) | **≈ 7.3 h** | not computed (the code term at network CODE_CAP is a projection, §3.2d) |
+| 380 transfers on that state (round 3c, §3.2d) | 10.2 s per block | TX_CAP: devnet ≈ 52 such blocks | + ≈ 8.5 min in total | not a practical bound (≈ 7.9 s per tx projected × TX_CAP 10^7) |
 
 - **Round 2's conclusion is withdrawn.** "Open time under load is tens of minutes, not hours" and "a
   realistic mixed chain lands around 1–1.5 h" rested on the jump loop (9.6 ms) as the compute worst case.
@@ -440,6 +721,13 @@ rest with empty blocks). These are sums of measured per-block costs, not measure
 - The **empty-block** network figure is a range, ≈ 64–69 min, because b grows with H (§3.1).
 - At the network caps the state term alone (≈ 15–18 s per block, §3.2b) makes the open of a
   full-state chain take weeks; the projection is linear from the synthetic root and is not a measurement.
+- **Round 3c (JV3B-1/2).** The "380 transfers" row above (63 ms per record) is on the small genesis
+  state. On a grown state every USER tx pays `validate_snapshot` + two snapshot clones (§3.2d): at the
+  all-caps devnet state a 380-transfer block costs 10.2 s. The devnet TX_CAP (20,000 cumulative) bounds
+  this to ≈ 52 full transfer blocks per chain (≈ +8.5 min of open), so the devnet worst open becomes
+  ≈ 7.3 h + ≈ 8.5 min (`evidence/journal-r3c/derived.log` [13]); the network TX_CAP (10^7) bounds it only
+  in principle. The empty-block state term with code at the cap (≈ 0.41 s) replaces the ≈ 0.23 s of the
+  row above.
 
 ### 3.4 Open-time memory: peak, steady and transient (fresh process; `JM-OPENMEM-FRESH`, J2-M3)
 
@@ -702,10 +990,10 @@ independent of height, and would also remove the double rebuild.
 | journal disk, empty/typical | 23 MB … ~0.2 GB | (projected) 0.15 … ~0.6 GB |
 | journal disk, max (cumulative caps) | ≈ 0.22 GiB | (projected) **≈ 11.3 GiB** |
 | journal disk, adversarial re-fetch | grows per cycle within window (§4) | (projected) same |
-| one block's re-execution, worst measured | ≈ 1.0 s (compute); ≈ 1.3 s with the state at the caps — above t_exec = 1 s | ≈ 1.0 s (compute); ≈ 15–18 s with the state at the caps (projected) — far above t_exec = 3 s |
-| open replay at H_END | 129 s (empty, measured; stage A 137 s) … **≈ 5.2 h** (worst kind) … **≈ 6.5 h** (worst kind, state at the caps) | ≈ 64–69 min (empty) … **≈ 35–38 h** (worst kind) … ≈ 3 weeks (state at the caps) |
+| one block's re-execution, worst measured | ≈ 1.0 s (compute, small state); ≈ 1.3 s with slots/accounts at the caps; **≈ 10.2 s for a block of 380 transfers on a state with accounts, slots and code near the caps (§3.2d)**, where an empty block takes ≈ 0.41 s and a CREATE2-heavy child ≈ 2.4 s — above t_exec = 1 s and T_blk = 4 s | ≈ 1.0 s (compute); ≈ 15–18 s with slots/accounts at the caps (extrapolation of an extrapolation); with code at CODE_CAP too, ≈ 8 s per USER tx, ≈ 50 min per 380-transfer block and ≈ 80 s per empty block (linear projections far beyond the measured range, §3.2d); a create-heavy block adds ≈ 23–28 s of `current_total` scan (§3.2c) — far above t_exec = 3 s and T_blk = 60 s |
+| open replay at H_END | 129 s (empty, measured; stage A 137 s) … **≈ 5.2 h** (worst kind) … **≈ 6.5 h** (worst kind, slots/accounts at the caps) … **≈ 7.3 h + ≈ 8.5 min** (worst kind with code at the cap too, plus the TX_CAP-bounded transfer blocks; §3.3) | ≈ 64–69 min (empty) … **≈ 35–38 h** (worst kind) … ≈ 3 weeks (state at the caps) |
 | open memory | transient ≈ 1.0× the journal on top of the steady set (1.1–4.6× by kind, §3.4) | ≈ 11.3 GiB transient at the canonical maximum, on top of the steady set |
-| deep reorg at R_keep near the tip | **96 s** (empty; two stalls ≈ 43 s and ≈ 48 s, each > D_att) … **≈ 11 h** (worst kind) … ≈ 13 h (state at the caps) | **10.4 min** (empty) … **≈ 69–73 h** (worst kind) |
+| deep reorg at R_keep near the tip | **96 s** (empty; two stalls ≈ 43 s and ≈ 48 s, each > D_att) … **≈ 11 h** (worst kind) … ≈ 13 h (slots/accounts at the caps) … ≈ 15 h (code at the cap too: 2·20,000·(0.96 + 0.41) s, scaled, not measured) | **10.4 min** (empty) … **≈ 69–73 h** (worst kind) |
 
 t_exec: network 3 s (governance.md:7); devnet 1 s (`admission::NodeLocal::single_host`, D-A02-PROFILE).
 R14 (governance.md:93) requires t_exec ≥ validate_p99. A single valid block above t_exec on this host is
@@ -717,6 +1005,8 @@ representative sample, not a worst-case bound), not a gate measurement.
   ≈ 5.2 h for a chain of the worst measured compute kind, and ≈ 6.5 h with the state at the devnet
   caps — against T_blk = 4 s. A deep reorg near H_END does not fit even on an empty chain (stalls of ≈ 43 s and
   ≈ 48 s, each > D_att = 25 s), and takes ≈ 11 h (≈ 13 h with the state at the devnet caps) under the worst kind.
+  On a state with code near CODE_CAP as well, a single valid block of 380 transfers re-executes in
+  ≈ 10.2 s, above T_blk (§3.2d); TX_CAP limits such blocks to ≈ 52 per chain.
 - **Network**: not admissible on this node at all; as a projection it would (1) replay from genesis in
   ≈ 64–69 min for empty blocks and ≈ 35–38 h under the worst measured compute, weeks with the state
   at the caps; (2) take ≈ 10.4 min (empty) to ≈ 69–73 h (worst kind) for a legal deep reorg at the tip in
@@ -734,7 +1024,7 @@ representative sample, not a worst-case bound), not a gate measurement.
 |---|---|---|
 | storage.md:61 records keyed by (height, blockHash) for the canonical chain | import-ordered append-only journal; by-hash/offset index in RAM (D-REORG-REDB) | functional parity for reads; no on-disk key index |
 | storage.md:70 / consensus.md:230–232 reverse diffs up to R_keep, then TrieRebuild | **none kept**; TrieRebuild from genesis inside R_keep | **conformance gap**: deep-fork rebuild/restore re-execute from genesis (§5), paid twice per reorg (§5.3) |
-| storage.md:73–77 inventory ~19.65 GiB logical / 29.5 GiB disk (incl. a live trie) | journal holds only headers+bodies+parentResult (≤ ~11.3 GiB); receipts/logs/code/state/trie re-derived; the world root is recomputed from the whole state per block (no live trie) | journal ≈ half the inventory; the rest is CPU/RAM at open; the per-block state term (§3.2b) is an implementation property, not a spec requirement |
+| storage.md:73–77 inventory ~19.65 GiB logical / 29.5 GiB disk (incl. a live trie) | journal holds only headers+bodies+parentResult (≤ ~11.3 GiB); receipts/logs/code/state/trie re-derived; the world root is recomputed from the whole state per block (no live trie) | journal ≈ half the inventory; the rest is CPU/RAM at open; the per-block state term (§3.2b) is an implementation property, not a spec requirement; so are the per-tx snapshot validation and clones and the per-scan keccak of every runtime (§3.2d) |
 | execution.md:106 Cancun semantics (EIP-2565 MODEXP pricing, the Cancun precompiles) | revm 19.7 Cancun precompile set (c-kzg enabled) | conforms; the per-gas worst case (§3.2a) follows from that pricing |
 | network.md:7, :26–28 D38 R stage ≤ 4096 headers/branch, ≤ 16384 total; E stage GetBodies | pocold has no headers-first split: GetFrom/Block deliver full blocks and journal each | **conformance gap** (approved text): re-fetch re-journals full blocks (§4) |
 | network.md:144 adoption at depth ≤ R_keep | implemented (D-REORG-REDB) | correct; the **cost** is §5 |
@@ -785,13 +1075,24 @@ proposals.
    Local retention, validity-neutral by construction (states are re-derivable), but it changes the A13
    snapshot count (one more retained state per such fork point, bounded by side_max) and needs a test that
    the second rebuild is gone and a mutation control. A partial alternative to option 4. PROPOSED.
-7. **Incremental state root and O(dirty) block checks (new, §3.2b).** Cache per-account storage roots and
-   the trie between blocks and recompute only dirty accounts, and make the per-block scans (`check_caps`,
-   `sum_balances`, `validate_snapshot`, `live_counts`) incremental, so a block's re-execution is
-   proportional to what it touches, not to the whole state. The root value is unchanged (same MPT), so it
-   is validity-neutral if proven equal; it is an lp4-execution change with its own memory term (a resident
-   trie) and needs an equivalence test against `world_root` on every block plus mutation controls.
-   PROPOSED.
+7. **Incremental state root and O(dirty) block checks (new, §3.2b, §3.2c).** Cache per-account storage
+   roots and the trie between blocks and recompute only dirty accounts, and make the per-block scans
+   incremental: `check_caps`, `sum_balances`, `validate_snapshot`, `live_counts`, **and
+   `code_caps::current_total`** — the last called on every successful create, giving a create-heavy block
+   its O(creates × live-accounts) term (§3.2c), which a cached running logical-code total keyed by the
+   create's own delta would reduce to O(creates). Then a block's re-execution is proportional to what it
+   touches, not to the whole state. The root value is unchanged (same MPT), so it is validity-neutral if
+   proven equal; it is an lp4-execution change with its own memory term (a resident trie and the running
+   totals) and needs an equivalence test against `world_root` and against `current_total`/`live_counts` on
+   every block plus mutation controls. **Round 3c additions (§3.2d):** the per-USER-tx
+   `code_caps::validate_snapshot` in `native::execute_for_profile` (and after every SYSTEM call), the two
+   per-tx whole-snapshot clones in `native::build_engine` (`with_db(snapshot.clone())` and
+   `NativeContext::from_snapshot`'s `pre_transaction`), and the keccak of every account's runtime in
+   `code_caps::code_len` (`hash_slow`, which makes each of these scans O(logical code bytes)) — for
+   example a per-account cached code length and verified hash, a running logical-code total validated
+   once per block, and a copy-on-write overlay instead of a full clone. Each must be proven
+   result-equivalent (the same Ok/Err and the same CODE_CAP decision as the full scans, and PAY's
+   pre-transaction view unchanged); PROPOSED.
 8. **Bound the re-execution cost per gas (normative, new, §3.2a).** The worst measured kinds come from the
    Cancun gas schedule the spec adopts (execution.md:106), e.g. EIP-2565 MODEXP pricing of small moduli.
    Repricing (in the direction of later Ethereum proposals that raise the MODEXP minimum and small-modulus
@@ -816,8 +1117,16 @@ proposals.
   and weeks with the state term. A deep-fork rebuild/restore re-executes from genesis **twice** for want of
   reverse diffs (§5.3), so a legal depth-2048 reorg near the tip takes 96 s (devnet) / 10.4 min (network)
   **on an empty chain** and up to ≈ 11 h (≈ 13 h with the state at the devnet caps) / ≈ 69–73 h under the worst measured kind, in two stalls
-  that each exceed D_att. The worst figures are lower bounds on the worst case (§3.2a). No snapshot, diff
-  or state-root mitigation implemented.
+  that each exceed D_att. The worst figures are lower bounds on the worst case (§3.2a). Beyond the compute
+  and the §3.2b per-block term, a block's re-execution grows with **txs × state** — every USER tx runs
+  `validate_snapshot` and two whole-snapshot clones — and **creates × state** — every create runs
+  `current_total` — and each scan is O(accounts + slots + logical code bytes) (§3.2c, §3.2d; round 3c,
+  correcting round 3b). Measured at a devnet state with accounts, slots and code near the caps: an empty
+  block ≈ 0.41 s, a CREATE2-heavy child ≈ 2.4 s, and a block of 380 transfers **≈ 10.2 s** (> T_blk 4 s),
+  the per-block worst measured; round 3b's "create-heavy block is the per-block worst" is withdrawn. The
+  devnet TX_CAP bounds the transfer blocks to ≈ 52 per chain; at network caps the per-tx term is
+  projected at ≈ 8 s per tx (a linear projection far beyond the measured range, §3.2d). No snapshot,
+  diff, state-root, incremental-code-total or per-tx-scan mitigation implemented.
 - **Open-time memory transient**: OPEN. Open needs ≈ 1.0× the journal in RAM **on top of** the steady
   resident chain (§3.4; peak/journal is 2.1× (body-max) to 5.7× (transfers) by block kind), excluded from the A13 steady-state
   bound; at the network maximum or the adversarial journal it exceeds the budget, so a node can be pushed
@@ -864,3 +1173,32 @@ close these obligations.
 | J2-m5 (minor) | 69 min from a single-run 3-point fit; split attribution | **Fixed.** Six checkpoints in round 3; the LS and two-point fits give a range (≈ 64–69 min), and the two-point b grows with H, so the projection is not an upper bound. `JM-SPLIT` over 20,000 blocks measures the insert + retain slope at ≈ 106% of the fitted b (round 2's 79% came from a 6,000-block split, where the slope is lower); only the measured shares are attributed (§3.1, §3.3). |
 | J2-m6 (minor) | fresh path pre-read the journal; stale docstring | **Fixed in test.** Journal size from `std::fs::metadata`, heap trimmed (`malloc_trim`, glibc only; a no-op elsewhere) before the baseline; the docstring says what the baseline is and drops "~2x". |
 | J2-m7 (minor) | stale docstring, unlabelled profile, unsourced intercept | **Fixed.** `jm_replay_empty_blocks` docstring (super-linear, not linear); the measured profile is labelled (harness `cfg()`: d_att 73, hash_rate 1024, c 8, tau 40) in the module docstring and the profile note; the intercept is measured as `JM-OPEN0` (61.6 ms) and used in §3.2. |
+
+---
+
+## 11. Third review findings — resolution (round 3b)
+
+Measurement and documentation only; no `src` file changed. Code under test `e3dfb47` (base `256428f`);
+evidence `evidence/journal-r3b/`.
+
+| # | finding | resolution |
+|---|---|---|
+| J-REV3-1 (major) | the per-gas search omitted state-interacting families (SSTORE cold/warm, cold CALL, EXTCODECOPY, LOG, CREATE2); the create path's O(creates × live-accounts) scan (`code_caps::current_total`) is in neither the §3.2b additive model nor §7 option 7, so whether MODEXP is the per-block worst at a full state is not established | **Fixed in report; obligation stays OPEN.** Six state-interacting kinds added to `compute_kinds` and measured by `jm_exec_cost_per_gas` on the small state (§3.2a): all ≤ 2.1 ns/gas there, so MODEXP stays the per-gas worst on a small state and LOG is bounded by LOG_COUNT_MAX. New `#[ignore]` test `jm_create_state_term` (§3.2c) grows the live-account state and measures a CREATE2-heavy child, a cold-CALL control and a many-small-create block: the create-specific term (CREATE2 − empty child) rises ≈ 63 → ≈ 1,972 µs/create as accounts grow to 15,645, while the cold-CALL control tracks the empty child — isolating `current_total` as an O(creates × live-accounts) term. Projection: ≈ 0.54 s/block at the devnet ACCT_CAP, ≈ 27.6 s/block at the network ACCT_CAP, additive to the §3.2b root term; on a full state a create-heavy block, not MODEXP, is the per-block worst. §7 option 7 adds `current_total` to its scan list; §8 and §5.4 updated. The worst figures remain lower bounds. *Corrected in round 3c (§12, JV3B-1/2): the per-block worst is a many-transaction block, not the create-heavy one, and the term is O(creates · (accounts + code bytes)).* |
+| J-REV3-2 (minor) | the network state-size figures (≈ 15–18 s/block, open ≈ 3 weeks) are an extrapolation of an extrapolation but stated as the obligation's magnitude | **Fixed.** §3.2b now states the three compounding steps inline (synthetic root with no chain → scaled by the devnet validate/root ratio 1.23 at a ≈ 1,000× larger state → extended linearly to the block and to H_END), and §3.3/§5.4/§8 carry the "extrapolation of an extrapolation" qualifier where the multi-week / 15–18 s figures appear; the §3.2c network create term carries the same qualifier. |
+| J-REV3-3 (minor) | the devnet state term +0.23 s is from the "both" series endpoint (≈ 95% of the caps), not the caps | **Fixed.** §3.2b states the measured fill (47,704 slots ≈ 95% of SLOT_CAP, 18,769 accounts ≈ 94% of ACCT_CAP) and extends by the measured slopes (≈ 2.5 µs/slot, ≈ 4.3 µs/account) to an at-cap empty-child of ≈ 246 ms, i.e. ≈ +0.25 s per block; the measured figure under-states the at-cap value by ≈ 11 ms (`derived.log` [11]). |
+
+---
+
+## 12. Fourth review findings — resolution (round 3c)
+
+Measurement and documentation only; no `src` file changed (the mutants of §3.2d are scratch edits, reverted).
+Code under test `1d094de` (base `11f8e89`); evidence `evidence/journal-r3c/` (`INDEX.md`).
+
+| # | finding | resolution |
+|---|---|---|
+| JV3B-1 (blocker) | "a create-heavy block, not MODEXP, is the per-block worst" and "the §3.2b term is a fixed per-block cost" are false: every USER tx runs `validate_snapshot` and two whole-snapshot clones, so a plain many-tx block is the per-block worst on a large state; the many-small-create excess was misattributed to a pending-pool scan | **Fixed in report; conclusion withdrawn; obligation stays OPEN (stronger).** New `#[ignore]` test `jm_tx_state_term` measures a 380-transfer block, a CREATE2-heavy child and a 149-create block on account-, code-, slot- and all-filled states (§3.2d). On every grown state the transfer block is the worst: 2.25 s (15,415 accounts), 5.30 s (2.05 MB of code, 67 accounts), **10.25 s** with all three near the devnet caps (> T_blk 4 s), against 0.53 / 1.85 / 2.38 s for the CREATE2 child. The model is restated (per-block term + txs × (validate_snapshot + 2 clones) + creates × current_total). Withdrawn in the header, §3.2b, §3.2c, §5.4, §8 and §11; the pending-pool explanation is withdrawn (§3.2c). TX_CAP bounds the transfer blocks to ≈ 52 per devnet chain (§3.3). Mitigations added to §7 option 7, PROPOSED. |
+| JV3B-2 (major) | `code_len` keccaks every runtime, so `current_total` and `validate_snapshot` are O(accounts + logical code bytes), bounded by CODE_CAP, not ACCT_CAP; the account-only fit and the §3.2b state model miss the code dimension | **Fixed in report.** §3.2c and §3.2d state each scan as O(accounts + slots + code bytes). The code series (62 deploys of 32,768 B, 97.6% of the devnet CODE_CAP, 67 accounts) gives `validate_snapshot` 11.5 ms, an empty block 124 ms, a CREATE2 child 1.85 s (7.0 ms per create, where the account fit predicts ≈ 32 µs) and a transfer block 5.30 s. Mutant D (skip `hash_slow`) removes the whole code dimension (code-state empty block 124 → 1.6 ms), so it is the keccak in `code_len`. The devnet at-cap empty-block term is ≈ 413 ms with code (not ≈ 246 ms) and the worst devnet open ≈ 7.3 h (+ ≈ 8.5 min of transfer blocks). Network figures (≈ 6.2 s per `validate_snapshot`, ≈ 7.9 s per tx, ≈ 80 s per empty block) are labelled linear projections ≈ 512× beyond the measured code range. §7 option 7 lists `hash_slow` in `code_len` (cached code length/hash or a running total), PROPOSED. |
+| JV3B-3 (minor) | the 0.112 µs/account slope and the 0.54 s / 27.6 s projections come from one run with a high last point; negative intercept; the within-tx O(creates²) part unstated | **Fixed.** Two more runs of `jm_create_state_term` on `1d094de` (`create-r1.log`, `create-r2.log`): at A ≈ 15,645 the three runs give 1,596 / 1,691 / 1,972 µs/create. The fit on per-checkpoint medians gives ≈ 0.49 s per 247-create block at the devnet ACCT_CAP (0.47–0.54 s over the single-run fits) and 23.0–27.6 s at the network ACCT_CAP (projection) (`derived.log` [14]). Mutant A shows the within-tx part: the CREATE2 child on the genesis state takes 4.4 ms without `current_total` against 18.0 ms with it on the same build (≈ 55 µs per create from the journaled state growing inside the tx); the negative intercept is a fitting artefact (§3.2c). |
+| JV3B-4 (minor) | `evidence/journal-r3b/INDEX.md` cites "§10 J-REV3-1/2/3"; the round-3b table is §11, and §3.2c is omitted | **Fixed by a new file.** `evidence/journal-r3b/INDEX.md` is an existing evidence file and is not edited; `evidence/journal-r3c/INDEX.md` carries the correction (round-3b report sections: §3.2a, §3.2b, §3.2c and §11). |
+| survivor: mutant B (skip `validate_snapshot` in `execute_for_profile`) | no committed child did many txs on a grown state, so the per-tx `validate_snapshot` term was never isolated | **Killed by the new measurement.** In `jm_tx_state_term` mutant B changes the code-state transfer block from 5.18 s to 0.19 s and the accounts-state one from 1.80 to 1.07 s (`mutants/mut-B.log` against `mutants/mut-none.log`, §3.2d). |
+| survivor: mutant A (`current_total` → 0) | it left the many-small and transfer blocks largely in place, contradicting "the same regime" | **Fixed in report.** §3.2c withdraws "the same regime"; mutant A takes the 149-create block from 967 to 776 ms (accounts) and from 2.90 to 2.07 s (code), mutant B to 766 ms and 1.17 s; the transfer block is unchanged under A (§3.2d). |
