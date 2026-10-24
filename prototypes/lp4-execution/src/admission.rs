@@ -329,7 +329,11 @@ pub fn measure(spec_bytes:&[u8],alloc:&InMemoryDB,repeats:u32)->Result<Timing,St
     let mut state=genesis.state().clone();
     // Fund the calibration sender by moving balance (total supply unchanged).
     let key=crate::txsign::Key::devnet("admission-calibration");let sender=key.address();let spin=scratch_address("pocol-admission-spin");
-    let base0=crate::devnet::from_fixed(&cp.baseFee0);let max_fee=base0.saturating_mul(U256::from(16u64)).max(U256::from(1u64));
+    // Every sampled block carries the GAS_LIMIT workload at the base fee baseFee0. apply_block takes the
+    // base fee as an input and the work measured does not depend on it; under the London rule full
+    // blocks would compound it by 1/8 per block past any fixed fee cap, and later samples (closing,
+    // final) would then be empty blocks (PR #27 review).
+    let base=crate::devnet::from_fixed(&cp.baseFee0);let max_fee=base.max(U256::from(1u64));
     let records=u64::try_from(spec.m0_list.len()).unwrap_or(u64::MAX);
     let blocks=2+records.div_ceil(u64::from(cp.RET.max(1)))+u64::from(cp.D)+4;let need=max_fee.saturating_mul(U256::from(cp.GAS_LIMIT)).saturating_mul(U256::from(blocks));
     let reserved:Vec<Address>=(0..5).map(apply::program_address).chain([crate::pay_address(),crate::pay::escrow_address(),apply::system_address()]).collect();
@@ -340,12 +344,11 @@ pub fn measure(spec_bytes:&[u8],alloc:&InMemoryDB,repeats:u32)->Result<Timing,St
     let code=Bytecode::new_raw(Bytes::copy_from_slice(&SPIN));state.insert_account_info(spin,AccountInfo{code_hash:code.hash_slow(),code:Some(code),..Default::default()});
     let members:Vec<Address>=spec.m0_list.iter().map(|m|Address::from(m.id)).collect();
     if members.is_empty(){return Err("calibration: empty M_0".into())}
-    let mut prev:Option<ParentResult>=None;let mut base=base0;let mut nonce=0u64;let mut phase_ms=[0u64;3];let mut samples=0u32;let mut seen=[false;3];
+    let mut prev:Option<ParentResult>=None;let mut nonce=0u64;let mut phase_ms=[0u64;3];let mut samples=0u32;let mut seen=[false;3];
     for h in 1..=blocks.min(cp.H_END){
         let ts=if h<=2{spec_ts(&cp,h)}else{cp.T_END.max(cp.T_CLOSE).saturating_add(h)};
-        let txs=if base<=max_fee{
-            let tx=crate::txsign::Tx{chain_id:spec.chain_id,nonce,max_priority:U256::ZERO,max_fee,gas:cp.GAS_LIMIT,to:Some(spin),value:U256::ZERO,data:Bytes::new()};nonce+=1;vec![tx.sign_1559(&key)]
-        }else{vec![]};
+        let tx=crate::txsign::Tx{chain_id:spec.chain_id,nonce,max_priority:U256::ZERO,max_fee,gas:cp.GAS_LIMIT,to:Some(spin),value:U256::ZERO,data:Bytes::new()};nonce+=1;
+        let txs=vec![tx.sign_1559(&key)];
         let input=BlockInput{height:h,timestamp:ts,base_fee:base,gas_limit:cp.GAS_LIMIT,prevrandao:B256::ZERO,proposer:Proposer::Fallback,parent_result:prev.clone(),
             evidence:vec![],evidence_raw:&[],transactions:&txs,ancestors:vec![(0,B256::from(hash))],cum_log_bytes:0};
         let mut out=None;let mut worst=0u64;
@@ -353,9 +356,10 @@ pub fn measure(spec_bytes:&[u8],alloc:&InMemoryDB,repeats:u32)->Result<Timing,St
             let t0=std::time::Instant::now();let o=apply::apply_block(&state,&genesis,&profile,&input).map_err(|e|format!("calibration h={h}: {e:?}"))?;
             worst=worst.max(u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX).max(1));samples+=1;out=Some(o);
         }
-        let o=out.unwrap();let class=if o.is_final{2}else if o.facts.closing{1}else{0};
+        let o=out.unwrap();
+        if o.gas_used<cp.GAS_LIMIT{return Err(format!("calibration h={h}: the block used {} gas, not the GAS_LIMIT workload",o.gas_used))}
+        let class=if o.is_final{2}else if o.facts.closing{1}else{0};
         phase_ms[class]=phase_ms[class].max(worst);seen[class]=true;
-        base=crate::fees::next_base_fee(base,o.gas_used,cp.GAS_LIMIT).map_err(|e|format!("{e:?}"))?;
         let shares:Vec<(u64,Address)>=(0..u64::from(cp.S_max)).map(|i|(i+1,members[(i as usize+h as usize)%members.len()])).collect();
         prev=Some(ParentResult{block_hash:B256::from(U256::from(h)),winner:members[h as usize%members.len()],shares});
         state=o.state;

@@ -442,6 +442,29 @@ fn branch(h:&mut Net,parent:[u8;32],count:usize,bodies:&[Body])->Vec<Block>{
     for d in [dir,dir2,dir3]{let _=std::fs::remove_dir_all(&d);}
 }
 
+/// A reorg whose two sides total more than 2048 blocks (PR #27 review): the walk back to the common
+/// ancestor stopped after 2·1024 steps, so only the newest detached blocks were restored and a
+/// transaction in the oldest one was lost from the pool. Release only: about 2,200 blocks are
+/// validated twice. Run with `cargo test --release --test consensus -- --ignored a11_deep_reorg`.
+#[test] #[ignore="deep-reorg test: run in release with --ignored"]
+fn a11_deep_reorg_restores_the_oldest_detached_transaction(){
+    let alice=devnet::account_key("alice");let t0=pay(&alice,0,7);
+    let mut a=net();let g=a.chain.head;let first=t0.clone();
+    let ours=grow(&mut a,g,1101,&move|n,p|signed(n,p,Body{txs:vec![first.clone()],evidence:vec![]},0));
+    // Theirs also starts with a signed block (a signed block outweighs many fallback blocks), then
+    // fallback blocks until its work exceeds ours.
+    let mut b=net();let s0=signed(&b,g,Body::default(),1);import(&mut b,&s0);
+    let theirs:Vec<Block>=std::iter::once(s0.clone()).chain(heavier(&mut b,s0.hash(),a.chain.head().total_work,0)).collect();
+    assert!(ours.len()+theirs.len()>2048,"the two sides total {} blocks",ours.len()+theirs.len());
+    let (mut node,dir)=a11_node("deep");
+    for x in &ours{node.import(x.clone(),None).unwrap();}
+    assert!(pool(&node).is_empty(),"t0 is included in the oldest block of our branch");
+    for x in &theirs{node.import(x.clone(),None).unwrap_or_else(|e|panic!("h={}: {e:?}",x.header.h));}
+    assert_eq!(node.chain.head,theirs.last().unwrap().hash(),"reorganized to the heavier branch");
+    assert_eq!(pool(&node),vec![t0],"the oldest detached block's transaction is back in the pool");
+    let _=std::fs::remove_dir_all(&dir);
+}
+
 // ---------------- audit A13 regressions: enforced resource assumptions ----------------
 fn admitted_with(c:&DevnetConfig,local:pocol_lp4_execution::admission::NodeLocal)->Spec{Spec::new(devnet::build(c).unwrap().admit(&local).unwrap_or_else(|e|panic!("{e}")).0)}
 #[test] fn a13_side_branch_states_are_capped_and_rebuilt_on_demand(){

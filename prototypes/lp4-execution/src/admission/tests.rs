@@ -39,6 +39,15 @@ fn sh()->NodeLocal{NodeLocal::single_host()}
     let n=net(&c);let t=measure(&n.spec_bytes,&n.alloc,1).unwrap();
     admit(&n.request(&NodeLocal::p11(),Some(&t))).unwrap_or_else(|e|panic!("{e}"));
 }
+/// PR #27 review: with a long closing sequence (here 33 blocks to the final one, D = 30) the London base fee
+/// of full blocks passed the old fixed fee cap (16·baseFee0) after about 24 blocks, and the closing and
+/// final samples were then empty blocks. Every sample now carries the GAS_LIMIT workload (measure
+/// refuses a block that does not).
+#[test] fn calibration_keeps_the_full_gas_workload_through_a_long_closing_sequence(){
+    let mut c=cfg();c.d=30;let n=net(&c);
+    let t=measure(&n.spec_bytes,&n.alloc,1).unwrap_or_else(|e|panic!("{e}"));
+    assert!(t.samples>=30,"the sequence runs past the ~24 blocks the old fee cap covered: {t:?}");
+}
 #[test] fn audit_reproductions_are_rejected_with_their_rules(){
     let (_,t)=base();
     let mut c=cfg();c.s_max=1;assert_eq!(rules(run(&net(&c),&t,&sh())),v(&["R9"]),"A02-R9 S_max=1");

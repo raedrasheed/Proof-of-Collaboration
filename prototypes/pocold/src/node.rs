@@ -51,8 +51,6 @@ pub const FUTURE_MAX:usize=64;pub const TEMPLATES_MAX:usize=64;pub const SEEN_MA
 pub const EVENT_QUEUE:usize=128;
 /// Orphans (blocks whose parent is unknown): parent keys, blocks per parent and bytes, all peers together.
 pub const ORPHAN_PARENTS_MAX:usize=64;pub const ORPHANS_PER_PARENT:usize=16;pub const ORPHAN_BYTES_MAX:usize=16*1024*1024;
-/// Blocks walked on each side of a reorg to restore detached transactions (A11).
-pub const REORG_RESTORE_MAX:usize=1024;
 /// Receipt times kept for production (only recent parents matter).
 pub const RECEIVED_MAX:usize=1024;
 /// Sync sessions (network.md D38: Status, locator <= 32, count <= 512): blocks asked per round, the
@@ -342,8 +340,9 @@ impl Node{
         let new_head=self.chain.insert(entry);self.stats.imported+=1;
         // A session's block is protected from the side cap while it is non-canonical (before retain()).
         if solicited&&!self.chain.is_canonical(&hash){self.protect(hash);}
-        // A11: the detached transactions are read before retain() offloads the abandoned branch.
-        let detached=if new_head{self.detached_txs(old_head)}else{vec![]};
+        // A11: the abandoned blocks' journal offsets are taken before retain() may evict them; their
+        // bodies are read back one block at a time when the pool is rebuilt.
+        let detached=if new_head{self.detached_blocks(old_head)}else{vec![]};
         let fork_h=if new_head{self.chain.lca_height(&old_head,&self.chain.head).unwrap_or(0)}else{0};
         self.chain.retain();
         // D-REORG-REDB: the adopted blocks that were offloaded as non-canonical are made whole again
@@ -385,7 +384,7 @@ impl Node{
     }
     pub fn orphan_stats(&self)->(usize,usize,usize){(self.orphans.len(),self.orphans.values().map(|l|l.len()).sum(),self.orphan_bytes)}
     fn reject(&mut self,hash:[u8;32],why:&str){self.rejects.push_back((hex(&hash),chain::truncate(why)));if self.rejects.len()>REJECTS_MAX{self.rejects.pop_front();}self.log(&format!("reject {}: {why}",&hex(&hash)[..14]));}
-    fn on_new_head(&mut self,detached:Vec<Vec<u8>>){
+    fn on_new_head(&mut self,detached:Vec<u64>){
         self.rebuild_pool(detached);
         if let Some(s)=self.cfg.stop_at{if self.chain.head().height>=s{self.stopped=true;return}}
         self.restart_production();
@@ -415,36 +414,34 @@ impl Node{
         if relay{self.broadcast(&Msg::Tx{raw},None);}
         Ok(hash)
     }
-    /// Transactions of the blocks that left the canonical chain (from `old` back to the common
-    /// ancestor with the new head), oldest block first and in block order, minus those that the
-    /// new canonical branch includes (A11). At most REORG_RESTORE_MAX blocks are walked per side.
-    fn detached_txs(&self,old:[u8;32])->Vec<Vec<u8>>{
-        let height=|x:&[u8;32]|self.chain.get(x).map(|e|e.height);
-        let (mut a,mut b)=(old,self.chain.head);let mut gone=Vec::new();let mut kept=HashSet::new();
-        for _ in 0..2*REORG_RESTORE_MAX{
-            if a==b{break}
-            let (Some(ha),Some(hb))=(height(&a),height(&b)) else{break};
-            if ha>=hb{let Some(e)=self.chain.get(&a) else{break};gone.push(a);match e.parent{Some(p)=>a=p,None=>break}}
-            else{let Some(e)=self.chain.get(&b) else{break};kept.extend(self.tx_hashes_of(e));match e.parent{Some(p)=>b=p,None=>break}}
+    /// Journal offsets of the blocks that left the canonical chain, from `old` back to the common
+    /// ancestor with the new head, oldest first (A11). The walk always reaches the common ancestor
+    /// (as `lca_height` does); the abandoned side is at most R_keep blocks, since a deeper fork is
+    /// never adopted, and only its offsets are held here.
+    fn detached_blocks(&self,old:[u8;32])->Vec<u64>{
+        let (mut a,mut b)=(old,self.chain.head);let mut gone=Vec::new();
+        while a!=b{
+            let (Some(ea),Some(eb))=(self.chain.get(&a),self.chain.get(&b)) else{break};
+            if ea.height>=eb.height{
+                match ea.body_off{Some(off)=>gone.push(off),None=>self.log(&format!("detached block {} has no journal offset",&hex(&a)[..14]))}
+                match ea.parent{Some(p)=>a=p,None=>break}
+            }else{match eb.parent{Some(p)=>b=p,None=>break}}
         }
-        let mut out=Vec::new();
-        for h in gone.iter().rev(){let Some(e)=self.chain.get(h) else{continue};
-            // The abandoned branch was canonical, hence resident; an offloaded one is read back.
-            let txs=if e.offloaded{match self.chain.body_of(e,Some(&self.journal)){Ok(b)=>b.txs,Err(_)=>continue}}else{e.body.txs.clone()};
-            for raw in txs{if !kept.contains(&revm::primitives::keccak256(&raw)){out.push(raw);}}}
-        out
+        gone.reverse();gone
     }
-    /// Transaction hashes of a stored block; an offloaded block's are re-derived from its journaled body.
-    fn tx_hashes_of(&self,e:&Entry)->Vec<B256>{
-        if !e.offloaded{return e.tx_hashes.clone()}
-        match self.chain.body_of(e,Some(&self.journal)){Ok(b)=>b.txs.iter().map(|t|revm::primitives::keccak256(t)).collect(),Err(err)=>{self.log(&format!("journal read for {}: {err:?}",&hex(&e.hash)[..14]));vec![]}}
-    }
-    fn rebuild_pool(&mut self,detached:Vec<Vec<u8>>){
+    fn rebuild_pool(&mut self,detached:Vec<u64>){
         let old=std::mem::take(&mut self.pool.txs);self.pool.bytes=0;self.pool.pending_state=self.chain.head().state.clone();
         self.pool.meter=PoolMeter::of(&self.pool.pending_state,self.chain.spec.profile());
         // Transactions in abandoned blocks return to the pool (consensus §10), before the previous
-        // pool; each is re-executed on the new head (nonce, balance, fee) and duplicates are skipped.
-        for raw in detached{let _=self.submit_tx(raw,false);}
+        // pool, oldest block first and in block order; each is re-executed on the new head (nonce,
+        // balance, fee), so one the new branch includes (its nonce is spent there) is not taken again.
+        // One abandoned body is held at a time, read from the journal (append-only, never compacted).
+        let body_max=self.chain.spec.cp().BODY_MAX as usize;
+        for off in detached{
+            let txs=match self.journal.read_at(off).map_err(|e|format!("{e:?}")).and_then(|(_,bb,_)|Body::decode(&bb,body_max).map_err(|e|format!("{e:?}"))){
+                Ok(b)=>b.txs,Err(e)=>{self.log(&format!("journal read of a detached block at {off}: {e}"));continue}};
+            for raw in txs{let _=self.submit_tx(raw,false);}
+        }
         for (_,raw) in old{let _=self.submit_tx(raw,false);}
     }
     /// Pool transactions that still execute in order (for a signed template on `p`). execution.md:83: a
