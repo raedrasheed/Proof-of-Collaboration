@@ -1501,6 +1501,13 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
     assert_eq!(a.chain.get(&side.hash()).map(|e|e.hash),b.chain.get(&side.hash()).map(|e|e.hash));
     assert!(a.chain.get(&fork).unwrap().slim,"and slimmed again by the next retain");
     assert_eq!(views(&mut a),views(&mut b),"after the fork on a slimmed parent");
+    // A fork 40 deep, below the K_hist cut: its parent's state is rebuilt by re-executing from genesis
+    // through slimmed entries, each from its restored fields.
+    let deep=a.chain.canonical_at(a.chain.head().height-40).unwrap().hash;assert!(a.chain.get(&deep).unwrap().slim&&a.chain.get(&deep).unwrap().pruned);
+    let side2=fallback(&h,deep,1);let rb=a.chain.rebuilds;
+    a.import(side2.clone(),None).unwrap();b.import(side2.clone(),None).unwrap();
+    assert!(a.chain.rebuilds>rb,"positive control: a TrieRebuild through slimmed entries");assert!(a.chain.get(&side2.hash()).is_some());
+    assert_eq!(views(&mut a),views(&mut b),"after the fork below the cut");
     drop(a);let mut r=Node::open(ca(),admitted(&cfg(&["a","b","c"]))).unwrap();
     assert!(slims(&r)>80);assert_eq!(exact(&r,&b),slims(&r));assert_eq!(views(&mut r),views(&mut b),"after reopen");drop(r);
     for d in [da,db]{let _=std::fs::remove_dir_all(&d);}
