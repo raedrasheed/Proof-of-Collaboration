@@ -210,6 +210,54 @@ the 45 copies: K_hist + 1 retained states and side_max side states, 55.5 GiB at 
   - mutation controls: a diff missing a slot, a diff applied in the wrong direction, materialization
     from the wrong LCA.
 
+**S3a status (2026-10-24): landed; evidence/c1-s3a/.**
+- `src/statediff.rs`: a `StateDiff` holds the before and after value of every field that differs:
+  accounts with their cached code, account state, each slot, contracts, block hashes and logs.
+  `states_equal` compares every field, including the cached code that `AccountInfo`'s PartialEq ignores.
+- `src/chain.rs`:
+  - each validated block gets its diff;
+  - `settle` (the end of `retain`) keeps full only the head, genesis and the side states within
+    side_max;
+  - `materialize` and `state_of` build any other state from the nearest full state through the diffs;
+  - `validate` materializes a non-full parent itself, so its NeedsRebuild contract is unchanged.
+- **Two findings made during the work, both fixed:**
+  1. **An adopted branch must not break the path to the states below the fork.** When the adopted
+     blocks had been pruned as side blocks, they had no diffs, and the retained canonical states below
+     the fork became unreachable. They would then answer −32017 where the old code answered.
+     - Fix: `restore_canonical` also re-executes canonical blocks above the cut that lack a diff, but
+       only when a retained state lies below them.
+     - The node calls `retain_unsettled`, then the restore, then `settle`, in live import and replay,
+       so the fork point is still reachable during the restore.
+  2. **No extra rebuild.** At first, after a fork below the cut, that re-execution rebuilt the adopted
+     branch from genesis. Since no retained state lies below it, it is now skipped. The equivalence test
+     shows the same rebuild count as the reference (20 and 20).
+- **A13, measured by `derive()`:**
+
+  | | before S3a | after S3a |
+  |---|---:|---:|
+  | devnet model | 4,323,240,949 B | **3,601,500,638 B** |
+  | network snapshots group | 75.12 GiB | **27.76 GiB** (17 copies: head, genesis, side_max, 2 materialized, 10 transient, growth) |
+  | network diff term | — | **0.46 GiB** (2·K_hist + side_max + 1 diffs of at most 7.0 MB each, derived from the gas schedule) |
+  | network model total | 90.93 GiB | **41.41 GiB** (gate 47.33 GiB) |
+
+  - A new condition, `s3a-removal`, records that a removed account keeps no earlier storage (Cancun).
+  - Genesis is counted as a full copy. It is in fact the genesis allocation; a tighter term is open.
+- **Validation time** at the near-cap devnet state (18,828 accounts, 46,636 slots): the diff alone takes
+  12.5 ms per block. 380 transfers take 672 ms, against 655 ms for C-2's final code. An empty child takes
+  491 ms, against 465 ms.
+- **Acceptance tests (pass):**
+  - `s3a_every_retained_state_equals_the_full_state_it_replaces`: 374 import steps, among them a 10-deep
+    reorg, a re-reorg and a fork below the cut. 8,388 states are compared field by field and by
+    stateRoot against a full-state reference. The canonical pruned flags are identical. At most 4 full
+    states are held, against 35 in the reference.
+  - `s3a_state_queries_answer_as_with_full_states`: every balance, nonce, code, storage and `eth_call`
+    query at every height and tag equals the reference node's. This holds live, after two reorgs and
+    after reopen, with the same rebuild and restore work.
+  - The statediff unit tests: 2,000 random state pairs, both directions; composition over a chain; the
+    cached code.
+  - The S2 code-sharing test, now run over materialized states.
+  - The full suites; the ignored deep-reorg tests; the mutation controls (`evidence/c1-s3a/`).
+
 **S3b: transient working copies as overlays (an executor change, done together with S5).**
 - This removes the 10 transient copies and the growth copy, 18.0 GiB at the network profile.
 - It needs `lp4-execution` to run on a layered state: a `CacheDB` over a borrowed base, with whole-state
@@ -221,6 +269,10 @@ the 45 copies: K_hist + 1 retained states and side_max side states, 55.5 GiB at 
 Projected network model after S3a: 90.93 − 55.5 − 3.0 (the per-copy code containers) − 2.25 (side code
 sets) ≈ **30.2 GiB, plus the diff and materialization terms (new)**. This is a projection until
 `derive()` prints it.
+**Correction after the code (S3a status below):** the measured total is 41.41 GiB. The projection
+assumed two things that the code did not do:
+- the side states as diffs: they stay full, so that a deep side branch does not rebuild;
+- no extra copies: genesis and two materialized states are now counted.
 
 ## S4: per-block metadata off the heap
 

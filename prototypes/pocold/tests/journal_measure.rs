@@ -28,20 +28,20 @@ fn net()->Net{let c=cfg();let d=devnet::build(&c).unwrap();let mut keys=HashMap:
     for m in &d.miners{keys.insert(m.id,Key::from_secret(&m.key.secret()).unwrap());}
     Net{chain:Chain::new(admitted()),keys}}
 fn try_seal(n:&Net,mut h:Header,body:Body,attempt:u32,start:u64)->Option<Block>{
-    let p=n.chain.get(&h.parent_hash).unwrap().clone();let ctx=n.chain.child_ctx(&p,attempt).unwrap();
+    let p=n.chain.full_entry(&h.parent_hash).unwrap();let ctx=n.chain.child_ctx(&p,attempt).unwrap();
     let tid=template_id(&h.ut_raw);let mut shares=vec![];let mut x=start;
     loop{if (x as u128)>=ctx.assignment.nonce_max(){return None}let ph=pow_hash(&tid,x);if le_target(&ph,&ctx.t_share){if le_target(&ph,&ctx.target){break}shares.push(x);}x+=1;}
     let owner=addr(&ctx.assignment.owner(x).unwrap());
     h.nonce=x;shares.truncate(256);h.shares=shares;reseal(&mut h);
     h.winner_sig=n.keys[&owner].sign_hash(&B256::from(pocold::hashes::win_msg(&tid,x,&share_root(&h))));reseal(&mut h);
     Some(Block{header:h,body})}
-fn fallback(n:&Net,parent:[u8;32],a:u32)->Block{let p=n.chain.get(&parent).unwrap().clone();
+fn fallback(n:&Net,parent:[u8;32],a:u32)->Block{let p=n.chain.full_entry(&parent).unwrap();
     for a in a..a+16{let (h,_,_)=n.chain.build_fallback(&p,a).unwrap();if let Some(b)=try_seal(n,h,Body::default(),a,0){return b}}panic!("no fallback solution")}
 /// A signed a=0 block at ts = parent ts + T_blk (the window starts at parent ts + 1): on the ASERT schedule,
 /// like a fallback a=0 block (lower + dFbWait), so a long run of signed blocks does not harden the target
 /// (at parent ts + 1 each one ran 3 s ahead and the PoW work doubled every ~13 blocks).
 fn signed(n:&Net,parent:[u8;32],body:Body)->Block{
-    let p=n.chain.get(&parent).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    let p=n.chain.full_entry(&parent).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();
     for off in u64::from(n.chain.spec.cp().T_blk).saturating_sub(1)..u64::from(n.chain.spec.cp().D_att){let (h,_,_)=n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower()+off,body.clone(),vec![]).unwrap_or_else(|e|panic!("build_signed: {e:?}"));
         if let Some(b)=try_seal(n,h,body.clone(),0,0){return b}}panic!("no signed solution")}
 fn import(n:&mut Net,b:&Block){let (e,_)=n.chain.validate(b,None,0).unwrap_or_else(|e|panic!("h={} {e:?}",b.header.h));n.chain.insert(e);n.chain.retain();}
@@ -56,7 +56,7 @@ fn big_call(key:&Key,nonce:u64,len:usize)->Vec<u8>{Tx{chain_id:777910,nonce,max_
 /// The most 21000-gas transfers build_signed accepts on `head` (a full-gas transfer block), found by
 /// re-execution only (no PoW), then returned so the caller seals once.
 fn pack_transfers(n:&Net,head:[u8;32],alice:&Key)->Vec<Vec<u8>>{
-    let p=n.chain.get(&head).unwrap().clone();
+    let p=n.chain.full_entry(&head).unwrap();
     let (mut lo,mut hi)=(1usize,400usize);
     let ok=|k:usize|{let txs:Vec<Vec<u8>>=(0..k as u64).map(|i|pay(alice,i)).collect();
         n.chain.build_signed(&p,&n.keys[&n.chain.child_ctx(&p,0).unwrap().proposer],n.chain.child_ctx(&p,0).unwrap().window.lower(),Body{txs,evidence:vec![]},vec![]).is_ok()};
@@ -530,7 +530,7 @@ fn jm_open_memory(){
     let (mut nonce,mut blocks)=(0u64,0u64);
     if kind=="full_body_max"{
         loop{let body=Body{txs:vec![big_call(&alice,nonce,len),big_call(&alice,nonce+1,len)],evidence:vec![]};
-            let pe=harness.chain.get(&parent).unwrap().clone();
+            let pe=harness.chain.full_entry(&parent).unwrap();
             if pe.cum_tx_bytes+body.txs.iter().map(|t|t.len() as u64).sum::<u64>()>harness.chain.spec.cp().TXBYTES_CAP{break}
             let b=signed(&harness,parent,body);import(&mut harness,&b);parent=b.hash();n.import(b,None).unwrap();nonce+=2;blocks+=1;}
     }else{
@@ -584,7 +584,7 @@ fn jm_exec_cost_per_gas(){
     let helper=alice.address().create(0);let p1=signed(&n,p0.hash(),Body{txs:vec![deploy(&alice,0,200_000,0,MEM_HELPER.to_vec())],evidence:vec![]});import(&mut n,&p1);
     let head=n.chain.head;
     let mut blocks:Vec<(String,Block)>=vec![("empty_fallback".into(),fallback(&n,head,1))];
-    if want("full_gas_transfers"){let mut nonce=1u64;let tr={let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    if want("full_gas_transfers"){let mut nonce=1u64;let tr={let p=n.chain.full_entry(&head).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();
         let (mut lo,mut hi)=(1usize,400usize);let ok=|k:usize|n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower(),Body{txs:(0..k as u64).map(|i|pay(&alice,1+i)).collect(),evidence:vec![]},vec![]).is_ok();
         while lo<hi{let mid=(lo+hi+1)/2;if ok(mid){lo=mid}else{hi=mid-1}}lo as u64};
         blocks.push(("full_gas_transfers".into(),signed(&n,head,kind_body("full_gas_transfers",&alice,&mut nonce,tr,0))));}
@@ -753,7 +753,7 @@ fn jm_create_state_term(){
         for (a,x) in &st.accounts{if sys.contains(a)||x.info().is_none(){continue}ac+=1;sl+=x.storage.values().filter(|v|!v.is_zero()).count() as u64;}(sl,ac)};
     // The most one-create (to=None empty child) txs build_signed accepts on `head`, found by re-execution.
     let pack_creates=|n:&Net,head:[u8;32],a:&Key,start:u64|->Vec<Vec<u8>>{
-        let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+        let p=n.chain.full_entry(&head).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();
         let ok=|k:usize|n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower(),
             Body{txs:(0..k as u64).map(|i|deploy(a,start+i,120_000,0,EMPTY_CHILD.to_vec())).collect(),evidence:vec![]},vec![]).is_ok();
         let (mut lo,mut hi)=(1usize,200usize);assert!(ok(lo));while lo<hi{let mid=(lo+hi+1)/2;if ok(mid){lo=mid}else{hi=mid-1}}
@@ -784,7 +784,7 @@ fn jm_create_state_term(){
 }
 /// The most txs `mk(start..)` build_signed accepts on `head` (re-execution only, no PoW), for the caller to seal once.
 fn pack_txs<F:Fn(u64)->Vec<u8>>(n:&Net,head:[u8;32],start:u64,max:usize,mk:F)->Vec<Vec<u8>>{
-    let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    let p=n.chain.full_entry(&head).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();
     let ok=|k:usize|n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower(),Body{txs:(0..k as u64).map(|i|mk(start+i)).collect(),evidence:vec![]},vec![]).is_ok();
     let (mut lo,mut hi)=(1usize,max);assert!(ok(lo));while lo<hi{let mid=(lo+hi+1)/2;if ok(mid){lo=mid}else{hi=mid-1}}
     (0..lo as u64).map(|i|mk(start+i)).collect()}
@@ -830,10 +830,13 @@ fn jm_tx_state_term(){
             let (_,tm,_)=validate_ms(&n.chain,&signed(n,head,Body{txs:tr,evidence:vec![]}),3);
             let c2=signed(n,head,Body{txs:vec![deploy(&alice,nonce,FULL_GAS,0,create2_loop())],evidence:vec![]});let (_,c2m,_)=validate_ms(&n.chain,&c2,3);
             let (e2,_)=n.chain.validate(&c2,None,0).unwrap();let creates=(e2.state.accounts.len() as i64-st.accounts.len() as i64).max(1);
+            // C-1 S3a: the diff each validate now computes (part of the times above), alone.
+            let mut df=vec![];let mut dsz=(0,0);for _ in 0..3{let t=Instant::now();let d=pocold::statediff::StateDiff::between(&st,&e2.state);df.push(t.elapsed().as_secs_f64()*1e3);dsz=d.size();}
+            let diff_ms=median(df);
             let ms=pack_txs(n,head,nonce,200,|i|deploy(&alice,i,120_000,0,EMPTY_CHILD.to_vec()));let mk=ms.len();
             let (_,mm,_)=validate_ms(&n.chain,&signed(n,head,Body{txs:ms,evidence:vec![]}),3);
             println!("JM-TXSTATE {}",serde_json::json!({"series":s,"phase":phase,"fillBlocks":blocks,"height":n.chain.head().height,"liveUserSlots":sl,"liveUserAccounts":ac,"stateAccountsAll":st.accounts.len(),"logicalCode":inv,
-                "validateSnapshotMs":vs,"inventoryMs":iv,"stateCloneMs":cl,"predictedPerTxUs":(vs+2.0*cl)*1e3,"emptyChildMs":em,
+                "validateSnapshotMs":vs,"inventoryMs":iv,"stateCloneMs":cl,"s3aDiffCreate2Ms":diff_ms,"s3aDiffCreate2Size":[dsz.0,dsz.1],"predictedPerTxUs":(vs+2.0*cl)*1e3,"emptyChildMs":em,
                 "transferTxs":tk,"transferMs":tm,"transferPerTxUs":(tm-em)*1e3/tk as f64,
                 "create2Ms":c2m,"create2Creates":creates,"create2PerCreateUs":(c2m-em)*1e3/creates as f64,
                 "manySmallTxs":mk,"manySmallMs":mm,"manySmallPerTxUs":(mm-em)*1e3/mk as f64,"buildSeconds":t0.elapsed().as_secs_f64()}));
@@ -869,9 +872,11 @@ fn jm_tx_state_term(){
     let head=ptrs(&n.chain.head().state);assert_eq!(head.len(),3,"positive control: three 32 KiB runtimes at the head");
     let mut states=0;let mut shared=0;
     for e in n.chain.blocks.values().filter(|e|!e.pruned&&n.chain.is_canonical(&e.hash)){
-        let p=ptrs(&e.state);if p.is_empty(){continue}states+=1;
+        // C-1 S3a: a retained state that is not held full is materialized from the head through the diffs,
+        // so it shares the head's buffers in the same way.
+        let st=n.chain.state_of(&e.hash).unwrap();let p=ptrs(&st);if p.is_empty(){continue}states+=1;
         for (h,ptr) in &p{assert_eq!(head.get(h),Some(ptr),"h={}: code {h} shares the head's buffer",e.height);shared+=1;}
-        for (h,c) in &e.state.contracts{if c.original_bytes().len()>=32000{assert_eq!(head.get(h),Some(&(c.original_bytes().as_ptr() as usize)),"h={}: contracts map entry {h} shares it too",e.height);}}
+        for (h,c) in &st.contracts{if c.original_bytes().len()>=32000{assert_eq!(head.get(h),Some(&(c.original_bytes().as_ptr() as usize)),"h={}: contracts map entry {h} shares it too",e.height);}}
     }
     assert!(states>=6&&shared>=12,"{states} states with code, {shared} shared runtimes");
     // Control: an independent execution of the same deploy (another chain object) makes its own buffer.

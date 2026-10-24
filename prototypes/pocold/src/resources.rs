@@ -44,6 +44,41 @@ pub const MIN_TX_BYTES:u128=85;
 /// GAS_LIMIT and use at least this each (user_phase: the reservation check and `used <= limit`), so a
 /// valid block holds at most GAS_LIMIT / TX_GAS_MIN transactions.
 pub const TX_GAS_MIN:u128=21_000;
+/// C-1 S3a: full states materialized from a full one through the diffs, alive at once: the parent of a
+/// block being validated or an RPC tag's state (one at a time on the consensus thread), and one that
+/// `ensure_state_with` keeps full until the next settle.
+pub const MATERIALIZED:u128=2;
+/// C-1 S3a: diffs held at once. Canonical blocks above the K_hist cut (K_hist), side states within
+/// side_max, the block being imported, and during an adopting import the abandoned branch's diffs until
+/// `settle` (K_hist more).
+pub fn diffs_held(k_hist:u32,side_max:u32)->u128{2*u128::from(k_hist)+u128::from(side_max)+1}
+/// The cheapest first write of a distinct storage slot in a transaction (EIP-2200/2929 SSTORE reset of a
+/// warm slot: 2,900 gas); a slot changed between a parent's state and its child's had one in some
+/// transaction of the block.
+pub const SLOT_WRITE_GAS_MIN:u128=2_900;
+/// The cheapest way for a transaction to add an account to the committed state: a warm touch costs 100
+/// after an access-list entry of 2,400 (EIP-2930), counted at 2,400.
+pub const ACCOUNT_TOUCH_GAS_MIN:u128=2_400;
+/// Precompile and system addresses a block can touch at 100 gas each (warm by EIP-2929): counted at once.
+pub const WARM_ADDRESSES:u128=32;
+/// C-1 S3a: the largest diff of one block. USER gas is at most GAS_LIMIT and refunds return at most a fifth
+/// of it (EIP-3529), so at most 5/4 GAS_LIMIT was spent. Changed slots: one first write each
+/// (SLOT_WRITE_GAS_MIN) plus the SYSTEM phase's SYS_KEYS_BLOCK_MAX (apply.rs enforces it). Changed
+/// accounts: three per transaction (sender, recipient, fee), one per ACCOUNT_TOUCH_GAS_MIN, the warm
+/// addresses, the SYSTEM phase's SYS_ACCT_BLOCK_MAX and the escrow's issuance. A removed account keeps no
+/// earlier storage in a diff: under Cancun only an account created in the same transaction is destroyed,
+/// and an empty account cannot hold storage (condition `s3a-removal`). Contracts: at most one per changed
+/// account. Block hashes: the 256-block window moves by one (257 entries). Each element is counted at its
+/// inline size with Vec growth (×2).
+pub fn diff_max(cp:&ConsensusParams)->Option<u128>{
+    use std::mem::size_of;use crate::statediff::{AccountDiff,StateDiff};use revm::primitives::{Address,Bytecode,B256,U256};
+    let spent=u128::from(cp.GAS_LIMIT).checked_mul(5)?/4;
+    let slots=add(&[spent/SLOT_WRITE_GAS_MIN,u128::from(cp.SYS_KEYS_BLOCK_MAX)])?;
+    let accounts=add(&[3*(spent/TX_GAS_MIN),spent/ACCOUNT_TOUCH_GAS_MIN,WARM_ADDRESSES,u128::from(cp.SYS_ACCT_BLOCK_MAX),1])?;
+    let vec2=|n:u128,sz:usize|mul(n,2*sz as u128);
+    add(&[vec2(accounts,size_of::<(Address,AccountDiff)>())?,vec2(slots,size_of::<(U256,Option<U256>,Option<U256>)>())?,
+        vec2(accounts,size_of::<(B256,Option<Bytecode>,Option<Bytecode>)>())?,vec2(257,size_of::<(U256,Option<B256>,Option<B256>)>())?,size_of::<StateDiff>() as u128+16])
+}
 /// Receipt encoding without logs: status, cumulative gas, a 256-byte bloom, list headers.
 pub const RECEIPT_BASE:u128=300;
 /// C-1 S1: history.redb's file size over the bytes it stores (receipts records, index entries, keys),
@@ -65,6 +100,7 @@ pub const CONDITIONS:&[(&str,&str)]=&[
     ("main-thread","the main thread's stack is reserved by the platform; counted at 1 MiB because it only spawns and joins"),
     ("revm-representation","the execution term relies on revm 19.7 behaviour checked by source inspection (iterative frames, SharedMemory truncation, fixed stack capacity) and by measured adversarial peaks"),
     ("cpu-and-timing","CPU costs (world-root rebuild, chain scans, pool re-execution, deep-fork rebuild) are not memory terms; worst-case timing is not bounded"),
+    ("s3a-removal","a diff keeps no storage for a removed account: under Cancun (revm 19.7, EIP-6780) only an account created in the same transaction is destroyed, and an account without code, nonce and balance holds no storage; by inspection, not enforced by a counter"),
     ("redb-representation","the history.redb terms rely on redb 2.6.4 behaviour checked by source inspection (cache split and write-buffer flush, allocator bitmaps) and on a measured file-size factor (HISTORY_FILE_FACTOR)"),
     ("open-replay-transient","Node::open holds the whole journal's payloads (store::open, pre-existing) and a replay index of two entries per record while replaying; this open-time transient grows with the journal and is not part of the steady-state bound"),
 ];
@@ -72,7 +108,7 @@ pub const CONDITIONS:&[(&str,&str)]=&[
 /// group fields are the sums of their items and `total` is the sum of all items.
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct Bound{
-    pub snapshots:u128,pub snapshot_bytes:u128,pub code:u128,pub history:u128,pub side_blocks:u128,
+    pub snapshots:u128,pub snapshot_bytes:u128,pub diffs:u128,pub code:u128,pub history:u128,pub side_blocks:u128,
     pub queues:u128,pub rpc:u128,pub threads:u128,pub execution:u128,pub total:u128,
     pub items:Vec<(&'static str,u128)>,
 }
@@ -87,7 +123,9 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // code entries <= accounts + 2 defaults; containers normalized after every commit.
     let accounts=u128::from(cp.ACCT_CAP).checked_add(5)?;let slots=u128::from(cp.SLOT_CAP).checked_add(u128::from(cp.SYS_SLOT_MAX))?;
     let snapshot_bytes=memory::snapshot(accounts,slots,accounts.checked_add(2)?)?;
-    let snapshots=add(&[1,u128::from(k_hist),u128::from(side_max),TRANSIENT_SNAPSHOTS])?;
+    // C-1 S3a: full states are the head, genesis, the side states within side_max, and the materialized
+    // ones (MATERIALIZED); every other retained state is a diff (below). Before S3a: 1 + K_hist + side_max.
+    let snapshots=add(&[1,1,u128::from(side_max),MATERIALIZED,TRANSIENT_SNAPSHOTS])?;
     // Code (decision package C-1 S2). A runtime is held in refcounted buffers (revm Bytecode: Bytes and
     // an Arc jump table) that a state copy shares (journal_measure::retained_states_of_one_lineage_
     // share_their_code_buffers). Each block's state is its parent's copy plus that block's changes, and
@@ -101,13 +139,16 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // execution in progress makes at most its gas / CODE_DEPOSIT bytes of new runtime.
     let code_set=memory::code_bytes(u128::from(cp.CODE_CAP),0)?;let code_entries=memory::code_bytes(0,accounts)?;
     let exec_code=memory::code_bytes(memory::execution_gas(cp.GAS_LIMIT)/CODE_DEPOSIT,0)?;
-    let (retained,side_states)=(1+u128::from(k_hist),u128::from(side_max));
+    let side_states=u128::from(side_max);
     let code=add(&[code_set,mul(side_states,code_set)?,code_set,code_set,mul(snapshots,code_entries)?,mul(EXECUTIONS,exec_code)?])?;
-    let mut items=vec![("snapshots/head and K_hist retained states",mul(retained,snapshot_bytes)?),("snapshots/side_max side-branch states",mul(side_states,snapshot_bytes)?),
+    let mut items=vec![("snapshots/head state",snapshot_bytes),("snapshots/genesis state (counted as a full one)",snapshot_bytes),
+        ("snapshots/side_max side-branch states",mul(side_states,snapshot_bytes)?),
+        ("snapshots/materialized states (C-1 S3a: a parent or an RPC tag, and one kept until settle)",mul(MATERIALIZED,snapshot_bytes)?),
         ("snapshots/transient working copies",mul(TRANSIENT_SNAPSHOTS,snapshot_bytes)?),
         // A table that grows in a working copy keeps its old allocation until the new one is filled:
         // one table at a time (single consensus thread), at most a whole snapshot's tables.
         ("snapshots/table growth in a working copy",snapshot_bytes),
+        ("diffs/retained and side states as diffs (C-1 S3a: 2·K_hist + side_max + 1)",mul(diffs_held(k_hist,side_max),diff_max(cp)?)?),
         ("code/one set for the canonical lineage (its states share the buffers)",code_set),("code/side_max side-branch states (a set each)",mul(side_states,code_set)?),
         ("code/a rebuild or restore in progress (a set)",code_set),("code/the pool's pending state (a set)",code_set),
         ("code/containers in every snapshot",mul(snapshots,code_entries)?),("code/new runtime of the execution in progress",mul(EXECUTIONS,exec_code)?)];
@@ -222,9 +263,9 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let execution=mul(EXECUTIONS,memory::execution(gas,code_max)?)?;let fixed=mul(EXECUTIONS,memory::fixed_heap(gas,code_max)?)?;
     items.extend([("execution/frames, code analysis, preallocations, precompiles",fixed),("execution/memory and operation classes (worst gas split)",execution.checked_sub(fixed)?)]);
     let total=add(&items.iter().map(|x|x.1).collect::<Vec<_>>())?;
-    debug_assert_eq!(Some(total),add(&[mul(snapshots,snapshot_bytes)?,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,execution]));
+    debug_assert_eq!(Some(total),add(&[mul(snapshots,snapshot_bytes)?,snapshot_bytes,mul(diffs_held(k_hist,side_max),diff_max(cp)?)?,code,history,side_blocks,queues,rpc,threads,execution]));
     let _=size_of::<Header>()+size_of::<Body>();
-    Some(Bound{snapshots,snapshot_bytes,code,history,side_blocks,queues,rpc,threads,execution,total,items})
+    Some(Bound{snapshots,snapshot_bytes,diffs:mul(diffs_held(k_hist,side_max),diff_max(cp)?)?,code,history,side_blocks,queues,rpc,threads,execution,total,items})
 }
 /// The share of the budget kept outside the model (D-A13-BUDGET): allocator headers, size-class
 /// rounding and fragmentation are not modelled (CONDITIONS), so the model total must fit in

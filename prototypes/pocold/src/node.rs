@@ -46,8 +46,10 @@ pub struct Limits{pub net:net::Limits,pub rpc:crate::rpc::Limits,
     pub pool_slice:Duration,pub pool_gas_max:Option<u64>,
     /// C-1 S1: how many canonical blocks below the head stay resident (None: K_hist). Older canonical
     /// history is served from the journal and history.redb. A test reference sets u64::MAX (none offloaded).
-    pub history_window:Option<u64>}
-impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None,history_window:None}}}
+    pub history_window:Option<u64>,
+    /// C-1 S3a off: every retained state is kept full (the behaviour before S3a). A test reference only.
+    pub full_states:bool}
+impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None,history_window:None,full_states:false}}}
 /// C-1 S1: replay refills history.redb with non-durable commits and makes them durable every this many blocks.
 const HISTORY_SYNC:u64=256;
 /// D-7: one slice of pool revalidation. The consensus thread is held for at most this, plus the
@@ -227,7 +229,7 @@ impl Node{
         let rk_replay=retention_rkeep(&cfg.dir,cfg.limits.r_keep).map_err(|e|format!("retention.rkeep: {e}"))?;
         let mut chain=Chain::new(spec);chain.r_keep=rk_replay;chain.side_cap=cfg.limits.side_cap;chain.replaying=true;
         // C-1 S1: canonical history below the resident window lives off the heap (journal + history.redb).
-        let history=crate::history::History::open(&cfg.dir).map_err(|e|format!("history: {}",e.0))?;chain.history_window=Some(cfg.limits.history_window.unwrap_or(chain.k_hist));
+        let history=crate::history::History::open(&cfg.dir).map_err(|e|format!("history: {}",e.0))?;chain.history_window=Some(cfg.limits.history_window.unwrap_or(chain.k_hist));chain.keep_full_states=cfg.limits.full_states;
         // D-REORG-REDB replay. Every record is replayed in journal order with retain() after each, as
         // live import did. Live journals a block only after validating it on a present parent, and
         // only when it is absent, so: (1) a block whose NEXT journal event is a child record is
@@ -278,13 +280,14 @@ impl Node{
             // once at the end re-executed every canonical block from the lowest offloaded one up).
             let fork_h=if chain.head!=old_head{chain.lca_height(&old_head,&chain.head).unwrap_or(0)}else{0};
             let adopted=chain.head!=old_head;
-            chain.retain();
+            chain.retain_unsettled();
             if adopted{restored+=chain.restore_canonical(fork_h,&rec.journal).map_err(|e|format!("replay {i}: restore canonical {e:?}"))?;}
+            chain.settle();
         }
         if refilled>0{history.sync().map_err(|e|format!("replay: history {}",e.0))?;}
-        drop(events);chain.protect.clear();chain.replaying=false;chain.r_keep=cfg.limits.r_keep;chain.retain();
+        drop(events);chain.protect.clear();chain.replaying=false;chain.r_keep=cfg.limits.r_keep;chain.retain_unsettled();
         // Every adoption was restored above, so this finds nothing unless replay skipped a record.
-        restored+=chain.restore_canonical(0,&rec.journal).map_err(|e|format!("replay: restore canonical {e:?}"))?;
+        restored+=chain.restore_canonical(0,&rec.journal).map_err(|e|format!("replay: restore canonical {e:?}"))?;chain.settle();
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
         let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.light_queue);let resp=crate::rpc::RespPools::new(&cfg.limits.rpc);
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
@@ -426,11 +429,13 @@ impl Node{
         // bodies are read back one block at a time when the pool is rebuilt.
         let detached=if new_head{self.detached_blocks(old_head)}else{vec![]};
         let fork_h=if new_head{self.chain.lca_height(&old_head,&self.chain.head).unwrap_or(0)}else{0};
-        self.chain.retain();
+        self.chain.retain_unsettled();
         // D-REORG-REDB: the adopted blocks that were offloaded as non-canonical are made whole again
-        // (after retain offloaded the abandoned branch, so the two are never resident together).
+        // (after retain offloaded the abandoned branch, so the two are never resident together). C-1
+        // S3a: before the side states are pruned (`settle`), so the fork point's state is reachable.
         if new_head{match self.chain.restore_canonical(fork_h,&self.journal){Ok(n)=>self.stats.restored+=n as u64,
             Err(e)=>{self.log(&format!("FATAL restore of the adopted branch: {e:?}"));std::process::exit(70);}}}
+        self.chain.settle();
         self.broadcast(&Msg::Block{header:b.header.encoded.clone(),body:b.body.encode()},from);
         if new_head{
             if self.chain.get(&self.chain.head).and_then(|e|e.parent)!=Some(old_head){self.stats.reorgs+=1;}
@@ -602,7 +607,7 @@ impl Node{
         // its USER phase; a transaction depending on them may still be dropped by build_signed_template's
         // retry.) Without a checked parent state the selection is made as before.
         let profile=self.chain.spec.profile();let ctx=self.child_block_ctx(p);
-        let mut sim=if p.pruned{None}else{checked_code_total(&p.state,&self.chain.spec).map(|t|(p.state.clone(),t))};
+        let mut sim=if p.pruned||!p.full{None}else{checked_code_total(&p.state,&self.chain.spec).map(|t|(p.state.clone(),t))};
         // D-7: candidates are the admitted transactions, then the backlog's (each is executed here on p's
         // state anyway); an abandoned block not yet expanded is not a candidate.
         let backlog=self.pool.backlog.iter().filter_map(|i|match i{PoolItem::Tx(r,_)=>Some(r),PoolItem::Block(_)=>None});
@@ -633,7 +638,7 @@ impl Node{
     pub fn start_production(&mut self){self.restart_production()}
     fn restart_production(&mut self){
         if let Some(p)=self.prod.take(){if let Some(m)=p.miner{m.stop();}}
-        let head=self.chain.head().clone_light();
+        let head=self.chain.head().meta_clone();
         if head.is_final{self.log("chain is final; no production");return}
         let received_ms=*self.received.get(&head.hash).unwrap_or(&now_ms());
         self.prod=Some(Production{parent:head.hash,height:head.height+1,attempt:0,mode:Mode::Idle,shares:BTreeSet::new(),miner:None,solved:false,received_ms});
@@ -641,7 +646,7 @@ impl Node{
     }
     fn begin_attempt(&mut self,a:u32){
         let parent_hash=match &self.prod{Some(p)=>p.parent,None=>return};
-        let p=self.chain.get(&parent_hash).unwrap().clone();
+        let Some(p)=self.full_entry(&parent_hash) else{return};
         if let Some(pr)=&mut self.prod{pr.attempt=a;pr.shares.clear();pr.solved=false;if let Some(m)=pr.miner.take(){m.stop();}}
         if a==0{
             let ctx=match self.chain.child_ctx(&p,0){Ok(c)=>c,Err(e)=>{self.log(&format!("ctx error {e:?}"));return}};
@@ -698,7 +703,7 @@ impl Node{
     }
     fn lock(&mut self,header:Header,body:Body,fallback:bool){
         let parent=match &self.prod{Some(p)=>p.parent,None=>return};
-        let p=self.chain.get(&parent).unwrap().clone_light();
+        let Some(p)=self.full_entry(&parent) else{return};
         let ctx=match self.chain.child_ctx(&p,header.a){Ok(c)=>c,Err(_)=>return};
         let tid=template_id(&header.ut_raw);
         self.log(&format!("lock h={} a={} {} tid={}",header.h,header.a,if fallback{"FB"}else{"PROP"},&hex(&tid)[..12]));
@@ -720,7 +725,7 @@ impl Node{
     fn try_lock_signed(&mut self,shell:Header,body:Body,from:PeerId)->bool{
         let parent=match &self.prod{Some(p)=>p.parent,None=>return false};
         if shell.parent_hash!=parent||shell.a!=0||shell.proposer.len()!=20{return false}
-        let p=self.chain.get(&parent).unwrap().clone_light();
+        let Some(p)=self.full_entry(&parent) else{return false};
         let ctx=match self.chain.child_ctx(&p,0){Ok(c)=>c,Err(_)=>return false};
         let tid=template_id(&shell.ut_raw);
         let ok_sig=matches!(hashes::recover_address(&hashes::sig_msg(&tid),&shell.sig),Ok(a) if a[..]==shell.proposer[..]);
@@ -801,7 +806,7 @@ impl Node{
             Mode::Propose{at_s} if now_s()>=*at_s=>{self.begin_attempt(0);}
             Mode::Wait{deadline_ms} if now>*deadline_ms=>{
                 // FB is sticky for (parent, h, 0).
-                let p=self.chain.get(&parent).unwrap().clone_light();self.lock_fallback(&p,0);
+                if let Some(p)=self.full_entry(&parent){self.lock_fallback(&p,0);}
             }
             Mode::Locked(_)|Mode::Idle|Mode::Wait{..}|Mode::Propose{..}=>{
                 let p=self.chain.get(&parent).unwrap();
@@ -930,6 +935,12 @@ impl Node{
             Err(err)=>{self.log(&format!("history read for {}: {}",&hex(&hash)[..14],err.0));return None}}
         Some(std::borrow::Cow::Owned(v))
     }
+    /// C-1 S3a: a stored block with its full state (materialized through the diffs, or rebuilt), for
+    /// production on it. None if it cannot be had.
+    fn full_entry(&mut self,h:&[u8;32])->Option<Entry>{
+        if let Err(e)=self.chain.ensure_state_with(h,Some(&self.journal)){self.log(&format!("state for {}: {e:?}",&hex(h)[..14]));return None}
+        self.chain.get(h).cloned()
+    }
     /// TrieRebuild of a stored block's state through the journal (offloaded bodies read back).
     pub fn rebuild_state(&mut self,hash:&[u8;32])->Result<(),Reject>{self.chain.ensure_state_with(hash,Some(&self.journal))}
     /// A stored block's committed body (resident or from the journal).
@@ -1001,5 +1012,4 @@ impl Node{
         self.evidence_pool=keep;out
     }
 }
-trait Light{fn clone_light(&self)->Entry;}
-impl Light for Entry{fn clone_light(&self)->Entry{self.clone()}}
+

@@ -897,11 +897,14 @@ fn meta_by_tag<'a>(n:&'a Node,tag:&Value)->Option<&'a Entry>{
 fn whole<'a>(n:&'a Node,e:&'a Entry)->Result<std::borrow::Cow<'a,Entry>,Fail>{
     n.view(e).ok_or_else(||Fail(-32603,"block history unavailable (logged; the store is rebuilt at the next open)".into(),None))
 }
-fn state_for<'a>(n:&'a Node,tag:&Value)->Result<&'a revm::InMemoryDB,(i64,String)>{
-    if tag.as_str()==Some("pending"){return Ok(&n.pool_state())}
+/// The state a tag names. C-1 S3a: a retained state that is not the head's is materialized from the head
+/// through the diffs (the same answer as when every retained state was held full).
+fn state_for<'a>(n:&'a Node,tag:&Value)->Result<std::borrow::Cow<'a,revm::InMemoryDB>,(i64,String)>{
+    if tag.as_str()==Some("pending"){return Ok(std::borrow::Cow::Borrowed(n.pool_state()))}
     let e=meta_by_tag(n,tag).ok_or((-32001,"unknown block".to_string()))?;
-    if e.pruned{return Err((-32017,"state outside the retained trie window (K_hist)".into()))}
-    Ok(&e.state)
+    let pruned=||(-32017,"state outside the retained trie window (K_hist)".to_string());
+    if e.pruned{return Err(pruned())}
+    n.chain.state_of(&e.hash).ok_or_else(pruned)
 }
 fn call(n:&mut Node,m:&str,p:&[Value],b:&mut Budget)->R{
     let cp=n.chain.spec.cp();
@@ -1049,7 +1052,7 @@ fn simulate(n:&Node,o:&Value,tag:&Value,gas:Option<u64>,b:&Budget)->Result<Execu
         gas_limit:gas.or_else(||parse_u64(&o["gas"])).unwrap_or(CALL_GAS_MAX).min(CALL_GAS_MAX),gas_price:U256::ZERO,value:parse_u256(&o["value"]).unwrap_or_default(),
         data:Bytes::from(data),nonce:None,chain_id:Some(n.chain.spec.chain_id()),..Default::default()};
     let ctx=NativeBlockContext{height:U256::from(e.height+1),timestamp:U256::from(e.ts+1),gas_limit:U256::from(cp.GAS_LIMIT.max(CALL_GAS_MAX)),base_fee:U256::ZERO,prevrandao:B256::ZERO};
-    let mut st=e.state.clone();
+    let mut st=n.chain.state_of(&e.hash).ok_or_else(||Fail::from((-32017,"state outside the retained trie window (K_hist)".to_string())))?.into_owned();
     // eth_call simulation: fund the caller for value transfers, never committed.
     if let Some(a)=st.accounts.get_mut(&tx.caller){a.info.balance=a.info.balance.max(tx.value);}
     // Cancellation (network.md:286): the stop hook ends the execution at its next poll once the

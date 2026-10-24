@@ -24,7 +24,7 @@ fn net()->Net{net_with(&cfg(&["a","b","c"]))}
 fn seal_block(n:&Net,h:lp1hdr::Header,body:Body,attempt:u32,start:u64)->Block{try_seal(n,h,body,attempt,start).expect("no solution in nonce space")}
 /// None when the bounded nonce space holds no solution (probability ~e^-c).
 fn try_seal(n:&Net,mut h:lp1hdr::Header,body:Body,attempt:u32,start:u64)->Option<Block>{
-    let p=n.chain.get(&h.parent_hash).unwrap().clone();let ctx=n.chain.child_ctx(&p,attempt).unwrap();
+    let p=n.chain.full_entry(&h.parent_hash).unwrap();let ctx=n.chain.child_ctx(&p,attempt).unwrap();
     let tid=template_id(&h.ut_raw);let mut shares=vec![];let mut x=start;
     loop{if (x as u128)>=ctx.assignment.nonce_max(){return None}let ph=pow_hash(&tid,x);if le_target(&ph,&ctx.t_share){if le_target(&ph,&ctx.target){break}shares.push(x);}x+=1;}
     let owner=addr(&ctx.assignment.owner(x).unwrap());
@@ -34,11 +34,11 @@ fn try_seal(n:&Net,mut h:lp1hdr::Header,body:Body,attempt:u32,start:u64)->Option
 }
 mod lp1hdr{pub use pocold::header::Header;}
 /// Fallback at attempt a; if its nonce space has no solution, the next attempt (consensus §4).
-fn fallback(n:&Net,parent:[u8;32],a:u32)->Block{let p=n.chain.get(&parent).unwrap().clone();
+fn fallback(n:&Net,parent:[u8;32],a:u32)->Block{let p=n.chain.full_entry(&parent).unwrap();
     for a in a..a+16{let (h,_,_)=n.chain.build_fallback(&p,a).unwrap();if let Some(b)=try_seal(n,h,Body::default(),a,0){return b}}panic!("no fallback solution")}
 /// Signed template by Draw(h,0); a different in-window timestamp is a new TemplateID.
 fn signed(n:&Net,parent:[u8;32],body:Body,ts_offset:u64)->Block{
-    let p=n.chain.get(&parent).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    let p=n.chain.full_entry(&parent).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();
     for off in ts_offset..u64::from(n.chain.spec.cp().D_att){let (h,_,_)=n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower()+off,body.clone(),vec![]).unwrap();
         if let Some(b)=try_seal(n,h,body.clone(),0,0){return b}}panic!("no signed solution")
 }
@@ -151,7 +151,7 @@ fn best_of(chain:&Chain)->[u8;32]{
     // 9 shares: unsorted, equal to nonce, above T_share.
     if good.header.shares.len()>=2{let mut h=good.header.clone();h.shares.swap(0,1);reseal(&mut h);block("9 shares not strictly ascending",reject(&n,&Block{header:h,body:Body::default()}));}
     let mut h=good.header.clone();h.shares=vec![h.nonce];reseal(&mut h);block("9 share range",reject(&n,&Block{header:h,body:Body::default()}));
-    let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    let p=n.chain.full_entry(&head).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();
     let over=(0..).find(|x|*x!=good.header.nonce&&!le_target(&pow_hash(&tid,*x),&ctx.t_share)).unwrap();
     let mut h=good.header.clone();h.shares=vec![over];reseal(&mut h);block("9 share target",reject(&n,&Block{header:h,body:Body::default()}));
     // 11 gasLimit / baseFee (re-mined so PoW passes).
@@ -189,7 +189,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
 #[test] fn evidence_type1_and_type2_punish_through_a_signed_block(){
     let mut n=net();for _ in 0..3{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);}
     // Type 1: the drawn proposer of h=4 signs two different templates.
-    let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();let accused1=ctx.proposer;
+    let head=n.chain.head;let p=n.chain.full_entry(&head).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();let accused1=ctx.proposer;
     let (t1,_,_)=n.chain.build_signed(&p,&n.keys[&accused1],ctx.window.lower(),Body::default(),vec![]).unwrap();
     let (t2,_,_)=n.chain.build_signed(&p,&n.keys[&accused1],ctx.window.lower()+1,Body::default(),vec![]).unwrap();
     let st=|h:&lp1hdr::Header|{let mut p=h.ut_raw.clone();rlp::encode_bytes(&h.sig,&mut p);let mut o=Vec::new();rlp::encode_list_payload(&p,&mut o);o};
@@ -205,7 +205,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let mut e2=Vec::new();rlp::encode_list_payload(&ev2,&mut e2);
     let mut evidence=vec![e1.clone()];if winner!=accused1{evidence.push(e2.clone());}
     // Include in a signed block at h=5 (the drawn proposer must not be one of the accused for this test to apply cleanly).
-    let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    let head=n.chain.head;let p=n.chain.full_entry(&head).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();
     let effects=n.chain.evidence_effects(&p,&Body{txs:vec![],evidence:evidence.clone()},5).unwrap();
     assert_eq!(effects.len(),evidence.len());
     let (h,_,_)=n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower(),Body{txs:vec![],evidence:evidence.clone()},effects).unwrap();
@@ -214,7 +214,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let r=apply::miner_record(s,accused1).unwrap();assert!(r.tomb);assert_eq!(r.bond_state,2);
     if winner!=accused1{let r=apply::miner_record(s,winner).unwrap();assert!(r.tomb);assert_ne!(apply::pending(s,4).1>>168u32,U256::ZERO,"pot 4 invalidated");}
     // Re-using the same evidence later is invalid (accused already a tomb).
-    let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();
+    let head=n.chain.head;let p=n.chain.full_entry(&head).unwrap();
     assert!(matches!(n.chain.evidence_effects(&p,&Body{txs:vec![],evidence:vec![e1]},6),Err(Reject::Block(_))));
 }
 
@@ -226,7 +226,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     for _ in 0..9{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);if n.chain.head().is_final{final_at=Some(n.chain.head().height);break}}
     assert_eq!(final_at,Some(9));
     let s=&n.chain.head().state;for j in 1..=9{assert_eq!(apply::pending(s,j).1,U256::ZERO);}
-    let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();
+    let head=n.chain.head;let p=n.chain.full_entry(&head).unwrap();
     assert!(n.chain.build_fallback(&p,0).is_err(),"no valid child above H_END/final");
 }
 
@@ -240,7 +240,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     assert!(closing.iter().filter(|(h,_)|*h<4).all(|(_,c)|!c),"ordinary below H_CLOSE: {closing:?}");
     assert!(closing.iter().filter(|(h,_)|*h>=4).all(|(_,c)|*c),"closing from H_CLOSE on: {closing:?}");
     assert_eq!(final_at,Some(12));
-    let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();assert!(n.chain.build_fallback(&p,0).is_err(),"no valid child above H_END/final");
+    let head=n.chain.head;let p=n.chain.full_entry(&head).unwrap();assert!(n.chain.build_fallback(&p,0).is_err(),"no valid child above H_END/final");
 }
 
 #[test] fn k_hist_retention_and_trie_rebuild_for_deep_fork(){
@@ -278,7 +278,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let mut node=Node::open(Config{dir,name:"t".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},spec).unwrap();
     node.handle(Event::Tick);
     let net2=Net{chain:Chain::new(admitted(&c)),keys};
-    let g=net2.chain.head;let p=net2.chain.get(&g).unwrap().clone();let ctx=net2.chain.child_ctx(&p,0).unwrap();
+    let g=net2.chain.head;let p=net2.chain.full_entry(&g).unwrap();let ctx=net2.chain.child_ctx(&p,0).unwrap();
     let mk=|off:u64|{let (h,_,_)=net2.chain.build_signed(&p,&net2.keys[&ctx.proposer],ctx.window.lower()+off,Body::default(),vec![]).unwrap();h};
     let (t1,t2)=(mk(0),mk(1));
     // Simulate the node's production loop at h=1 (it starts producing on run(); use the handler directly).
@@ -286,7 +286,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     assert_eq!(node.evidence_pool.len(),1,"one type-1 evidence");
     // The evidence is valid in a block at h=2 on a branch whose h=1 drew the same proposer.
     let mut n2=net2;let b1=fallback(&n2,g,0);import(&mut n2,&b1);
-    let head=n2.chain.head;let ph=n2.chain.get(&head).unwrap().clone();
+    let head=n2.chain.head;let ph=n2.chain.full_entry(&head).unwrap();
     let eff=n2.chain.evidence_effects(&ph,&Body{txs:vec![],evidence:node.evidence_pool.clone()},2).unwrap();
     assert_eq!(eff,vec![apply::EvidenceEffect::Punish{accused:ctx.proposer}]);
 }
@@ -301,7 +301,7 @@ fn remine_signed(n:&Net,mut h:lp1hdr::Header,signer:Address)->Block{
     let node=|tag:&str|{let dir=std::env::temp_dir().join(format!("pocold-tplpen-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
         let mut n=Node::open(Config{dir,name:"t".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},admitted(&c)).unwrap();n.start_production();n};
     let net2=Net{chain:Chain::new(admitted(&c)),keys};
-    let g=net2.chain.head;let p=net2.chain.get(&g).unwrap().clone();let ctx=net2.chain.child_ctx(&p,0).unwrap();
+    let g=net2.chain.head;let p=net2.chain.full_entry(&g).unwrap();let ctx=net2.chain.child_ctx(&p,0).unwrap();
     let (good,_,_)=net2.chain.build_signed(&p,&net2.keys[&ctx.proposer],ctx.window.lower(),Body::default(),vec![]).unwrap();
     // The drawn proposer signs a template whose stateRoot is not the parent's result: its rebuild differs.
     let mut bad=good.clone();bad.state_root[0]^=1;reseal(&mut bad);
@@ -384,7 +384,7 @@ fn a01_node(tag:&str)->(pocold::node::Node,std::path::PathBuf){
 #[test] fn a01_committed_invalid_body_is_still_a_block_rejection_and_cached(){
     // The header commits to a body whose content is invalid: that is a verdict on the block hash.
     let mut n=net();for _ in 0..2{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);}
-    let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    let head=n.chain.head;let p=n.chain.full_entry(&head).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();
     let good=signed(&n,head,Body::default(),0);
     let garbage=Body{txs:vec![vec![0x02,0xc0]],evidence:vec![]};
     let mut h=good.header.clone();h.tx_root=pocold::types::ordered_root(&garbage.txs).unwrap();reseal(&mut h);
@@ -757,7 +757,7 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
 // ---------------- review finding: BODY_MAX bounds the encoded body on every path ----------------
 #[test] fn body_max_bounds_the_encoded_body_not_the_item_sum(){
     let mut n=net();for _ in 0..2{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);}
-    let head=n.chain.head;let p=n.chain.get(&head).unwrap().clone();let ctx=n.chain.child_ctx(&p,0).unwrap();
+    let head=n.chain.head;let p=n.chain.full_entry(&head).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();
     let max=n.chain.spec.cp().BODY_MAX as usize;let k=max/100;
     // k items of 100 bytes: the raw sum fits BODY_MAX, the encoding (2-byte item headers) does not.
     let body=Body{txs:vec![vec![0x02;100];k],evidence:vec![]};assert!(k*100<=max&&body.encode().len()>max);
@@ -865,10 +865,11 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     assert_eq!(d.items.iter().map(|x|x.1).sum::<u128>(),d.total);
     // RpcGuard review 2 (m2): the total is pinned, so a term cannot change unnoticed (round 3: the
     // small-answer term counts SMALL_REPLY_PEAK per connection, +4,082,688 B; C-1 S1: canonical history
-    // below the resident window is off the heap, 5,487,223,178 -> 4,323,763,701 B). Some terms are type
+    // below the resident window is off the heap, 5,487,223,178 -> 4,323,240,949 B; C-1 S3a: retained
+    // canonical states as diffs, -> 3,601,500,638 B). Some terms are type
     // sizes (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
     // target checks that it boots within the budget with its reserve.
-    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,4_323_240_949,"the A13 model total changed");}
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_601_500_638,"the A13 model total changed");}
     // C-1 S1: a window of the whole chain is the model before S1, plus history.redb's cache and allocator.
     let all=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits{history_window:Some(u64::MAX),..Default::default()},2).unwrap();
     let redb:u128=all.items.iter().filter(|x|x.0.starts_with("history/history.redb")).map(|x|x.1).sum();
@@ -876,7 +877,12 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     // phase), which is tighter than LOG_CAP for H_END+1 devnet blocks.
     let logs=all.items.iter().find(|x|x.0=="history/resident window: logs").unwrap().1;let pre_logs=u128::from(pocol_lp4_execution::user_phase::caps::LOG_CAP)/32*33;
     assert!(logs<pre_logs);
-    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(all.total-redb+(pre_logs-logs),5_487_223_178,"the whole-chain window reproduces the pre-S1 model");}
+    // The pre-S1 history group, by its formula: (H_END+1) entries, TXBYTES_CAP, TX_CAP receipts and index
+    // (380 B each), LOG_CAP·33/32 and the evidence identities (EVID_BYTES_MAX+24 each).
+    let cp=admitted(&cfg(&["a","b","c"])).cp().clone();let entries=all.items.iter().find(|x|x.0=="history/resident window: block entries").unwrap().1;
+    let identities=u128::from(cp.M_max)+u128::from(cp.R_max)*u128::from(cp.H_END);
+    let pre_s1=entries+u128::from(cp.TXBYTES_CAP)+u128::from(cp.TX_CAP)*380+pre_logs+identities*(u128::from(cp.EVID_BYTES_MAX)+24);
+    assert_eq!(entries%(u128::from(cp.H_END)+1),0);assert_eq!(all.history-redb+(pre_logs-logs),pre_s1,"the whole-chain window reproduces the pre-S1 history group");
     assert!(all.items.iter().any(|x|x.0.starts_with("history/offloaded")&&x.1==0));
     assert!(pocold::resources::budget_required(d.total).unwrap()<=u128::from(pocold::node::MEM_BUDGET));
     assert_eq!(d.items.iter().find(|x|x.0.starts_with("rpc/small answers")).map(|x|x.1),Some(32*pocold::rpc::SMALL_REPLY_PEAK as u128));
@@ -1331,6 +1337,121 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
     }
     let _=std::fs::remove_dir_all(&dir);
 }
+/// C-1 S3a acceptance (proposals/C1-STORAGE-DESIGN.md "S3 refinement"): only the head, genesis and the
+/// side states within side_max are held full; every other retained state is a diff from its parent's and
+/// is materialized on demand. The same import sequence goes into a chain with S3a and into a reference
+/// that keeps every retained state full (the behaviour before S3a). The sequence has transactions and
+/// contract creates, a 10-block reorg inside the K_hist window, a re-reorg back, and an adoption from a
+/// fork below the cut (TrieRebuild). After every import:
+/// - head, canonical chain and the pruned flag of every canonical block are the reference's;
+/// - every state S3a still has equals the reference's full state field by field, and its stateRoot is the
+///   block's header stateRoot;
+/// - S3a keeps a state only where the reference does, and holds at most 2 + side_max full states.
+#[test] fn s3a_every_retained_state_equals_the_full_state_it_replaces(){
+    use pocold::statediff::states_equal;
+    let alice=devnet::account_key("alice");let bob=devnet::account_key("bob");
+    let log_tx=|nonce:u64|Tx{chain_id:777910,nonce,max_priority:U256::from(1u64),max_fee:U256::from(100_000_000_000u64),gas:200_000,to:None,value:U256::ZERO,data:vec![0x61,0x00,0x10,0x5f,0xa0,0x00].into()}.sign_1559(&alice);
+    let mut h=net();let g=h.chain.head;
+    let mut main=vec![];let (mut p,mut nonce)=(g,0u64);
+    for i in 0..70u64{let body=if i%3==0{let t=vec![pay(&alice,nonce,1+i),log_tx(nonce+1)];nonce+=2;Body{txs:t,evidence:vec![]}}else{Body::default()};
+        let x=branch(&mut h,p,1,&[body]);p=x[0].hash();main.extend(x);}
+    let at=|v:&Vec<Block>,k:usize|v[k-1].hash();
+    // A 10-deep heavier branch from height 60 (with a transaction), then the main branch extended past it.
+    let mut h2=net();for b in &main[..60]{import(&mut h2,b);}
+    let mut side=vec![signed(&h2,at(&main,60),Body{txs:vec![pay(&bob,0,7)],evidence:vec![]},0)];import(&mut h2,&side[0]);
+    side.extend(heavier(&mut h2,side[0].hash(),h.chain.get(&main[69].hash()).unwrap().total_work,1));
+    let mut h3=net();for b in &main{import(&mut h3,b);}
+    let back=heavier(&mut h3,main[69].hash(),h2.chain.head().total_work,1);
+    // A fork below the K_hist cut (height 20), adopted once heavier: its parent state was pruned.
+    let mut h4=net();for b in &main[..20]{import(&mut h4,b);}
+    // Its first block is the attempt-1 fallback, so it differs from the main block at that height.
+    let d0=fallback(&h4,at(&main,20),1);import(&mut h4,&d0);
+    let mut deep=vec![d0.clone()];deep.extend(heavier(&mut h4,d0.hash(),h3.chain.head().total_work,1));
+    let seq:Vec<Block>=main.iter().chain(&side).chain(&back).chain(&deep).cloned().collect();
+    let mut a=net();let mut b=net();b.chain.keep_full_states=true;
+    // As the node imports: retain, the restore of an adopted branch, then settle (no journal: nothing here
+    // is offloaded, so the restore re-executes only the adopted blocks without a diff).
+    struct NoJournal;impl pocold::chain::BlockBytes for NoJournal{fn record_at(&self,_:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8>),Reject>{Err(Reject::Block("no journal".into()))}}
+    // The deep branch arrives as a sync session's does: protected from the side cap while non-canonical.
+    let session:std::collections::HashSet<[u8;32]>=deep.iter().map(|x|x.hash()).collect();
+    let step=|n:&mut Net,x:&Block|{let r=match n.chain.validate(x,None,0){Err(Reject::NeedsRebuild(q))=>{n.chain.ensure_state(&q).unwrap();n.chain.validate(x,None,0)}r=>r};
+        let (e,_)=r.unwrap_or_else(|e|panic!("h={} {e:?}",x.header.h));let old=n.chain.head;n.chain.insert(e);
+        if session.contains(&x.hash())&&!n.chain.is_canonical(&x.hash()){n.chain.protect.insert(x.hash());}
+        let fork_h=if n.chain.head!=old{n.chain.lca_height(&old,&n.chain.head).unwrap_or(0)}else{0};let adopted=n.chain.head!=old;
+        n.chain.retain_unsettled();if adopted{n.chain.restore_canonical(fork_h,&NoJournal).unwrap();}n.chain.settle();};
+    let side_max=a.chain.spec.local().side_max as usize;let (mut compared,mut max_full,mut ref_max)=(0usize,0usize,0usize);
+    for (i,x) in seq.iter().enumerate(){
+        let before=a.chain.head;step(&mut a,x);step(&mut b,x);
+        ref_max=ref_max.max(b.chain.blocks.values().filter(|e|!e.pruned).count());
+        let full=a.chain.blocks.values().filter(|e|e.full&&!e.pruned).count();max_full=max_full.max(full);
+        assert!(full<=2+side_max,"step {i}: {full} full states");
+        assert_eq!(a.chain.head,b.chain.head,"step {i}");assert_eq!(a.chain.canonical,b.chain.canonical,"step {i}");
+        for hh in &b.chain.canonical{assert_eq!(a.chain.blocks[hh].pruned,b.chain.blocks[hh].pruned,"step {i}: canonical pruned flag at h={}",b.chain.blocks[hh].height);}
+        for (hh,eb) in &b.chain.blocks{assert!(a.chain.blocks[hh].pruned||!eb.pruned,"step {i}: S3a keeps a state the reference pruned (h={})",eb.height);}
+        // Every state in full at each reorg (the head did not just extend), every 4th step and at the end.
+        let reorg=a.chain.get(&a.chain.head).and_then(|e|e.parent)!=Some(before);
+        if !(reorg||i%4==0||i+1==seq.len()){continue}
+        for (hh,eb) in &b.chain.blocks{let ea=&a.chain.blocks[hh];
+            if ea.pruned{continue}
+            assert!(!eb.pruned,"step {i}: S3a keeps a state the reference pruned (h={})",eb.height);
+            let st=a.chain.state_of(hh).unwrap_or_else(||panic!("step {i}: h={} not reachable",eb.height));
+            assert!(states_equal(&st,&eb.state),"step {i}: h={} materialized state differs",eb.height);
+            if eb.height>0{assert_eq!(apply::state_root(&st).unwrap().0,eb.header.state_root,"step {i}: h={} stateRoot",eb.height);}
+            compared+=1;}
+    }
+    let mats=a.chain.materializations.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(a.chain.head,deep.last().unwrap().hash(),"positive control: the deep fork is adopted");
+    assert!(a.chain.rebuilds>0&&mats>0,"positive control: a TrieRebuild ({}) and materializations ({mats})",a.chain.rebuilds);
+    assert!(compared>1000&&ref_max>max_full*5,"positive control: {compared} states compared; the reference held up to {ref_max} full states, S3a at most {max_full}");
+    println!("S3A-EQUIV {}",json!({"steps":seq.len(),"statesCompared":compared,"maxFull":max_full,"referenceMaxFull":ref_max,"materializations":mats,"rebuildsS3a":a.chain.rebuilds,"rebuildsRef":b.chain.rebuilds}));
+}
+
+/// C-1 S3a at the node: every state query (balance, nonce, code, storage, eth_call) at every height and
+/// tag answers as on a node that keeps every retained state full (the behaviour before S3a): the
+/// retained heights from materialized states, the older ones -32017 on both. Live, after a reorg and after
+/// reopening, with the same rebuild and restore work.
+#[test] fn s3a_state_queries_answer_as_with_full_states(){
+    use pocold::node::{Config,Limits,Node};
+    let mk=|tag:&str,full:bool|{let dir=std::env::temp_dir().join(format!("pocold-s3a-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+        let d=dir.clone();let t=tag.to_string();let conf=move||Config{dir:d.clone(),name:t.clone(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{full_states:full,..Default::default()}};
+        (Node::open(conf(),admitted(&cfg(&["a","b","c"]))).unwrap(),dir,conf)};
+    let (mut a,da,ca)=mk("diff",false);let (mut b,db,cb)=mk("full",true);
+    let (mut h,blocks,p)=s1_chain();
+    // A 6-block reorg near the tip, then the old branch again: both import paths run.
+    let fork=h.chain.get(&p).unwrap().parent.unwrap();let fork=h.chain.get(&fork).unwrap().parent.unwrap();
+    let mut h2=net();for x in &blocks{import(&mut h2,x);}
+    let bob=devnet::account_key("bob");
+    let mut side=vec![signed(&h2,fork,Body{txs:vec![pay(&bob,0,3)],evidence:vec![]},0)];import(&mut h2,&side[0]);
+    side.extend(heavier(&mut h2,side[0].hash(),h.chain.get(&p).unwrap().total_work,2));
+    let back=heavier(&mut h,p,h2.chain.head().total_work,1);
+    let alice=devnet::account_key("alice").address();
+    let accounts:Vec<Address>=std::iter::once(alice).chain([bob.address(),Address::ZERO]).chain((0..50u64).map(|k|alice.create(k))).collect();
+    let full=|n:&mut Node,m:&str,p:serde_json::Value|{let body=json!({"jsonrpc":"2.0","id":1,"method":m,"params":p}).to_string();let (t,_r)=std::sync::mpsc::channel();
+        let r=pocold::rpc::answer(n,&pocold::rpc::Request::local(body.into_bytes(),t,std::time::Instant::now()+std::time::Duration::from_secs(120),false));
+        let v:serde_json::Value=serde_json::from_str(&r.body).unwrap();if v.get("error").is_some(){json!({"error":v["error"]["code"]})}else{json!({"result":v["result"]})}};
+    let answers=|n:&mut Node|->Vec<serde_json::Value>{let top=n.chain.head().height;let mut v=vec![];
+        let tags:Vec<serde_json::Value>=(0..=top).map(|x|json!(format!("{x:#x}"))).chain(["latest","safe","finalized","earliest"].map(|t|json!(t))).collect();
+        for t in &tags{for a in &accounts{let a=format!("{a:#x}");
+            for m in ["eth_getBalance","eth_getTransactionCount","eth_getCode"]{v.push(full(n,m,json!([a,t])));}
+            v.push(full(n,"eth_getStorageAt",json!([a,"0x0",t])));}
+            v.push(full(n,"eth_call",json!([{"to":format!("{:#x}",alice.create(1)),"data":"0x"},t])));}
+        v};
+    let compare=|a:&mut Node,b:&mut Node,what:&str|{let (x,y)=(answers(a),answers(b));assert_eq!(x.len(),y.len());
+        let ok=x.iter().filter(|r|r.get("result").is_some()).count();let pruned=x.iter().filter(|r|r.get("error")==Some(&json!(-32017))).count();
+        assert_eq!(x,y,"{what}");assert!(ok>1000&&pruned>100,"positive control ({what}): {ok} answers, {pruned} outside the window");};
+    for x in &blocks{a.import(x.clone(),None).unwrap();b.import(x.clone(),None).unwrap();}
+    let full_states=|n:&Node|n.chain.blocks.values().filter(|e|e.full&&!e.pruned).count();
+    assert!(full_states(&a)<=4&&full_states(&b)>30,"positive control: S3a holds {} full states, the reference {}",full_states(&a),full_states(&b));
+    compare(&mut a,&mut b,"live");
+    for x in side.iter().chain(&back){a.import(x.clone(),None).unwrap();b.import(x.clone(),None).unwrap();}
+    assert_eq!(a.chain.head,back.last().unwrap().hash());assert!(a.stats.reorgs>=2,"positive control: two reorgs");
+    compare(&mut a,&mut b,"after the reorgs");
+    assert_eq!((a.chain.rebuilds,a.chain.restore_reexecs,a.stats.restored),(b.chain.rebuilds,b.chain.restore_reexecs,b.stats.restored),"the same rebuild and restore work");
+    drop(a);drop(b);let mut a=Node::open(ca(),admitted(&cfg(&["a","b","c"]))).unwrap();let mut b=Node::open(cb(),admitted(&cfg(&["a","b","c"]))).unwrap();
+    compare(&mut a,&mut b,"after reopen");
+    for d in [da,db]{let _=std::fs::remove_dir_all(&d);}
+}
+
 /// The S1 scenario chain: A1 (with a transaction) abandoned for the heavier B1, B2 from genesis, then 96
 /// blocks with a payment and a LOG0-emitting create every 4th block. Returns the builder, every block in
 /// import order and the tip.
@@ -1372,7 +1493,7 @@ fn d133_at_depth(depth:usize,rk:u64,cap:usize,tag:&str){
     let alice=devnet::account_key("alice");
     let mut nets=vec![net(),net(),net()];let g=nets[0].chain.head;
     let x0=fallback(&nets[0],g,0);
-    let lower=nets[1].chain.child_ctx(&nets[1].chain.get(&g).unwrap().clone(),0).unwrap().window.lower();
+    let lower=nets[1].chain.child_ctx(&nets[1].chain.full_entry(&g).unwrap(),0).unwrap().window.lower();
     let off=x0.header.ts-lower;
     let y0=signed(&nets[1],g,Body::default(),off);let z0=signed(&nets[2],g,Body{txs:vec![pay(&alice,0,3)],evidence:vec![]},off);
     assert!(x0.header.ts==y0.header.ts&&y0.header.ts==z0.header.ts,"one timestamp at the fork point");

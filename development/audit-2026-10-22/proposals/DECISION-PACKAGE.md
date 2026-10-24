@@ -64,13 +64,20 @@ were not results. The table below replaces them.
 |---|---|---|---:|
 | S2 ✔ | code shared between snapshots (done, `d567ce1`) | code 54.69 → 9.69 | **105.83 (measured)** |
 | S1 ✔ | canonical bodies, receipts, logs and evidence off the heap below a resident window of K_hist blocks, read from the journal and history.redb on demand (storage.md:70) | history 19.19 → 4.28 (tx bytes, receipts and index, logs, evidence moved; offloaded entries drop their header bytes; added: window 0.013, redb cache and allocator 0.025) | **90.93 (measured)**, gate 103.92 |
-| S3 | retained and side states as reverse diffs from the head (storage.md:70, D30); transient copies as copy-on-write overlays | 44 of the 45 full copies (73.49); the per-copy code containers and the extra code sets (8.48), since the states then share one code set | 8.96 + new: K_hist + side diffs, overlays (bounded by the written entries of the work in progress) |
-| S4 | per-block metadata off the heap (an index on disk) | offloaded per-block entries 4.25 | 4.71 + new: index cache |
-| S5 | live state on disk behind a bounded cache (redb live trie, storage.md:63–67) | the one full copy (1.63) | 3.08 + new: state cache, diffs, overlays; target ≤ 5.25 (budget less the 1/8 reserve) |
+| S3a ✔ | retained canonical states as diffs from their parents, materialized from the head on demand (storage.md:70, D30) | 33 retained copies (53.89) less 4 added (genesis counted, 2 materialized), and their code containers (2.62); added: the diffs 0.46 | **41.41 (measured)**, gate 47.33 |
+| S3b (with S5) | transient working copies as copy-on-write overlays (an executor change) | the 10 transient copies and the growth copy (17.96) and their code containers (0.94) | ≈ 22.5 + new: overlays bounded by the written entries of the work in progress |
+| S4 | per-block metadata off the heap (an index on disk) | offloaded per-block entries 4.25 | ≈ 18.3 + new: index cache |
+| S5 | live state on disk behind a bounded cache (redb live trie, storage.md:63–67) | the remaining full copies: head, genesis, side_max, materialized (9.80), their containers (0.51) and the side code sets (2.25) | ≈ 5.7, or 5.25 with the diffs (0.46) in the store, + new: state cache, overlays; target ≤ 5.25 (budget less the 1/8 reserve) |
 
-What is left after S5 is measured, not projected: execution 1.10, one code set with its containers 1.22,
-side metadata 0.20, queues 0.24, RPC 0.20, threads 0.08, the S1 window and history.redb 0.04. That is
-3.08 GiB. The new terms must fit the remaining 2.17 GiB under the 5.25 GiB target. They are derived and pinned stage by stage.
+After S3a the projections are taken from the measured S3a items (evidence/c1-s3a/a13-network-profile-s3a.log).
+What is left after S5 is then at the target with no room: about 5.25 GiB before any new term. It is:
+- three code sets of 1.125 GiB each: the lineage's, a rebuild's and the pool's;
+- execution 1.10, side metadata 0.20, queues 0.24, RPC 0.20, threads 0.08.
+
+The rebuild and pool sets are full because a separate execution makes separate buffers. S5 must read
+code from the store instead of copying it, or the new terms (state cache, overlays) cannot fit.
+
+These figures are projections until `derive()` prints them. They are derived and pinned stage by stage.
 
 - **Consensus, genesisHash and validity:** none.
 - **Compatibility:** the journal and storage format change. This is a local migration; no on-chain or RPC
@@ -130,6 +137,19 @@ evidence/c1-s1/.
   - open runs redb's full integrity check, about 1–1.4 s per GiB of store;
   - while a damaged store is detected, history RPC reads answer −32603, and the node stops at its next
     import, as on a journal error.
+
+**S3a status (2026-10-24, done; measured by `derive()`):** proposals/C1-STORAGE-DESIGN.md "S3a status" and
+evidence/c1-s3a/.
+- Only the head, genesis and the side states within side_max stay full. Every other retained state is a
+  diff from its parent's and is materialized on demand.
+- Network snapshots group: 75.12 → 27.76 GiB. Model total: 90.93 → **41.41 GiB**, so the gate needs
+  **47.33 GiB**. Devnet model: 4,323,240,949 → 3,601,500,638 B.
+- Every retained state and every state RPC answer equals the full-state reference's, with the same
+  rebuild and restore work.
+- Validation of 380 transfers on the near-cap state: 672 ms, against 655 ms before S3a (the diff alone
+  takes 12.5 ms).
+- What remains: the 10 transient working copies (S3b, an executor change), the full head and side states
+  (S5), and the per-block metadata (S4).
 
 ---
 

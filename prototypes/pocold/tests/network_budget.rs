@@ -24,7 +24,7 @@ fn network()->DevnetConfig{
     let need=pocold::resources::budget_required(b.total).unwrap();
     println!("A13-NETWORK {}",serde_json::json!({"total":b.total.to_string(),"totalGiB":gib(b.total),"budgetRequiredGiB":gib(need),"budgetGiB":6,
         "snapshotGiB":gib(b.snapshot_bytes),"snapshots":b.snapshots.to_string(),
-        "groupsGiB":{"snapshots":gib(b.snapshots*b.snapshot_bytes+b.snapshot_bytes),"code":gib(b.code),"history":gib(b.history),"side":gib(b.side_blocks),"queues":gib(b.queues),"rpc":gib(b.rpc),"threads":gib(b.threads),"execution":gib(b.execution)},
+        "groupsGiB":{"snapshots":gib(b.snapshots*b.snapshot_bytes+b.snapshot_bytes),"diffs":gib(b.diffs),"code":gib(b.code),"history":gib(b.history),"side":gib(b.side_blocks),"queues":gib(b.queues),"rpc":gib(b.rpc),"threads":gib(b.threads),"execution":gib(b.execution)},
         "items":b.items.iter().map(|(k,v)|serde_json::json!([k,v.to_string(),gib(*v)])).collect::<Vec<_>>()}));
     assert!(need>u128::from(pocold::node::MEM_BUDGET),"the network profile does not fit 6 GiB today (if this fails, the model changed: update the decision package)");
 }

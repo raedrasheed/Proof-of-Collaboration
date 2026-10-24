@@ -72,6 +72,13 @@ pub struct Entry{
     pub cum_log_bytes:u64,
     /// R21: state dropped outside the K_hist window; rebuilt by re-execution on demand.
     pub pruned:bool,
+    /// C-1 S3a: `state` holds the full state. A state that is not pruned but not full is materialized
+    /// from a full one through the diffs (`Chain::state_of`): only the head, genesis and the side states
+    /// within side_max are kept full.
+    pub full:bool,
+    /// C-1 S3a: this block's state as a diff from its parent's (set when it is validated or re-executed;
+    /// kept for canonical blocks above the K_hist cut and for side blocks that keep a state).
+    pub diff:Option<std::sync::Arc<crate::statediff::StateDiff>>,
     /// Draw(h,0) for this block's height on its branch (evidence type 1 DrawIndex).
     pub drawn:Address,
     /// This block's nonce ranges (owner lookup for evidence without old state).
@@ -98,7 +105,7 @@ impl Entry{
         Entry{hash:self.hash,header:self.header.clone(),body:self.body.clone(),height:self.height,parent:self.parent,total_work:self.total_work,import_seq:self.import_seq,
             signed:self.signed,ts:self.ts,target:self.target,base_fee:self.base_fee,gas_used:self.gas_used,seal:self.seal,state:InMemoryDB::default(),is_final:self.is_final,
             result:self.result.clone(),receipts:self.receipts.clone(),tx_hashes:self.tx_hashes.clone(),cum_txs:self.cum_txs,cum_tx_bytes:self.cum_tx_bytes,
-            cum_log_bytes:self.cum_log_bytes,pruned:true,drawn:self.drawn,ranges:self.ranges.clone(),body_off:self.body_off,offloaded:self.offloaded}
+            cum_log_bytes:self.cum_log_bytes,pruned:true,full:false,diff:self.diff.clone(),drawn:self.drawn,ranges:self.ranges.clone(),body_off:self.body_off,offloaded:self.offloaded}
     }
 }
 
@@ -145,6 +152,10 @@ pub struct Chain{
     /// R21 window: full states kept for heights > head-K_hist (and genesis).
     pub k_hist:u64,
     pub rebuilds:u64,
+    /// C-1 S3a: states materialized from a full state through diffs (no re-execution).
+    pub materializations:std::sync::atomic::AtomicU64,
+    /// C-1 S3a off: every retained state stays full (the behaviour before S3a; a test reference).
+    pub keep_full_states:bool,
     /// C-1 S1: when set (by a node whose receipts and transaction index live in `history.redb`), canonical
     /// journaled blocks more than this many blocks below the head are offloaded like side blocks; the
     /// last `history_window` canonical blocks stay resident. None for a bare chain: nothing canonical is
@@ -180,10 +191,10 @@ impl Chain{
         let mut h=blank_header();h.chain_id=spec.chain_id();h.genesis_hash=gh;h.ts=cp.g_ts;h.target=spec.target_g();
         let genesis=Entry{hash:gh,header:h,body:Body::default(),height:0,parent:None,total_work:U256::ZERO,import_seq:0,signed:false,ts:cp.g_ts,
             target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis().state().clone(),is_final:false,result:None,
-            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false};
+            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,full:true,diff:None,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
         let k_hist=u64::from(spec.local().k_hist);
-        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,history_window:None,history_cursor:1,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
+        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,materializations:Default::default(),keep_full_states:false,history_window:None,history_cursor:1,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
             r_keep:R_KEEP,side_cap:SIDE_BLOCKS_MAX,protect:Default::default(),replaying:false}
     }
     pub fn head(&self)->&Entry{&self.blocks[&self.head]}
@@ -275,7 +286,11 @@ impl Chain{
         if !self.blocks.contains_key(&x.parent_hash){return Err(Reject::UnknownParent)}
         if let Some(r)=self.invalid.get(&x.parent_hash){return blk(format!("ancestorInvalid {r}"))}
         if self.blocks[&x.parent_hash].pruned{return Err(Reject::NeedsRebuild(x.parent_hash))}
-        let p=&self.blocks[&x.parent_hash];
+        // C-1 S3a: a retained parent state that is not held full is materialized through the diffs.
+        let materialized;
+        let p=if self.blocks[&x.parent_hash].full{&self.blocks[&x.parent_hash]}else{
+            materialized=self.full_entry(&x.parent_hash).ok_or(Reject::NeedsRebuild(x.parent_hash))?;
+            self.materializations.fetch_add(1,std::sync::atomic::Ordering::Relaxed);&materialized};
         // 2. linkage and H_END.
         if x.h!=p.height+1{return blk("2 height")}
         if x.h>cp.H_END{return blk("10a H_END")}
@@ -345,8 +360,10 @@ impl Chain{
         if out.state_root.0!=x.state_root{return blk("17 stateRoot")}
         if out.receipts_root.0!=x.receipts_root||out.logs_bloom[..]!=x.logs_bloom[..]||out.gas_used!=x.gas_used{return blk("17 receipts/bloom/gasUsed")}
         let tx_hashes=b.body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();
+        // C-1 S3a: the diff from the parent's state, while both are at hand.
+        let diff=Some(std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state)));
         let entry=Entry{hash,header:x.clone(),body:b.body.clone(),height:x.h,parent:Some(p.hash),total_work:p.total_work.saturating_add(work(&x.target)),
-            import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,
+            import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,full:true,diff,
             result:Some(ParentResult{block_hash:B256::from(hash),winner:addr(&owner),shares}),receipts:out.receipts,tx_hashes,
             cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,cum_log_bytes:p.cum_log_bytes+out.log_bytes,pruned:false,drawn:ctx.proposer,
             ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect(),body_off:None,offloaded:false};
@@ -457,13 +474,17 @@ impl Chain{
     ///   `restore_canonical` makes adopted ones whole only inside it;
     /// - at most `side_max` non-canonical blocks keep a state (unprotected and lowest-work first
     ///   are pruned, rebuilt on demand).
-    pub fn retain(&mut self){
+    pub fn retain(&mut self){self.retain_unsettled();self.settle();}
+    /// `retain` without its last part (`settle`): a node that adopted a branch restores it
+    /// (`restore_canonical`) in between, while the side states and diffs that lead to the fork point
+    /// are still there (C-1 S3a).
+    pub fn retain_unsettled(&mut self){
         let head_h=self.head().height;let cut=head_h.saturating_sub(self.k_hist);
         // R21 is the canonical trie window; non-canonical states are bounded by side_max below. (Pruning
         // a side block below the window made each block of a deep competing branch rebuild its parent
         // from genesis: quadratic work for an R_keep-deep adoption.)
         let prune:Vec<[u8;32]>=self.canonical.iter().skip(1).take(cut as usize).copied().collect();
-        for h in prune{if let Some(e)=self.blocks.get_mut(&h){if !e.pruned{e.state=InMemoryDB::default();e.pruned=true;}}}
+        for h in prune{if let Some(e)=self.blocks.get_mut(&h){if !e.pruned{e.state=InMemoryDB::default();e.pruned=true;}e.full=false;e.diff=None;}}
         let side=|c:&Chain|->Vec<[u8;32]>{c.blocks.values().filter(|e|e.height>0&&!c.is_canonical(&e.hash)).map(|e|e.hash).collect()};
         let r_keep=self.r_keep;
         let mut gone:Vec<[u8;32]>=side(self).into_iter().filter(|h|self.blocks[h].height+r_keep<=head_h).collect();
@@ -509,11 +530,67 @@ impl Chain{
                 self.history_cursor+=1;
             }
         }
+    }
+    /// The end of `retain`: at most side_max non-canonical blocks keep a state (unprotected and lowest-work
+    /// first are pruned); then the C-1 S3a shedding of full states.
+    pub fn settle(&mut self){
+        let side_left:Vec<[u8;32]>=self.blocks.values().filter(|e|e.height>0&&!self.is_canonical(&e.hash)).map(|e|e.hash).collect();
         let mut with_state:Vec<(bool,U256,u64,[u8;32])>=side_left.into_iter().filter(|h|!self.blocks[h].pruned).map(|h|{let e=&self.blocks[&h];(self.protect.contains(&h),e.total_work,e.import_seq,h)}).collect();
         let side_max=self.spec.local().side_max as usize;
         if with_state.len()>side_max{with_state.sort();let over=with_state.len()-side_max;
             let drop:Vec<[u8;32]>=with_state.into_iter().take(over).map(|x|x.3).collect();
-            for h in drop{if let Some(e)=self.blocks.get_mut(&h){e.state=InMemoryDB::default();e.pruned=true;}}}
+            for h in drop{if let Some(e)=self.blocks.get_mut(&h){e.state=InMemoryDB::default();e.pruned=true;e.full=false;e.diff=None;}}}
+        self.shed_full_states();
+    }
+    /// C-1 S3a: drops the full state of every canonical block above the K_hist cut but the head (its diff
+    /// is kept), then marks pruned any state that is no longer reachable from a full one through diffs,
+    /// and makes the head's state full. After it the full states are the head, genesis and the side
+    /// states within side_max.
+    fn shed_full_states(&mut self){
+        if self.keep_full_states{return}
+        let head=self.head;
+        let canon:Vec<[u8;32]>=self.canonical.iter().skip(1).copied().filter(|h|*h!=head).collect();
+        for h in canon{if let Some(e)=self.blocks.get_mut(&h){if e.full&&!e.pruned{
+            if e.diff.is_some(){e.state=InMemoryDB::default();e.full=false;}else{e.state=InMemoryDB::default();e.full=false;e.pruned=true;}}}}
+        if self.blocks.get(&head).map_or(false,|e|!e.full&&!e.pruned){if let Some(s)=self.materialize(&head){let e=self.blocks.get_mut(&head).unwrap();e.state=s;e.full=true;self.materializations.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}}
+        let open:Vec<[u8;32]>=self.blocks.values().filter(|e|!e.pruned&&!e.full).map(|e|e.hash).collect();
+        for h in open{if self.state_path(&h).is_none(){let side=!self.is_canonical(&h);let e=self.blocks.get_mut(&h).unwrap();e.pruned=true;if side{e.diff=None;}}}
+    }
+    /// The diffs that lead from the full state `from` to `to`: `down` (apply_before, in order: `from` back
+    /// to the common ancestor) and `up` (apply_after, in reverse: the common ancestor up to `to`). None if
+    /// a block on the way has no diff.
+    fn path_between(&self,from:&[u8;32],to:&[u8;32])->Option<(Vec<[u8;32]>,Vec<[u8;32]>)>{
+        let (mut a,mut b)=(*from,*to);let (mut down,mut up)=(vec![],vec![]);
+        while a!=b{
+            let (ea,eb)=(self.blocks.get(&a)?,self.blocks.get(&b)?);
+            if ea.height>=eb.height{ea.diff.as_ref()?;down.push(a);a=ea.parent?;}else{eb.diff.as_ref()?;up.push(b);b=eb.parent?;}
+        }
+        Some((down,up))
+    }
+    /// The shortest way to `to` from a full state: (base, down, up).
+    fn state_path(&self,to:&[u8;32])->Option<([u8;32],Vec<[u8;32]>,Vec<[u8;32]>)>{
+        self.blocks.values().filter(|e|e.full&&!e.pruned).filter_map(|e|self.path_between(&e.hash,to).map(|(d,u)|(e.hash,d,u)))
+            .min_by_key(|(h,d,u)|(d.len()+u.len(),*h))
+    }
+    /// A block's state built from a full state and the diffs (None if unreachable).
+    pub fn materialize(&self,to:&[u8;32])->Option<InMemoryDB>{
+        let (base,down,up)=self.state_path(to)?;
+        let mut s=self.blocks[&base].state.clone();
+        for h in &down{self.blocks[h].diff.as_ref()?.apply_before(&mut s);}
+        for h in up.iter().rev(){self.blocks[h].diff.as_ref()?.apply_after(&mut s);}
+        Some(s)
+    }
+    /// A copy of a stored block with its full state (materialized when it is not held full). A pruned
+    /// block is copied as it is (its state is empty).
+    pub fn full_entry(&self,h:&[u8;32])->Option<Entry>{
+        let e=self.blocks.get(h)?;if e.full||e.pruned{return Some(e.clone())}
+        let mut x=e.meta_clone();x.pruned=false;x.state=self.materialize(h)?;x.full=true;Some(x)
+    }
+    /// A stored block's state: borrowed when full, materialized otherwise; None when pruned.
+    pub fn state_of(&self,h:&[u8;32])->Option<std::borrow::Cow<'_,InMemoryDB>>{
+        let e=self.blocks.get(h)?;if e.pruned{return None}
+        if e.full{return Some(std::borrow::Cow::Borrowed(&e.state))}
+        self.materialize(h).map(std::borrow::Cow::Owned)
     }
     /// Height of the lowest common ancestor of two stored blocks (metadata walk).
     pub fn lca_height(&self,a:&[u8;32],b:&[u8;32])->Option<u64>{
@@ -575,15 +652,20 @@ impl Chain{
     /// before this change. Returns the number of blocks restored.
     pub fn restore_canonical(&mut self,from_h:u64,src:&dyn BlockBytes)->Result<usize,Reject>{
         let head_h=self.head().height;
-        let off=|c:&Chain,h:u64|c.canonical_at(h).map_or(false,|e|e.offloaded);
+        // C-1 S3a: a canonical block above the K_hist cut without a diff (it was pruned as a side block) is
+        // re-executed too when a retained canonical state lies below it, so that its diff links the head to
+        // that state. (After a fork below the cut no retained state lies below the adopted blocks.)
         // C-1 S1: below the resident window a canonical block stays offloaded (its receipts are stored).
-        let window_start=self.history_window.map_or(1,|w|head_h.saturating_sub(w)+1);
+        let (cut,resident)=(head_h.saturating_sub(self.k_hist),self.history_window.map_or(1,|w|head_h.saturating_sub(w)+1));
+        let lowest_kept=(cut+1..=head_h).find(|h|self.canonical_at(*h).map_or(false,|e|!e.pruned));
+        let off=|c:&Chain,h:u64|c.canonical_at(h).map_or(false,|e|(e.offloaded&&h>=resident)||(!c.keep_full_states&&h>cut&&e.diff.is_none()&&lowest_kept.map_or(false,|k|k<h)));
+        let window_start=resident.min(cut+1);
         let Some(first)=(from_h.max(1).max(window_start)..=head_h).find(|h|off(self,*h)) else{return Ok(0)};
         let last=(first..=head_h).rev().find(|h|off(self,*h)).unwrap_or(first);
-        let ph=self.canonical[first as usize-1];let was_pruned=self.blocks[&ph].pruned;
+        let ph=self.canonical[first as usize-1];let (was_pruned,was_full)=(self.blocks[&ph].pruned,self.blocks[&ph].full);
         self.ensure_state_with(&ph,Some(src))?;
         let mut p=self.blocks[&ph].meta_clone();p.state=self.blocks[&ph].state.clone();
-        if was_pruned&&ph!=self.canonical[0]{let x=self.blocks.get_mut(&ph).unwrap();x.state=InMemoryDB::default();x.pruned=true;}
+        if (was_pruned||!was_full)&&ph!=self.canonical[0]{let x=self.blocks.get_mut(&ph).unwrap();x.state=InMemoryDB::default();x.full=false;x.pruned=was_pruned;}
         let mut n=0;
         for hgt in first..=last{
             let hash=self.canonical[hgt as usize];let e=&self.blocks[&hash];
@@ -593,6 +675,8 @@ impl Chain{
             let out=self.reexec(&p,e,&body)?;self.restore_reexecs+=1;
             if out.receipts_root.0!=e.header.receipts_root||out.gas_used!=e.header.gas_used{return blk("restore: receipts mismatch")}
             let x=self.blocks.get_mut(&hash).unwrap();
+            // C-1 S3a: a re-executed block keeps its diff (an adopted block pruned as a side block had none).
+            if x.diff.is_none(){x.diff=Some(std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state)));}
             if x.offloaded{x.tx_hashes=body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();x.receipts=out.receipts;x.body=body;
                 x.header.encoded=hb.unwrap_or_default();x.offloaded=false;n+=1;}
             let mut next=x.meta_clone();next.state=out.state;p=next;
@@ -614,21 +698,32 @@ impl Chain{
     /// `None`. A pruned block reached on the rebuild path that is offloaded but has no source, or no
     /// `body_off`, is an error — never a silent empty body.
     pub fn ensure_state_with(&mut self,hash:&[u8;32],src:Option<&dyn BlockBytes>)->Result<(),Reject>{
+        let e=self.blocks.get(hash).ok_or_else(||Reject::Block("rebuild target".into()))?;
+        if e.full&&!e.pruned{return Ok(())}
+        // C-1 S3a: a state that is not pruned is built from a full state through the diffs.
+        if !e.pruned{if let Some(st)=self.materialize(hash){let x=self.blocks.get_mut(hash).unwrap();x.state=st;x.full=true;self.materializations.fetch_add(1,std::sync::atomic::Ordering::Relaxed);return Ok(())}
+            self.blocks.get_mut(hash).unwrap().pruned=true;}
+        // TrieRebuild from the nearest ancestor that has a state (full, or materialized).
         let mut path=vec![];let mut cur=*hash;
-        while self.blocks.get(&cur).map(|e|e.pruned).unwrap_or(false){path.push(cur);cur=self.blocks[&cur].parent.ok_or_else(||Reject::Block("rebuild root".into()))?;}
-        if path.is_empty(){return Ok(())}
+        let root_state=loop{
+            let e=self.blocks.get(&cur).ok_or_else(||Reject::Block("rebuild root".into()))?;
+            if !e.pruned{if e.full{break e.state.clone()}if let Some(st)=self.materialize(&cur){self.materializations.fetch_add(1,std::sync::atomic::Ordering::Relaxed);break st}}
+            path.push(cur);cur=e.parent.ok_or_else(||Reject::Block("rebuild root".into()))?;
+        };
+        let root=&self.blocks[&cur];
         // A13: rolling re-execution. Only the block being extended holds a state; intermediate
         // states are dropped, so a rebuild of any depth keeps at most two snapshots alive.
-        let root=self.blocks.get(&cur).ok_or_else(||Reject::Block("rebuild root".into()))?;
-        let mut p=root.meta_clone();p.state=root.state.clone();
+        let mut p=root.meta_clone();p.state=root_state;
         for h in path.into_iter().rev(){
             let e=self.blocks[&h].meta_clone();
             // Off-heap body: fetched and decoded from the journal when this block was offloaded.
             let body=self.body_of(&e,src)?;
             let out=self.reexec(&p,&e,&body)?;
+            // C-1 S3a: the re-executed block gets its diff back (pruned blocks had none).
+            if self.blocks[&h].diff.is_none(){let d=std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state));self.blocks.get_mut(&h).unwrap().diff=Some(d);}
             let mut next=e;next.state=out.state;next.pruned=false;p=next;self.rebuilds+=1;
         }
-        let x=self.blocks.get_mut(hash).ok_or_else(||Reject::Block("rebuild target".into()))?;x.state=p.state;x.pruned=false;
+        let x=self.blocks.get_mut(hash).ok_or_else(||Reject::Block("rebuild target".into()))?;x.state=p.state;x.pruned=false;x.full=true;
         Ok(())
     }
     fn key(&self,h:&[u8;32])->(u8,u64,[u8;32]){let e=&self.blocks[h];(if e.signed{0}else{1},e.import_seq,e.hash)}
