@@ -35,6 +35,22 @@ fork choice or RPC-visible data — see §7); every option in §7 is **PROPOSED*
    docstrings, the measured profile and the open intercept are corrected (J2-m6, J2-m7). J2-m1 (setup) is
    acknowledged: this round is based on `fa97594`, which contains the journal r2 merge `0d6f9dd`.
 
+**Round 3b note.** This second fix pass answers the third review (J-REV3-1 … J-REV3-3, resolved in §11),
+measurement and documentation only; no `src` file changed.
+1. **State-interacting blocks (J-REV3-1, major).** The round-3 per-gas search omitted the state-touching
+   opcode families. Six are now measured (§3.2a) and, crucially, the **CREATE path** is shown to carry an
+   O(creates × live-accounts) term that the §3.2b additive model misses: `code_caps::current_total` scans
+   all accounts on every successful create. §3.2c measures it (≈ 0.54 s per block at the devnet ACCT_CAP,
+   ≈ 27.6 s projected at the network ACCT_CAP), so on a full state a **create-heavy** block, not MODEXP,
+   is the per-block worst. §7 option 7 and §8 are updated.
+2. **Network state term labelled (J-REV3-2, minor).** The ≈ 15–18 s/block and multi-week figures are now
+   stated inline as an **extrapolation of an extrapolation**, with the chain of steps (§3.2b, §3.3, §5.4).
+3. **Devnet state term at the fill vs the caps (J-REV3-3, minor).** §3.2b now states that the +0.23 s is
+   measured at ≈ 95% of the caps; the at-cap value is ≈ +0.25 s (a slight under-estimate).
+All three obligations stay OPEN; every mitigation stays PROPOSED. Round-3b evidence: the committed test at
+`e3dfb47` (base `256428f`), logs in `evidence/journal-r3b/` (`INDEX.md`), derived figures in
+`evidence/journal-r3b/derived.log` (`tools/journal_projections.py` [10]/[11]).
+
 **Round 2 note (history).** Round 2 carried the stage-A model forward and corrected it against the first
 review (J-V1…J-V13, §9): a legal deep reorg pays the genesis rebuild twice (§5.3); open time under
 transaction load is bounded by TX_CAP, not TXBYTES_CAP (§3.2–§3.3); the super-linear open is
@@ -49,7 +65,10 @@ journal r2 merge `0d6f9dd`). This track changes no `src` file. Round-3 measureme
 `prototypes/pocold/tests/journal_measure.rs` at `7f587bb` (two test-only commits on fa97594, `346246e` and
 `7f587bb`; every `src` file is fa97594's), logs in
 `evidence/journal-r3/` (commands and runs: `evidence/journal-r3/INDEX.md`), derived figures in
-`evidence/journal-r3/derived.log` printed by `tools/journal_projections.py` (stdlib). Earlier rounds:
+`evidence/journal-r3/derived.log` printed by `tools/journal_projections.py` (stdlib). Round-3b measurements
+(the state-interacting families and the create-path term, §3.2a/§3.2c): the same test extended at `e3dfb47`
+(branch `wf/journal-r3b`, base `256428f`; still no `src` change from fa97594), logs in
+`evidence/journal-r3b/` (`INDEX.md`), figures in `evidence/journal-r3b/derived.log`. Earlier rounds:
 stage A `86b339e` (`evidence/journal-measure.log`), round 2 `47bfc11` (`evidence/journal-measure-r2.log`,
 `evidence/witness-refetch-below-khist.log`). All runs: release, this host (Linux 6.18.44-fc-v153, 4 CPUs),
 under `cpu.lock`, the test binary run directly. The test only measures existing code (`store`,
@@ -353,6 +372,29 @@ Readings:
   (another MODEXP shape, a different exponent pattern) may cost more per gas, so the worst figure is a
   lower bound on the worst case.
 
+**State-interacting kinds (round 3b, J-REV3-1).** The third review asked for the opcode families that
+touch the state: SSTORE (cold-fresh and warm-reset), CALL to many cold accounts, EXTCODECOPY, LOG-heavy
+and CREATE2. Six were added to `compute_kinds` and measured by `jm_exec_cost_per_gas` **on the small
+genesis state** (`evidence/journal-r3b/exec.log`, repeat `exec-repeat.log`, on `e3dfb47`):
+
+| kind | body B | validate median | net ns/gas | note |
+|---|--:|--:|--:|---|
+| create2_loop | 135 | 17.5–18.0 ms | 1.9–2.0 | 247 creates/block; the state dependence is §3.2c |
+| sstore_warm | 122 | 11.1 ms | 1.16 | rewrites one slot (no state growth) |
+| cold_call | 140 | 6.4–7.4 ms | 0.6–0.7 | ~3,000 value-0 cold CALLs (no creates) |
+| extcodecopy_cold | 133 | 4.0–4.7 ms | 0.3–0.4 | ~3,000 cold account reads |
+| sstore_fresh | 122 | 3.3–3.4 ms | 0.18 | CREATES ~359 slots; the state dependence is §3.2c |
+| log0_loop | 108 | 2.5–3.0 ms | 0.07–0.15 | halts at LOG_COUNT_MAX (546), all gas charged |
+
+On a near-empty state **none of these is the per-gas worst case: MODEXP (≈ 134 ns/gas) stays ≈ 65–180×
+above them**. Logs are bounded by `LOG_COUNT_MAX` (546/block, a block meter halt) so LOG is never a per-gas
+vector; cold access (CALL/EXTCODECOPY) and warm SSTORE are below the jump loop. **But two of these grow
+the state** (`sstore_fresh` ≈ 359 slots, `create2_loop` ≈ 247 accounts per block), and the CREATE path
+carries a cost that is NOT a per-gas constant: it is **linear in the live-account count** (§3.2c), because
+`code_caps::register`'s create-return handler calls `code_caps::current_total`, an O(`db.accounts`) scan,
+on every successful create. So whether a state-interacting block is the per-block worst depends on the
+state, not on the gas alone (J-REV3-1).
+
 ### 3.2b Re-execution cost vs state size (`JM-STATE`, `JM-STATE-SYN`, new in round 3)
 
 `apply_block` (lp4-execution `apply.rs`) does `parent.clone()` of the whole state, scans it several times
@@ -394,16 +436,82 @@ the validate of an empty, a bn_pair_2 and a modexp_b8_e1024_m8_even child of the
   clone is small.
 - Filling the devnet caps takes ≈ 225 full blocks (≈ 140 for SLOT_CAP, ≈ 87 for ACCT_CAP); every
   later block, empty or not, then pays ≈ 0.23 s more on every re-execution (live import, replay,
-  TrieRebuild, restore).
+  TrieRebuild, restore). **The ≈ 0.23 s is measured at the end of the "both" series, 47,704 slots and
+  18,769 accounts — ≈ 95% of SLOT_CAP and ≈ 94% of ACCT_CAP, not the caps themselves (J-REV3-3).**
+  Extending by the measured slopes (≈ 2.5 µs/slot, ≈ 4.3 µs/account) gives an at-cap empty-child of
+  ≈ 246 ms, i.e. a state term of ≈ +0.25 s per block; the measured figure under-states the at-cap value
+  by ≈ 11 ms. (`evidence/journal-r3b/derived.log` [11].)
 - **Network caps (synthetic, `jm_state_root_synthetic`).** pocold cannot hold these caps, so the dominant
   part is measured without a chain: `state_root` and `clone` of a state of 4·10^6 slots in 11,143
   contracts and 10^6 accounts (`evidence/journal-r3/state-syn.log`): `state_root` **14.4 s** and `clone` 0.87 s (0.83 s / 3.38 s for the root at 1/16 and 1/4 of both caps: linear). Scaled by the devnet
   ratio of the validate increment to the root increment (1.23 at the end of the devnet "both" series), a block at the network caps would
   re-execute in **≈ 15–18 s**, empty or not — against T_blk = 60 s. Filling them takes ≈ 11,100 +
   ≈ 4,300 full blocks.
+  **This ≈ 15–18 s is an extrapolation of an extrapolation (J-REV3-2), from three compounding steps:**
+  (1) `state_root` + `clone` are measured on a **synthetic** state with **no chain** (no `apply_block`,
+  no per-block scans) — itself an extrapolation of how a real block's root recomputation behaves;
+  (2) the non-root per-block scans are assumed to scale with the root and are added via the **devnet**
+  validate/root increment ratio 1.23, applied at a state ≈ 1,000× larger than where it was measured;
+  (3) the result is extended linearly to the whole block. Each step is reasonable; none is measured at
+  network scale (pocold refuses that profile). Where the resulting multi-week open and ≈ 15–18 s/block
+  figures appear below (§3.3, §5.4, §8) they carry this qualifier.
 - This is an implementation property (no incremental trie: the root is recomputed from all accounts each
   block), not a spec requirement; storage.md:73–77 inventories a live trie. An incremental state root is
   proposed in §7 (option 7).
+- **The additive model above is a lower bound for a create-heavy block (§3.2c).** The §3.2b term (clone +
+  a root recomputation linear in the state) is a *fixed* per-block cost, independent of what the block
+  does. It omits the CREATE path: `code_caps::current_total` scans all accounts on every successful
+  create, so a create-heavy block carries an **additional** O(creates × live-accounts) term on top.
+
+### 3.2c Re-execution of a create-heavy block: O(creates × live-accounts) (`JM-CREATE`, J-REV3-1, round 3b)
+
+`code_caps::register` installs a `create_return` handler that, on every successful CREATE/CREATE2, calls
+`code_caps::current_total` — which iterates **all** `db.accounts` (`code_caps.rs:44`:
+`db.accounts.iter()…filter_map(|(_,a)|a.info())`, chained with the journal diff) to re-total the logical
+code against CODE_CAP. A block that performs C creates on a state of A live accounts therefore re-executes
+in **O(C · A)** from this scan alone — a term that §3.2b's root-based additive model does not represent,
+and that §7's incremental-root option (option 7) does not list among the per-block scans it would remove.
+
+`jm_create_state_term` grows the live user-account state (the §3.2b account fill) and at each checkpoint
+times, on the head: an empty child (the §3.2b root term), a **CREATE2-heavy** child (one tx, 247 creates
+of a tiny empty-code contract), a **cold-CALL control** (one tx, ~3,000 value-0 cold CALLs — cold access
+but no creates, so no `current_total` scan) and a **many-small-create** block (149 one-create txs — the
+same regime spread across transactions, not one looping tx). `evidence/journal-r3b/create.log`
+(on `e3dfb47`):
+
+| live user accounts | empty child | CREATE2 child (247 creates) | create-term (= CREATE2 − empty) | µs per create | cold-CALL control | many-small (149 txs) |
+|--:|--:|--:|--:|--:|--:|--:|
+| 5 | 1.8 ms | 17.4 ms | 15.6 ms | 63 | 7.5 ms | 35.6 ms |
+| 2,765 | 17.9 ms | 85.2 ms | 67.3 ms | 273 | 25.4 ms | 167.1 ms |
+| 5,525 | 37.3 ms | 153.6 ms | 116.3 ms | 471 | 40.3 ms | 338.1 ms |
+| 8,055 | 53.8 ms | 263.4 ms | 209.6 ms | 849 | 107.3 ms | 544.6 ms |
+| 10,815 | 68.2 ms | 358.2 ms | 290.0 ms | 1,174 | 78.9 ms | 635.6 ms |
+| 13,345 | 88.8 ms | 380.2 ms | 291.4 ms | 1,180 | 96.7 ms | 696.5 ms |
+| 15,645 | 102.2 ms | 589.3 ms | 487.0 ms | 1,972 | 125.3 ms | 895.7 ms |
+
+- **The create-specific term rises with the live-account count** — ≈ 63 µs/create at 5 accounts to
+  ≈ 1,972 µs/create at 15,645 — while the **cold-CALL control tracks the empty child** (cold access of a
+  similar number of accounts, but no `current_total`, so no extra growth). That isolates
+  `current_total` as the cause, exactly as the review predicted.
+- A least-squares fit (`derived.log` [10]) gives per-create ≈ (base) + 0.112 µs/account · A: the slope is
+  the scan. At the **devnet** ACCT_CAP (20,000) a 247-create block would add ≈ **0.54 s** of
+  `current_total` scan to its re-execution, on top of the ≈ 0.25 s root term — so ≈ 0.8 s for the create
+  work alone (its total ≈ 1.1 s, comparable to MODEXP at the caps). The many-small-create form shows the
+  same regime (per-create rises 227 → 5,325 µs; it is slower per create because each tx re-enters the
+  create handler and the pending-pool scan).
+- **At the network ACCT_CAP (10^6) the projection is ≈ 27.6 s per block of `current_total` scan**
+  (247 creates × ≈ 112 ms/create), additive to the ≈ 15–18 s root term (§3.2b) — so a create-heavy block
+  at the network caps would re-execute in **tens of seconds**, well above the MODEXP ≈ 1.0 s per-gas
+  worst and the empty-block root term. **This network figure is an extrapolation of an extrapolation
+  (J-REV3-2):** (1) the per-create cost is fit linear in A, measured only to A = 15,645 (≈ 78% of the
+  devnet ACCT_CAP); (2) extended linearly to 10^6, ≈ 64× beyond the measured range, with the per-block
+  create count held at 247. pocold cannot admit the network profile, so it is a projection about the
+  spec's targets, not this node.
+- Classification: an **implementation property**, not a spec requirement — `current_total` is PoCol's
+  CODE_CAP enforcement (`code_caps.rs`, LP4-CODE-01), and a complete re-total per create is O(accounts)
+  only because there is no incremental code-size index. It strengthens the re-execution obligation (§8)
+  and is added to §7 option 7's scan list. The §3.2a worst-per-gas figure (MODEXP) remains a lower bound;
+  this term shows a *different* block (create-heavy) becomes the per-block worst once the state is large.
 
 ### 3.3 Open-time bounds at H_END (projections; J2-B1, J-V6 reopened)
 
@@ -702,7 +810,7 @@ independent of height, and would also remove the double rebuild.
 | journal disk, empty/typical | 23 MB … ~0.2 GB | (projected) 0.15 … ~0.6 GB |
 | journal disk, max (cumulative caps) | ≈ 0.22 GiB | (projected) **≈ 11.3 GiB** |
 | journal disk, adversarial re-fetch | grows per cycle within window (§4) | (projected) same |
-| one block's re-execution, worst measured | ≈ 1.0 s (compute); ≈ 1.3 s with the state at the caps — above t_exec = 1 s | ≈ 1.0 s (compute); ≈ 15–18 s with the state at the caps (projected) — far above t_exec = 3 s |
+| one block's re-execution, worst measured | ≈ 1.0 s (compute); ≈ 1.3 s with the state at the caps; a create-heavy block adds ≈ 0.54 s of `current_total` scan at the caps (§3.2c) — above t_exec = 1 s | ≈ 1.0 s (compute); ≈ 15–18 s with the state at the caps (extrapolation of an extrapolation); a create-heavy block adds ≈ 27.6 s of `current_total` scan at the caps (same, §3.2c) — far above t_exec = 3 s |
 | open replay at H_END | 129 s (empty, measured; stage A 137 s) … **≈ 5.2 h** (worst kind) … **≈ 6.5 h** (worst kind, state at the caps) | ≈ 64–69 min (empty) … **≈ 35–38 h** (worst kind) … ≈ 3 weeks (state at the caps) |
 | open memory | transient ≈ 1.0× the journal on top of the steady set (1.1–4.6× by kind, §3.4) | ≈ 11.3 GiB transient at the canonical maximum, on top of the steady set |
 | deep reorg at R_keep near the tip | **96 s** (empty; two stalls ≈ 43 s and ≈ 48 s, each > D_att) … **≈ 11 h** (worst kind) … ≈ 13 h (state at the caps) | **10.4 min** (empty) … **≈ 69–73 h** (worst kind) |
@@ -785,13 +893,16 @@ proposals.
    Local retention, validity-neutral by construction (states are re-derivable), but it changes the A13
    snapshot count (one more retained state per such fork point, bounded by side_max) and needs a test that
    the second rebuild is gone and a mutation control. A partial alternative to option 4. PROPOSED.
-7. **Incremental state root and O(dirty) block checks (new, §3.2b).** Cache per-account storage roots and
-   the trie between blocks and recompute only dirty accounts, and make the per-block scans (`check_caps`,
-   `sum_balances`, `validate_snapshot`, `live_counts`) incremental, so a block's re-execution is
-   proportional to what it touches, not to the whole state. The root value is unchanged (same MPT), so it
-   is validity-neutral if proven equal; it is an lp4-execution change with its own memory term (a resident
-   trie) and needs an equivalence test against `world_root` on every block plus mutation controls.
-   PROPOSED.
+7. **Incremental state root and O(dirty) block checks (new, §3.2b, §3.2c).** Cache per-account storage
+   roots and the trie between blocks and recompute only dirty accounts, and make the per-block scans
+   incremental: `check_caps`, `sum_balances`, `validate_snapshot`, `live_counts`, **and
+   `code_caps::current_total`** — the last called on every successful create, giving a create-heavy block
+   its O(creates × live-accounts) term (§3.2c), which a cached running logical-code total keyed by the
+   create's own delta would reduce to O(creates). Then a block's re-execution is proportional to what it
+   touches, not to the whole state. The root value is unchanged (same MPT), so it is validity-neutral if
+   proven equal; it is an lp4-execution change with its own memory term (a resident trie and the running
+   totals) and needs an equivalence test against `world_root` and against `current_total`/`live_counts` on
+   every block plus mutation controls. PROPOSED.
 8. **Bound the re-execution cost per gas (normative, new, §3.2a).** The worst measured kinds come from the
    Cancun gas schedule the spec adopts (execution.md:106), e.g. EIP-2565 MODEXP pricing of small moduli.
    Repricing (in the direction of later Ethereum proposals that raise the MODEXP minimum and small-modulus
@@ -816,8 +927,12 @@ proposals.
   and weeks with the state term. A deep-fork rebuild/restore re-executes from genesis **twice** for want of
   reverse diffs (§5.3), so a legal depth-2048 reorg near the tip takes 96 s (devnet) / 10.4 min (network)
   **on an empty chain** and up to ≈ 11 h (≈ 13 h with the state at the devnet caps) / ≈ 69–73 h under the worst measured kind, in two stalls
-  that each exceed D_att. The worst figures are lower bounds on the worst case (§3.2a). No snapshot, diff
-  or state-root mitigation implemented.
+  that each exceed D_att. The worst figures are lower bounds on the worst case (§3.2a). Beyond the compute
+  and the §3.2b root term, a **create-heavy** block adds an O(creates × live-accounts) term from
+  `code_caps::current_total` (§3.2c): ≈ 0.54 s per block at the devnet ACCT_CAP and ≈ 27.6 s per block at
+  the network ACCT_CAP (an extrapolation of an extrapolation, §3.2c), so on a full state a create-heavy
+  block, not MODEXP, is the per-block worst. No snapshot, diff, state-root or incremental-code-total
+  mitigation implemented.
 - **Open-time memory transient**: OPEN. Open needs ≈ 1.0× the journal in RAM **on top of** the steady
   resident chain (§3.4; peak/journal is 2.1× (body-max) to 5.7× (transfers) by block kind), excluded from the A13 steady-state
   bound; at the network maximum or the adversarial journal it exceeds the budget, so a node can be pushed
@@ -864,3 +979,16 @@ close these obligations.
 | J2-m5 (minor) | 69 min from a single-run 3-point fit; split attribution | **Fixed.** Six checkpoints in round 3; the LS and two-point fits give a range (≈ 64–69 min), and the two-point b grows with H, so the projection is not an upper bound. `JM-SPLIT` over 20,000 blocks measures the insert + retain slope at ≈ 106% of the fitted b (round 2's 79% came from a 6,000-block split, where the slope is lower); only the measured shares are attributed (§3.1, §3.3). |
 | J2-m6 (minor) | fresh path pre-read the journal; stale docstring | **Fixed in test.** Journal size from `std::fs::metadata`, heap trimmed (`malloc_trim`, glibc only; a no-op elsewhere) before the baseline; the docstring says what the baseline is and drops "~2x". |
 | J2-m7 (minor) | stale docstring, unlabelled profile, unsourced intercept | **Fixed.** `jm_replay_empty_blocks` docstring (super-linear, not linear); the measured profile is labelled (harness `cfg()`: d_att 73, hash_rate 1024, c 8, tau 40) in the module docstring and the profile note; the intercept is measured as `JM-OPEN0` (61.6 ms) and used in §3.2. |
+
+---
+
+## 11. Third review findings — resolution (round 3b)
+
+Measurement and documentation only; no `src` file changed. Code under test `e3dfb47` (base `256428f`);
+evidence `evidence/journal-r3b/`.
+
+| # | finding | resolution |
+|---|---|---|
+| J-REV3-1 (major) | the per-gas search omitted state-interacting families (SSTORE cold/warm, cold CALL, EXTCODECOPY, LOG, CREATE2); the create path's O(creates × live-accounts) scan (`code_caps::current_total`) is in neither the §3.2b additive model nor §7 option 7, so whether MODEXP is the per-block worst at a full state is not established | **Fixed in report; obligation stays OPEN.** Six state-interacting kinds added to `compute_kinds` and measured by `jm_exec_cost_per_gas` on the small state (§3.2a): all ≤ 2.1 ns/gas there, so MODEXP stays the per-gas worst on a small state and LOG is bounded by LOG_COUNT_MAX. New `#[ignore]` test `jm_create_state_term` (§3.2c) grows the live-account state and measures a CREATE2-heavy child, a cold-CALL control and a many-small-create block: the create-specific term (CREATE2 − empty child) rises ≈ 63 → ≈ 1,972 µs/create as accounts grow to 15,645, while the cold-CALL control tracks the empty child — isolating `current_total` as an O(creates × live-accounts) term. Projection: ≈ 0.54 s/block at the devnet ACCT_CAP, ≈ 27.6 s/block at the network ACCT_CAP, additive to the §3.2b root term; on a full state a create-heavy block, not MODEXP, is the per-block worst. §7 option 7 adds `current_total` to its scan list; §8 and §5.4 updated. The worst figures remain lower bounds. |
+| J-REV3-2 (minor) | the network state-size figures (≈ 15–18 s/block, open ≈ 3 weeks) are an extrapolation of an extrapolation but stated as the obligation's magnitude | **Fixed.** §3.2b now states the three compounding steps inline (synthetic root with no chain → scaled by the devnet validate/root ratio 1.23 at a ≈ 1,000× larger state → extended linearly to the block and to H_END), and §3.3/§5.4/§8 carry the "extrapolation of an extrapolation" qualifier where the multi-week / 15–18 s figures appear; the §3.2c network create term carries the same qualifier. |
+| J-REV3-3 (minor) | the devnet state term +0.23 s is from the "both" series endpoint (≈ 95% of the caps), not the caps | **Fixed.** §3.2b states the measured fill (47,704 slots ≈ 95% of SLOT_CAP, 18,769 accounts ≈ 94% of ACCT_CAP) and extends by the measured slopes (≈ 2.5 µs/slot, ≈ 4.3 µs/account) to an at-cap empty-child of ≈ 246 ms, i.e. ≈ +0.25 s per block; the measured figure under-states the at-cap value by ≈ 11 ms (`derived.log` [11]). |
