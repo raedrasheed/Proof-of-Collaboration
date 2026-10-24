@@ -1,6 +1,8 @@
 # Windows verification of the repair scope (round 2)
 
-Status (2026-10-23): **Run 9 (29fd44a) PASS on every check** of the repair scope. That covers the
+Status (2026-10-24): **Run 16 (25bec25) PASS on every check**, on the round-3 integration: RpcGuard r3
+(poll/WSAPoll pacer and P2P reader), caps r3 tests and journal r3 measurements. Earlier: Run 9 (29fd44a) PASS on every check
+of the repair scope. That covers the
 integrated caps-r2 and rpcguard-r2 code and the Windows fixes found by Runs 1–7. Not covered: the e2e
 fix round, merged after 29fd44a, which changes only the Python e2e test that this workflow does not
 run. Any later code commit needs its own run. See "Runs" at the end. The sections before "Runs" are the original preparation record and are kept as they were.
@@ -307,3 +309,24 @@ Windows defects found and fixed by this verification:
 | 13 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40009973331 | d40fd91 | evidence only | repeat |
 
 Their artifacts are not copied: the code under test is that of Run 9 or Run 11.
+
+### Runs 14–17
+| run | commit | content | result | counted as |
+|---|---|---|---|---|
+| 14 | fa97594 | evidence only | PASS | repeat |
+| 15 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40041180282 | 2cbac12 | merge of wf/caps-r3 (tests/caps.rs: the TXBYTES counter's block and branch, the cross-block exact fit) | PASS | verifies the caps r3 tests on Windows |
+| 16 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40053978772 | 25bec25 | merges of wf/rpcguard-r3 (rpc::sockwait: poll on Unix, WSAPoll on Windows, in the SendPacer and the P2P reader; late answers -32020; new RpcGuard tests) and wf/journal-r3 (journal_measure.rs with a cfg-gated malloc_trim helper) | **PASS** | **first Windows execution of the round-3 code** |
+| 17 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40054605962 | 5e1b2dd | evidence only | PASS | repeat of Run 16 |
+
+Run 16 details:
+- Artifact zip SHA-256 `5cac46054aebdc00558e9804d0dcf7da8a42915f490a5729d7eded62fe3cdb1c`, copied unchanged to
+  `evidence/windows-25bec25/`.
+- Results:
+  - lp1-store-journal 12 passed;
+  - lp1-node-all 150 passed;
+  - lp4-execution 168 passed, 21 binaries;
+  - **pocold 164 passed, 0 failed, 12 ignored, 15 binaries.** The ignored tests are the spec-depth tests and journal_measure's #[ignore] measurements, which this workflow does not run;
+  - extension 234 passed.
+- ABSORB on Windows: `kernelTookWholeAnswer:false`.
+- The round-3 RpcGuard tests passed on Windows, among them `sockwait_reports_readiness_within_its_timeout`.
+- journal_measure.rs builds on Windows, including its cfg-gated helper.
