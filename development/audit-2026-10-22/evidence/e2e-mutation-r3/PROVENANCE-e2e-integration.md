@@ -7,7 +7,10 @@ The facts below come from the session transcript: the tool calls at 2026-10-23T1
 18:58:22Z, 18:58:40Z and 19:13:51Z. The transcript is not in the repository. Each fact that can
 still be checked was re-checked on 2026-10-23, as noted, and again on 2026-10-24 after a container
 restart: the four tool calls were read back from the transcript, and every check below was
-repeated with the same result.
+repeated with the same result. The checks of the next section were repeated once more on
+2026-10-24 around 06:50Z, after a session limit, in the worktree `wf_86607a23-c25-4`: same results
+(four sha256 `9d73605e…`, `git diff --quiet` exit 0, binary `145ae16c…`, 81 PASS lines and three
+PASS result lines in the log).
 
 ## What ran
 
