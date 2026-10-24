@@ -290,12 +290,14 @@ fn stats(port:u16)->serde_json::Value{let (_,b)=rpc(port,r#"{"jsonrpc":"2.0","id
     let c=&pocold::rpc::COUNTERS;let d=heavy_duration();
     // A small HEAVY_QUEUE and a short QUEUE_WAIT so a full-for-QUEUE_WAIT queue reliably answers busy
     // while the consensus thread is stalled on the first heavy call (network.md:214, :234).
-    let mut l=small();l.rpc.conn_max=2;l.rpc.heavy_queue=4;l.rpc.queue_wait=Duration::from_millis(20);l.rpc.work_deadline=(d/8).max(Duration::from_millis(1));let qmax=pocold::rpc::queued_max(&l.rpc);let r=start("queued",l);
+    let mut l=small();l.rpc.conn_max=2;l.rpc.heavy_queue=2;l.rpc.queue_wait=Duration::from_millis(5);l.rpc.work_deadline=(d/8).max(Duration::from_millis(1));let qmax=pocold::rpc::queued_max(&l.rpc);let r=start("queued",l);
     let (f0,q0)=(counter(&c.queue_full),counter(&c.queued));
     let stop=Arc::new(AtomicBool::new(false));let peak=Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sampler={let (stop,peak)=(stop.clone(),peak.clone());std::thread::spawn(move||while !stop.load(Ordering::SeqCst){peak.fetch_max(counter(&pocold::rpc::COUNTERS.queued).saturating_sub(q0),Ordering::SeqCst);std::thread::yield_now();})};
     let mut rounds=0;
-    while counter(&c.queue_full)==f0&&rounds<5{rounds+=1;
+    // Windows run 20 (49ae9fa): a queue of 4 with a 20 ms wait reached its cap without a busy answer in
+    // 5 rounds; a queue of 2, a 5 ms wait and up to 12 rounds make a full-for-QUEUE_WAIT queue likely.
+    while counter(&c.queue_full)==f0&&rounds<12{rounds+=1;
         // One heavy call holds the consensus thread for about d; two senders keep abandoning
         // heavy requests (each answered 504 at d/8, its body left queued).
         let h=std::thread::spawn({let p=r.rpc;move||rpc(p,HEAVY,false).0});std::thread::sleep(d/16);

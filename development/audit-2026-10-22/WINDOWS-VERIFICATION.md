@@ -330,3 +330,18 @@ Run 16 details:
 - ABSORB on Windows: `kernelTookWholeAnswer:false`.
 - The round-3 RpcGuard tests passed on Windows, among them `sockwait_reports_readiness_within_its_timeout`.
 - journal_measure.rs builds on Windows, including its cfg-gated helper.
+
+### Runs 18–20
+| run | commit | result | notes |
+|---|---|---|---|
+| 19 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40081065412 | 2b1a571 (merges of caps r3b, journal r3c, rpcguard r3c) | PASS | first Windows run of the round-3 final passes |
+| 20 https://github.com/raedrasheed/Proof-of-Collaboration/actions/runs/40082181726 | 49ae9fa (evidence only, same code as Run 19) | **FAIL**, 1 test | `abandoned_queued_bodies_are_capped_and_released`: queue reached its cap (peak 4) but no -32021 busy within 5 rounds. Artifact (SHA-256 `eb61b267c7575709e5f6d8a6121b68c0cdb1f083153c706e6ccfedc801ece283`) in `evidence/windows-49ae9fa/` |
+
+Run 20 is a timing flake, not a code difference: Run 19 passed on the same code.
+- The test needed a QUEUE_WAIT-long full queue to arise from racing senders, and five rounds were not enough on that runner.
+- Fix (next commit, test only):
+  - HEAVY_QUEUE 2 instead of 4, QUEUE_WAIT 5 ms instead of 20 ms, and up to 12 rounds;
+  - assertions unchanged (busy ≥ 1, peak ≤ HEAVY_QUEUE, nothing left queued).
+- Linux: 8 of 8 runs reach busy in round 1, with 10–14 busy answers
+  (`evidence/integration-r3/abandoned-queued-8x-linux.log`).
+- The next Windows run decides.
