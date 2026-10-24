@@ -6,8 +6,9 @@
 > (consensus.md:101, §4(a)), and the caps-test build constant LOG_CAP (validation.md:2065; its
 > HIST_TRIE_BUDGET is not, §6).
 >
-> Revised after the independent review (round 2, branch `wf/caps-r2`; corrections in §7) and after the
-> second review (round 3, branch `wf/caps-r3`; corrections in §7b).
+> Revised after the independent review (round 2, branch `wf/caps-r2`; corrections in §7), after the
+> second review (round 3, branch `wf/caps-r3`; corrections in §7b) and after the third review (round 3b,
+> branch `wf/caps-r3b`; corrections in §7d).
 
 This study builds on [LOG-CAP-AGGREGATE.md](LOG-CAP-AGGREGATE.md) and
 [LOG-CAP-AGGREGATE-ALTERNATIVES.md](LOG-CAP-AGGREGATE-ALTERNATIVES.md). The alternatives file
@@ -122,7 +123,7 @@ This section covers a branch whose remaining room fits no pooled transaction.
 | subject | spec-intended | code before `9094f98` | code now |
 |---|---|---|---|
 | user transactions of every kind (transfers, contract calls and creations, the registry's register / deregister / claimBond) | none can be included on this branch (item 16) | same validity | same |
-| builder (`template_txs`) | skips the transaction (execution.md:83) | the template carried every pooled transaction (see the two rows below) | skips what passes the room, with that sender's later transactions; signed empty blocks at the normal pace |
+| builder (`template_txs`) | skips the transaction (execution.md:83) | the template carried every pooled transaction (see the two rows below) | skips what passes the room, with that sender's later transactions; signed empty blocks at the normal pace. Exact at the boundary in every position tested: the first, second and third transaction of a block, on a zero and a non-zero parent counter, for both counters (round 3b, §7d) |
 | …past TXBYTES_CAP, or past TX_CAP while one block's count still fits it (the case on every real profile) | — | own block invalid ("16 caps"); every height waited until U(0)+Γ, i.e. D_att+Γ after the parent's timestamp (consensus.md:93, :97), for a fallback. Measured: 74–78 s per block on the tests/caps.rs test devnet (D_att 73, single-host Γ 5). Derived, not run: 30 s on the default devnet profile (D_att 25 + Γ 5, devnet.rs:37), about 330 s on the network profile (D_att 300 + Γ 30, governance.md:6) | — |
 | …more pooled transactions than TX_CAP | — | `apply_block` refused the block (`Budget("TX_MAX")`, apply.rs:250: one block's count against the whole TX_CAP); the builder emptied it; **nothing was ever included, although room existed**. Reach: only when TX_CAP is below one block's transaction count, which gas bounds at 380 (the pool at 4,096). It cannot occur on the network (10^7), devnet or caps/64 (20,000) profiles; it was reproduced with TX_CAP 3 and 5 | — |
 | received signed templates | a violating template counts as absent, then sticky FB at T_j (consensus.md:101, §4(a)) | locked and mined, wasting attempt 0 | not locked (`node.rs:557`) |
@@ -132,7 +133,7 @@ This section covers a branch whose remaining room fits no pooled transaction.
 | mempool | not specified: network.md:149–153 lists −32014, −32015, and −32016 for "full" and "after F" | accepts; transactions that can never be included stay until POOL_MAX (4,096 or 32 MiB), then −32016 "pool full" | same; proposal N5 |
 | …free pool squatting near the TXBYTES boundary (before full exhaustion) | not specified | — | Once the room left is below TX_MAX (131,072 B), a transaction larger than the room is skipped but stays pooled (`template_txs`). It is never included, so never charged, and the pool has no expiry and no eviction (`submit_tx`, node.rs:404). About 256 such 131,072-byte transactions fill POOL_MAX_BYTES (32 MiB; or 4,096 by count). The pool then answers −32016 to small transactions that would still fit the room, and the squatters are relayed to peers. The cost is only the balance needed to pass execution on the pending state, never spent. Every new head also re-executes the stuck pool (`rebuild_pool`), bounded by POOL_MAX. Code inspection; not run. Proposal N5 |
 | RPC | — | eth_sendRawTransaction returns a hash whose receipt stays null; `pocol_getCaps` (network.md:333) answers −32601 | same; proposal N6 |
-| reorg at the boundary | the counters follow the branch | adoption by work alone (D133); detached transactions return to the pool (A11) and are includable on a branch with room | tested for both counters since round 3 (`counters_are_per_branch_across_a_reorg_at_the_exhaustion_boundary`). For TX_CAP and for TXBYTES_CAP, a block on the branch that is not the head is checked against its own branch's counter, in both directions: a block that fits its branch's room but not the head's is valid, and one that fits the head's room but not its branch's is "16 caps". Up to round 2, only the TX_CAP side was tested (second review R2C-1, §7b) |
+| reorg at the boundary | the counters follow the branch | adoption by work alone (D133); detached transactions return to the pool (A11) and are includable on a branch with room | a block on the branch that is not the head is checked against its own branch's counter (`Chain::within_caps` reads the parent's), in both directions: a block that fits its branch's room but not the head's is valid, and one that fits the head's room but not its branch's is "16 caps". Tested by `counters_are_per_branch_across_a_reorg_at_the_exhaustion_boundary`, per counter and direction. TXBYTES_CAP: neither direction up to round 2 (W12, the head's counter, survived; second review R2C-1); both since round 3 (5965b8d; X9 and X10 are each killed by one direction). TX_CAP: neither direction up to round 2 either, since X1 (the count read from the head) survives round 2's tests (third review C3R-1; round 3 wrote "up to round 2, only the TX_CAP side was tested", which was wrong); round 3 pinned only the "16 caps" direction (A's next block after the reorg), and R1 (max(head, parent)) survived it; both since round 3b (e985ce1: B's one-transaction block imports while A, at TX_CAP, is the head) |
 
 ### 3b. LOG_CAP reached
 
@@ -280,6 +281,7 @@ Reading:
 | round 2: model check label and `emptyBlocksFromBaseFee0ToIdle` (review CV-7, CV-12) | — | 0b9b4d0 | `r2-caps-model-0b9b4d0.log` (25 checks; byte-identical to the committed vectors), `r2-caps-tests-0b9b4d0.log` (caps_identity 3 pass on the new vectors) |
 | round 3: tests pin which block and which branch item 16 reads the byte counter from, and the builder's exact fit across blocks (second review R2C-1, R2C-2); test-only | consensus.md:170, D49, execution.md:83 | 5965b8d | in `evidence/caps-r3/`: `caps-tests-5965b8d.log` (7 pass), `mutations-5965b8d.log` (§7c) |
 | round 3: the A13 model at the integrated head, and O2 recomputed on it (R2C-3, R2C-5) | — | measured at fa97594 | in `evidence/caps-r3/`: `a13-fa97594.log`, `o2-memory-fa97594.json` (§5b) |
+| round 3b: tests pin TX_CAP's branch scope in both directions, and both counters' boundary at every position and block shape (third review C3R-1 to C3R-3); test-only | consensus.md:170, D49, execution.md:83 | e985ce1 | in `evidence/caps-r3b/`: `caps-tests-e985ce1.log` (9 pass), `mutations-e985ce1.log` (§7e) |
 
 Round 3 ran at 5965b8d, in release, on Linux. The later round-3 commits change only `development/`.
 The logs are in `evidence/caps-r3/`:
@@ -291,6 +293,19 @@ The logs are in `evidence/caps-r3/`:
 - `caps_model.py`: 25 checks, byte-identical to the committed vectors.
 
 The full lp4-execution suite was not rerun, because round 3 changes no lp4 code.
+
+Round 3b ran at e985ce1, in release, on Linux. The later round-3b commit changes only `development/`.
+The logs are in `evidence/caps-r3b/`:
+- `tests/caps.rs`: 9 pass (7 before, plus the two boundary matrices), no compiler warnings;
+- lp4-execution `caps_identity`: 3 pass;
+- in the caps-test build, `tests/log_cap.rs` 2 pass (exhaustedAt 513) and `tests/caps.rs` 9 pass;
+- the whole pocold suite, once: 155 pass, 0 fail, 8 ignored (the 2 spec-depth tests and the 6 journal
+  measurements, not run), no compiler warnings;
+- the mutation check (§7e) and the R7 probe.
+
+`caps_model.py` was not rerun, because round 3b changes neither the model nor its vectors.
+
+The full lp4-execution suite was not rerun, because round 3b changes no lp4 code.
 
 Round 2, at 0b9b4d0 (its `prototypes/` tree equals c635594's), release: lp4-execution 165 pass, 0 fail;
 pocold 130 pass, 0 fail, 2 ignored (the spec-depth tests, not run); no compiler warnings
@@ -373,7 +388,7 @@ finding and its resolution is listed below. The only code change is to tests (`t
 
 | finding | resolution |
 |---|---|
-| R2C-1 (major): no test pinned which entry's counter item 16 reads for TXBYTES. W11 (the grandparent's counter) and W12 (the head's) survived the whole pocold suite. The reorg test pinned the branch scope for TX_CAP only, and every "over" block followed two empty blocks | fixed in 5965b8d, in three parts. (1) The boundary test checks the over block on the block that used the room, with no empty block between, so the parent's and the grandparent's counters differ (W11). (2) The reorg test has a TXBYTES fork case, with TXBYTES_CAP = big + b0 − 1 (828 B). Branch A carries big (716 B) and is left with 112 B of room. Branch B (fallback, b0 113 B, fallback) forks at genesis and is heavier. While A is the head, B's block carrying b0 fits B's room but not A's, and it is valid. Once B is the head, A's next block (113 B) fits B's room (715 B) but not A's, and it is "16 caps". This kills W12, and each direction is pinned on its own (X9, X10 in §7c). (3) The TX_CAP part also imports A's next block after the reorg, so the count is read from the parent, not from the head (X1). §3a's "tested" now covers both counters |
+| R2C-1 (major): no test pinned which entry's counter item 16 reads for TXBYTES. W11 (the grandparent's counter) and W12 (the head's) survived the whole pocold suite. The reorg test pinned the branch scope for TX_CAP only, and every "over" block followed two empty blocks | fixed in 5965b8d, in three parts. (1) The boundary test checks the over block on the block that used the room, with no empty block between, so the parent's and the grandparent's counters differ (W11). (2) The reorg test has a TXBYTES fork case, with TXBYTES_CAP = big + b0 − 1 (828 B). Branch A carries big (716 B) and is left with 112 B of room. Branch B (fallback, b0 113 B, fallback) forks at genesis and is heavier. While A is the head, B's block carrying b0 fits B's room but not A's, and it is valid. Once B is the head, A's next block (113 B) fits B's room (715 B) but not A's, and it is "16 caps". This kills W12, and each direction is pinned on its own (X9, X10 in §7c). (3) The TX_CAP part also imports A's next block after the reorg, so the count is read from the parent, not from the head (X1). §3a's "tested" now covers both counters. *Corrected in round 3b (third review C3R-1, §7d): part (3) pins only the "16 caps" direction for TX_CAP, and R1 (max(head, parent)) survived it; nor was the TX_CAP side tested up to round 2, as §3a then said (X1 survives round 2's tests). Both directions are pinned since e985ce1* |
 | R2C-2: the builder's exact fit was pinned in one position only, the second transaction of a block on genesis. B10, B11 and B12 survived tests/caps.rs | fixed in 5965b8d: a cross-block exact fit with TXBYTES_CAP = a0 + b0. a0 is alone in block 1. Then `template_txs` returns [b0], with b1 skipped. b0 is block 2's first transaction and fills the room on a non-zero parent counter. Block 2 reaches cum_tx_bytes = TXBYTES_CAP and is a valid head (the positive item-16 exact fit across blocks), and b1 on block 2 is "16 caps" |
 | R2C-3: the "today" A13 figures (5,627,687,516 B, 10,808,068 B unused) were stale at the integrated head | §5 O2 cell and the new §5b name the commit of each figure. 5,627,687,516 B is 9ce5a7c's model, confirmed at c3a78e7. At fa97594 the model is 5,577,343,580 B (measured, `evidence/caps-r3/a13-fa97594.log`, = RPCGUARD.md:158), with 68,343,995 B unused. O2 is recomputed at fa97594: 11,941,350,108 B tightened, needing 13,647,257,267 B. A13-DERIVATION.md's "9ce5a7c and later" is not this track's file; replacement text is handed to the orchestrator |
 | R2C-4: "waiting 145 empty blocks reaches that fee from any starting base fee" | §2: from baseFee0 = 10^9. A higher start needs about 5.2 more empty blocks per doubling: 150, 162 and 196 blocks from 2·10^9, 10^10 and 10^12 (recomputed by exact integer simulation) |
@@ -404,3 +419,105 @@ and caps_identity mutants (M4, M4b, M5, M10, M11) ran the tests they target, as 
 
 The review's whole-suite survivors (W11, W12, B11) are now killed by `tests/caps.rs`, which is part of
 the whole suite.
+
+The third review found survivors of these tests that this set did not include (R1, R6, R9, T1–T4, T8;
+§7d). "Each direction of the fork case is load-bearing on its own" holds for the byte counter only; for
+TX_CAP, round 3 pinned one direction.
+
+## 7d. Round-3b corrections (after the third review)
+
+The third review of `wf/caps` at 938cb94 found no blocker, one major issue and three minor ones. Every
+finding and its resolution is listed below. The only code change is to tests (`tests/caps.rs`,
+e985ce1); nothing normative is implemented, and development/m1/reference is not edited.
+
+| finding | resolution |
+|---|---|
+| C3R-1 (major): for TX_CAP only one direction of item 16's branch scope was pinned. R1 (the count read from max(head, parent)) survived tests/caps.rs and the whole pocold suite. §3a's "in both directions" was wrong for TX_CAP, and so was "up to round 2, only the TX_CAP side was tested": X1 (the count read from the head) survives round 2's tests | fixed in e985ce1. The TX_CAP part of the reorg test now builds B as (fallback, bob's transfer, fallback); B forks at genesis and is heavier than A. While A is the head at cum_txs = TX_CAP = 3, B's block carrying one transaction fits B's room (3) but not A's (0), and it imports (this kills R1). After the reorg (B at 1), A's next block fits B's room (2) but not A's, and it is "16 caps" (X1, R2, R3). The builder then fills B's room of 2 (templates [2, 0, 0]). §3a now states, per counter and direction, what was tested when; §7b carries a correction note |
+| C3R-2: TX_CAP had no fill across blocks from a non-zero count and no "over" block carrying more than one transaction. T4, T8 and R6 survived the whole suite | fixed in e985ce1 by `tx_cap_boundary_is_exact_at_every_position_and_block_shape` (below) |
+| C3R-3: the byte boundary was not pinned for a third or later transaction, for a non-first transaction on a non-zero parent, or for a multi-transaction "over" block on a non-zero parent. T1, T2, T3 and R9 survived the whole suite | fixed in e985ce1 by `txbytes_cap_boundary_is_exact_at_every_position_and_block_shape` (below) |
+| C3R-4: round 3's doc_updates missed the second stale 5.241 GiB figure (FINDING-STATUS.json:647, make_finding_status.py:71) | these are not this track's files. The corrected text for both lines (5.194 GiB at fa97594; 5.241 GiB at 9ce5a7c) is handed to the orchestrator |
+
+Instead of one case per survivor, the two new tests share one helper (`boundary_matrix`) that runs a
+counter over every combination of:
+- the parent's counter: zero (genesis), or two transactions (a0 and a1 in block 1, 226 B);
+- k = 1, 2 or 3 of bob's transfers (113 B each) in the block;
+- the cap at the exact fit (parent + k), or one short of it (one transaction, or one byte).
+
+Each case checks three things:
+- item 16 on a hand-built block of all k: valid at the exact fit; "16 caps" when one over, both on the
+  harness and through the node;
+- the builder, with bob's four transfers pooled: `template_txs` returns exactly his first k − short;
+- the builder's block imports as a valid head (at the cap when the fit is exact), and the stored counters
+  equal the bodies.
+
+Two things are skipped:
+- the case TX_CAP 0 (zero parent, k = 1, one short), which leaves nothing to fit;
+- in the TX_CAP cases one over on a zero-count parent (k = 2, 3), the hand-built block; the builder is
+  still checked there. That block, of more than TX_CAP transactions, cannot be built: build_signed
+  applies the body, and apply_block refuses more than TX_CAP transactions in one block (apply.rs:250).
+  It is the case R7 changes (§7e).
+
+So 11 TX_CAP cases and 12 TXBYTES_CAP cases run; their `CAPS` lines list them.
+
+`live()` now uses its own data directory (`live-<tag>`). Its tags `txcap` and `txbytes` were also used by
+two in-process tests of the same binary. The two nodes of each pair have the same PID, so they used the
+same data directory while running in parallel. Depending on timing, the second open could fail as
+`Locked` (store.rs:117), or one test's `node()` could remove the directory under the other's running
+node. No failure was observed.
+
+### 7e. Mutation check after round 3b
+
+Three sets were run against the round-3b `tests/caps.rs` at e985ce1, one mutant at a time, in release:
+- round 3's 55 (§7c), with their edits unchanged;
+- the third review's 20, with its edits unchanged. Eight of them (B10–B12, W11, W12, X1, X9, X10)
+  have the same edits as round 3's and ran once, so 12 are new: R1–R3, R6–R9, T1–T4 and T8;
+- 17 new ones (Y1–Y17), aimed at the positions and shapes the matrix covers.
+
+The runner loads the earlier runners' edit lists from their files, so the edits are not retyped. Results
+are in `evidence/caps-r3b/mutations-e985ce1.log` and `.json`; the runner and the edits stay in the
+scratch directory. **83 of the 84 are killed. R7 survives, and it is equivalent (below).** No run hit
+the harness timeout. Y5's first edit had one parenthesis too many and did not compile. It is recorded as
+incomplete in run 1, and the corrected edit is killed in run 2. All 55 of round 3's kills still hold,
+including the eight the third review reran (B10–B12, W11, W12, X1, X9, X10).
+
+| mutant | killed by (tests/caps.rs line) |
+|---|---|
+| R1 TX count from max(head, parent) | the reorg test: B's one-transaction block while A is the head (:184) |
+| R2 TX count from min(head, parent) | the reorg test: A's next block after the reorg (:187) |
+| R3 TX count from the canonical block at p's height | the reorg test (:184) |
+| R6 TX count +1 slack for multi-transaction blocks | the TX_CAP matrix: the block one over is "16 caps" (:156) |
+| R8 bytes +1 slack for a single transaction on a zero-byte parent | the TXBYTES_CAP matrix (:156): one 113 B transfer on genesis with TXBYTES_CAP 112 |
+| R9 bytes +1 slack for a multi-transaction block on a non-zero parent | the TXBYTES_CAP matrix (:156) |
+| T1, T2, T3 (builder byte room after the first transaction; one byte over from the third; exact fit refused for a non-first transaction on a non-zero parent) | the TXBYTES_CAP matrix: the template (:160) |
+| T4, T8 (builder TX room one short on a non-zero count; a block's first transaction not using TX room there) | the TX_CAP matrix (:160) and the reorg test (:190) |
+| Y1–Y4 builder byte position (first transaction on a zero parent, exact and one over; exact fit from the third; one over for a non-first transaction on a non-zero parent) | the TXBYTES_CAP matrix (:160) |
+| Y5–Y8 builder TX room (one long on a non-zero count; not decremented from the third; checked for the first two only; one short on a zero count) | the TX_CAP matrix (:160), and other tests |
+| Y9–Y12 item 16 bytes (exact fit refused for 3+ transactions; +1 slack for 3+; only the first two counted; +1 slack for one transaction on a non-zero parent) | the TXBYTES_CAP matrix (:155, :156), Y12 also the boundary and reorg tests |
+| Y13–Y17 item 16 count (+1 slack for one transaction on a non-zero parent; exact fit refused for multi-transaction blocks on a non-zero or a zero count; +1 slack for 3+; a block counted as at most 2) | the TX_CAP matrix (:155, :156), Y13–Y15 also other tests |
+
+**R8** is not equivalent on the profiles these tests use. The third review found it equivalent on every
+real profile, where TXBYTES_CAP (at least 16 MiB) exceeds TX_MAX (131,072 B), so a single transaction,
+already bounded by TX_MAX (chain.rs:314), can never pass TXBYTES_CAP by one byte. The test devnets set
+TXBYTES_CAP below TX_MAX, which admission accepts. There R8 accepts a block one byte over, and the matrix
+kills it.
+
+**R7** (TX count +1 slack on a zero-count parent) survives, and it is equivalent. On a zero-count parent,
+item 16's count is txs.len() ≤ TX_CAP; R7 makes it txs.len() ≤ TX_CAP + 1. Each use of `within_caps`
+either is followed by applying the body, or has no effect in release:
+- `validate` (chain.rs:335): the next step applies the body (chain.rs:337), and `apply_block` refuses more
+  than TX_CAP transactions in one block (apply.rs:250). The block is still `Reject::Block`, with the reason
+  `apply Budget("TX_MAX")` instead of `16 caps`.
+- `try_lock_signed` (node.rs:559): the next steps call `rebuild_signed` (node.rs:561, chain.rs:253),
+  which applies the body as well, so the template is still not locked.
+- `template_txs`: only a `debug_assert` (node.rs:465), compiled out in release.
+
+So only the reason string changes, for a block that the builder never produces and that build_signed
+cannot produce (it applies the body). A scratch probe forges such a block and confirms this
+(`evidence/caps-r3b/r7-probe-e985ce1.log`; the probe program is gitignored and not committed). It uses
+TX_CAP 2 and a zero-count parent. A sealed block carrying 3 transfers, its header built for 2 and then
+committing to all 3, with the template re-signed by the drawn proposer, gives:
+- without R7, `Block("16 caps")`;
+- with R7, `Block("apply Budget(\"TX_MAX\")")`.
+
+As a received template it is not locked in either case, while the valid 2-transfer control template
+locks in both.
