@@ -121,7 +121,10 @@ under stage A (entry check only), so the fix rounds introduce no new semantics f
 **Running behaviour (second review, m7).** Option A below is what pocold runs, pending a decision. It
 is encoded in code since round 2 (`const EFFECTFUL` in rpc.rs, which `member` exempts from the
 post-encoding check), so choosing B would change that code: remove the exemption and add a test that
-a transaction pooled after its deadline is answered −32020.
+a transaction pooled after its deadline is answered −32020. No committed test pins option A either:
+the round-3 mutant that removes the exemption survives the deadline tests
+(evidence/rpcguard-r3/MUTATIONS-RPCGUARD-R3.md, R3-P3-NO-EFFECTFUL-EXEMPTION), deliberately, since the
+reading is not decided; a test for the chosen option belongs with the decision.
 
 ### Options
 
