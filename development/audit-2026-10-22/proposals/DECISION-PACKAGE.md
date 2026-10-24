@@ -307,6 +307,64 @@ leaves GSV1 alone.
 **Acceptance test:** two nodes with different activeVersion refuse each other at Hello with a reported
 reason, and identical nodes connect as before.
 
+### D-3 / D-5: what the owner asked for before deciding (2026-10-24)
+
+The owner asked for three things before approving D-3 and D-5. The full analysis is
+[D3-D5-HEND-ANALYSIS.md](D3-D5-HEND-ANALYSIS.md), made by an independent agent; I checked its
+arithmetic and its spec citations myself.
+
+**1. Behaviour at and after H_END (spec and code agree on the end):**
+- No valid block has h > H_END, and no valid block has the final block F as its parent.
+- On the network profile, height ends the chain first. Time ends it first only if blocks average more
+  than 80 s.
+- In F, user transactions still run. F mints no subsidy and settles every remaining reward pot. All
+  bonds are refunded before F.
+- After F, balances are frozen for good. The spec keeps the data for 30 days and then takes a signed
+  snapshot.
+
+**2. Proofs of non-exhaustion.** Exact arithmetic, reproduced by script; 0 mismatches against the
+study's vectors:
+
+| cap | O2 value | worst use until H_END | margin |
+|---|---|---|---|
+| LOG_CAP | 2^32 | H_END × LOG_BLOCK_MAX = 4,246,732,800 | 1.12% |
+| TXBYTES_CAP | 24 GiB | H_END × the largest body = 25,478,323,200 | 1.13% |
+| TX_CAP | 5·10^7 | H_END × ⌊GAS_LIMIT / 21,000⌋ = 49,248,000 | 1.50% |
+
+- So under O2 each cap is **unreachable** before H_END, a proof, not an assumption about load.
+- The TX_CAP line rests on one lemma: every included transaction adds at least 21,000 gas.
+  - It holds for Cancun refunds. It was checked over 2,178 storage-write sequences, which is not a formal
+    proof.
+  - Without the lemma, a block holds up to 475 transactions, and 5·10^7 would not be enough.
+- With the current network values all three caps are reachable. N1 alone fixes only LOG_CAP. On the
+  devnet, LOG_CAP is already unreachable.
+
+**Two corrections to D-3 before approval:**
+1. The study's R28/R29 gates would refuse to boot the devnet and caps/64 caps, which the same
+   recommendation keeps. **Scope R28/R29 to the network profile.**
+2. **State the 21,000-gas lemma in R28**, or raise TX_CAP to at least 61,560,000.
+
+**3. Release and compatibility plan against a silent split (proposals, not approved):**
+- Make R27 a boot gate on every profile except caps-test.
+- Add protocolVersion to Hello. network.md:6 already requires it, and pocold does not send it.
+- Add a digest of the consensus constants outside the CP to Hello, and refuse a peer on a mismatch.
+- Ship these in the same release as N1, and no later than the first binary that boots the network
+  profile.
+- After that, every change to a constant takes a new protocolVersion with a ForkSchedule entry.
+- No re-genesis of existing devnet data is needed: 2^30 → 2^32 changes no block there, since
+  H_END × 32,768 ≤ both values.
+- A mixed-version two-node test must refuse at handshake, never fork.
+
+**Spec gaps the analysis found in the code.** These are conformance items, queued in §6 and not yet
+implemented:
+- after F the pool still accepts transactions; network.md:152 says −32016 {final: true};
+- `pocol_getClosing`, `pocol_getCaps`, `pocol_getPot` and `pocol_getSettlement` are not served;
+- Hello lacks protocolVersion (network.md:6). This changes the wire format, so it goes with the release
+  plan above.
+
+**Recommendation:** approve D-3 with the two corrections and D-5 (b) together with the release plan.
+Nothing is implemented until you approve.
+
 ---
 
 ## 4. Priority 4: journal growth and recovery cost (JOURNAL-GROWTH-AND-REPLAY.md)
@@ -350,6 +408,11 @@ reason, and identical nodes connect as before.
 | (c) signed snapshots from others | storage.md mentions a signed snapshot after ts_F+30 days only | **[NORMATIVE]** before then |
 
 **Recommendation: (a) only, and confirm that block history is never compacted (b is rejected).**
+
+**Owner's decision (2026-10-24): (a) approved.** Local state checkpoints, keeping the block history the spec
+requires, with integrity checks of every checkpoint and recovery from a partial write. The design is in
+[C1-STORAGE-DESIGN.md](C1-STORAGE-DESIGN.md) (D-6). It is built on S5, since a checkpoint is then a committed
+store version, not a new serialization of an in-memory state.
 
 ---
 
