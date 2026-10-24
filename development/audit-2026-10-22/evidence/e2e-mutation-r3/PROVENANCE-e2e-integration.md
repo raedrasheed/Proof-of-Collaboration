@@ -5,7 +5,9 @@ not edited. Its only header line gives the binary sha256.
 
 The facts below come from the session transcript: the tool calls at 2026-10-23T18:58:16Z,
 18:58:22Z, 18:58:40Z and 19:13:51Z. The transcript is not in the repository. Each fact that can
-still be checked was re-checked on 2026-10-23, as noted.
+still be checked was re-checked on 2026-10-23, as noted, and again on 2026-10-24 after a container
+restart: the four tool calls were read back from the transcript, and every check below was
+repeated with the same result.
 
 ## What ran
 
