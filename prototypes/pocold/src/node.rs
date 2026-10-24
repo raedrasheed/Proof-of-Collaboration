@@ -18,6 +18,15 @@ impl chain::BlockBytes for Journal{
         self.read_at(off).map_err(|e|Reject::Block(format!("journal read_at {off}: {e:?}")))
     }
 }
+/// The node's block source: journal records, and (C-1 S4) the nonce ranges in history.redb.
+struct Src<'a>{journal:&'a Journal,history:&'a crate::history::History}
+impl chain::BlockBytes for Src<'_>{
+    fn record_at(&self,off:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8>),Reject>{chain::BlockBytes::record_at(self.journal,off)}
+    fn ranges_of(&self,hash:&[u8;32])->Option<Vec<(Address,u128,u128)>>{self.history.ranges(hash).ok().flatten()}
+}
+/// NeedsRebuild retries of one block: its parent, and (C-1 S4) each slimmed evidence ancestor restored in
+/// turn (only after the head fell back more than R_keep). Beyond them the block is refused, never accepted.
+const REBUILD_TRIES:usize=17;
 
 pub struct Config{
     pub dir:PathBuf,
@@ -48,8 +57,11 @@ pub struct Limits{pub net:net::Limits,pub rpc:crate::rpc::Limits,
     /// history is served from the journal and history.redb. A test reference sets u64::MAX (none offloaded).
     pub history_window:Option<u64>,
     /// C-1 S3a off: every retained state is kept full (the behaviour before S3a). A test reference only.
-    pub full_states:bool}
-impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None,history_window:None,full_states:false}}}
+    pub full_states:bool,
+    /// C-1 S4: canonical journaled entries deeper than this are slimmed (None: 2·R_keep + E_win + 257;
+    /// u64::MAX: never, a test reference).
+    pub slim_depth:Option<u64>}
+impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None,history_window:None,full_states:false,slim_depth:None}}}
 /// C-1 S1: replay refills history.redb with non-durable commits and makes them durable every this many blocks.
 const HISTORY_SYNC:u64=256;
 /// D-7: one slice of pool revalidation. The consensus thread is held for at most this, plus the
@@ -186,6 +198,8 @@ pub struct Stats{pub imported:u64,pub mined:u64,pub signed_templates:u64,pub fal
     pub sync_sessions:u64,pub sync_rounds:u64,pub refetched:u64,pub restored:u64,pub replay_skipped:u64,
     /// C-1 S1: blocks whose receipts and transaction index replay wrote to history.redb (missing ones).
     pub history_refilled:u64,
+    /// C-1 S4: slimmed entries restored for a validation (a parent or an evidence ancestor).
+    pub unslims:u64,
     /// Peers whose template from Draw(h,0) for this node's parent failed its checks (consensus.md:101).
     pub template_penalties:u64,
     /// D-7: pool revalidation slices run and the longest one (ms).
@@ -230,6 +244,9 @@ impl Node{
         let mut chain=Chain::new(spec);chain.r_keep=rk_replay;chain.side_cap=cfg.limits.side_cap;chain.replaying=true;
         // C-1 S1: canonical history below the resident window lives off the heap (journal + history.redb).
         let history=crate::history::History::open(&cfg.dir).map_err(|e|format!("history: {}",e.0))?;chain.history_window=Some(cfg.limits.history_window.unwrap_or(chain.k_hist));chain.keep_full_states=cfg.limits.full_states;
+        // C-1 S4: deeper than any fork (R_keep), a head that fell back by R_keep, the evidence window and
+        // the 256-ancestor window: no validation reads a slimmed entry unless the head fell back further.
+        chain.slim_depth=Some(cfg.limits.slim_depth.unwrap_or(2*rk_replay.max(cfg.limits.r_keep)+u64::from(chain.spec.cp().E_win)+257));
         // D-REORG-REDB replay. Every record is replayed in journal order with retain() after each, as
         // live import did. Live journals a block only after validating it on a present parent, and
         // only when it is absent, so: (1) a block whose NEXT journal event is a child record is
@@ -261,14 +278,16 @@ impl Node{
                 Err(Reject::UnknownParent)=>{skipped+=1;}
                 r=>{
                     let (mut entry,_)=match r{
-                        Err(Reject::NeedsRebuild(p))=>{chain.ensure_state_with(&p,Some(&rec.journal)).map_err(|e|format!("replay {i}: rebuild {e:?}"))?;chain.validate(&block,None,0).map_err(|e|format!("replay {i}: {e:?}"))?}
+                        Err(Reject::NeedsRebuild(p))=>{let src=Src{journal:&rec.journal,history:&history};let mut q=p;let mut tries=0;
+                            loop{chain.ensure_state_with(&q,Some(&src)).map_err(|e|format!("replay {i}: rebuild {e:?}"))?;tries+=1;
+                                match chain.validate(&block,None,0){Err(Reject::NeedsRebuild(n)) if tries<REBUILD_TRIES=>q=n,r=>break r.map_err(|e|format!("replay {i}: {e:?}"))?}}}
                         r=>r.map_err(|e|format!("replay {i}: {e:?}"))?,
                     };
                     if result_bytes(&entry.result)!=rb{return Err(format!("parentResultMismatch at record {i}"))}
                     entry.body_off=Some(this_off);
                     // Replay refills a store that was lost or damaged (I1): a stored block is left as it is.
                     // Writes are made durable every HISTORY_SYNC blocks (redb frees pages only then) and at the end.
-                    if history.put_with(&entry.hash,&entry.receipts,&entry.tx_hashes,false).map_err(|e|format!("replay {i}: history {}",e.0))?{refilled+=1;
+                    if history.put_with(&entry.hash,&entry.receipts,&entry.tx_hashes,&entry.ranges,false).map_err(|e|format!("replay {i}: history {}",e.0))?{refilled+=1;
                         if refilled%HISTORY_SYNC==0{history.sync().map_err(|e|format!("replay {i}: history {}",e.0))?;}}
                     chain.insert(entry);
                 }
@@ -281,13 +300,13 @@ impl Node{
             let fork_h=if chain.head!=old_head{chain.lca_height(&old_head,&chain.head).unwrap_or(0)}else{0};
             let adopted=chain.head!=old_head;
             chain.retain_unsettled();
-            if adopted{restored+=chain.restore_canonical(fork_h,&rec.journal).map_err(|e|format!("replay {i}: restore canonical {e:?}"))?;}
+            if adopted{restored+=chain.restore_canonical(fork_h,&Src{journal:&rec.journal,history:&history}).map_err(|e|format!("replay {i}: restore canonical {e:?}"))?;}
             chain.settle();
         }
         if refilled>0{history.sync().map_err(|e|format!("replay: history {}",e.0))?;}
         drop(events);chain.protect.clear();chain.replaying=false;chain.r_keep=cfg.limits.r_keep;chain.retain_unsettled();
         // Every adoption was restored above, so this finds nothing unless replay skipped a record.
-        restored+=chain.restore_canonical(0,&rec.journal).map_err(|e|format!("replay: restore canonical {e:?}"))?;chain.settle();
+        restored+=chain.restore_canonical(0,&Src{journal:&rec.journal,history:&history}).map_err(|e|format!("replay: restore canonical {e:?}"))?;chain.settle();
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
         let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.light_queue);let resp=crate::rpc::RespPools::new(&cfg.limits.rpc);
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
@@ -395,8 +414,11 @@ impl Node{
         // journaling, as local retention (governance.md:200), never as invalid.
         if !self.chain.blocks.contains_key(&hash)&&b.header.h.saturating_add(self.chain.r_keep)<=self.chain.head().height{return Err(Reject::Evicted)}
         let mut res=self.chain.validate(&b,Some(now_s()),self.capital_phi());
-        if let Err(Reject::NeedsRebuild(p))=&res{let p=*p;self.log("TrieRebuild for a fork below the K_hist window");
-            if let Err(e)=self.chain.ensure_state_with(&p,Some(&self.journal)){return Err(e)}res=self.chain.validate(&b,Some(now_s()),self.capital_phi());}
+        let mut tries=0;
+        while let Err(Reject::NeedsRebuild(p))=&res{let p=*p;if tries==REBUILD_TRIES{break}tries+=1;
+            if self.chain.get(&p).map_or(false,|e|e.slim){self.stats.unslims+=1;}else{self.log("TrieRebuild for a fork below the K_hist window");}
+            let src=Src{journal:&self.journal,history:&self.history};
+            if let Err(e)=self.chain.ensure_state_with(&p,Some(&src)){return Err(e)}res=self.chain.validate(&b,Some(now_s()),self.capital_phi());}
         let (mut entry,_)=match res{
             Ok(v)=>v,
             Err(Reject::UnknownParent)=>{
@@ -414,7 +436,7 @@ impl Node{
         // C-1 S1 (invariant I3): the receipts and transaction index are durable before the journal record.
         // A write that fails (a disk error, or a store marked damaged) stops the node as a failed journal
         // append does; the next open sets a damaged store aside and replay rebuilds it.
-        if let Err(e)=self.history.put(&entry.hash,&entry.receipts,&entry.tx_hashes){self.log(&format!("FATAL history write: {}",e.0));std::process::exit(70);}
+        if let Err(e)=self.history.put(&entry.hash,&entry.receipts,&entry.tx_hashes,&entry.ranges){self.log(&format!("FATAL history write: {}",e.0));std::process::exit(70);}
         let record=store::encode_record(&b.header.encoded,&b.body.encode(),&result_bytes(&entry.result));
         // D-REORG-REDB: record the journal frame offset so this block's body can be read back off-heap.
         match self.journal.append(&record){Ok(off)=>entry.body_off=Some(off),Err(e)=>{self.log(&format!("FATAL journal append: {e:?}"));std::process::exit(70);}}
@@ -433,7 +455,7 @@ impl Node{
         // D-REORG-REDB: the adopted blocks that were offloaded as non-canonical are made whole again
         // (after retain offloaded the abandoned branch, so the two are never resident together). C-1
         // S3a: before the side states are pruned (`settle`), so the fork point's state is reachable.
-        if new_head{match self.chain.restore_canonical(fork_h,&self.journal){Ok(n)=>self.stats.restored+=n as u64,
+        if new_head{match self.chain.restore_canonical(fork_h,&Src{journal:&self.journal,history:&self.history}){Ok(n)=>self.stats.restored+=n as u64,
             Err(e)=>{self.log(&format!("FATAL restore of the adopted branch: {e:?}"));std::process::exit(70);}}}
         self.chain.settle();
         self.broadcast(&Msg::Block{header:b.header.encoded.clone(),body:b.body.encode()},from);
@@ -912,7 +934,7 @@ impl Node{
     /// served from its journal record, byte-equal to what was imported (VA-SPEC §4).
     pub fn block_msg(&self,hash:&[u8;32])->Option<Msg>{
         let e=self.chain.get(hash).filter(|e|e.height>0)?;
-        if !e.offloaded{return Some(Msg::Block{header:e.header.encoded.clone(),body:e.body.encode()})}
+        if !e.offloaded&&!e.slim{return Some(Msg::Block{header:e.header.encoded.clone(),body:e.body.encode()})}
         match self.journal.read_at(e.body_off?){Ok((hb,bb,_))=>Some(Msg::Block{header:hb,body:bb}),Err(err)=>{self.log(&format!("journal read for {}: {err:?}",&hex(hash)[..14]));None}}
     }
     /// A stored block for RPC (eth_getBlockByHash): as stored when resident; an offloaded one (a side block,
@@ -923,11 +945,16 @@ impl Node{
     pub fn block_view(&self,hash:&[u8;32])->Option<std::borrow::Cow<'_,Entry>>{self.view(self.chain.get(hash)?)}
     /// `block_view` of an entry the caller already holds.
     pub fn view<'a>(&'a self,e:&'a Entry)->Option<std::borrow::Cow<'a,Entry>>{
-        if !e.offloaded{return Some(std::borrow::Cow::Borrowed(e))}
+        if !e.offloaded&&!e.slim{return Some(std::borrow::Cow::Borrowed(e))}
         let hash=e.hash;
-        let (hb,bb,_)=self.journal.read_at(e.body_off?).map_err(|err|self.log(&format!("journal read for {}: {err:?}",&hex(&hash)[..14]))).ok()?;
-        let body=Body::decode(&bb,self.chain.spec.cp().BODY_MAX as usize).ok()?;
-        let mut v=e.meta_clone();v.tx_hashes=body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();v.body=body;v.header.encoded=hb;v.offloaded=false;
+        let (hb,bb,rb)=self.journal.read_at(e.body_off?).map_err(|err|self.log(&format!("journal read for {}: {err:?}",&hex(&hash)[..14]))).ok()?;
+        let mut v=e.meta_clone();
+        if e.offloaded{let body=Body::decode(&bb,self.chain.spec.cp().BODY_MAX as usize).ok()?;v.tx_hashes=body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();v.body=body;}
+        // C-1 S4: a slimmed entry's header fields and ParentResult come back from the same record.
+        if e.slim{v.header=decode_header(&hb).ok()?;v.result=chain::decode_result(&rb,&hash).ok()?;v.slim=false;}
+        v.header.encoded=hb;
+        if !e.offloaded{return Some(std::borrow::Cow::Owned(v))}
+        v.offloaded=false;
         // Every journaled block's receipts were stored before its record (I3) or by replay: a missing or
         // damaged record means the store is damaged. No partial answer is given; the next open rebuilds it.
         match self.history.receipts(&hash){Ok(Some(r))=>v.receipts=r,
@@ -938,11 +965,16 @@ impl Node{
     /// C-1 S3a: a stored block with its full state (materialized through the diffs, or rebuilt), for
     /// production on it. None if it cannot be had.
     fn full_entry(&mut self,h:&[u8;32])->Option<Entry>{
-        if let Err(e)=self.chain.ensure_state_with(h,Some(&self.journal)){self.log(&format!("state for {}: {e:?}",&hex(h)[..14]));return None}
+        if let Err(e)=self.chain.ensure_state_with(h,Some(&Src{journal:&self.journal,history:&self.history})){self.log(&format!("state for {}: {e:?}",&hex(h)[..14]));return None}
         self.chain.get(h).cloned()
     }
+    /// C-1 S4: a stored block with its slimmed fields restored (header, ParentResult, nonce ranges) from
+    /// the journal and history.redb; itself when not slimmed. For inspection and tests.
+    pub fn restored_entry(&self,h:&[u8;32])->Option<Entry>{
+        let e=self.chain.get(h)?;self.chain.restored(e,Some(&Src{journal:&self.journal,history:&self.history})).ok().map(|x|x.into_owned())
+    }
     /// TrieRebuild of a stored block's state through the journal (offloaded bodies read back).
-    pub fn rebuild_state(&mut self,hash:&[u8;32])->Result<(),Reject>{self.chain.ensure_state_with(hash,Some(&self.journal))}
+    pub fn rebuild_state(&mut self,hash:&[u8;32])->Result<(),Reject>{self.chain.ensure_state_with(hash,Some(&Src{journal:&self.journal,history:&self.history}))}
     /// A stored block's committed body (resident or from the journal).
     pub fn body_of(&self,hash:&[u8;32])->Result<Body,Reject>{let e=self.chain.get(hash).ok_or(Reject::UnknownParent)?;self.chain.body_of(e,Some(&self.journal))}
     pub fn pool_state(&self)->&InMemoryDB{&self.pool.pending_state}

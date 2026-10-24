@@ -866,10 +866,11 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     // RpcGuard review 2 (m2): the total is pinned, so a term cannot change unnoticed (round 3: the
     // small-answer term counts SMALL_REPLY_PEAK per connection, +4,082,688 B; C-1 S1: canonical history
     // below the resident window is off the heap, 5,487,223,178 -> 4,323,240,949 B; C-1 S3a: retained
-    // canonical states as diffs, -> 3,601,500,638 B). Some terms are type
+    // canonical states as diffs, -> 3,601,500,638 B; C-1 S4: old canonical entries slimmed,
+    // -> 3,322,680,105 B). Some terms are type
     // sizes (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
     // target checks that it boots within the budget with its reserve.
-    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_601_500_638,"the A13 model total changed");}
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_322_680_105,"the A13 model total changed");}
     // C-1 S1: a window of the whole chain is the model before S1, plus history.redb's cache and allocator.
     let all=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits{history_window:Some(u64::MAX),..Default::default()},2).unwrap();
     let redb:u128=all.items.iter().filter(|x|x.0.starts_with("history/history.redb")).map(|x|x.1).sum();
@@ -1235,7 +1236,7 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
     // the reference; its receipts and index go into A's store as import writes them, and A stops there.
     let x=branch(&mut h,p,1,&[Body{txs:vec![pay(&alice,48,9)],evidence:vec![]}]).remove(0);let xt=format!("{}",revm::primitives::keccak256(&x.body.txs[0]));
     b.import(x.clone(),None).unwrap();let ex=b.chain.get(&x.hash()).unwrap().clone();
-    let r=open();r.history.put(&ex.hash,&ex.receipts,&ex.tx_hashes).unwrap();drop(r);
+    let r=open();r.history.put(&ex.hash,&ex.receipts,&ex.tx_hashes,&ex.ranges).unwrap();drop(r);
     let mut r=open();assert_eq!(r.chain.head,p,"the block was never journaled");assert!(r.history.has(&x.hash()).unwrap(),"positive control: the orphan entry is there");
     assert!(rpc_local(&mut r,"eth_getTransactionByHash",json!([xt])).is_null()&&rpc_local(&mut r,"eth_getTransactionReceipt",json!([xt])).is_null(),"an orphan entry is never read");
     assert_eq!(views(&mut r,&txs),want,"after the crash");
@@ -1454,6 +1455,90 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
     assert_eq!((a.chain.rebuilds,a.chain.restore_reexecs,a.stats.restored),(b.chain.rebuilds,b.chain.restore_reexecs,b.stats.restored),"the same rebuild and restore work");
     drop(a);drop(b);let mut a=Node::open(ca(),admitted(&cfg(&["a","b","c"]))).unwrap();let mut b=Node::open(cb(),admitted(&cfg(&["a","b","c"]))).unwrap();
     compare(&mut a,&mut b,"after reopen");
+    for d in [da,db]{let _=std::fs::remove_dir_all(&d);}
+}
+
+/// C-1 S4 acceptance: canonical entries deeper than `slim_depth` drop the header's heap fields, the
+/// ParentResult and the nonce ranges, and are restored exactly from the journal record and history.redb.
+/// A node slimming at depth 8 answers every block, transaction, receipt, log, header and block-bytes
+/// query, and serves every P2P block, as a reference that never slims. Every slimmed entry restores to the
+/// reference's header, ParentResult and ranges. A side block on a slimmed parent (a fork the depth would
+/// not allow by default) is validated after the parent is restored, and the parent is slimmed again later.
+/// The same holds after reopen.
+#[test] fn s4_slimmed_entries_answer_as_full_ones_and_restore_exactly(){
+    use pocold::node::{Config,Limits,Node};
+    let mk=|tag:&str,depth:u64|{let dir=std::env::temp_dir().join(format!("pocold-s4-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+        let d=dir.clone();let t=tag.to_string();let conf=move||Config{dir:d.clone(),name:t.clone(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{slim_depth:Some(depth),..Default::default()}};
+        (Node::open(conf(),admitted(&cfg(&["a","b","c"]))).unwrap(),dir,conf)};
+    let (mut a,da,ca)=mk("slim",8);let (mut b,db,_)=mk("ref",u64::MAX);
+    let (_,blocks,p)=s1_chain();
+    let txs:Vec<String>=blocks.iter().flat_map(|x|x.body.txs.iter().map(|t|format!("{}",revm::primitives::keccak256(t)))).collect();
+    for n in [&mut a,&mut b]{for x in &blocks{n.import(x.clone(),None).unwrap();}assert_eq!(n.chain.head,p);}
+    let views=|n:&mut Node|->Vec<serde_json::Value>{let top=n.chain.head().height;let mut v=chain_view(n);
+        for t in &txs{v.push(rpc_local(n,"eth_getTransactionByHash",json!([t])));v.push(rpc_local(n,"eth_getTransactionReceipt",json!([t])));}
+        v.push(rpc_local(n,"eth_getLogs",json!([{"fromBlock":"0x0","toBlock":format!("{top:#x}")}])));
+        v.push(rpc_local(n,"pocol_getHeaders",json!(["0x1",format!("{top:#x}")])));
+        for x in 0..=top{v.push(rpc_local(n,"pocol_getBlockRlp",json!([format!("{x:#x}")])));let hash=n.chain.canonical_at(x).unwrap().hash;
+            v.push(rpc_local(n,"eth_getBlockByHash",json!([hex(&hash),true])));v.push(json!(n.block_msg(&hash).map(|m|format!("{m:?}"))));}
+        v};
+    let slims=|n:&Node|n.chain.blocks.values().filter(|e|e.slim).count();
+    let exact=|a:&Node,b:&Node|{let mut k=0;for e in a.chain.blocks.values().filter(|e|e.slim){
+        let r=a.restored_entry(&e.hash).unwrap();let f=b.chain.get(&e.hash).unwrap();let mut fh=f.header.clone();if r.offloaded{fh.encoded=Vec::new();}
+        assert_eq!((&r.header,&r.result,&r.ranges),(&fh,&f.result,&f.ranges),"h={}: restored exactly",e.height);assert!(!r.ranges.is_empty()&&r.result.is_some());k+=1;}k};
+    assert!(slims(&a)>80&&slims(&b)==0,"positive control: {} slimmed entries, the reference {}",slims(&a),slims(&b));
+    let top=a.chain.head().height;let slim_h:Vec<u64>=(1..=top).filter(|h|a.chain.canonical_at(*h).unwrap().slim).collect();
+    assert_eq!(slim_h,(1..top-8).collect::<Vec<_>>(),"exactly the canonical entries deeper than 8 are slimmed");
+    let small=a.chain.blocks.values().filter(|e|e.slim).map(|e|e.header.ut_raw.len()+e.ranges.len()+e.result.as_ref().map_or(0,|r|r.shares.len())).sum::<usize>();assert_eq!(small,0);
+    assert_eq!(exact(&a,&b),slims(&a));
+    let want=views(&mut b);assert_eq!(views(&mut a),want,"slimmed entries answer as full ones");
+    // A fork on a slimmed parent 20 blocks deep (allowed by R_keep, refused by the default depth): A
+    // restores the parent to validate it, as B validates it without.
+    let mut h=net();for x in &blocks{import(&mut h,x);}let fork=a.chain.canonical_at(a.chain.head().height-20).unwrap().hash;
+    assert!(a.chain.get(&fork).unwrap().slim,"positive control: the fork point is slimmed");
+    let side=fallback(&h,fork,1);
+    a.import(side.clone(),None).unwrap();b.import(side.clone(),None).unwrap();
+    assert!(a.stats.unslims>=1,"the slimmed parent was restored for the validation");
+    assert_eq!(a.chain.get(&side.hash()).map(|e|e.hash),b.chain.get(&side.hash()).map(|e|e.hash));
+    assert!(a.chain.get(&fork).unwrap().slim,"and slimmed again by the next retain");
+    assert_eq!(views(&mut a),views(&mut b),"after the fork on a slimmed parent");
+    drop(a);let mut r=Node::open(ca(),admitted(&cfg(&["a","b","c"]))).unwrap();
+    assert!(slims(&r)>80);assert_eq!(exact(&r,&b),slims(&r));assert_eq!(views(&mut r),views(&mut b),"after reopen");drop(r);
+    for d in [da,db]{let _=std::fs::remove_dir_all(&d);}
+}
+
+/// C-1 S4: type-2 evidence whose ancestor (the equivocating winner's block) is slimmed. A node slimming
+/// at depth 3 restores that ancestor for the evidence walk and accepts the block with the same effect
+/// (the winner tombstoned) as a node that never slims.
+#[test] fn s4_evidence_against_a_slimmed_ancestor_restores_it_first(){
+    use pocold::node::{Config,Limits,Node};
+    let mut n=net();for _ in 0..3{let h=n.chain.head;let b=fallback(&n,h,0);import(&mut n,&b);}
+    let mut seq:Vec<Block>=n.chain.canonical.iter().skip(1).map(|h|{let e=&n.chain.blocks[h];Block{header:e.header.clone(),body:e.body.clone()}}).collect();
+    let head=n.chain.head;let b4=fallback(&n,head,0);import(&mut n,&b4);seq.push(b4.clone());
+    let winner=n.chain.head().result.clone().unwrap().winner;let tid=template_id(&b4.header.ut_raw);
+    let mut alt=b4.header.clone();alt.shares=vec![];reseal(&mut alt);
+    let (root1,root2)=(share_root(&b4.header),share_root(&alt));assert_ne!(root1,root2);
+    let sig2=n.keys[&winner].sign_hash(&B256::from(hashes::win_msg(&tid,b4.header.nonce,&root2)));
+    let mut ev2=Vec::new();rlp::encode_bytes(&[2],&mut ev2);rlp::encode_bytes(&tid,&mut ev2);rlp::encode_bytes(&b4.header.nonce.to_be_bytes(),&mut ev2);
+    rlp::encode_bytes(&root1,&mut ev2);rlp::encode_bytes(&b4.header.winner_sig,&mut ev2);rlp::encode_bytes(&root2,&mut ev2);rlp::encode_bytes(&sig2,&mut ev2);
+    let mut e2=Vec::new();rlp::encode_list_payload(&ev2,&mut e2);
+    // Blocks until b4 is 8 deep, then the first height whose drawn proposer is not the winner carries e2.
+    loop{let h=n.chain.head;let p=n.chain.full_entry(&h).unwrap();let ctx=n.chain.child_ctx(&p,0).unwrap();
+        if p.height>=12&&ctx.proposer!=winner{
+            let body=Body{txs:vec![],evidence:vec![e2.clone()]};let effects=n.chain.evidence_effects(&p,&body,p.height+1).unwrap();
+            let (hd,_,_)=n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower(),body.clone(),effects).unwrap();
+            let x=seal_block(&n,hd,body,0,0);import(&mut n,&x);seq.push(x);break}
+        assert!(p.height<4+16,"no eligible proposer within E_win");let x=fallback(&n,h,0);import(&mut n,&x);seq.push(x);}
+    let mk=|tag:&str,depth:u64|{let dir=std::env::temp_dir().join(format!("pocold-s4ev-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+        (Node::open(Config{dir:dir.clone(),name:tag.into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{slim_depth:Some(depth),..Default::default()}},admitted(&cfg(&["a","b","c"]))).unwrap(),dir)};
+    let (mut a,da)=mk("slim",3);let (mut b,db)=mk("ref",u64::MAX);
+    for x in &seq[..seq.len()-1]{a.import(x.clone(),None).unwrap();b.import(x.clone(),None).unwrap();}
+    assert!(a.chain.get(&b4.hash()).unwrap().slim,"positive control: the evidence's ancestor is slimmed");
+    let before=a.stats.unslims;let last=seq.last().unwrap().clone();
+    a.import(last.clone(),None).unwrap();b.import(last.clone(),None).unwrap();
+    assert!(a.stats.unslims>before,"the slimmed ancestor was restored for the evidence walk");
+    assert_eq!(a.chain.head,b.chain.head);assert_eq!(a.chain.head,last.hash());
+    let r=apply::miner_record(&a.chain.head().state,winner).unwrap();assert!(r.tomb,"the equivocating winner is tombstoned");
+    assert_eq!(apply::state_root(&a.chain.head().state).unwrap(),apply::state_root(&b.chain.head().state).unwrap());
     for d in [da,db]{let _=std::fs::remove_dir_all(&d);}
 }
 

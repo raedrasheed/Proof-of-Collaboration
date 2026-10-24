@@ -79,6 +79,10 @@ pub struct Entry{
     /// C-1 S3a: this block's state as a diff from its parent's (set when it is validated or re-executed;
     /// kept for canonical blocks above the K_hist cut and for side blocks that keep a state).
     pub diff:Option<std::sync::Arc<crate::statediff::StateDiff>>,
+    /// C-1 S4: the header's heap fields, the ParentResult and the nonce ranges were dropped (an old
+    /// canonical block, deeper than `Chain::slim_depth`); `Chain::unslim` restores them exactly from the
+    /// journal record and history.redb.
+    pub slim:bool,
     /// Draw(h,0) for this block's height on its branch (evidence type 1 DrawIndex).
     pub drawn:Address,
     /// This block's nonce ranges (owner lookup for evidence without old state).
@@ -95,7 +99,26 @@ pub struct Entry{
 /// Source of a block's bytes for the off-heap store: given a journal frame offset (an `Entry.body_off`),
 /// returns (headerBytes, bodyBytes, parentResultBytes). Implemented by the node over `store::Journal`
 /// (`read_at`); a bare chain passes `None` and never offloads, so it is never called there.
-pub trait BlockBytes{fn record_at(&self,off:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8>),Reject>;}
+pub trait BlockBytes{fn record_at(&self,off:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8>),Reject>;
+    /// C-1 S4: a block's stored nonce ranges (history.redb), for restoring a slimmed entry.
+    fn ranges_of(&self,_hash:&[u8;32])->Option<Vec<(Address,u128,u128)>>{None}}
+/// C-1 S4: drops what a slimmed entry does not keep: the header's heap fields, the ParentResult and the
+/// nonce ranges. Fork choice, contexts and evidence read only the rest at these depths.
+fn slim(e:&mut Entry){let h=&mut e.header;h.logs_bloom=Vec::new();h.proposer=Vec::new();h.sig=Vec::new();h.shares=Vec::new();h.ut_raw=Vec::new();
+    h.share_list_raw=Vec::new();h.encoded=Vec::new();e.result=None;e.ranges=Vec::new();e.slim=true;}
+/// The ParentResult of block `hash` from its journal record's result bytes (node::result_bytes).
+pub fn decode_result(rb:&[u8],hash:&[u8;32])->Result<Option<ParentResult>,Reject>{
+    let bad=||Reject::Block("result bytes".into());
+    let it=crate::rlp::decode(rb).map_err(|_|bad())?;let l=it.list().ok_or_else(bad)?;
+    if l.is_empty(){return Ok(None)}
+    if l.len()!=2{return Err(bad())}
+    let w=l[0].bytes().ok_or_else(bad)?;if w.len()!=20{return Err(bad())}
+    let mut shares=Vec::new();
+    for s in l[1].list().ok_or_else(bad)?{let q=s.list().ok_or_else(bad)?;if q.len()!=2{return Err(bad())}
+        let n=q[0].bytes().ok_or_else(bad)?;let o=q[1].bytes().ok_or_else(bad)?;if n.len()!=8||o.len()!=20{return Err(bad())}
+        shares.push((u64::from_be_bytes(n.try_into().unwrap()),Address::from_slice(o)));}
+    Ok(Some(ParentResult{block_hash:B256::from(*hash),winner:Address::from_slice(w),shares}))
+}
 /// Drops a journaled block's bytes from memory (D-REORG-REDB): body, receipts, tx hashes and the
 /// encoded header. Fork choice, child contexts and evidence ancestry read only the metadata kept.
 fn offload(e:&mut Entry){e.body=Body::default();e.receipts=Vec::new();e.tx_hashes=Vec::new();e.header.encoded=Vec::new();e.offloaded=true;}
@@ -105,7 +128,7 @@ impl Entry{
         Entry{hash:self.hash,header:self.header.clone(),body:self.body.clone(),height:self.height,parent:self.parent,total_work:self.total_work,import_seq:self.import_seq,
             signed:self.signed,ts:self.ts,target:self.target,base_fee:self.base_fee,gas_used:self.gas_used,seal:self.seal,state:InMemoryDB::default(),is_final:self.is_final,
             result:self.result.clone(),receipts:self.receipts.clone(),tx_hashes:self.tx_hashes.clone(),cum_txs:self.cum_txs,cum_tx_bytes:self.cum_tx_bytes,
-            cum_log_bytes:self.cum_log_bytes,pruned:true,full:false,diff:self.diff.clone(),drawn:self.drawn,ranges:self.ranges.clone(),body_off:self.body_off,offloaded:self.offloaded}
+            cum_log_bytes:self.cum_log_bytes,pruned:true,full:false,diff:self.diff.clone(),slim:self.slim,drawn:self.drawn,ranges:self.ranges.clone(),body_off:self.body_off,offloaded:self.offloaded}
     }
 }
 
@@ -156,6 +179,10 @@ pub struct Chain{
     pub materializations:std::sync::atomic::AtomicU64,
     /// C-1 S3a off: every retained state stays full (the behaviour before S3a; a test reference).
     pub keep_full_states:bool,
+    /// C-1 S4: canonical journaled blocks deeper than this below the head are slimmed (None: never).
+    /// `slim_cursor`: every canonical height below it was slimmed once; `unslimmed`: entries restored
+    /// since, slimmed again when they are deep enough.
+    pub slim_depth:Option<u64>,pub slim_cursor:u64,pub unslimmed:Vec<[u8;32]>,
     /// C-1 S1: when set (by a node whose receipts and transaction index live in `history.redb`), canonical
     /// journaled blocks more than this many blocks below the head are offloaded like side blocks; the
     /// last `history_window` canonical blocks stay resident. None for a bare chain: nothing canonical is
@@ -191,10 +218,10 @@ impl Chain{
         let mut h=blank_header();h.chain_id=spec.chain_id();h.genesis_hash=gh;h.ts=cp.g_ts;h.target=spec.target_g();
         let genesis=Entry{hash:gh,header:h,body:Body::default(),height:0,parent:None,total_work:U256::ZERO,import_seq:0,signed:false,ts:cp.g_ts,
             target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis().state().clone(),is_final:false,result:None,
-            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,full:true,diff:None,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false};
+            receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,full:true,diff:None,slim:false,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
         let k_hist=u64::from(spec.local().k_hist);
-        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,materializations:Default::default(),keep_full_states:false,history_window:None,history_cursor:1,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
+        Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,materializations:Default::default(),keep_full_states:false,slim_depth:None,slim_cursor:1,unslimmed:Vec::new(),history_window:None,history_cursor:1,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
             r_keep:R_KEEP,side_cap:SIDE_BLOCKS_MAX,protect:Default::default(),replaying:false}
     }
     pub fn head(&self)->&Entry{&self.blocks[&self.head]}
@@ -285,7 +312,7 @@ impl Chain{
         if x.protocol_version!=self.spec.active_version(x.h){return blk("netVersion")}
         if !self.blocks.contains_key(&x.parent_hash){return Err(Reject::UnknownParent)}
         if let Some(r)=self.invalid.get(&x.parent_hash){return blk(format!("ancestorInvalid {r}"))}
-        if self.blocks[&x.parent_hash].pruned{return Err(Reject::NeedsRebuild(x.parent_hash))}
+        if self.blocks[&x.parent_hash].pruned||self.blocks[&x.parent_hash].slim{return Err(Reject::NeedsRebuild(x.parent_hash))}
         // C-1 S3a: a retained parent state that is not held full is materialized through the diffs.
         let materialized;
         let p=if self.blocks[&x.parent_hash].full{&self.blocks[&x.parent_hash]}else{
@@ -363,7 +390,7 @@ impl Chain{
         // C-1 S3a: the diff from the parent's state, while both are at hand.
         let diff=Some(std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state)));
         let entry=Entry{hash,header:x.clone(),body:b.body.clone(),height:x.h,parent:Some(p.hash),total_work:p.total_work.saturating_add(work(&x.target)),
-            import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,full:true,diff,
+            import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,full:true,diff,slim:false,
             result:Some(ParentResult{block_hash:B256::from(hash),winner:addr(&owner),shares}),receipts:out.receipts,tx_hashes,
             cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,cum_log_bytes:p.cum_log_bytes+out.log_bytes,pruned:false,drawn:ctx.proposer,
             ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect(),body_off:None,offloaded:false};
@@ -438,6 +465,8 @@ impl Chain{
         let mut cur=Some(p);
         while let Some(e)=cur{
             if e.height==0||e.height+u64::from(self.spec.cp().E_win)<h_incl{break}
+            // C-1 S4: an ancestor this walk needs is restored first (never inside the slim depth).
+            if e.slim{return Err(Reject::NeedsRebuild(e.hash))}
             if template_id(&e.header.ut_raw)==tid{
                 // owner(nonce) under that block's assignment (stored ranges, D142).
                 let owner=e.ranges.iter().find(|(_,s0,e0)|*s0<=nonce as u128&&(nonce as u128)<*e0).map(|r|r.0).ok_or_else(||Reject::Block("ev2 nonce outside nMax".into()))?;
@@ -521,6 +550,17 @@ impl Chain{
         // append), so no crash can lose them; genesis is never journaled and never offloaded.
         let side_left=side(self);
         for h in &side_left{if let Some(e)=self.blocks.get_mut(h){if !e.offloaded&&e.body_off.is_some()&&e.height>0{offload(e);}}}
+        // C-1 S4: canonical journaled entries deeper than slim_depth keep only what fork choice, contexts
+        // and evidence read at that depth (restored on demand, `unslim`).
+        if let Some(d)=self.slim_depth{
+            let floor=head_h.saturating_sub(d);
+            let again:Vec<[u8;32]>=std::mem::take(&mut self.unslimmed);
+            for h in again{match self.blocks.get_mut(&h){Some(e) if e.height<floor&&!e.slim&&e.body_off.is_some()&&self.canonical.get(e.height as usize)==Some(&h)=>slim(e),Some(_)=>self.unslimmed.push(h),None=>{}}}
+            while self.slim_cursor<floor{
+                if let Some(h)=self.canonical.get(self.slim_cursor as usize).copied(){if let Some(e)=self.blocks.get_mut(&h){if !e.slim&&e.body_off.is_some(){slim(e);}}}
+                self.slim_cursor+=1;
+            }
+        }
         // C-1 S1: canonical history below the resident window goes off the heap too; its receipts and
         // transaction index are in history.redb (written before the journal record, invariant I3).
         if let Some(w)=self.history_window{
@@ -620,6 +660,7 @@ impl Chain{
         // does not commit sig/winnerSig) and serves it from that record, so replay keeps the same copy.
         let Some(e)=self.blocks.get_mut(hash) else{return};e.import_seq=self.next_seq;self.next_seq+=1;
         let resident=!e.offloaded;e.header=header;if !resident{e.header.encoded=Vec::new();}if body_off.is_some(){e.body_off=body_off;}
+        if e.slim{e.slim=false;slim(e);}
         if self.is_canonical(hash){self.recompute_head();}
         else if self.better(hash,&self.head.clone()){self.head=*hash;self.rebuild_canonical();}
     }
@@ -678,12 +719,15 @@ impl Chain{
         if (was_pruned||!was_full)&&ph!=self.canonical[0]{let x=self.blocks.get_mut(&ph).unwrap();x.state=InMemoryDB::default();x.full=false;x.pruned=was_pruned;}
         let mut n=0;
         for hgt in first..=last{
-            let hash=self.canonical[hgt as usize];let e=&self.blocks[&hash];
+            let hash=self.canonical[hgt as usize];let er=self.meta_restored(&hash,Some(src))?;let e=&er;
             let (hb,bb)=if e.offloaded{let o=e.body_off.ok_or_else(||Reject::Block("offloaded block without body_off".into()))?;let (hb,bb,_)=src.record_at(o)?;(Some(hb),Some(bb))}else{(None,None)};
             let body=match &bb{Some(bb)=>Body::decode(bb,self.spec.cp().BODY_MAX as usize).map_err(|_|Reject::Block("offloaded body decode".into()))?,None=>e.body.clone()};
             if let Some(hb)=&hb{if decode_header(hb).map(|h|block_hash(&h)).ok()!=Some(hash){return blk("restore: journal header does not hash to the block")}}
             let out=self.reexec(&p,e,&body)?;self.restore_reexecs+=1;
             if out.receipts_root.0!=e.header.receipts_root||out.gas_used!=e.header.gas_used{return blk("restore: receipts mismatch")}
+            let x=self.blocks.get_mut(&hash).unwrap();
+            // C-1 S4: a slimmed block made whole here is restored first (the next block reads its result).
+            if x.slim{x.header=er.header.clone();x.result=er.result.clone();x.ranges=er.ranges.clone();x.slim=false;self.unslimmed.push(hash);}
             let x=self.blocks.get_mut(&hash).unwrap();
             // C-1 S3a: a re-executed block keeps its diff (an adopted block pruned as a side block had none).
             if x.diff.is_none(){x.diff=Some(std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state)));}
@@ -700,6 +744,36 @@ impl Chain{
     pub fn was_evicted(&self,hash:&[u8;32])->bool{self.evicted.contains(hash)}
     /// Non-canonical blocks, and those holding a state (A13 accounting, status).
     pub fn side_counts(&self)->(usize,usize){let side=self.blocks.values().filter(|e|e.height>0&&!self.is_canonical(&e.hash));let (mut n,mut s)=(0,0);for e in side{n+=1;if !e.pruned{s+=1}}(n,s)}
+    /// C-1 S4: a slimmed entry's header (the journal record's header bytes), ParentResult (its result
+    /// bytes) and nonce ranges (history.redb), each checked against the entry it restores.
+    fn restored_fields(&self,e:&Entry,src:&dyn BlockBytes)->Result<(Header,Option<ParentResult>,Vec<(Address,u128,u128)>),Reject>{
+        let off=e.body_off.ok_or_else(||Reject::Block("slim entry without body_off".into()))?;let (hb,_,rb)=src.record_at(off)?;
+        let header=decode_header(&hb).map_err(|_|Reject::Block("slim header decode".into()))?;
+        if block_hash(&header)!=e.hash{return blk("slim: journal header does not hash to the block")}
+        let result=decode_result(&rb,&e.hash)?;
+        let ranges=src.ranges_of(&e.hash).ok_or_else(||Reject::Block("slim: ranges unavailable".into()))?;
+        Ok((header,result,ranges))
+    }
+    /// A copy of `e` with its slimmed fields restored (`e` itself when it is not slim).
+    pub fn restored<'a>(&self,e:&'a Entry,src:Option<&dyn BlockBytes>)->Result<std::borrow::Cow<'a,Entry>,Reject>{
+        if !e.slim{return Ok(std::borrow::Cow::Borrowed(e))}
+        let (mut header,result,ranges)=self.restored_fields(e,src.ok_or_else(||Reject::Block("slim entry without a block source".into()))?)?;
+        if e.offloaded{header.encoded=Vec::new();}
+        let mut x=e.meta_clone();x.state=InMemoryDB::default();x.pruned=e.pruned;x.full=false;x.header=header;x.result=result;x.ranges=ranges;x.slim=false;
+        Ok(std::borrow::Cow::Owned(x))
+    }
+    /// A stored block's metadata copy (no state) with its slimmed fields restored.
+    fn meta_restored(&self,h:&[u8;32],src:Option<&dyn BlockBytes>)->Result<Entry,Reject>{
+        let e=&self.blocks[h];if !e.slim{return Ok(e.meta_clone())}
+        Ok(self.restored(e,src)?.into_owned())
+    }
+    /// C-1 S4: restores a slimmed entry in place (it is slimmed again by `retain` once it is deep enough).
+    pub fn unslim(&mut self,h:&[u8;32],src:&dyn BlockBytes)->Result<(),Reject>{
+        let e=self.blocks.get(h).ok_or_else(||Reject::Block("unslim target".into()))?;if !e.slim{return Ok(())}
+        let (mut header,result,ranges)=self.restored_fields(e,src)?;
+        let x=self.blocks.get_mut(h).unwrap();if x.offloaded{header.encoded=Vec::new();}
+        x.header=header;x.result=result;x.ranges=ranges;x.slim=false;self.unslimmed.push(*h);Ok(())
+    }
     /// TrieRebuild: re-executes from the nearest retained ancestor and checks
     /// every stateRoot against the committed header.
     pub fn ensure_state(&mut self,hash:&[u8;32])->Result<(),Reject>{self.ensure_state_with(hash,None)}
@@ -708,6 +782,8 @@ impl Chain{
     /// `None`. A pruned block reached on the rebuild path that is offloaded but has no source, or no
     /// `body_off`, is an error — never a silent empty body.
     pub fn ensure_state_with(&mut self,hash:&[u8;32],src:Option<&dyn BlockBytes>)->Result<(),Reject>{
+        // C-1 S4: a slimmed target is restored first (the caller needs its fields, as a parent or ancestor).
+        if self.blocks.get(hash).map_or(false,|e|e.slim){self.unslim(hash,src.ok_or_else(||Reject::Block("slim entry without a block source".into()))?)?;}
         let e=self.blocks.get(hash).ok_or_else(||Reject::Block("rebuild target".into()))?;
         if e.full&&!e.pruned{return Ok(())}
         // C-1 S3a: a state that is not pruned is built from a full state through the diffs.
@@ -720,12 +796,13 @@ impl Chain{
             if !e.pruned{if e.full{break e.state.clone()}if let Some(st)=self.materialize(&cur){self.materializations.fetch_add(1,std::sync::atomic::Ordering::Relaxed);break st}}
             path.push(cur);cur=e.parent.ok_or_else(||Reject::Block("rebuild root".into()))?;
         };
-        let root=&self.blocks[&cur];
+        let root=self.meta_restored(&cur,src)?;let root=&root;
         // A13: rolling re-execution. Only the block being extended holds a state; intermediate
         // states are dropped, so a rebuild of any depth keeps at most two snapshots alive.
         let mut p=root.meta_clone();p.state=root_state;
         for h in path.into_iter().rev(){
-            let e=self.blocks[&h].meta_clone();
+            // A slimmed block on the path is re-executed from its restored fields (not kept).
+            let e=self.meta_restored(&h,src)?;
             // Off-heap body: fetched and decoded from the journal when this block was offloaded.
             let body=self.body_of(&e,src)?;
             let out=self.reexec(&p,&e,&body)?;

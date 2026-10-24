@@ -184,9 +184,17 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // counted at one byte per 4 KiB page of the file. The file holds per block a receipts record and per
     // transaction an index entry, at most HISTORY_FILE_FACTOR times their bytes (measured below 4.2,
     // evidence/c1-s1/).
-    let payload=add(&[mul(blocks,32+32+64)?,mul(u128::from(cp.TX_CAP),RECEIPT_BASE+4+64+4)?,u128::from(caps::LOG_CAP)/32*33])?;
+    // C-1 S4: each block's nonce ranges too (owner 20 + start 16 + end 16 bytes per member, a seal).
+    let payload=add(&[mul(blocks,32+32+64)?,mul(blocks,32+32+52*m)?,mul(u128::from(cp.TX_CAP),RECEIPT_BASE+4+64+4)?,u128::from(caps::LOG_CAP)/32*33])?;
+    // C-1 S4: canonical journaled entries deeper than slim_depth (default 2·R_keep + E_win + 257) keep only
+    // the entry, its map slot and canonical index, and an empty state; the header's heap fields, the
+    // ParentResult and the nonce ranges are restored from the journal and history.redb on demand.
+    let depth=u128::from(limits.slim_depth.unwrap_or(2*limits.r_keep+u64::from(cp.E_win)+257)).min(blocks);
+    let slim_entry=add(&[mul(entry+1,3)?,64,memory::empty_snapshot()?])?;
+    let (full_old,slim_old)=(depth.saturating_sub(window),blocks-depth.max(window));
     let redb_alloc=mul(payload,HISTORY_FILE_FACTOR)?/4096;
-    let hist=[("history/offloaded canonical block metadata (H_END+1 − window)",mul(blocks-window,offloaded_entry)?),
+    let hist=[("history/offloaded canonical block metadata (slim_depth − window entries)",mul(full_old,offloaded_entry)?),
+        ("history/slimmed canonical block metadata (H_END+1 − slim_depth entries, C-1 S4)",mul(slim_old,slim_entry)?),
         ("history/resident window: block entries",mul(window,per_block)?),("history/resident window: transaction bytes",w_bodies),("history/resident window: evidence",w_evidence),
         ("history/resident window: transaction hashes and receipts",w_receipts),("history/resident window: logs",w_logs),
         ("history/history.redb page cache (HISTORY_CACHE)",crate::history::HISTORY_CACHE as u128),("history/history.redb allocator state",redb_alloc)];

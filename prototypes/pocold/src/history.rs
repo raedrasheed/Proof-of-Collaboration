@@ -3,6 +3,8 @@
 //! (invariant I1): they are written for every validated block before its journal record (I3), can
 //! always be rebuilt by re-execution, and a store that does not open is deleted and rebuilt by replay.
 //! Bodies and encoded headers stay in the journal, which is never compacted (storage.md:70).
+//! C-1 S4 adds a third table: each block's nonce ranges, so that an entry slimmed in memory is restored
+//! exactly (its header and ParentResult come back from its journal record).
 //!
 //! The store is never trusted past what it can prove. Each receipts record carries keccak(block hash ++
 //! record), a transaction index entry is checked by its reader against the block's transaction hashes,
@@ -20,6 +22,11 @@ const RECEIPTS:TableDefinition<&[u8;32],&[u8]>=TableDefinition::new("receipts");
 /// (tx hash ++ block hash) -> the transaction's index in that block (u32 big-endian). One key per block
 /// that holds the transaction; a reader takes the canonical one.
 const TXIDX:TableDefinition<&[u8;64],u32>=TableDefinition::new("txidx");
+/// C-1 S4: block hash -> keccak(block hash ++ record) ++ record; the record is the block's nonce ranges
+/// (Entry::ranges), each owner (20 bytes), start and end (16 bytes each, big-endian).
+const RANGES:TableDefinition<&[u8;32],&[u8]>=TableDefinition::new("ranges");
+/// A block's nonce ranges: (owner, start, end exclusive).
+pub type Ranges=Vec<(revm::primitives::Address,u128,u128)>;
 /// The redb page cache (A13: resources.rs counts it). Reads past it go to the file.
 pub const HISTORY_CACHE:usize=16<<20;
 pub const FILE:&str="history.redb";
@@ -45,7 +52,7 @@ impl History{
             let mut db=catch_unwind(AssertUnwindSafe(||{let mut b=Database::builder();b.set_cache_size(HISTORY_CACHE);b.create(p)})).map_err(|_|HistoryError("redb panicked at open".into()))?.map_err(err)?;
             // Ok(false): redb found damage and repaired what it could; the store is not trusted.
             match catch_unwind(AssertUnwindSafe(||db.check_integrity())){Ok(Ok(true))=>{}_=>return Err(HistoryError("integrity check failed".into()))}
-            catch_unwind(AssertUnwindSafe(||->Result<(),HistoryError>{let w=db.begin_write().map_err(err)?;{w.open_table(RECEIPTS).map_err(err)?;w.open_table(TXIDX).map_err(err)?;}w.commit().map_err(err)}))
+            catch_unwind(AssertUnwindSafe(||->Result<(),HistoryError>{let w=db.begin_write().map_err(err)?;{w.open_table(RECEIPTS).map_err(err)?;w.open_table(TXIDX).map_err(err)?;w.open_table(RANGES).map_err(err)?;}w.commit().map_err(err)}))
                 .map_err(|_|HistoryError("redb panicked at open".into()))??;
             Ok(db)};
         let first=if marker.exists(){Err(HistoryError("marked damaged".into()))}else{create(&path)};
@@ -74,27 +81,32 @@ impl History{
         if self.is_damaged(){return Err(HistoryError("history store damaged".into()))}
         catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_|Err(self.mark_damaged("redb panicked")))
     }
-    /// Whether the block's receipts are stored.
+    /// Whether the block's receipts and ranges are stored (a store written before S4 has no ranges: the
+    /// next put of the block adds them).
     pub fn has(&self,block:&[u8;32])->Result<bool,HistoryError>{
-        self.guard(||{let r=self.db.begin_read().map_err(err)?;let t=r.open_table(RECEIPTS).map_err(err)?;Ok(t.get(block).map_err(err)?.is_some())})
+        self.guard(||{let r=self.db.begin_read().map_err(err)?;let t=r.open_table(RECEIPTS).map_err(err)?;let g=r.open_table(RANGES).map_err(err)?;
+            Ok(t.get(block).map_err(err)?.is_some()&&g.get(block).map_err(err)?.is_some())})
     }
     /// Stores a validated block's receipts and transaction index in one durable commit (live import:
     /// invariant I3). Idempotent: a block already stored is left as it is (its receipts are a function of
     /// the block and its parent).
-    pub fn put(&self,block:&[u8;32],receipts:&[Vec<u8>],tx_hashes:&[B256])->Result<bool,HistoryError>{self.put_with(block,receipts,tx_hashes,true)}
+    pub fn put(&self,block:&[u8;32],receipts:&[Vec<u8>],tx_hashes:&[B256],ranges:&[(revm::primitives::Address,u128,u128)])->Result<bool,HistoryError>{self.put_with(block,receipts,tx_hashes,ranges,true)}
     /// As `put`; a non-durable commit (`durable` false) is persisted by the next durable one. Replay uses
     /// it: the journal records exist already, so a crash before `sync` only means replay refills again.
     /// Returns whether the block was written (false: already stored).
-    pub fn put_with(&self,block:&[u8;32],receipts:&[Vec<u8>],tx_hashes:&[B256],durable:bool)->Result<bool,HistoryError>{
+    pub fn put_with(&self,block:&[u8;32],receipts:&[Vec<u8>],tx_hashes:&[B256],ranges:&[(revm::primitives::Address,u128,u128)],durable:bool)->Result<bool,HistoryError>{
         if self.has(block)?{return Ok(false)}
         let mut rec=Vec::with_capacity(receipts.iter().map(|r|r.len()+4).sum());
         for r in receipts{rec.extend_from_slice(&(r.len() as u32).to_be_bytes());rec.extend_from_slice(r);}
         let mut val=seal(block,&rec).to_vec();val.extend_from_slice(&rec);
+        let mut rg=Vec::with_capacity(ranges.len()*52);for (a,s0,e0) in ranges{rg.extend_from_slice(a.as_slice());rg.extend_from_slice(&s0.to_be_bytes());rg.extend_from_slice(&e0.to_be_bytes());}
+        let mut rval=seal(block,&rg).to_vec();rval.extend_from_slice(&rg);
         self.guard(||{
             let mut w=self.db.begin_write().map_err(err)?;if !durable{w.set_durability(Durability::None);}
             {let mut t=w.open_table(RECEIPTS).map_err(err)?;t.insert(block,val.as_slice()).map_err(err)?;
              let mut x=w.open_table(TXIDX).map_err(err)?;
-             for (i,h) in tx_hashes.iter().enumerate(){let mut k=[0u8;64];k[..32].copy_from_slice(h.as_slice());k[32..].copy_from_slice(block);x.insert(&k,i as u32).map_err(err)?;}}
+             for (i,h) in tx_hashes.iter().enumerate(){let mut k=[0u8;64];k[..32].copy_from_slice(h.as_slice());k[32..].copy_from_slice(block);x.insert(&k,i as u32).map_err(err)?;}
+             let mut g=w.open_table(RANGES).map_err(err)?;g.insert(block,rval.as_slice()).map_err(err)?;}
             w.commit().map_err(err)?;Ok(true)})
     }
     /// A durable commit: every earlier non-durable `put_with` is persisted.
@@ -113,6 +125,14 @@ impl History{
             out.push(b[i..i+n].to_vec());i+=n;
         }
         Ok(Some(out))
+    }
+    /// C-1 S4: a block's nonce ranges, or None if not stored. A record that fails its seal or does not
+    /// parse marks the store damaged.
+    pub fn ranges(&self,block:&[u8;32])->Result<Option<Ranges>,HistoryError>{
+        let v=self.guard(||{let r=self.db.begin_read().map_err(err)?;let t=r.open_table(RANGES).map_err(err)?;Ok(t.get(block).map_err(err)?.map(|v|v.value().to_vec()))})?;
+        let Some(v)=v else{return Ok(None)};
+        if v.len()<32||v[..32]!=seal(block,&v[32..])[..]||(v.len()-32)%52!=0{return Err(self.mark_damaged("ranges record fails its seal"))}
+        Ok(Some(v[32..].chunks(52).map(|c|(revm::primitives::Address::from_slice(&c[..20]),u128::from_be_bytes(c[20..36].try_into().unwrap()),u128::from_be_bytes(c[36..52].try_into().unwrap()))).collect()))
     }
     /// Every stored (block hash, index) that holds the transaction. The caller checks each against the
     /// block's transaction hashes (`mark_damaged` on a mismatch).
