@@ -398,8 +398,10 @@ impl Node{
     }
 
     // ---------------- pool ----------------
-    fn next_block_ctx(&self)->NativeBlockContext{
-        let h=self.chain.head();let cp=self.chain.spec.cp();
+    fn next_block_ctx(&self)->NativeBlockContext{self.child_block_ctx(self.chain.head())}
+    /// The execution context of a child of `h` built now (pool admission and template selection).
+    fn child_block_ctx(&self,h:&Entry)->NativeBlockContext{
+        let cp=self.chain.spec.cp();
         let base=if h.height==0{chain::from_fixed_lp4(&cp.baseFee0)}else{pocol_lp4_execution::fees::next_base_fee(h.base_fee,h.gas_used,h.header.gas_limit).unwrap_or(U256::MAX)};
         NativeBlockContext{height:U256::from(h.height+1),timestamp:U256::from(now_s().max(h.ts+1)),gas_limit:U256::from(cp.GAS_LIMIT),base_fee:base,prevrandao:B256::ZERO}
     }
@@ -470,11 +472,31 @@ impl Node{
         let (mut room_txs,mut room_bytes)=self.chain.caps_room(p);let mut skipped=HashSet::new();
         // Encoded item length (RLP string header included); the three list headers take <= 12 bytes.
         let enc=|n:usize|n+1+if n<56{0}else if n<256{1}else if n<65536{2}else{3};
+        // PR #27 review R1-1: a skipped transaction (no room, or not executable) can be what a later
+        // transaction of another sender depends on, for example the transfer that funds it. Each candidate
+        // is therefore executed, in order, on a running copy of the parent state, and one that fails
+        // validation there is skipped with the rest of its sender's transactions, so the selection stays
+        // executable and an independent transaction is not starved. (The block's SYSTEM phases run before
+        // its USER phase; a transaction depending on them may still be dropped by build_signed_template's
+        // retry.) Without a checked parent state the selection is made as before.
+        let profile=self.chain.spec.profile();let ctx=self.child_block_ctx(p);
+        let mut sim=if p.pruned{None}else{checked_code_total(&p.state,&self.chain.spec).map(|t|(p.state.clone(),t))};
         for (_,raw) in &self.pool.txs{
-            let Ok(env)=wire::decode_for_profile(raw,self.chain.spec.profile()) else{continue};let tx=env.tx_env();
+            let Ok(env)=wire::decode_for_profile(raw,profile) else{continue};let tx=env.tx_env();
             if skipped.contains(&tx.caller){continue}
             if room_txs==0||raw.len() as u64>room_bytes{skipped.insert(tx.caller);continue}
             if gas+tx.gas_limit>cp.GAS_LIMIT||bytes+enc(raw.len())>cp.BODY_MAX as usize-12{break}
+            if let Some((st,total))=&mut sim{
+                match native::execute_on_validated(st,*total,tx.clone(),&ctx,profile){
+                    Ok(r)=>{
+                        let touched:Vec<Address>=r.state.keys().copied().collect();let before=pocol_lp4_execution::code_caps::code_of(st,&touched);
+                        user_phase::commit_tx(st,r.state,true);
+                        match(before,pocol_lp4_execution::code_caps::code_of(st,&touched)){
+                            (Ok(b),Ok(a))=>match total.checked_sub(b).and_then(|t|t.checked_add(a)){Some(t)=>*total=t,None=>sim=None},_=>sim=None}
+                    }
+                    Err(_)=>{skipped.insert(tx.caller);continue}
+                }
+            }
             gas+=tx.gas_limit;bytes+=enc(raw.len());room_txs-=1;room_bytes-=raw.len() as u64;out.push(raw.clone());
         }
         debug_assert!(self.chain.within_caps(p,&out));

@@ -262,3 +262,44 @@ fn live(tag:&str,tx_cap:u64,txbytes_cap:u64,pool:u64,stop_at:u64)->Node{
     let t=pay(&devnet::account_key("alice"),0,0);let room=(5*t.len()/2) as u64;
     let n=live("txbytes",1000,room,6,8);assert_eq!(n.chain.head().cum_txs,2,"two transfers fit TXBYTES_CAP");
 }
+
+// ---------------- PR #27 review R1-1: a skipped transaction's dependents ----------------
+fn send(key:&Key,nonce:u64,to:Address,value:U256,data:usize)->Vec<u8>{Tx{chain_id:CHAIN,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),
+    gas:21000+16*data as u64,to:Some(to),value,data:vec![0x5a;data].into()}.sign_1559(key)}
+/// alice's large transfer funds dave, who has nothing on the head; dave's small transfers depend on it
+/// (they were admitted on the pool's pending state, which includes alice's). The byte room is below
+/// alice's transfer, so the builder skips it. Before the fix the builder then offered dave's transfers,
+/// which cannot execute on the head, and not bob's independent one; with more than 8 such dependents
+/// no signed template was built at all. Now the selection is executed on a running copy of the parent
+/// state: dave's are skipped with alice's, and bob's transfer is selected and the template builds.
+#[test] fn the_builder_skips_the_dependents_of_a_skipped_transaction(){
+    let (alice,bob,dave)=(devnet::account_key("alice"),devnet::account_key("bob"),devnet::account_key("dave-unfunded"));
+    let big=send(&alice,0,dave.address(),U256::from(10u128.pow(18)),2000);
+    let ds:Vec<Vec<u8>>=(0..9u64).map(|i|send(&dave,i,bob.address(),U256::from(1u64),0)).collect();
+    let b0=send(&bob,0,alice.address(),U256::from(1u64),0);
+    let room:u64=ds.iter().map(|t|t.len() as u64).sum();assert!(room<big.len() as u64&&b0.len() as u64<=room);
+    let c=cfg(1000,room);let (mut n,dir)=node(&c,"r1dep",None,None);let h=net(&c);
+    for t in std::iter::once(&big).chain(ds.iter()).chain(std::iter::once(&b0)){n.submit_tx(t.clone(),false).unwrap();}
+    assert_eq!(n.pool.txs.len(),11,"all admitted on the pending state");
+    let head=n.chain.head().clone();let offered=n.template_txs(&head);
+    assert_eq!(offered,vec![b0.clone()],"only bob's independent transfer: dave's depend on alice's skipped one");
+    let ctx=h.chain.child_ctx(&head,0).unwrap();
+    assert!(h.chain.build_signed(&head,&h.keys[&ctx.proposer],ctx.window.lower(),Body{txs:offered,evidence:vec![]},vec![]).is_ok(),"the selection executes on the head");
+    let _=std::fs::remove_dir_all(&dir);
+}
+/// Review R1-4: a block of TX_CAP+1 transactions on a parent with no transactions (here TX_CAP 2, three
+/// transfers on genesis) is refused, whether the builder refuses to build it or validation refuses it.
+/// Item 16 and the USER budget check each hold this alone, so removing either one alone changed no test;
+/// this pins the case itself.
+#[test] fn a_block_over_tx_cap_on_an_empty_parent_is_refused(){
+    let c=cfg(2,1<<24);let n=net(&c);let alice=devnet::account_key("alice");
+    let txs:Vec<Vec<u8>>=(0..3).map(|i|pay(&alice,i,0)).collect();
+    let p=n.chain.head().clone();assert_eq!(p.cum_txs,0);let ctx=n.chain.child_ctx(&p,0).unwrap();let body=Body{txs,evidence:vec![]};
+    for off in 0..u64::from(n.chain.spec.cp().D_att){
+        match n.chain.build_signed(&p,&n.keys[&ctx.proposer],ctx.window.lower()+off,body.clone(),vec![]){
+            Err(_)=>return,// refused at build: the same checks as validation
+            Ok((h,_,_))=>if let Some(b)=try_seal(&n,h,body.clone(),0){
+                assert!(n.chain.validate(&b,None,0).is_err(),"three transactions at TX_CAP 2 on an empty parent must be invalid");return}}
+    }
+    panic!("no sealed block to check");
+}
