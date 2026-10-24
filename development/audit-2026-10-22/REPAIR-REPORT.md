@@ -14,7 +14,7 @@
 >   (MODEXP) takes about 1.0 s, over the devnet t_exec = 1 s; the state root is recomputed on every
 >   block; the worst devnet open at H_END takes about 7.3 h. The three journal obligations (disk
 >   growth, re-execution from genesis, the open-time memory transient) stay OPEN.
-> - Windows: the repair-scope CI passes (run 21 on `1cc96c4`; earlier runs 9, 16 and 19). It does not
+> - Windows: the repair-scope CI passes (run 22 on `c959379`, the last code commit; earlier runs 9, 16, 19 and 21). It does not
 >   cover the real-Chrome and Python e2e suites, the thread-count assertions or the `#[ignore]`
 >   measurement tests (§5). Until 2026-10-23 this box said "Windows was not run"; that was true then.
 >
