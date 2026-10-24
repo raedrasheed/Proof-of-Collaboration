@@ -1043,11 +1043,15 @@ fn wait_for(secs:u64,f:&dyn Fn()->bool)->bool{let t=std::time::Instant::now();wh
 }
 /// A session's protection covers only its non-canonical blocks: a linear catch-up far longer than
 /// protect_max (2·R_keep, here 16) completes through continuation rounds, since each block it
-/// delivers extends the canonical chain and needs no protection.
+/// delivers extends the canonical chain and needs no protection. The catch-up is longer than one
+/// GetFrom answer (at most SYNC_COUNT blocks), so it needs a second round whatever the timing; with
+/// 60 blocks only the server's queue (offer stops at half of queue_bytes_max) could cut a round short,
+/// which depends on how fast its writer drains, and once one round carried all 60 (syncRounds 1).
 #[test] fn a_long_catch_up_is_not_bounded_by_the_protected_branch_size(){
     use pocold::node::{Config,Limits,Node};
     let port=||std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let c=cfg(&["a","b","c"]);let mut h=net();let g=h.chain.head;let blocks=grow(&mut h,g,60,&|n,p|fallback(n,p,0));
+    let len=pocold::node::SYNC_COUNT as usize+8;
+    let c=cfg(&["a","b","c"]);let mut h=net();let g=h.chain.head;let blocks=grow(&mut h,g,len,&|n,p|fallback(n,p,0));
     let mut lim=Limits{r_keep:8,side_cap:8,..Default::default()};lim.net.queue_bytes_max=32*1024;
     let (pa,pb,ra)=(port(),port(),port());let tag=std::process::id();
     let dir=|x:&str|{let d=std::env::temp_dir().join(format!("pocold-catchup-{x}-{tag}"));let _=std::fs::remove_dir_all(&d);d};
@@ -1058,8 +1062,8 @@ fn wait_for(secs:u64,f:&dyn Fn()->bool)->bool{let t=std::time::Instant::now();wh
     let mut na=Node::open(Config{dir:dir("a"),name:"a".into(),miner:None,listen:Some(addr(pa)),peers:vec![addr(pb)],rpc:Some(addr(ra)),stop_at:None,log:false,limits:lim},admitted(&c)).unwrap();
     na.start_network().unwrap();std::thread::spawn(move||na.run());
     let head=||rpc_tcp(ra,"eth_getBlockByNumber",json!(["latest",false]))["hash"].clone();
-    assert!(wait_for(300,&||head()==target),"A catches up 60 blocks with protect_max 16: at {}",head());
-    let st=rpc_tcp(ra,"pocol_status",json!([]));assert!(st["stats"]["syncRounds"].as_u64().unwrap_or(0)>1,"positive control: truncated rounds were continued: {}",st["stats"]);
+    assert!(wait_for(300,&||head()==target),"A catches up {len} blocks with protect_max 16: at {}",head());
+    let st=rpc_tcp(ra,"pocol_status",json!([]));assert!(st["stats"]["syncRounds"].as_u64().unwrap_or(0)>1,"positive control: the catch-up was continued past its first round: {}",st["stats"]);
 }
 /// R21's K_hist window prunes canonical states only; non-canonical states are bounded by side_max.
 /// A competing branch below the window therefore imports with its tip's state kept, so a deep
