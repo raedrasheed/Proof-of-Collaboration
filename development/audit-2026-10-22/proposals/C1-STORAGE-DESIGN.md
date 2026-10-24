@@ -285,11 +285,97 @@ assumed two things that the code did not do:
 - the side states as diffs: they stay full, so that a deep side branch does not rebuild;
 - no extra copies: genesis and two materialized states are now counted.
 
+### S5 + S3b design freeze (2026-10-24, before code): the executor on a layered state
+
+**Why this is one stage.**
+- After S3a and S4 the network model is 37.96 GiB. Most of what remains is full state copies:
+  - the head, genesis, side_max and materialized states (9.80 GiB);
+  - the 10 transient working copies and the growth copy (17.96 GiB).
+- Removing them needs `lp4-execution` to run without whole states:
+  - on a base it only reads (in memory, or `state.redb` for S5);
+  - with an overlay for its writes;
+  - returning the writes as a diff.
+- The executor walks the whole state on every block in five places. Each must become incremental and be
+  proven equal to the full computation:
+
+| whole-state walk (lp4-execution) | replacement | proof |
+|---|---|---|
+| state root (`trie::state_root` over every account and slot) | an incremental trie: node hashes kept per account and storage trie, updated from the block's diff (C-2 item 4) | the full root recomputed and compared on every block of every suite (a test feature), and on every vector |
+| `code_caps::validate_snapshot` and `inventory` | running totals of logical code per state, updated from the diff (C-2 item 2 already keeps them within a block) | equal to the full scan at every block in the suites |
+| the caps counters (live user accounts and slots, system slots; `user_phase` lines 130–165) | counters updated from the diff | equal to the full scan at every block |
+| `drop_unreferenced_code` (all accounts' code hashes) | a reference count per code hash, updated from the diff | the contracts map equal to the full rule at every block |
+| `genesis.image.verify_candidate` (`check_caps`, the system slot count and the sum of every balance against the supply bound; the code and profile checks read five fixed accounts) | running totals (user accounts and slots, system slots, the balance sum) updated from the diff; the five fixed accounts read directly | equal results on every vector and block; a mutant that leaves a total stale must fail |
+
+**The steps, each landed separately with its equivalence proof:**
+1. **E1, incremental root.** This is also priority 2 (validation time): the root dominates the 465–491
+   ms of an empty child at the near-cap state.
+   - **How:** `p1_trie::node(rows, depth)` is a pure function of all the rows under the key prefix
+     `rows[0].key[..depth]`. So a cache of each subtree's child reference (an inline encoding under 32
+     bytes, or a hash), keyed by its prefix and invalidated along every changed key, reproduces the root
+     exactly while recomputing only the changed paths.
+   - **Cost:** about one entry of roughly 70–100 B per trie node. At the network caps (about 1M accounts
+     and 4M slots) that is about 0.4–0.5 GiB. In memory it is a new A13 term. In S5 the node cache lives
+     in `state.redb`, with only a bounded cache in memory.
+2. **E2, running counters and code reference counts.**
+3. **E3, the executor on a borrowed base with an overlay.** `apply_block(base, …)` returns its writes as a
+   `StateDiff`. Every `parent.clone()` and `users.state().clone()` goes. The pool, production, RPC
+   simulation and rebuilds use overlays. This removes the transient copies (S3b).
+4. **E4, `state.redb`.** The head state and the window's reverse diffs live on disk behind a bounded cache.
+   Each block commits its writes and its reverse diff before the journal append (I3). Open detects a store
+   one block ahead and rolls it back. This is S5; D-6 checkpoints are committed versions of this store.
+5. **E5, the two reductions that are still needed:**
+   - a smaller inline entry;
+   - the rebuild and the pool reading code from the store instead of their own sets.
+
+**Unchanged:** validity, every root, every receipt, genesisHash, the wire format and every RPC answer.
+If any step would change one of them, it stops and goes back to the decision package.
+
+**Reference.** The current executor stays in the tree as a test-only reference until E4 lands, so that
+every step is compared block by block against it, not only against vectors.
+
 ## S4: per-block metadata off the heap
 
 - Entries older than R_keep keep only what fork choice and contexts need for the heights still reachable
   by a reorg. Everything else moves to `history.redb`, keyed by height and hash (storage.md "height 40 B").
 - **Acceptance tests:** fork choice and the D-REORG-REDB tests unchanged; `derive()` term replaced.
+
+### S4 status (2026-10-24): landed; evidence/c1-s4/
+
+The frozen plan was to move old entries to `history.redb`. What was built instead: old entries stay in
+memory but slimmed, and the journal plus a new `history.redb` table restore what was dropped, exactly.
+The journal already holds the header and ParentResult bytes, so nothing else had to move.
+- **What is slimmed:** canonical journaled entries deeper than `slim_depth` drop the header's heap fields,
+  the ParentResult and the nonce ranges.
+  - The default depth is 2·R_keep + E_win + 257. That covers any fork (R_keep), a head that fell back by
+    up to R_keep, the evidence window, and the 256 ancestors of a child context.
+  - Inside that depth no validation reads a slimmed entry.
+  - Fork-choice fields, `drawn`, the scalars and the diff stay.
+- **Restored, never trusted:**
+  - the header and ParentResult come from the journal record, and the header must hash to the block;
+  - the ranges come from history.redb (sealed, written before the journal append like the receipts).
+  - Where restore happens:
+    - a validation that needs a slimmed parent or evidence ancestor gets NeedsRebuild, and the node
+      restores the entry (bounded retries);
+    - a TrieRebuild re-executes slimmed blocks from restored copies;
+    - RPC and P2P views restore too;
+    - a restored entry is slimmed again once it is deep enough.
+- **A13:**
+  - network history group 4.28 → **0.83 GiB**; model 41.41 → **37.96 GiB** (gate 43.38 GiB);
+  - devnet 3,601,500,638 → **3,322,680,105 B**.
+  - A slimmed entry is still about 5 KB in the model, three times the inline `Entry` for map growth plus
+    an empty state. A smaller inline entry is possible later.
+- **Acceptance tests (pass):**
+  - `s4_slimmed_entries_answer_as_full_ones_and_restore_exactly`: at depth 8,
+    - exactly the canonical entries deeper than 8 are slimmed;
+    - every block, transaction, receipt, log, header, RLP and P2P answer equals a never-slimming
+      reference's;
+    - every slimmed entry restores to the reference's fields;
+    - a fork on a slimmed parent and a fork below the K_hist cut, which rebuilds through slimmed entries,
+      both validate;
+    - the same holds after reopen.
+  - `s4_evidence_against_a_slimmed_ancestor_restores_it_first`: type-2 evidence whose ancestor is slimmed
+    is accepted after the restore, with the same tombstone and state root as the reference.
+  - Mutation controls: `evidence/c1-s4/mutants.log`.
 
 ## D-6: local state checkpoints (owner approved)
 
