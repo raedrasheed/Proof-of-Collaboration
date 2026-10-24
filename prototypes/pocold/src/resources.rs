@@ -185,7 +185,8 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // (encoded, ut_raw, bloom, proposer, sig, share nonces), ParentResult shares, nonce ranges
     // (members <= M_max), an empty pruned state and evidence (E_max items <= EVID_BYTES_MAX).
     let entry=size_of::<([u8;32],Entry)>() as u128;
-    let per_block=add(&[mul(entry+1,3)?,64,mul(hdr,2)?,256+20+65+64,mul(8,s)?,mul(32,s+1)?,mul(64,m)?,
+    // C-1 E2: and its state summary (boxed; a slimmed entry drops it).
+    let per_block=add(&[mul(entry+1,3)?,64,size_of::<pocol_lp4_execution::state_summary::Summary>() as u128,mul(hdr,2)?,256+20+65+64,mul(8,s)?,mul(32,s+1)?,mul(64,m)?,
         memory::empty_snapshot()?,mul(u128::from(cp.E_max),24)?])?;
     // A block's transactions are bounded by its body and by its gas.
     let side_txs=(u128::from(cp.BODY_MAX)/MIN_TX_BYTES).min(u128::from(cp.GAS_LIMIT)/TX_GAS_MIN);

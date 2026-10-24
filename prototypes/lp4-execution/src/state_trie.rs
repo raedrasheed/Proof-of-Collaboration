@@ -186,6 +186,8 @@ impl Touched{
     pub fn account(&mut self,a:Address){self.accounts.entry(a).or_insert_with(||Some(Vec::new()));}
     pub fn whole_account(&mut self,a:Address){self.accounts.insert(a,None);}
     pub fn slot(&mut self,a:Address,s:U256){if let Some(v)=self.accounts.entry(a).or_insert_with(||Some(Vec::new())){v.push(s)}}
+    /// Every touched account with its touched slots (None: its whole storage).
+    pub fn iter(&self)->impl Iterator<Item=(&Address,Option<&[U256]>)>{self.accounts.iter().map(|(a,s)|(a,s.as_deref()))}
     pub fn len(&self)->usize{self.accounts.values().map(|s|1+s.as_ref().map_or(0,|v|v.len())).sum()}
     pub fn is_empty(&self)->bool{self.accounts.is_empty()}
     /// Every account and slot whose committed value (existence, nonce, balance, code hash, nonzero

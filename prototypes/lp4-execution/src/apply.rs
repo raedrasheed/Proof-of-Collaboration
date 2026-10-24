@@ -114,6 +114,8 @@ pub struct BlockOutput{
     pub dirty_accounts:u64,
     /// C-1 E1: the trie of `state` (its root is `state_root`), for the child's incremental root.
     pub trie:crate::state_trie::StateTrie,
+    /// C-1 E2: the summary of `state`, for the child's checks.
+    pub summary:crate::state_summary::Summary,
 }
 
 /// Parent-state facts used by consensus (finality, closing, membership).
@@ -255,14 +257,20 @@ pub fn is_final_block(parent:&InMemoryDB,profile:&ProfileIdentity,h:u64,ts:u64)-
 
 /// Executes block h on top of `parent` (never mutated). Deterministic.
 pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,input:&BlockInput<'_>)->Result<BlockOutput,ApplyError>{
-    apply_block_with(parent,None,genesis,profile,input)
+    apply_block_with(parent,None,None,genesis,profile,input)
 }
 /// C-1 E1: `apply_block` given the trie of `parent`, so that the state root is updated from the keys the
 /// block changed instead of recomputed over the whole state. The caller vouches that `parent_trie` is
 /// the trie of `parent` (pocold checks its root against the parent's committed stateRoot); with None the
 /// trie is built from the whole state. Either way the result is the same as `state_root`'s, which the
 /// tests (and the `root-check` feature) compare on every block.
-pub fn apply_block_with(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie::StateTrie>,genesis:&Genesis,profile:&ProfileIdentity,input:&BlockInput<'_>)->Result<BlockOutput,ApplyError>{
+///
+/// C-1 E2: `parent_summary` likewise vouches for `parent`'s summary (state_summary). With it, the parent's
+/// candidate check, the code checks of the SYSTEM calls and of the USER phase, the final candidate check
+/// and the code drop read summaries moved through the changed keys instead of walking the whole state;
+/// without it they walk the state as before. The outcomes are the same; the tests compare them.
+pub fn apply_block_with(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie::StateTrie>,parent_summary:Option<&crate::state_summary::Summary>,genesis:&Genesis,profile:&ProfileIdentity,input:&BlockInput<'_>)->Result<BlockOutput,ApplyError>{
+    use crate::{state_summary::Summary,state_trie::Touched};
     let cp=profile.cp();
     let h=input.height;
     if h==0||h>cp.H_END{return Err(ApplyError::Context("height"))}
@@ -272,7 +280,13 @@ pub fn apply_block_with(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie
     let body_bytes:usize=input.transactions.iter().chain(input.evidence_raw.iter()).map(|t|t.len()).sum();
     if body_bytes>cp.BODY_MAX as usize{return Err(ApplyError::Budget("BODY_MAX"))}
     if input.evidence_raw.len()>usize::from(cp.E_max)||input.evidence_raw.iter().any(|e|e.len()>cp.EVID_BYTES_MAX as usize){return Err(ApplyError::Budget("evidence"))}
-    genesis.image.verify_candidate(parent,profile).map_err(|e|ApplyError::Genesis(format!("parent {e:?}")))?;
+    let check=root_check();
+    match parent_summary{
+        Some(sum)=>{let r=genesis.image.verify_summary(parent,sum,profile);
+            if check{assert_eq!(*sum,Summary::scan(parent,cp.B_code_max),"C-1 E2: the parent's summary differs from a scan");assert_eq!(r,genesis.image.verify_candidate(parent,profile),"C-1 E2: parent check");}
+            r}
+        None=>genesis.image.verify_candidate(parent,profile),
+    }.map_err(|e|ApplyError::Genesis(format!("parent {e:?}")))?;
     let is_final=is_final_block(parent,profile,h,input.timestamp);
     let limits=CodeLimits{runtime:cp.B_code_max,logical:cp.CODE_CAP};
     let origin=match input.proposer{Proposer::Signed(a) if a!=Address::ZERO=>a,Proposer::Signed(_)=>return Err(ApplyError::Context("proposer")),Proposer::Fallback=>Address::ZERO};
@@ -283,7 +297,9 @@ pub fn apply_block_with(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie
         state.block_hashes.insert(U256::from(*n),*hash);
     }
     let block=NativeBlockContext{height:U256::from(h),timestamp:U256::from(input.timestamp),gas_limit:U256::from(input.gas_limit),base_fee:input.base_fee,prevrandao:input.prevrandao};
-    let mut ex=Exec{state,profile,block,origin,used:0,limits,meter:Meter::default(),code_total:None};
+    // C-1 E2: a parent that passed the checks above starts the SYSTEM calls from its code total, as the
+    // first call's whole check would have found it (C-2 item 2's invariant).
+    let mut ex=Exec{state,profile,block,origin,used:0,limits,meter:Meter::default(),code_total:parent_summary.map(|s|s.inventory())};
 
     // Phase 0.
     for e in &input.evidence{
@@ -311,9 +327,15 @@ pub fn apply_block_with(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie
     let users=crate::user_phase::execute_for_block(&ex.state,input.transactions,&ex.block,budget,budget,profile,ctx).map_err(|e|ApplyError::User(format!("{e:?}")))?;
     ex.state=users.state().clone();
     let tips=users.tips();
-    code_caps::validate_snapshot(&ex.state,limits).map_err(ApplyError::Caps)?;
-    // The USER phase replaced the state: the next SYSTEM call checks it whole again, as before C-2.
-    ex.code_total=None;
+    // The USER phase replaced the state: without a summary the next SYSTEM call checks it whole again, as
+    // before C-2; with one, the summary moved to the USER phase's state gives the check and the total.
+    ex.code_total=match parent_summary{
+        Some(sum)=>{let t=Touched::between(parent,&ex.state);let u=sum.moved(parent,&ex.state,&t);let r=u.code_check(limits);
+            if check{assert!(same_counts(&u,&Summary::scan(&ex.state,cp.B_code_max)),"C-1 E2: the USER phase's summary differs from a scan");
+                assert_eq!(r.is_ok(),code_caps::validate_snapshot(&ex.state,limits).is_ok(),"C-1 E2: USER phase code check");}
+            r.map_err(ApplyError::Caps)?;Some(u.inventory())}
+        None=>{code_caps::validate_snapshot(&ex.state,limits).map_err(ApplyError::Caps)?;None}
+    };
 
     // Phase 2: issuance + closeBlock, or finalize (no subsidy, tips burned).
     let mut issued=U256::ZERO;
@@ -334,19 +356,36 @@ pub fn apply_block_with(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie
     if ex.meter.keys.len() as u64>u64::from(cp.SYS_KEYS_BLOCK_MAX){return Err(ApplyError::Budget("SYS_KEYS_BLOCK_MAX"))}
     if ex.meter.accounts.len() as u64>u64::from(cp.SYS_ACCT_BLOCK_MAX){return Err(ApplyError::Budget("SYS_ACCT_BLOCK_MAX"))}
     let meter=ex.meter.clone();
-    let mut state=ex.state;crate::user_phase::drop_unreferenced_code(&mut state);
-    genesis.image.verify_candidate(&state,profile).map_err(|e|ApplyError::Genesis(format!("candidate {e:?}")))?;
+    let mut state=ex.state;
+    // C-1 E1/E2: the keys the block changed, for the trie and the summary (the drop changes no account).
+    let touched=(parent_trie.is_some()||parent_summary.is_some()).then(||Touched::between(parent,&state));
+    let summary=match (parent_summary,&touched){
+        (Some(sum),Some(t))=>{
+            let reference=check.then(||{let mut r=state.clone();crate::user_phase::drop_unreferenced_code(&mut r);r.contracts});
+            let clean=crate::state_summary::drop_unreferenced_code(parent,sum,&mut state,t);
+            if let Some(r)=reference{assert!(r.len()==state.contracts.len()&&r.keys().all(|k|state.contracts.contains_key(k)),"C-1 E2: the code drop differs");}
+            let mut f=sum.moved(parent,&state,t);f.contracts_clean=clean;
+            let r=genesis.image.verify_summary(&state,&f,profile);
+            if check{assert_eq!(f,Summary::scan(&state,cp.B_code_max),"C-1 E2: the candidate's summary differs from a scan");assert_eq!(r,genesis.image.verify_candidate(&state,profile),"C-1 E2: candidate check");}
+            r.map_err(|e|ApplyError::Genesis(format!("candidate {e:?}")))?;f}
+        _=>{crate::user_phase::drop_unreferenced_code(&mut state);
+            genesis.image.verify_candidate(&state,profile).map_err(|e|ApplyError::Genesis(format!("candidate {e:?}")))?;Summary::scan(&state,cp.B_code_max)}
+    };
     check_escrow_invariant(&state,profile,h,is_final)?;
 
     // Phase 3: roots.
     let c=users.commitments();
     let evidence_root=crate::trie::ordered_root(input.evidence_raw,usize::from(cp.E_max)).map(B256::from).map_err(|_|ApplyError::Root)?;
-    let trie=match parent_trie{Some(t)=>t.update(&state,&crate::state_trie::Touched::between(parent,&state)),None=>crate::state_trie::StateTrie::build(&state)};
+    let trie=match (parent_trie,&touched){(Some(p),Some(t))=>p.update(&state,t),_=>crate::state_trie::StateTrie::build(&state)};
     let state_root=trie.root();
     if root_check(){assert_eq!(state_root,self::state_root(&state)?,"C-1 E1: the incremental state root differs from the full computation at height {h}")}
     let facts=chain_facts(&state);
     Ok(BlockOutput{state,state_root,transactions_root:c.transactions_root,receipts_root:c.receipts_root,evidence_root,logs_bloom:c.logs_bloom,gas_used:c.gas_used,
-        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts(),trie})
+        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts(),trie,summary})
+}
+/// The summaries agree on everything but `contracts_clean` (an intermediate state's map is not dropped).
+fn same_counts(a:&crate::state_summary::Summary,b:&crate::state_summary::Summary)->bool{
+    crate::state_summary::Summary{contracts_clean:true,..*a}==crate::state_summary::Summary{contracts_clean:true,..*b}
 }
 /// Whether every computed root is compared with the full computation: in this crate's tests, and in
 /// builds with the `root-check` feature (pocold's tests) unless POCOL_ROOT_CHECK=0 (timing runs).

@@ -101,6 +101,8 @@ pub struct Entry{
     /// C-1 E1: the trie of this block's state, for its children's incremental state roots. Only the head
     /// keeps one after `settle`; any other parent's trie is derived from the head's (`Chain::trie_for`).
     pub trie:Option<pocol_lp4_execution::state_trie::StateTrie>,
+    /// C-1 E2: the summary of this block's state, for its children's checks (dropped when slimmed).
+    pub summary:Option<Box<pocol_lp4_execution::state_summary::Summary>>,
 }
 
 /// Source of a block's bytes for the off-heap store: given a journal frame offset (an `Entry.body_off`),
@@ -112,7 +114,7 @@ pub trait BlockBytes{fn record_at(&self,off:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8
 /// C-1 S4: drops what a slimmed entry does not keep: the header's heap fields, the ParentResult and the
 /// nonce ranges. Fork choice, contexts and evidence read only the rest at these depths.
 fn slim(e:&mut Entry){let h=&mut e.header;h.logs_bloom=Vec::new();h.proposer=Vec::new();h.sig=Vec::new();h.shares=Vec::new();h.ut_raw=Vec::new();
-    h.share_list_raw=Vec::new();h.encoded=Vec::new();e.result=None;e.ranges=Vec::new();e.slim=true;}
+    h.share_list_raw=Vec::new();h.encoded=Vec::new();e.result=None;e.ranges=Vec::new();e.summary=None;e.slim=true;}
 /// The ParentResult of block `hash` from its journal record's result bytes (node::result_bytes).
 pub fn decode_result(rb:&[u8],hash:&[u8;32])->Result<Option<ParentResult>,Reject>{
     let bad=||Reject::Block("result bytes".into());
@@ -135,7 +137,7 @@ impl Entry{
         Entry{hash:self.hash,header:self.header.clone(),body:self.body.clone(),height:self.height,parent:self.parent,total_work:self.total_work,import_seq:self.import_seq,
             signed:self.signed,ts:self.ts,target:self.target,base_fee:self.base_fee,gas_used:self.gas_used,seal:self.seal,state:InMemoryDB::default(),is_final:self.is_final,
             result:self.result.clone(),receipts:self.receipts.clone(),tx_hashes:self.tx_hashes.clone(),cum_txs:self.cum_txs,cum_tx_bytes:self.cum_tx_bytes,
-            cum_log_bytes:self.cum_log_bytes,pruned:true,full:false,diff:self.diff.clone(),slim:self.slim,drawn:self.drawn,ranges:self.ranges.clone(),body_off:self.body_off,offloaded:self.offloaded,trie:self.trie.clone()}
+            cum_log_bytes:self.cum_log_bytes,pruned:true,full:false,diff:self.diff.clone(),slim:self.slim,drawn:self.drawn,ranges:self.ranges.clone(),body_off:self.body_off,offloaded:self.offloaded,trie:self.trie.clone(),summary:self.summary.clone()}
     }
 }
 
@@ -230,7 +232,8 @@ impl Chain{
         let genesis=Entry{hash:gh,header:h,body:Body::default(),height:0,parent:None,total_work:U256::ZERO,import_seq:0,signed:false,ts:cp.g_ts,
             target:spec.target_g(),base_fee:U256::ZERO,gas_used:0,seal:seal_genesis(&gh),state:spec.genesis().state().clone(),is_final:false,result:None,
             receipts:vec![],tx_hashes:vec![],cum_txs:0,cum_tx_bytes:0,cum_log_bytes:0,pruned:false,full:true,diff:None,slim:false,drawn:Address::ZERO,ranges:vec![],body_off:None,offloaded:false,
-            trie:Some(pocol_lp4_execution::state_trie::StateTrie::build(spec.genesis().state()))};
+            trie:Some(pocol_lp4_execution::state_trie::StateTrie::build(spec.genesis().state())),
+            summary:Some(Box::new(pocol_lp4_execution::state_summary::Summary::scan(spec.genesis().state(),cp.B_code_max)))};
         let mut blocks=HashMap::new();blocks.insert(gh,genesis);
         let k_hist=u64::from(spec.local().k_hist);
         Self{spec,blocks,head:gh,canonical:vec![gh],next_seq:1,k_hist,rebuilds:0,materializations:Default::default(),keep_full_states:false,slim_depth:None,slim_cursor:1,unslimmed:Vec::new(),incremental_root:true,trie_derived:Default::default(),trie_built:Default::default(),trie_refused:Default::default(),history_window:None,history_cursor:1,restore_reexecs:0,invalid:HashMap::new(),invalid_order:Default::default(),seen_templates:BTreeMap::new(),evicted:Default::default(),evicted_order:Default::default(),evicted_total:0,
@@ -282,7 +285,8 @@ impl Chain{
             parent_result:ctx.parent_result.clone(),evidence:effects,evidence_raw:&body.evidence,transactions:&body.txs,ancestors:ctx.ancestors.clone(),cum_log_bytes:p.cum_log_bytes};
         let trie=if self.incremental_root{self.trie_for(p)}else{None};
         if self.incremental_root&&trie.is_none(){self.trie_built.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}
-        apply::apply_block_with(&p.state,trie.as_ref(),self.spec.genesis(),self.spec.profile(),&input).map_err(|e|Reject::Block(format!("apply {e:?}")))
+        let summary=if self.incremental_root{p.summary.as_deref()}else{None};
+        apply::apply_block_with(&p.state,trie.as_ref(),summary,self.spec.genesis(),self.spec.profile(),&input).map_err(|e|Reject::Block(format!("apply {e:?}")))
     }
     /// The committed state root of a stored block (genesis: the built genesis image's).
     fn committed_root(&self,e:&Entry)->[u8;32]{if e.height==0{self.spec.genesis().root().0}else{e.header.state_root}}
@@ -424,7 +428,7 @@ impl Chain{
             import_seq:0,signed,ts:x.ts,target:x.target,base_fee:ctx.base_fee,gas_used:x.gas_used,seal:seal(&tid,x.nonce),state:out.state,is_final:out.is_final,full:true,diff,slim:false,
             result:Some(ParentResult{block_hash:B256::from(hash),winner:addr(&owner),shares}),receipts:out.receipts,tx_hashes,
             cum_txs:p.cum_txs+b.body.txs.len() as u64,cum_tx_bytes:p.cum_tx_bytes+tx_bytes,cum_log_bytes:p.cum_log_bytes+out.log_bytes,pruned:false,drawn:ctx.proposer,
-            ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect(),body_off:None,offloaded:false,trie:Some(out.trie)};
+            ranges:ctx.assignment.ranges().iter().map(|r|(addr(&r.id()),r.start(),r.end_exclusive())).collect(),body_off:None,offloaded:false,trie:Some(out.trie),summary:Some(Box::new(out.summary))};
         Ok((entry,ctx))
     }
 
@@ -766,7 +770,8 @@ impl Chain{
             if x.diff.is_none(){x.diff=Some(std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state)));}
             if x.offloaded{x.tx_hashes=body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();x.receipts=out.receipts;x.body=body;
                 x.header.encoded=hb.unwrap_or_default();x.offloaded=false;n+=1;}
-            let mut next=x.meta_clone();next.state=out.state;next.trie=Some(out.trie);p=next;
+            if x.summary.is_none()&&!x.slim{x.summary=Some(Box::new(out.summary));}
+            let mut next=x.meta_clone();next.state=out.state;next.trie=Some(out.trie);next.summary=Some(Box::new(out.summary));p=next;
         }
         Ok(n)
     }
@@ -841,7 +846,8 @@ impl Chain{
             let out=self.reexec(&p,&e,&body)?;
             // C-1 S3a: the re-executed block gets its diff back (pruned blocks had none).
             if self.blocks[&h].diff.is_none(){let d=std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state));self.blocks.get_mut(&h).unwrap().diff=Some(d);}
-            let mut next=e;next.state=out.state;next.trie=Some(out.trie);next.pruned=false;p=next;self.rebuilds+=1;
+            if !self.blocks[&h].slim&&self.blocks[&h].summary.is_none(){self.blocks.get_mut(&h).unwrap().summary=Some(Box::new(out.summary));}
+            let mut next=e;next.state=out.state;next.trie=Some(out.trie);next.summary=Some(Box::new(out.summary));next.pruned=false;p=next;self.rebuilds+=1;
         }
         let x=self.blocks.get_mut(hash).ok_or_else(||Reject::Block("rebuild target".into()))?;x.state=p.state;x.pruned=false;x.full=true;
         Ok(())

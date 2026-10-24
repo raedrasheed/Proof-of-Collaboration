@@ -9,6 +9,22 @@ impl GenesisImage{
  pub(crate) fn state(&self)->&InMemoryDB{&self.state}
  pub(crate) fn root(&self)->B256{self.root}
  pub(crate) fn initial_supply(&self)->U256{self.alloc_sum+self.bonds}
+ /// C-1 E2: `verify_candidate` with the whole-state counts read from `s`, the summary of `db`
+ /// (state_summary): the same outcome. The fixed accounts are read from `db` as before.
+ pub(crate) fn verify_summary(&self,db:&InMemoryDB,s:&crate::state_summary::Summary,p:&ProfileIdentity)->Result<(),GenesisError>{
+  if B256::from(p.genesis_hash())!=self.profile{return Err(GenesisError::Profile)}
+  s.code_check(CodeLimits{runtime:p.cp().B_code_max,logical:p.cp().CODE_CAP}).map_err(|_|GenesisError::Code)?;
+  if s.user_accounts>p.cp().ACCT_CAP||s.user_slots>p.cp().SLOT_CAP{return Err(GenesisError::Capacity)}
+  if s.sys_slots>u64::from(p.cp().SYS_SLOT_MAX){return Err(GenesisError::Capacity)}
+  if s.balance>revm::primitives::alloy_primitives::U512::from(self.supply_bound){return Err(GenesisError::Supply)}
+  self.fixed_accounts(db,p)
+ }
+ fn fixed_accounts(&self,db:&InMemoryDB,p:&ProfileIdentity)->Result<(),GenesisError>{
+  if let Some(a)=db.accounts.get(&crate::pay_address()).and_then(|a|a.info()){if a.code_hash!=revm::primitives::KECCAK_EMPTY{return Err(GenesisError::Code)}}
+  for (i,hash) in self.codes.iter().enumerate(){let a=db.accounts.get(&system(i)).and_then(|a|a.info()).ok_or(GenesisError::Code)?;if a.code_hash!=*hash{return Err(GenesisError::Code)}}
+  for (i,value) in p.spec().cp.iter().enumerate(){let a=db.accounts.get(&system(3)).ok_or(GenesisError::Code)?;if a.storage.get(&U256::from(i)).copied().unwrap_or_default()!=number(*value){return Err(GenesisError::Profile)}}
+  Ok(())
+ }
  pub(crate) fn verify_candidate(&self,db:&InMemoryDB,p:&ProfileIdentity)->Result<(),GenesisError>{
   if B256::from(p.genesis_hash())!=self.profile{return Err(GenesisError::Profile)}
   check_caps(db,p)?;
@@ -18,10 +34,7 @@ impl GenesisImage{
   let sys:u64=(0..5).filter_map(|i|db.accounts.get(&system(i))).map(|a|a.storage.values().filter(|v|**v!=U256::ZERO).count() as u64).sum();
   if sys>u64::from(p.cp().SYS_SLOT_MAX){return Err(GenesisError::Capacity)}
   if sum_balances(db)?>self.supply_bound{return Err(GenesisError::Supply)}
-  if let Some(a)=db.accounts.get(&crate::pay_address()).and_then(|a|a.info()){if a.code_hash!=revm::primitives::KECCAK_EMPTY{return Err(GenesisError::Code)}}
-  for (i,hash) in self.codes.iter().enumerate(){let a=db.accounts.get(&system(i)).and_then(|a|a.info()).ok_or(GenesisError::Code)?;if a.code_hash!=*hash{return Err(GenesisError::Code)}}
-  for (i,value) in p.spec().cp.iter().enumerate(){let a=db.accounts.get(&system(3)).ok_or(GenesisError::Code)?;if a.storage.get(&U256::from(i)).copied().unwrap_or_default()!=number(*value){return Err(GenesisError::Profile)}}
-  Ok(())
+  self.fixed_accounts(db,p)
  }
 }
 pub(crate) fn system(i:usize)->Address{Address::from_word(U256::from(0xc0c001u64+i as u64).into())}

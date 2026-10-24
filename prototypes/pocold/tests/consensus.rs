@@ -868,10 +868,11 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     // below the resident window is off the heap, 5,487,223,178 -> 4,323,240,949 B; C-1 S3a: retained
     // canonical states as diffs, -> 3,601,500,638 B; C-1 S4: old canonical entries slimmed,
     // -> 3,322,680,105 B; C-1 E1: the head's state trie, one derived or built trie and a block's changed
-    // paths, and the entry's trie handle, -> 3,486,909,657 B). Some terms are type
+    // paths, and the entry's trie handle, -> 3,486,909,657 B; C-1 E2: each entry's boxed state summary,
+    // -> 3,489,051,177 B). Some terms are type
     // sizes (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
     // target checks that it boots within the budget with its reserve.
-    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_486_909_657,"the A13 model total changed");}
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_489_051_177,"the A13 model total changed");}
     // C-1 S1: a window of the whole chain is the model before S1, plus history.redb's cache and allocator.
     let all=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits{history_window:Some(u64::MAX),..Default::default()},2).unwrap();
     let redb:u128=all.items.iter().filter(|x|x.0.starts_with("history/history.redb")).map(|x|x.1).sum();
@@ -1461,6 +1462,9 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
             // Only the head keeps a trie after settle, and it is the head state's.
             assert_eq!(ea.trie.is_some(),*hh==a.chain.head,"step {i}: h={}",ea.height);}
         let head=a.chain.head();assert_eq!(head.trie.as_ref().unwrap().root(),apply::state_root(&head.state).unwrap(),"step {i}");
+        // C-1 E2: every entry that is not slimmed carries its state's summary.
+        assert_eq!(head.summary.as_deref(),Some(&pocol_lp4_execution::state_summary::Summary::scan(&head.state,a.chain.spec.cp().B_code_max)),"step {i}");
+        assert!(a.chain.blocks.values().all(|e|e.slim||e.summary.is_some()),"step {i}");
     }
     // Production and a fallback child on the final head take the head's trie.
     let before=counts(&a);let fb=fallback(&a,a.chain.head,0);step(&mut a,&fb);step(&mut b,&fb);assert_eq!(a.chain.head,fb.hash());

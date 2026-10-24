@@ -412,3 +412,50 @@ mod a03{
         assert!(spray(5).halts.is_empty());assert_eq!(spray(6).halts,vec![(0,Halt::AcctCap)]);
     }
 }
+
+/// C-1 E1/E2: a chain applied with the parent's trie and summary gives, block by block, the outputs of
+/// `apply_block` without them (the whole-state computations): roots, receipts, gas, the state and the
+/// contracts map, with transfers, contract creations and empty blocks. In this crate's tests
+/// `root_check()` is on, so every moved summary and outcome is also compared inside `apply_block_with`.
+#[test] fn e2_blocks_with_trie_and_summary_equal_the_reference(){
+    let net=devnet3();let ids:Vec<Address>=net.miners.iter().map(|m|m.id).collect();
+    let alice=devnet::account_key("alice");let bob=devnet::account_key("bob").address();
+    let tx=|nonce:u64,to:Option<Address>,data:Vec<u8>,gas:u64|crate::txsign::Tx{chain_id:777900,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas,to,value:U256::from(if to.is_some(){7u64}else{0}),data:data.into()}.sign_1559(&alice);
+    // Init code returning a 3-byte runtime (PUSH3 0x600055, then MSTORE/RETURN).
+    let init=vec![0x62,0x60,0x00,0x55,0x60,0,0x52,0x60,3,0x60,29,0xf3];
+    let (mut state,mut trie,mut sum)=(net.genesis.state().clone(),None::<crate::state_trie::StateTrie>,None::<crate::state_summary::Summary>);
+    let (mut prev,mut base_fee,mut parent_gas,mut nonce)=(None::<ParentResult>,U256::from(1_000_000_000u64),0u64,0u64);
+    for h in 1..=30u64{
+        if h>1{base_fee=crate::fees::next_base_fee(base_fee,parent_gas,8_000_000).unwrap();}
+        let txs:Vec<Vec<u8>>=match h%3{0=>vec![],1=>{nonce+=2;vec![tx(nonce-2,Some(bob),vec![],21000),tx(nonce-1,None,init.clone(),200_000)]},_=>{nonce+=1;vec![tx(nonce-1,Some(bob),vec![],21000)]}};
+        let input=BlockInput{height:h,timestamp:1_800_000_000+2*h,base_fee,gas_limit:8_000_000,prevrandao:B256::ZERO,
+            proposer:if h%2==0{Proposer::Signed(ids[(h as usize)%3])}else{Proposer::Fallback},
+            parent_result:prev.clone(),evidence:vec![],evidence_raw:&[],transactions:&txs,ancestors:vec![(0,net.genesis_hash)],cum_log_bytes:0};
+        let r=apply_block(&state,&net.genesis,&net.profile,&input).unwrap_or_else(|e|panic!("h={h}: {e:?}"));
+        let o=apply_block_with(&state,trie.as_ref(),sum.as_ref(),&net.genesis,&net.profile,&input).unwrap_or_else(|e|panic!("h={h}: {e:?}"));
+        assert_eq!((o.state_root,o.receipts_root,o.gas_used,o.receipts.clone()),(r.state_root,r.receipts_root,r.gas_used,r.receipts.clone()),"h={h}");
+        assert_eq!(o.summary,r.summary,"h={h}");
+        let mut ka:Vec<_>=o.state.contracts.keys().copied().collect();let mut kb:Vec<_>=r.state.contracts.keys().copied().collect();ka.sort();kb.sort();assert_eq!(ka,kb,"h={h}");
+        assert_eq!(o.state.accounts.len(),r.state.accounts.len());
+        for (a,x) in &r.state.accounts{let y=&o.state.accounts[a];assert_eq!((&y.info.nonce,&y.info.balance,&y.info.code_hash,&y.storage,&y.account_state),(&x.info.nonce,&x.info.balance,&x.info.code_hash,&x.storage,&x.account_state),"h={h}");}
+        parent_gas=o.gas_used;state=o.state;trie=Some(o.trie);sum=Some(o.summary);
+        let w=ids[(h as usize)%3];prev=Some(ParentResult{block_hash:B256::from(U256::from(h)),winner:w,shares:vec![(10,ids[(h as usize+1)%3])]});
+    }
+    let g=crate::state_summary::Summary::scan(net.genesis.state(),net.profile.cp().B_code_max);let s=sum.unwrap();
+    assert!(state.contracts.len()>net.genesis.state().contracts.len()&&s.code_total>=g.code_total+30,"positive control: ten runtimes were created ({s:?})");
+}
+
+/// C-1 E2: a candidate that fails one check fails it with the summary as without it (the same error).
+#[test] fn e2_failing_candidates_fail_alike(){
+    use crate::state_summary::Summary;use revm::primitives::{AccountInfo,Bytecode,Bytes};
+    let net=devnet3();let cp=net.profile.cp().clone();let img=&net.genesis.image;let g=net.genesis.state().clone();
+    let same=|db:&InMemoryDB|{let s=Summary::scan(db,cp.B_code_max);let (a,b)=(img.verify_summary(db,&s,&net.profile),img.verify_candidate(db,&net.profile));assert_eq!(a,b);a};
+    assert!(same(&g).is_ok());
+    let mut d=g.clone();d.insert_account_info(Address::from([0x77;20]),AccountInfo::from_balance(U256::MAX>>1));assert!(same(&d).is_err());
+    let mut d=g.clone();let c=Bytecode::new_raw(Bytes::from(vec![0u8;cp.B_code_max as usize+1]));d.insert_account_info(Address::from([0x78;20]),AccountInfo{code_hash:c.hash_slow(),code:Some(c),..Default::default()});assert!(same(&d).is_err());
+    let mut d=g.clone();d.insert_account_info(Address::from([0x79;20]),AccountInfo{code_hash:B256::from([5;32]),code:None,..Default::default()});assert!(same(&d).is_err());
+    let mut d=g.clone();let a=Address::from([0x7a;20]);d.insert_account_info(a,AccountInfo::from_balance(U256::from(1)));
+    for k in 0..=cp.SLOT_CAP{d.insert_account_storage(a,U256::from(k),U256::from(1)).unwrap();}assert!(same(&d).is_err());
+    let mut d=g.clone();let sys=program_address(4);for k in 0..=u64::from(cp.SYS_SLOT_MAX){d.insert_account_storage(sys,U256::from(k)+U256::from(1u64<<40),U256::from(1)).unwrap();}assert!(same(&d).is_err());
+    let mut d=g.clone();for i in 0..=cp.ACCT_CAP{d.insert_account_info(Address::from_word(B256::from(U256::from(i+1000))),AccountInfo::from_balance(U256::from(1)));}assert!(same(&d).is_err());
+}
