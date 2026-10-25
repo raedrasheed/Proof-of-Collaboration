@@ -69,8 +69,8 @@ were not results. The table below replaces them.
 | E1 ✔ (S5 step 1) | incremental state root (C-2 item 4): the head's trie in memory, any other parent's derived from it through the diffs or built | added: the trie group 2.23 (the head's trie, one derived or built, a block's changed paths); it moves to state.redb with E4 | **40.20 (measured)**, gate 45.94 |
 | E2 ✔ (S5 step 2) | the per-block whole-state checks (candidate checks, code checks, code drop) from a state summary moved through the changed keys | added: one boxed summary per entry (devnet +2.1 MB) | **40.20 (measured)** |
 | E3 ✔ (S3b, E3.1–E3.3) | the executor, production, the pool and RPC on overlays over the parent (lp4 `view::Overlay`); the S3a diff from the block's write set | snapshots 27.76 → 16.33 (transient copies 10 → 2; the pool's layer counted as one whole state; growth copy kept), code containers 1.45 → 0.81, history 0.84 → 0.78 (smaller `Entry`); added: the applied block's overlay 0.004 | **28.08 (measured)**, gate 32.09. The projection was ≈ 19.1: it assumed the growth copy and every transient copy go; two transient copies, the growth copy and the pool's layer remain |
-| E3.4 | the head extended in place (the child takes the parent's state by move) | none in the bound: a side child is still merged into a full copy while it is built, so the worst case keeps one transient copy. It saves the whole-state copy on every block that extends the head (time, and memory outside the worst case) | 28.08 (unchanged bound) |
-| E4 + E5 (S5) | head state and trie nodes in state.redb with D-6 checkpoints; code read from the store; a smaller inline entry | projected: every remaining whole state (head, genesis, side_max, materialized, transient, pool layer, growth: 16.33), the code sets and containers (6.44, less a code cache), the in-memory tries (2.23) | ≈ 3.08 + new terms (state, trie and code caches; the overlays of the work in progress; the pool's layer bounded by its gas: D-7's value is not approved); target ≤ 5.25, so the new terms must stay ≤ 2.17 |
+| E4 (S5; E3.4 folded in; D-6 is E4.4) | the trie on disk is the state: every retained state (head, window, side, genesis, checkpoint) is a root over hash-addressed nodes in state.redb, shared between versions; reads through bounded caches; a block commits its nodes, reverse diff and root before the journal append | projected: every whole state (16.33), the in-memory tries (2.23) and the code containers (0.81) | ≈ 8.7 before E5 (the four code sets remain) + new terms: node and code caches, the state.redb page cache, one block's new nodes |
+| E5 | code read from the store by the rebuild and the pool; a smaller inline entry | projected: the code sets (5.63) | ≈ 3.08 + E4's and E5's new terms; target ≤ 5.25, so the new terms must stay ≤ 2.17 |
 
 **Recomputed after E3 (2026-10-25), from the measured E3 items (evidence/c1-e3/a13-network-profile-e3.log).**
 The earlier S5 projection (≈ 6.5, or 6.0 GiB) assumed that S3b would remove every transient copy and the
@@ -249,8 +249,8 @@ rebuilds the world root.
   **122 ms**. What remains is mostly the state copies (E3).
 - **E3.1–E3.3 (2026-10-25, evidence/c1-e3/)** run the block, production, the pool and RPC on overlays over
   the parent. At the near-cap state: an empty child 62 → **8.5 ms**; 380 transfers 174 → **55 ms**;
-  CREATE2-heavy 122 → **17 ms**. One whole-state copy is left per block (the merge at the end); E3.4
-  removes it when the block extends the head.
+  CREATE2-heavy 122 → **17 ms**. One whole-state copy is left per block (the merge at the end); E4
+  removes it (a child state is its root).
   Acceptance test 4 (incremental against full root on every block of the suites) passes: the tests build
   with lp4's `root-check` feature. A parent whose trie cannot be derived (more than 64 diffs from the head,
   or a side block deeper than side_max) costs what it did before E1.

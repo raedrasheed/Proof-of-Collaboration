@@ -23,7 +23,7 @@
 >   - The network profile still does not boot within 6 GiB. Its model is 28.08 GiB (gate 32.09 GiB) after
 >     C-1 S2, S1, S3a, S4, E1, E2 and E3.1–E3.3, against 150.83 GiB before them (C-1, D-1 approved as
 >     option (a)). The near-cap validation of 380 transfers is now 55 ms, and an empty child 8.5 ms.
->     E3.4, E4 (with D-6) and E5 remain. The earlier ≈ 6 GiB projection for S5 was not a measured result
+>     E4 (the trie on disk as the state, with D-6; E3.4 folded in) and E5 remain. The earlier ≈ 6 GiB projection for S5 was not a measured result
 >     and has been withdrawn: the measured floor without whole states, code sets and tries is 3.08 GiB,
 >     before the new terms E4 and E5 add (decision package §1).
 > - Windows: the repair-scope CI passes on the last code commit `d567ce1` (run 33; runs 29–32 on the earlier

@@ -608,7 +608,7 @@ the materialized states and the side child under construction. E4 then moves the
 
 ### E3 status (2026-10-25): E3.1–E3.3 landed; evidence/c1-e3/
 
-E3.4 (the head extended in place) is not done yet.
+E3.4 (the head extended in place) is not done; it was later folded into E4 (see "E4 design").
 
 **One deviation from the design, in the implementation only.** The executor is generic over two small
 lp4 traits (`view::View` for reads, `view::WorkState` for writes). It is not generic over revm's
@@ -692,8 +692,8 @@ What changed:
 - the two `Touched::between` walks, about 14 ms each, are replaced by the overlay's write set;
 - S3a's diff is built from the write set.
 
-What remains is one copy of the parent, at the end (`merge`). E3.4 removes it when the block extends
-the head. The rolling rebuild's and restore's diffs still use `StateDiff::between`; E3.4 moves them to the
+What remains is one copy of the parent, at the end (`merge`). E4 removes it (a child state is its root).
+The rolling rebuild's and restore's diffs still use `StateDiff::between`; E4.1 moves them to the
 write set too.
 
 **Acceptance tests:**
@@ -725,6 +725,172 @@ write set too.
     self-destruct that does not mark the account cleared is still marked cleared, and deleted, by the
     normalization that follows every commit. The insertion is kept as a defence.
   - **18 of 19 killed.**
+
+### E4 design (2026-10-25, before code): the trie on disk is the state
+
+**Why E3.4 is folded into E4.** E3.4 would have applied a block's write set to the head's in-memory
+state in place. In E4 the head state is no longer in memory. Applying the write set to the store is the
+same step, so E3.4 would be work thrown away a step later, and it does not change the A13 bound: a side
+child is still merged into a full copy. Only E3.4's small part is done, with E4.1: the rebuild's and the
+restore's diffs from the write set.
+
+**Why "head on disk" is not enough.** After E3 the network model holds 10 whole states (16.33 GiB),
+the code sets (6.44 GiB) and two tries (2.23 GiB). Moving only the head to disk leaves nine of them, and
+the other states cannot become in-memory diff chains:
+- a side state may be up to R_KEEP = 2048 blocks from the head;
+- its path of diffs would then be up to 4096 diffs of up to 6.9 MiB each.
+
+The spec's own inventory (storage.md, "trie" and "retention") answers this:
+- one live trie, at most 447 B per entry;
+- historical trie versions for K_eff ≤ 32 blocks, sharing their nodes, at most 1.6 GiB on disk;
+- reverse diffs for 2048 blocks, 1.92 GiB;
+- side data, 0.76 GiB.
+
+All of this is on disk. E4 implements that model:
+- **the trie on disk is the state store;**
+- **a state is a root;**
+- every retained state (the head, the K_hist window, the side states, genesis, a checkpoint) is read
+  through its root, from nodes shared between versions.
+
+What is in memory are bounded caches and the writes of the work in progress.
+
+**The store.** `state.redb`, redb 2.6.4, already a dependency. Its tables:
+
+| table | key → value | written |
+|---|---|---|
+| `node` | node hash (32 B) → node encoding (the `p1_trie::node` bytes) and a reference count | by a block's trie update, in the block's transaction |
+| `code` | code hash → runtime bytes and a reference count | when an account's code first appears |
+| `addr` | Keccak(address) → address | when an account first appears (preimage, for whole-state walks) |
+| `slotkey` | (address, Keccak(slot)) → slot | when a slot is first written (preimage: the dirty-key meter and a removed account's keys need the slot) |
+| `root` | block hash → state root, the version's pins, the BLOCKHASH window | per retained state |
+| `diff` | block hash → the S3a reverse diff, encoded | per block within R_KEEP, canonical and side |
+| `meta` | `head` → (block hash, height, root, last journal index); `checkpoint/*` (D-6) | per block, atomically with its nodes |
+
+Inline nodes (encodings under 32 bytes) are kept inside their parent, as the trie encodes them, so every
+stored node is hash-addressed. That makes a write idempotent and a version immutable.
+
+**Reads (lp4 `view::TrieState`).** A `View` over a root reads as follows:
+- `account(a)`: the world trie at Keccak(a). The leaf gives nonce, balance, code hash and the storage
+  root. Its `AccountState` is Touched when the account exists. A NotExisting account is absent: the
+  trie holds only existing accounts, and the full-state code removes NotExisting ones on normalization.
+- `slot(a, k)`: a lookup in a's storage trie;
+- `each_slot(a, ..)`: a walk of a's storage trie, with `slotkey` giving the slots. Execution needs it for
+  emptiness (collision) and for a removed account's dirty keys;
+- `each_account`: a walk of the world trie with `addr`. Only `Summary::scan` and the paths without a
+  summary use it: genesis, and a fallback;
+- `contract(h)`: the `code` table;
+- `block_hash(n)`: the version's window.
+
+Node reads go through a bounded cache (`NODE_CACHE` bytes, an A13 term), and code reads through a
+bounded code cache. `View` returns owned values (`AccountInfo` clones are cheap: code is shared) so
+that a store-backed view does not hand out references into a cache. This is the one interface change
+to E3's traits, and `InMemoryDB` keeps implementing it unchanged in behaviour.
+
+**Writes.** A block runs on an `Overlay` over its parent's `TrieState`, exactly as in E3. Its write set
+updates the trie, using E1's update over nodes read from the store. The block's transaction then
+records:
+- the new nodes;
+- the reference counts;
+- new code and preimages;
+- the reverse diff;
+- `root[block]` and, when the block is the new head, `meta.head`.
+
+This happens after validation and before the journal append (invariant I3). No whole state is merged
+or copied: the child state is its root. A side child is a root too, so the merged side copy of E3 goes.
+
+**Versions and reclamation.** A node lives while some pinned root reaches it. A root is pinned while
+its block keeps a state under the existing retention rules:
+- the head;
+- the K_hist window;
+- the side states within side_max;
+- genesis;
+- D-6 checkpoints.
+
+When `settle` unpins a root, the nodes only it held are released by reference count, in the same
+transaction. Within the window a state no longer needs materializing, because it is read from its
+root. Deeper states are built as before: from the reverse diffs applied to a pinned root, with the
+result committed as a new version. The disk bound is the spec's inventory.
+
+**Crash safety.**
+- redb commits are atomic, with checksummed commit slots.
+- A block's transaction is committed before its journal record (I3). After a crash the store is
+  therefore at the journal's head, or one block ahead.
+- On open, `meta.head` is compared with the journal's last record. A head one block ahead is rolled back
+  by unpinning that block's root. Its nodes are released, and the store is at the journal's head again.
+- A store that fails to open, or whose head root does not equal the journal head's committed stateRoot
+  after this, is deleted and rebuilt from the journal (I1), as history.redb is.
+
+**D-6 checkpoints on it.**
+- A checkpoint is a pinned root at a canonical height h_c below head − R_KEEP (every CHECKPOINT_EVERY =
+  2048 blocks). It is stored with the serialized chain metadata (entries without states) and the index
+  of the last journal record it covers, written in one transaction.
+- **Integrity checks before a checkpoint is used:**
+  - redb's checksums verify;
+  - the root's recomputed hash from its stored nodes (a streaming walk) equals block h_c's committed
+    stateRoot;
+  - the metadata's hashes equal the journal records it claims.
+- **Partial writes:**
+  - a torn store fails redb's checks and is rebuilt;
+  - a checkpoint whose checks fail is ignored, with a log line. Open falls back to the previous
+    checkpoint, or to genesis.
+- **History kept:** the journal stays complete (I1). A checkpoint only shortens the re-execution at
+  open. It never deletes a block, receipt or log, as the owner required.
+
+**A13 after E4 (to be derived from the code, then pinned):**
+- **removed:** every whole state (16.33 GiB), the two in-memory tries (2.23 GiB), and the code containers;
+- **added:**
+  - NODE_CACHE and the code cache;
+  - redb's page cache and allocator for `state.redb`;
+  - one block's new nodes before commit (trie_paths);
+  - the overlays already counted;
+  - the reverse diff of the block in progress.
+
+The code sets go in E5, when the rebuild and the pool read code from the store.
+
+**Steps, each verified before the next:**
+- **E4.1 (lp4).**
+  - `View` with owned values.
+  - `TrieState` over an in-memory node map: a state read from its root.
+  - The rebuild's and the restore's diffs from the write set (pocold).
+  - **Proof:** every block of the lp4 and pocold suites runs as before; under the reference check its
+    parent is also read through a `TrieState` of the same root, and every read made by the block is
+    compared with the full state.
+- **E4.2 (lp4/pocold).**
+  - `NodeStore` over `state.redb`: node, code and preimage tables; the bounded caches.
+  - E1's update reads and writes through it.
+  - **Proof:** roots equal to `world_root` on every block (the existing reference check), node reference
+    counts equal to a recount from the pinned roots at every settle (a test-only check), and the disk
+    stays within the spec inventory on a measured run.
+- **E4.3 (pocold).**
+  - `Entry.state` becomes a root handle.
+  - Head, window, side and genesis states are read through roots.
+  - `materialize` and `full_entry` give `TrieState`s.
+  - Pinning and unpinning follow retention.
+  - **Proof:** S3a's, S4's and E1's equivalence tests against `full_states`, extended to the store; every
+    RPC state answer equal to the full-state node's.
+- **E4.4 (pocold, D-6 and crash tests).**
+  - Checkpoints.
+  - Open with roll-back.
+  - **Tests:**
+    - a kill at each step of a block's commit and of a checkpoint's write;
+    - a torn `state.redb`;
+    - a flipped byte;
+    - a checkpoint whose root does not match;
+    - a missing store;
+    - open from a checkpoint equal to open from genesis;
+    - open time measured with and without one.
+- **E4.5.** A13 recount and pin; the network model printed; `a13_model_at_the_network_profile`
+  inverted if it is ≤ 6 GiB.
+
+**Unchanged:** validity, every root, receipt and RPC answer, genesisHash and the wire format. The
+journal stays the source of truth. If a step would change one of these, it stops and goes back to the
+decision package.
+
+**Costs that are not memory:**
+- a node read on a cache miss is a disk read;
+- validation time at the network caps then depends on the cache and the disk. It is measured with the
+  near-cap state and reported, not assumed;
+- deep rebuilds beyond the window cost what they cost now, plus the commits.
 
 ## S4: per-block metadata off the heap
 
@@ -802,8 +968,8 @@ The journal already holds the header and ParentResult bytes, so nothing else had
 1. S1 (done).
 2. S3a (done).
 3. S4 (done).
-4. S5 with S3b, in steps: E1 (done), E2 (done), E3.1–E3.3 (done), then E3.4, E4 with D-6 on it, and
-   E5.
+4. S5 with S3b, in steps: E1 (done), E2 (done), E3.1–E3.3 (done), then E4.1–E4.5 (E3.4 folded in; D-6 is
+   E4.4), and E5.
 
 Each stage lands with its own commit, evidence directory, suites and mutation controls. Its `derive()`
 output replaces the projection in DECISION-PACKAGE.md §1.

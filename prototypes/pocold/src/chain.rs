@@ -770,8 +770,9 @@ impl Chain{
             // C-1 S4: a slimmed block made whole here is restored first (the next block reads its result).
             if x.slim{x.header=er.header.clone();x.result=er.result.clone();x.ranges=er.ranges.clone();x.slim=false;self.unslimmed.push(hash);}
             let x=self.blocks.get_mut(&hash).unwrap();
-            // C-1 S3a: a re-executed block keeps its diff (an adopted block pruned as a side block had none).
-            if x.diff.is_none(){x.diff=Some(std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state)));}
+            // C-1 S3a: a re-executed block keeps its diff (an adopted block pruned as a side block had none); C-1
+            // E3: from the write set when it ran on an overlay.
+            if x.diff.is_none(){x.diff=Some(std::sync::Arc::new(crate::statediff::StateDiff::of_output(&p.state,&out)));}
             if x.offloaded{x.tx_hashes=body.txs.iter().map(|t|revm::primitives::keccak256(t)).collect();x.receipts=out.receipts;x.body=body;
                 x.header.encoded=hb.unwrap_or_default();x.offloaded=false;n+=1;}
             if x.summary.is_none()&&!x.slim{x.summary=Some(Box::new(out.summary));}
@@ -849,8 +850,9 @@ impl Chain{
             // Off-heap body: fetched and decoded from the journal when this block was offloaded.
             let body=self.body_of(&e,src)?;
             let out=self.reexec(&p,&e,&body)?;
-            // C-1 S3a: the re-executed block gets its diff back (pruned blocks had none).
-            if self.blocks[&h].diff.is_none(){let d=std::sync::Arc::new(crate::statediff::StateDiff::between(&p.state,&out.state));self.blocks.get_mut(&h).unwrap().diff=Some(d);}
+            // C-1 S3a: the re-executed block gets its diff back (pruned blocks had none); C-1 E3: from the write
+            // set when it ran on an overlay.
+            if self.blocks[&h].diff.is_none(){let d=std::sync::Arc::new(crate::statediff::StateDiff::of_output(&p.state,&out));self.blocks.get_mut(&h).unwrap().diff=Some(d);}
             if !self.blocks[&h].slim&&self.blocks[&h].summary.is_none(){self.blocks.get_mut(&h).unwrap().summary=Some(Box::new(out.summary));}
             let mut next=e;next.state=out.state.into();next.trie=Some(out.trie);next.summary=Some(Box::new(out.summary));next.pruned=false;p=next;self.rebuilds+=1;
         }
