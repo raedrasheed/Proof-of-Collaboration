@@ -53,6 +53,8 @@ def main():
         dn.init(work, "a,b,c", ["--t-blk", "2", "--tau", "20", "--c", "8", "--d-att", "41", "--fb-wait", "3", "--work-bits", "15"])
         info = json.load(open(os.path.join(work, "net", "devnet.json"))); cid = str(info["chainId"])
         dn.start(work, log=True); wait(lambda: min(dn.rpc(8540 + i, "pocol_status")["head"]["height"] for i in range(3)) >= 3, 90, "nodes up")
+        modes = [dn.rpc(8540 + i, "pocol_status")["stateStore"] for i in range(3)]
+        ok("every node runs in the requested state mode", modes == ["--state-store" in dn.EXTRA] * 3, f"stateStore={modes} (POCOLD_RUN_ARGS)")
         sdir = os.path.join(work, "site1"); want = site_files(sdir, 1)
         r = subprocess.run([SITE_BIN, "publish", "--rpc", "127.0.0.1:8540", "--chain-id", cid, "--account", "alice", "--dir", sdir], capture_output=True, text=True)
         ok("publish v1 (multi-file, multi-chunk) through node a", r.returncode == 0, r.stderr[-300:] if r.returncode else r.stdout.strip())

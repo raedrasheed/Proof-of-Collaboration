@@ -22,10 +22,26 @@ fn command(args:&[String])->i32{
         "init-devnet"=>init(args),
         "run"=>run(args),
         "status"=>status(args),
-        _=>{eprintln!("usage:\n  pocold init-devnet --out DIR --miners a,b,c [--chain-id N] [--genesis-time S] [--t-blk S] [--tau S] [--d-att S] [--fb-wait S] [--c N] [--work-bits N] [--h-end N] [--h-close N] [--accounts x,y] [LOCAL]\n  pocold run --network DIR --data DIR --name N [--miner LABEL] [--listen ADDR] [--peer ADDR]... [--rpc ADDR] [--stop-at H] [--log] [LOCAL]\n  pocold status --network DIR --data DIR [LOCAL]\nLOCAL (ParamGate local timing, whole seconds; default single host): [--delta S] [--phi S] [--t-exec S] [--delta-rel S] [--gamma S]\nEvery profile is admitted by the full ParamGate (R1-R26) before boot; a rejection lists the violated rules (-32018).");Ok(())}
+        _=>{eprintln!("usage:\n  pocold init-devnet --out DIR --miners a,b,c [--chain-id N] [--genesis-time S] [--t-blk S] [--tau S] [--d-att S] [--fb-wait S] [--c N] [--work-bits N] [--h-end N] [--h-close N] [--accounts x,y] [LOCAL]\n  pocold run --network DIR --data DIR --name N [--miner LABEL] [--listen ADDR] [--peer ADDR]... [--rpc ADDR] [--stop-at H] [--log] [NODE]\n  pocold status --network DIR --data DIR [NODE]\nNODE: [--pool-gas-max GAS] [--state-store [--checkpoint-every N]] (--state-store is experimental; open a data directory in the mode it was made in)\nLOCAL (ParamGate local timing, whole seconds; default single host): [--delta S] [--phi S] [--t-exec S] [--delta-rel S] [--gamma S]\nEvery profile is admitted by the full ParamGate (R1-R26) before boot; a rejection lists the violated rules (-32018).");Ok(())}
     };
     if let Err(e)=r{eprintln!("error: {e}");return 1}
     0
+}
+/// Local node limits from the arguments: the defaults, with
+/// - `--pool-gas-max GAS` (decision D-7: the bound on the pooled transactions' summed declared gas limits; at
+///   least GAS_LIMIT, and A13 counts the pool at it);
+/// - `--state-store` (C-1 E4, experimental: states kept as trie versions in state.redb; the default stays
+///   whole-state until store mode is accepted). A data directory must be opened in the mode it was made in;
+///   `--checkpoint-every N` sets store mode's checkpoint interval in journal records (0: none).
+fn limits(args:&[String])->Result<node::Limits,String>{
+    let mut l=node::Limits::default();
+    if let Some(g)=arg(args,"--pool-gas-max"){l.pool_gas_max=Some(g.parse().map_err(|e|format!("--pool-gas-max {g}: {e}"))?);}
+    l.state_store=args.iter().any(|a|a=="--state-store");
+    if let Some(c)=arg(args,"--checkpoint-every"){
+        if !l.state_store{return Err("--checkpoint-every needs --state-store".into())}
+        l.checkpoint_every=c.parse().map_err(|e|format!("--checkpoint-every {c}: {e}"))?;
+    }
+    Ok(l)
 }
 /// Node-local ParamGate inputs: the single-host defaults with optional overrides.
 fn local(args:&[String])->NodeLocal{
@@ -60,7 +76,7 @@ fn init(args:&[String])->Result<(),String>{
     println!("{}",serde_json::to_string_pretty(&info).unwrap());Ok(())
 }
 fn run(args:&[String])->Result<(),String>{
-    let net=PathBuf::from(arg(args,"--network").ok_or("--network")?);
+    let limits=limits(args)?;let net=PathBuf::from(arg(args,"--network").ok_or("--network")?);
     let spec=load_spec(&net,&local(args))?;
     let name=arg(args,"--name").unwrap_or_else(||"node".into());
     let miner=arg(args,"--miner").map(|l|devnet::miner_identity(&l).key);
@@ -68,7 +84,7 @@ fn run(args:&[String])->Result<(),String>{
     let cfg=node::Config{dir:PathBuf::from(arg(args,"--data").ok_or("--data")?),name,miner,
         listen:arg(args,"--listen").map(|s|parse(&s)).transpose()?,peers:args_all(args,"--peer").iter().map(|s|parse(s)).collect::<Result<_,_>>()?,
         rpc:arg(args,"--rpc").map(|s|parse(&s)).transpose()?,
-        stop_at:arg(args,"--stop-at").and_then(|s|s.parse().ok()),log:args.iter().any(|a|a=="--log"),limits:Default::default()};
+        stop_at:arg(args,"--stop-at").and_then(|s|s.parse().ok()),log:args.iter().any(|a|a=="--log"),limits};
     let mut n=node::Node::open(cfg,spec)?;
     if !n.chain.spec.admission().specification_compliant(){
         eprintln!("pocold: {} admission, not specification compliance ({} conditions; see status \"admission\")",n.chain.spec.admission().scope().name(),n.chain.spec.admission().report().conditions.len());
@@ -78,7 +94,7 @@ fn run(args:&[String])->Result<(),String>{
     println!("{}",n.status_json());Ok(())
 }
 fn status(args:&[String])->Result<(),String>{
-    let net=PathBuf::from(arg(args,"--network").ok_or("--network")?);let spec=load_spec(&net,&local(args))?;
-    let cfg=node::Config{dir:PathBuf::from(arg(args,"--data").ok_or("--data")?),name:"status".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()};
+    let limits=limits(args)?;let net=PathBuf::from(arg(args,"--network").ok_or("--network")?);let spec=load_spec(&net,&local(args))?;
+    let cfg=node::Config{dir:PathBuf::from(arg(args,"--data").ok_or("--data")?),name:"status".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits};
     let n=node::Node::open(cfg,spec)?;println!("{}",n.status_json());Ok(())
 }

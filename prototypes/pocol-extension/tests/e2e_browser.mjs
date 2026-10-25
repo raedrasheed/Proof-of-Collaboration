@@ -164,6 +164,9 @@ async function main() {
   if (!REUSE) py(['start', work, '--log']);
   try {
     await wait(async () => Math.min(...await Promise.all([0, 1, 2].map(async (i) => Number(await rpc(8540 + i, 'eth_blockNumber'))))) >= 16, 180000, 'devnet height >= 16');
+    // The state mode every node reports (POCOLD_RUN_ARGS=--state-store runs the suite in store mode).
+    const modes = await Promise.all([0, 1, 2].map(async (i) => (await rpc(8540 + i, 'pocol_status')).stateStore));
+    ok('every node runs in the requested state mode', modes.every((m) => m === (process.env.POCOLD_RUN_ARGS || '').split(/\s+/).includes('--state-store')), `stateStore=${modes}`);
     // Publish S_A (multi-file, multi-chunk) and S_B.
     let S_A, S_B;
     if (REUSE) ({ S_A, S_B } = JSON.parse(readFileSync(join(work, 'state.json'), 'utf8')));

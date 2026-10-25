@@ -105,6 +105,8 @@ pub struct LayerView<'a,B:View+?Sized=InMemoryDB>{pub base:&'a B,pub layer:&'a L
 impl Layer{
     /// Accounts written (A13: the layer's size is bounded by what wrote it).
     pub fn written(&self)->usize{self.top.accounts.len()}
+    /// Account entries and slot entries held (A13, D-7: a created account keeps every slot it loaded).
+    pub fn entries(&self)->(usize,usize){(self.top.accounts.len(),self.top.accounts.values().map(|x|x.storage.len()).sum())}
     pub fn is_empty(&self)->bool{self.top.accounts.is_empty()&&self.top.contracts.is_empty()&&!self.hashes_set}
     fn account(&self,base:&(impl View+?Sized),a:&Address)->Option<Acc>{
         match self.top.accounts.get(a){Some(x)=>(!self.deleted.contains(a)).then(||Acc{info:x.info.clone(),state:x.account_state.clone()}),None=>base.account(a)}

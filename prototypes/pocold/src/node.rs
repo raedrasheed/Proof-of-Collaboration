@@ -49,9 +49,10 @@ pub struct Limits{pub net:net::Limits,pub rpc:crate::rpc::Limits,
     /// unprotected non-canonical metadata (chain::R_KEEP, chain::SIDE_BLOCKS_MAX). Live import and
     /// replay must use the same values; tests lower them to reach the boundaries quickly.
     pub r_keep:u64,pub side_cap:usize,
-    /// Decision D-7 (local pool policy): the longest one slice of pool revalidation runs on the
-    /// consensus thread before the next event is taken (POOL_SLICE), and an optional bound on the
-    /// pooled transactions' summed gas limits (None: no bound; the value is the owner's decision).
+    /// Decision D-7 (local pool policy, never validity): the longest one slice of pool revalidation runs
+    /// on the consensus thread before the next event is taken (POOL_SLICE), and the bound on the pooled
+    /// transactions' summed declared gas limits (None: POOL_GAS_BLOCKS × GAS_LIMIT, approved 2026-10-25;
+    /// a set value must be at least GAS_LIMIT, and A13 counts the pool at it: `pool_gas_bound`).
     pub pool_slice:Duration,pub pool_gas_max:Option<u64>,
     /// C-1 S1: how many canonical blocks below the head stay resident (None: K_hist). Older canonical
     /// history is served from the journal and history.redb. A test reference sets u64::MAX (none offloaded).
@@ -117,6 +118,8 @@ pub const EVENT_TURN:usize=8;
 pub const SUBMIT_DEADLINE:&str="-32020 compute deadline (not pooled)";
 /// `submit_tx_by`'s refusal when the pool's revalidation backlog (D-7) did not finish by the request's deadline.
 pub const SUBMIT_BUSY:&str="-32021 pool revalidation in progress (not pooled)";
+/// `admit_tx`'s refusal of a transaction whose declared gas limit would take the pooled sum past the bound (D-7).
+pub const POOL_FULL_GAS:&str="-32016 pool full (gas)";
 
 pub fn now_ms()->u128{SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()}
 pub fn now_s()->u64{(now_ms()/1000) as u64}
@@ -161,8 +164,8 @@ pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending:pocol_lp4_execution::view::L
     /// offset) expands to its transactions when reached; a transaction is re-executed on the pending
     /// state. `backlog_bytes` counts the transactions held here against POOL_MAX_BYTES.
     backlog:VecDeque<PoolItem>,backlog_bytes:usize,
-    /// Summed gas limits of `txs` (the optional pool_gas_max bound).
-    pub gas:u64}
+    /// D-7: summed declared gas limits of `txs`, and their bound (`pool_gas_bound`).
+    pub gas:u64,pub gas_max:u64}
 /// One backlog entry: an abandoned block's journal offset, or a transaction (and whether to relay it
 /// once admitted: a P2P transaction that arrived during the backlog is relayed then, as it would have been).
 enum PoolItem{Block(u64),Tx(Vec<u8>,bool)}
@@ -171,6 +174,17 @@ pub const POOL_MAX_BYTES:usize=32*1024*1024;
 /// Local limit on pooled transactions (about ten blocks of plain transfers): every new head
 /// re-executes the pool, so its length bounds that work.
 pub const POOL_MAX_TXS:usize=4096;
+/// Decision D-7 (approved 2026-10-25, local pool policy): by default the pooled transactions' declared gas
+/// limits sum to at most this many GAS_LIMITs. It bounds the gas a new head re-executes and what the
+/// pending layer can hold; it bounds no execution time (gas is not time), which the slices do.
+pub const POOL_GAS_BLOCKS:u64=4;
+/// The pool's gas bound: `Limits::pool_gas_max`, or POOL_GAS_BLOCKS × GAS_LIMIT. A value below GAS_LIMIT is
+/// refused: a transaction a block can hold must fit an empty pool.
+pub fn pool_gas_bound(cp:&pocol_lp4_execution::profile::ConsensusParams,limits:&Limits)->Result<u64,String>{
+    let g=match limits.pool_gas_max{Some(g)=>g,None=>cp.GAS_LIMIT.checked_mul(POOL_GAS_BLOCKS).ok_or("pool gas bound: overflow")?};
+    if g<cp.GAS_LIMIT{return Err(format!("pool_gas_max {g} is below GAS_LIMIT {}: a transaction a block can hold could never be pooled",cp.GAS_LIMIT))}
+    Ok(g)
+}
 
 pub struct Node{
     pub cfg:Config,
@@ -275,7 +289,9 @@ impl Drop for Node{fn drop(&mut self){if let Some(s)=&self.state_store{s.close()
 impl Node{
     /// Opens the journal, replays and re-executes every committed block.
     pub fn open(cfg:Config,spec:Spec)->Result<Self,String>{
-        // A13: the resident bound of this profile with these limits must fit the budget.
+        // A13: the resident bound of this profile with these limits must fit the budget (the pool counted at
+        // its gas bound, which must itself be valid).
+        let pool_gas_max=pool_gas_bound(spec.cp(),&cfg.limits)?;
         crate::resources::check(spec.cp(),spec.local().k_hist,spec.local().side_max,&cfg.limits,cfg.peers.len())?;
         let binding=spec.genesis_hash();
         let rec=store::open(&cfg.dir,&binding).map_err(|e|format!("store: {e:?}"))?;
@@ -424,7 +440,7 @@ impl Node{
         let net=net::Net::new(cfg.limits.net.clone());
         let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,history,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,deferred:VecDeque::new(),between:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
-            pool:Pool{code_total:pool_code,txs:vec![],pending:Default::default(),pending_base:head_state,bytes:0,meter,backlog:VecDeque::new(),backlog_bytes:0,gas:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new(),
+            pool:Pool{code_total:pool_code,txs:vec![],pending:Default::default(),pending_base:head_state,bytes:0,meter,backlog:VecDeque::new(),backlog_bytes:0,gas:0,gas_max:pool_gas_max},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new(),
             state_store,ckpt:Ckpt{every:ckpt_every,last:ckpt_last,roll:rolls[n_rec]}};
         node.stats.imported=rec.payloads.len() as u64;node.stats.replay_skipped=skipped;node.stats.restored=restored as u64;node.stats.history_refilled=refilled;
         node.stats.resumed_from=(start>0).then_some(start as u64);node.stats.checkpoints_refused=refused;node.stats.pins_released=released;node.stats.checkpoints_written=written;
@@ -692,8 +708,9 @@ impl Node{
         let hash=env.hash();
         if self.pool.txs.iter().any(|(h,_)|*h==hash){return Ok(hash)}
         if self.pool.bytes+self.pool.backlog_bytes+raw.len()>POOL_MAX_BYTES||self.pool.txs.len()>=POOL_MAX_TXS{return Err("-32016 pool full".into())}
+        // D-7: refused before it is executed, with no state change; a new head recounts the sum.
         let gas_limit=env.tx_env().gas_limit;
-        if self.cfg.limits.pool_gas_max.is_some_and(|m|self.pool.gas.saturating_add(gas_limit)>m){return Err("-32016 pool full (gas)".into())}
+        if self.pool.gas.saturating_add(gas_limit)>self.pool.gas_max{return Err(POOL_FULL_GAS.into())}
         let ctx=self.next_block_ctx();
         let base=self.pool.pending_base.clone();let view=pocol_lp4_execution::view::LayerView{base:&base,layer:&self.pool.pending};
         let r=match(by,self.pool.code_total){
@@ -1123,6 +1140,28 @@ impl Node{
     pub fn pool_written(&self)->usize{self.pool.pending.written()}
     /// The pool meter's (user slots, user accounts, system slots).
     pub fn pool_live(&self)->(u64,u64,u64){self.pool.meter.live()}
+    /// The pending layer's account and slot entries (A13 tests).
+    pub fn pool_layer_entries(&self)->(usize,usize){self.pool.pending.entries()}
+    /// D-7: the pool's counters recomputed from what it holds (tests). `gas` and `bytes` are the sums over the
+    /// admitted transactions and `backlog_bytes` over the backlog's; each admitted transaction is held once
+    /// under its own hash; the bounds hold. The backlog may hold one abandoned body past POOL_MAX_BYTES while
+    /// it is revalidated (`pool_step_until` expands one at a time).
+    pub fn pool_audit(&self)->Result<(),String>{
+        let profile=self.chain.spec.profile();let (mut gas,mut bytes,mut seen)=(0u64,0usize,HashSet::new());
+        for (h,raw) in &self.pool.txs{
+            let env=wire::decode_for_profile(raw,profile).map_err(|e|format!("a pooled transaction does not decode: {e:?}"))?;
+            if env.hash()!=*h{return Err(format!("pooled under {h}, which is not its hash"))}
+            if !seen.insert(*h){return Err(format!("{h} is pooled twice"))}
+            gas=gas.checked_add(env.tx_env().gas_limit).ok_or("pooled gas overflows")?;bytes+=raw.len();
+        }
+        let backlog:usize=self.pool.backlog.iter().map(|i|match i{PoolItem::Tx(r,_)=>r.len(),PoolItem::Block(_)=>0}).sum();
+        if (gas,bytes,backlog)!=(self.pool.gas,self.pool.bytes,self.pool.backlog_bytes){
+            return Err(format!("counters gas {}, bytes {}, backlog bytes {} differ from the contents: {gas}, {bytes}, {backlog}",self.pool.gas,self.pool.bytes,self.pool.backlog_bytes))}
+        if gas>self.pool.gas_max{return Err(format!("pooled gas {gas} is past the bound {}",self.pool.gas_max))}
+        if self.pool.txs.len()>POOL_MAX_TXS{return Err(format!("{} transactions pooled, past POOL_MAX_TXS",self.pool.txs.len()))}
+        if bytes>POOL_MAX_BYTES||bytes+backlog>POOL_MAX_BYTES+self.chain.spec.cp().BODY_MAX as usize{return Err(format!("{bytes} pooled and {backlog} backlog bytes, past POOL_MAX_BYTES"))}
+        Ok(())
+    }
     pub fn peer_count(&self)->usize{self.peers.len()}
     pub fn status_json(&self)->serde_json::Value{
         let h=self.chain.head();
@@ -1130,7 +1169,7 @@ impl Node{
             Mode::Locked(l)=>format!("{} h={} a={} shares={} mining={}",if l.fallback{"FB"}else{"PROP"},p.height,p.attempt,p.shares.len(),p.miner.is_some())}};
         serde_json::json!({"name":self.cfg.name,"chainId":self.chain.spec.chain_id(),"genesisHash":hex(&self.chain.spec.genesis_hash()),"head":{"height":h.height,"hash":hex(&h.hash),"ts":h.ts,"signed":h.signed,"final":h.is_final,"totalWork":format!("{:#x}",h.total_work)},
             "peers":self.peers.values().map(|p|p.addr.clone()).collect::<Vec<_>>(),"production":mode,"miner":self.cfg.miner.as_ref().map(|k|format!("{:#x}",k.address())),
-            "pool":self.pool.txs.len(),"journalRecords":self.journal_records(),"blocksKnown":self.chain.blocks.len(),"invalidKnown":self.chain.invalid.len(),
+            "stateStore":self.cfg.limits.state_store,"pool":self.pool.txs.len(),"poolGas":self.pool.gas,"poolGasMax":self.pool.gas_max,"journalRecords":self.journal_records(),"blocksKnown":self.chain.blocks.len(),"invalidKnown":self.chain.invalid.len(),
             "admission":crate::admission_json(self.chain.spec.admission()),
             "a13":crate::resources::derive(self.chain.spec.cp(),self.chain.spec.local().k_hist,self.chain.spec.local().side_max,&self.cfg.limits,self.cfg.peers.len()).map(|b|serde_json::json!({
                 "boundBytes":b.total.to_string(),"budgetBytes":self.cfg.limits.mem_budget,"conditions":crate::resources::CONDITIONS.iter().map(|(id,d)|serde_json::json!({"id":id,"detail":d})).collect::<Vec<_>>()})),

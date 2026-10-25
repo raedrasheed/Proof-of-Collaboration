@@ -975,3 +975,42 @@ fn jm_store_mode_disk_impact(){
         let _=std::fs::remove_dir_all(&dir);
     }
 }
+/// C-1 E5 (#109): state.redb's file factor under churn, in store mode. A contract writes `count` slots from
+/// `base` with `value` (calldata words: base, count, value; value 0 deletes). Each cycle: JM_CH_GROW blocks write new
+/// slots, the same number of blocks rewrite every live slot of the cycle, and as many delete the previous
+/// cycle's slots. After every cycle, and after a reopen, the file is compared with the bytes it stores. A
+/// measurement: it shows how the factor moves under repeated growth, update and delete on this store size, not a
+/// bound for the adversarial file (condition `store-file-factor`). Release only.
+#[test]
+#[ignore="measurement: run in release with --ignored --nocapture"]
+fn jm_store_mode_churn(){
+    let env_n=|k:&str,d:u64|std::env::var(k).ok().and_then(|s|s.parse().ok()).unwrap_or(d);
+    let (cycles,grow,per)=(env_n("JM_CH_CYCLES",8),env_n("JM_CH_GROW",4),env_n("JM_CH_SLOTS",300));
+    let alice=devnet::account_key("alice");let mut h=net();let mut nonce=0u64;
+    let init=hexv("6020600c60003960206000f36040356020356000355b8115601e578281556001019060019003906009565b00");
+    let dir=tmp("st-churn");let d=dir.clone();
+    let conf=move||Config{dir:d.clone(),name:"jm".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{state_store:true,checkpoint_every:16,..Default::default()}};
+    let mut n=Node::open(conf(),admitted()).unwrap();
+    let add=|h:&mut Net,n:&mut Node,txs:Vec<Vec<u8>>|{let b=signed(h,h.chain.head,Body{txs,evidence:vec![]});import(h,&b);n.import(b,None).unwrap();};
+    add(&mut h,&mut n,vec![deploy(&alice,nonce,FULL_GAS,0,init)]);let c=alice.address().create(nonce);nonce+=1;
+    let call=|nonce:u64,value:u64,count:u64,base:u64|{let mut data=vec![0u8;96];data[24..32].copy_from_slice(&base.to_be_bytes());data[56..64].copy_from_slice(&count.to_be_bytes());data[88..96].copy_from_slice(&value.to_be_bytes());
+        Tx{chain_id:777910,nonce,max_priority:U256::from(1u64),max_fee:U256::from(1_000_000_000_000_000u64),gas:7_900_000,to:Some(c),value:U256::ZERO,data:data.into()}.sign_1559(&alice)};
+    let size=|d:&std::path::Path|std::fs::metadata(d.join("state.redb")).map(|m|m.len()).unwrap_or(0);
+    let phase=|n:&Node,what:String|{let s=n.state_store().unwrap();let (alloc,frag,meta)=s.file_stats().unwrap();let stored=s.stored_bytes().unwrap();let file=size(&dir);
+        serde_json::json!({"phase":what,"fileBytes":file,"storedBytes":stored,"allocatedBytes":alloc,"fragmentedBytes":frag,"metadataBytes":meta,"nodes":s.node_count().unwrap(),
+            "fileOverStored":file as f64/stored.max(1) as f64,"allocatedOverStored":alloc as f64/stored.max(1) as f64})};
+    let mut phases=vec![];let t=Instant::now();
+    for cy in 0..cycles{
+        let base=|k:u64|(cy*grow+k)*per;
+        for k in 0..grow{add(&mut h,&mut n,vec![call(nonce,cy+1,per,base(k))]);nonce+=1;}
+        for k in 0..grow{add(&mut h,&mut n,vec![call(nonce,cy+1000,per,base(k))]);nonce+=1;}
+        if cy>0{for k in 0..grow{add(&mut h,&mut n,vec![call(nonce,0,per,((cy-1)*grow+k)*per)]);nonce+=1;}}
+        let st=pocold::chain::StateHandle::of(n.chain.head()).whole();let live=st.accounts.get(&c).map_or(0,|a|a.storage.values().filter(|v|!v.is_zero()).count());
+        assert_eq!(live as u64,grow*per,"cycle {cy}: only this cycle's slots are live");
+        let mut p=phase(&n,format!("after cycle {cy}"));p["liveSlots"]=serde_json::json!(live);p["height"]=serde_json::json!(n.chain.head().height);phases.push(p);
+    }
+    let secs=t.elapsed().as_secs_f64();drop(n);
+    let n=Node::open(conf(),admitted()).unwrap();phases.push(phase(&n,"reopened".into()));drop(n);
+    println!("JM-CHURN {}",serde_json::json!({"cycles":cycles,"growBlocks":grow,"slotsPerBlock":per,"seconds":secs,"phases":phases}));
+    let _=std::fs::remove_dir_all(&dir);
+}

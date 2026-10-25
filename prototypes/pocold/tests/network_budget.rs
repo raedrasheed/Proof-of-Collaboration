@@ -23,13 +23,47 @@ fn print(tag:&str,b:&pocold::resources::Bound){
         "groupsGiB":{"snapshots":gib(b.snapshot_total),"diffs":gib(b.diffs),"trie":gib(b.trie),"code":gib(b.code),"store":gib(b.store),"history":gib(b.history),"side":gib(b.side_blocks),"queues":gib(b.queues),"rpc":gib(b.rpc),"threads":gib(b.threads),"execution":gib(b.execution)},
         "items":b.items.iter().map(|(k,v)|serde_json::json!([k,v.to_string(),gib(*v)])).collect::<Vec<_>>()}));
 }
-/// C-1 E4.5: the same profile with the states in state.redb (`Limits::state_store`), with the pool's gas
-/// unbounded (D-7: its value is not approved), as pocold would boot it.
+/// C-1 E4.5: the same profile with the states in state.redb (`Limits::state_store`), with the pool at its
+/// default gas bound (D-7, 4 × GAS_LIMIT), as pocold would boot it. Also state.redb's largest file, by part.
 #[test] fn a13_store_model_at_the_network_profile(){
     let d=devnet::build(&network()).expect("network-profile candidate");let cp=d.profile.cp().clone();
     let l=pocold::single_host_local();
-    let b=pocold::resources::derive(&cp,32,l.side_max,&pocold::node::Limits{state_store:true,..Default::default()},2).expect("no overflow");
+    let lim=pocold::node::Limits{state_store:true,..Default::default()};
+    let b=pocold::resources::derive(&cp,32,l.side_max,&lim,2).expect("no overflow");
     print("A13-NETWORK-STORE",&b);
+    let p=pocold::resources::state_file_parts(&cp,32,l.side_max,&lim).unwrap();let f:u128=p.iter().sum();
+    println!("A13-NETWORK-STATE-FILE {}",serde_json::json!({"fileTiB":f as f64/(1u128<<40) as f64,"regions":f.div_ceil(pocold::resources::REDB_REGION_BYTES).to_string(),
+        "regionAllocatorBytes":pocold::resources::redb_region_allocator(pocold::resources::REDB_REGION_PAGES).unwrap().to_string(),
+        "partsTiB":{"versionsNodes":p[0] as f64/(1u128<<40) as f64,"preimages":p[1] as f64/(1u128<<40) as f64,"code":p[2] as f64/(1u128<<40) as f64,"checkpoints":p[3] as f64/(1u128<<40) as f64},"factor":pocold::resources::STATE_FILE_FACTOR.to_string()}));
+}
+/// D-7 (A13-DERIVATION §2d): the pool's terms follow its gas bound. The layer holds what that gas can write
+/// (`layer_writes`); its code is, in whole-state mode, its creations, and in store mode also its touched accounts'
+/// code, at most CODE_CAP (which binds at the devnet profile, not at the network one). A bound past POOL_MAX_TXS ×
+/// GAS_LIMIT counts as that (the count bound binds first). The block overlay is the layer of 5/4 GAS_LIMIT with
+/// the SYSTEM phase's accounts and keys.
+#[test] fn d7_a13_pool_terms_follow_the_gas_bound(){
+    use pocold::{node::{Limits,POOL_MAX_TXS},resources::{self as r,derive}};use pocol_lp4_execution::resources::memory::code_bytes;
+    let net=devnet::build(&network()).unwrap().profile.cp().clone();
+    let dev=devnet::build(&DevnetConfig::new(777910,1_700_000_000,&["a","b","c"])).unwrap().profile.cp().clone();let l=pocold::single_host_local();
+    let item=|b:&r::Bound,k:&str|b.items.iter().find(|x|x.0.starts_with(k)).unwrap_or_else(||panic!("{k}")).1;
+    assert_eq!(r::layer_writes(32_000_000),Some((3*1523+13333+32,11034+320000)),"the counts at 4 × GAS_LIMIT");
+    for cp in [&net,&dev]{
+        let gl=u128::from(cp.GAS_LIMIT);let g=4*gl;let (pa,ps)=r::layer_writes(g).unwrap();
+        for store in [false,true]{
+            let at=|gmax:Option<u64>|derive(cp,32,l.side_max,&Limits{state_store:store,pool_gas_max:gmax,..Default::default()},2).unwrap();
+            let b=at(None);
+            assert_eq!(item(&b,"diffs/the pool's pending layer"),r::layer_bytes(pa,ps).unwrap());
+            let spent=gl*5/4;let (oa,os)=r::layer_writes(spent).unwrap();
+            assert_eq!(item(&b,"diffs/the overlay of the block being applied"),r::layer_bytes(oa+u128::from(cp.SYS_ACCT_BLOCK_MAX)+1,os+u128::from(cp.SYS_KEYS_BLOCK_MAX)).unwrap());
+            let code=if store{code_bytes((pa*u128::from(cp.B_code_max)).min(u128::from(cp.CODE_CAP))+g/r::CODE_DEPOSIT,pa+g/r::CREATE_GAS)}else{code_bytes(g/r::CODE_DEPOSIT,g/r::CREATE_GAS)};
+            assert_eq!(item(&b,"code/the pool's pending layer"),code.unwrap(),"store {store}");
+            let b2=at(Some(8*cp.GAS_LIMIT));assert!(item(&b2,"diffs/the pool's pending layer")>item(&b,"diffs/the pool's pending layer")&&b2.total>b.total,"a larger bound counts more");
+            assert_eq!(at(Some(u64::MAX)).total,at(Some(POOL_MAX_TXS as u64*cp.GAS_LIMIT)).total,"capped by the count bound");
+            let body=u128::from(cp.BODY_MAX);assert_eq!(item(&b,"queues/an abandoned block's transactions"),body+body/r::MIN_TX_BYTES*80,"one abandoned body in revalidation");
+            let e=r::check(cp,32,l.side_max,&Limits{state_store:store,pool_gas_max:Some(cp.GAS_LIMIT-1),..Default::default()},2).unwrap_err();assert!(e.contains("below GAS_LIMIT"),"{e}");
+        }
+    }
+    assert!(32768*17935>u128::from(dev.CODE_CAP)&&32768*17935<u128::from(net.CODE_CAP),"CODE_CAP binds the store-mode pool code at the devnet profile only");
 }
 #[test] fn a13_model_at_the_network_profile(){
     let d=devnet::build(&network()).expect("network-profile candidate");let cp=d.profile.cp().clone();

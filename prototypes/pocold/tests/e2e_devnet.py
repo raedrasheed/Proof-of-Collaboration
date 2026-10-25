@@ -186,7 +186,7 @@ def main():
         if port_open(8540 + i) or port_open(30300 + i): raise AssertionError(f"{l} is still running")  # else RPC would answer from the old process
         listen = connect if listen is None else listen
         peers = ([j for j in range(3) if j != i] if connect else []) if peers is None else peers
-        cmd = [dn.BIN, "run", "--network", net, "--data", os.path.join(work, "data", l), "--name", l, "--rpc", f"127.0.0.1:{8540+i}", "--log"]
+        cmd = [dn.BIN, "run", "--network", net, "--data", os.path.join(work, "data", l), "--name", l, "--rpc", f"127.0.0.1:{8540+i}", "--log"] + dn.EXTRA
         if miner: cmd += ["--miner", l]
         if listen: cmd += ["--listen", f"127.0.0.1:{30300+i}"]
         cmd += sum([["--peer", f"127.0.0.1:{30300+j}"] for j in peers], [])
@@ -223,6 +223,9 @@ def main():
         run_node("c")
         wait(lambda: h(2) >= h(0) - 1 >= 15, 90, "c syncs")
         ok("late-joining node c syncs to the head", True, f"c={h(2)}")
+        # The state mode every node reports (POCOLD_RUN_ARGS=--state-store runs the suite in store mode).
+        modes = [dn.rpc(8540 + i, "pocol_status")["stateStore"] for i in range(3)]
+        ok("every node runs in the requested state mode", modes == ["--state-store" in dn.EXTRA] * 3, f"stateStore={modes}")
         # Transactions over RPC (alice -> bob), via node a.
         alice = next(x for x in info["accounts"] if x["label"] == "alice"); bob = next(x for x in info["accounts"] if x["label"] == "bob")
         txs = []
@@ -515,7 +518,7 @@ def main():
         for l in L: stop_node(l)
         for i, l in enumerate(L):
             port = 8540 + i
-            rp = subprocess.Popen([dn.BIN, "run", "--network", net, "--data", os.path.join(work, "data", l), "--name", l + "-replay", "--rpc", f"127.0.0.1:{port}"],
+            rp = subprocess.Popen([dn.BIN, "run", "--network", net, "--data", os.path.join(work, "data", l), "--name", l + "-replay", "--rpc", f"127.0.0.1:{port}"] + dn.EXTRA,
                                   stdout=open(os.path.join(work, f"{l}-replay.log"), "ab"), stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 wait(lambda: dn.rpc(port, "pocol_status") is not None, 60, f"replay {l}")
@@ -524,8 +527,8 @@ def main():
                 ok(f"replay of {l} reproduces its live head h={hgt} (hash/stateRoot/receiptsRoot)", (b["hash"], b["stateRoot"], b["receiptsRoot"]) == (hsh, sr, rr), f"replayed head h={rhead['height']}")
             finally:
                 os.killpg(rp.pid, signal.SIGTERM); rp.wait()
-            st1 = subprocess.run([dn.BIN, "status", "--network", net, "--data", os.path.join(work, "data", l)], capture_output=True, text=True, check=True).stdout
-            st2 = subprocess.run([dn.BIN, "status", "--network", net, "--data", os.path.join(work, "data", l)], capture_output=True, text=True, check=True).stdout
+            st1 = subprocess.run([dn.BIN, "status", "--network", net, "--data", os.path.join(work, "data", l)] + dn.EXTRA, capture_output=True, text=True, check=True).stdout
+            st2 = subprocess.run([dn.BIN, "status", "--network", net, "--data", os.path.join(work, "data", l)] + dn.EXTRA, capture_output=True, text=True, check=True).stdout
             ok(f"two independent replays of {l} agree", json.loads(st1)["head"] == json.loads(st2)["head"] and json.loads(st1)["head"]["hash"] == rhead["hash"], json.loads(st1)["head"]["hash"][:14])
         print(json.dumps({"result": "PASS", "checks": len(checks), "elapsed_s": round(time.time() - t_start), "work": work}))
         return 0

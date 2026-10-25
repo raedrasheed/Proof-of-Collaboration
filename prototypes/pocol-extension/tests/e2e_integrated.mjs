@@ -57,6 +57,9 @@ async function main() {
   devnet(['start', work, '--log']);
   try {
     await wait(async () => Math.min(...await heights()) >= 16, 240000, 'height 16');
+    // The state mode every node reports (POCOLD_RUN_ARGS=--state-store runs the suite in store mode).
+    const modes = await Promise.all([0, 1, 2].map(async (i) => (await rpc(8540 + i, 'pocol_status')).stateStore));
+    ok('every node runs in the requested state mode', modes.every((m) => m === (process.env.POCOLD_RUN_ARGS || '').split(/\s+/).includes('--state-store')), `stateStore=${modes}`);
     ok('fresh-directory launch: 3 pocold processes produce and agree', (await Promise.all([0, 1, 2].map((i) => rpc(8540 + i, 'eth_getBlockByNumber', ['0x8', false])))).every((x, _, a) => x.hash === a[0].hash), `t=${((Date.now() - t0) / 1000).toFixed(0)}s`);
     // BR15 (governance ORIGIN_DENY): mining interfaces refuse any request carrying an Origin; without Origin they are served.
     const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'pocol_getTemplate', params: [] });

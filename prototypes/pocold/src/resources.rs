@@ -21,17 +21,48 @@ use crate::{chain::{self,Entry},header::Header,net,node::{self,Limits},types::{B
 ///
 /// At most two.
 pub const TRANSIENT_SNAPSHOTS:u128=2;
-/// C-1 E3: the pool's pending state is a layer of its writes over the head (`node::Pool`). The pool admits
-/// a transaction only within the caps (`PoolMeter`), and its gas is bounded only by POOL_MAX_TXS ×
-/// GAS_LIMIT unless `pool_gas_max` is set (D-7: its value is not approved), so the layer is counted as a
-/// whole state.
-pub const POOL_LAYER_SNAPSHOTS:u128=1;
-/// C-1 E3: the overlay of the block being applied (one at a time): an entry for each written account and
-/// each written slot (`block_writes`), with the cleared, deleted and retained address sets, each element
-/// at its inline size with hash-table growth (×2).
+/// The cheapest load that leaves a slot behind: revm 19.7 inserts a slot into the journaled state before it
+/// charges the load (revm-interpreter host.rs `sload`, journaled_state.rs `sload`), a frame that then runs out
+/// of gas keeps it (a revert only marks it cold), and the frame costs at least a warm CALL (memory::classes,
+/// "slot loaded unpaid").
+pub const SLOT_LOAD_GAS_MIN:u128=100;
+/// The cheapest creation (CREATE, 32,000 gas).
+pub const CREATE_GAS:u128=32_000;
+/// C-1 E3, D-7 (A13-DERIVATION §2d, the audit of what an execution keeps): the entries an overlay or the
+/// pool's layer (`view::Layer`) holds after executions that spent at most `gas`, as (accounts, slots).
+/// `Overlay::commit` takes only touched accounts, and a touch is paid: a call or a transfer to a cold account
+/// (2,600), or to a warm one not loaded before (an access-list entry, 2,400 paid, the precompiles, the
+/// coinbase), a creation, a self-destruct's beneficiary; a touch in a frame that reverts is undone
+/// (journaled_state.rs, AccountTouched). So three per transaction (sender, recipient, fee), one per
+/// ACCOUNT_TOUCH_GAS_MIN and the warm addresses. Slots: each changed slot (one first write each,
+/// SLOT_WRITE_GAS_MIN; a write in a frame that reverts is undone), and every slot an account created in the
+/// same transaction loaded, which the commit keeps whole, zero or not: one per SLOT_LOAD_GAS_MIN (confirmed by a
+/// witness kept outside the repository; its log is in evidence/d7-bound).
+pub fn layer_writes(gas:u128)->Option<(u128,u128)>{
+    Some((add(&[mul(3,gas/TX_GAS_MIN)?,gas/ACCOUNT_TOUCH_GAS_MIN,WARM_ADDRESSES])?,add(&[gas/SLOT_WRITE_GAS_MIN,gas/SLOT_LOAD_GAS_MIN])?))
+}
+/// Bytes of a layer with these entries: each account entry, each slot entry (spread over the accounts'
+/// storage tables, a table's own share for each), the cleared, deleted and retained address sets and the
+/// layer's own tables, every element at `memory::entry_bytes` (hash-table growth at its worst).
+pub fn layer_bytes(accounts:u128,slots:u128)->Option<u128>{
+    use revm::{db::DbAccount,primitives::{Address,U256}};use memory::{entry_bytes,table_bytes};
+    let (acct,slot,addr)=(size_of::<(Address,DbAccount)>() as u128,size_of::<(U256,U256)>() as u128,size_of::<Address>() as u128);
+    add(&[mul(accounts,entry_bytes(acct))?,mul(slots,entry_bytes(slot))?,mul(accounts.min(slots),table_bytes(slot))?,
+        mul(mul(accounts,3)?,entry_bytes(addr))?,mul(2,table_bytes(acct))?,mul(3,table_bytes(addr))?])
+}
+/// C-1 E3: the overlay of the block being applied (one at a time on the consensus thread, like a template's
+/// selection, which runs at most GAS_LIMIT): the layer of the USER phase's gas (`block_writes`' 5/4 GAS_LIMIT)
+/// with the SYSTEM phase's accounts and keys (SYS_ACCT_BLOCK_MAX, SYS_KEYS_BLOCK_MAX) and the escrow's
+/// issuance. Before D-7's audit this counted the changed slots only (one per 2,900 gas) and each element at
+/// twice its inline size.
 pub fn overlay_max(cp:&ConsensusParams)->Option<u128>{
-    use revm::{db::DbAccount,primitives::{Address,U256}};let (accounts,slots)=block_writes(cp)?;
-    add(&[mul(accounts,2*size_of::<(Address,DbAccount)>() as u128)?,mul(slots,2*size_of::<(U256,U256)>() as u128)?,mul(mul(accounts,3)?,2*size_of::<Address>() as u128)?])
+    let spent=u128::from(cp.GAS_LIMIT).checked_mul(5)?/4;let (a,s)=layer_writes(spent)?;
+    layer_bytes(add(&[a,u128::from(cp.SYS_ACCT_BLOCK_MAX),1])?,add(&[s,u128::from(cp.SYS_KEYS_BLOCK_MAX)])?)
+}
+/// D-7: the gas the pool's layer can hold: its bound (`node::pool_gas_bound`), and at most POOL_MAX_TXS
+/// transactions of GAS_LIMIT each (the count bound binds first above it).
+pub fn pool_gas(cp:&ConsensusParams,limits:&Limits)->Option<u128>{
+    let g=u128::from(node::pool_gas_bound(cp,limits).ok()?);Some(g.min(mul(node::POOL_MAX_TXS as u128,u128::from(cp.GAS_LIMIT))?))
 }
 /// Gas per byte of deployed runtime (EIP-170 code deposit, 200): an execution of g gas deploys at
 /// most g/200 bytes.
@@ -234,6 +265,7 @@ pub const CONDITIONS:&[(&str,&str)]=&[
     ("redb-representation","the history.redb terms rely on redb 2.6.4 behaviour checked by source inspection (cache split and write-buffer flush, allocator bitmaps) and on a measured file-size factor (HISTORY_FILE_FACTOR)"),
     ("open-replay-transient","Node::open holds the whole journal's payloads (store::open, pre-existing) and a replay index of two entries per record while replaying; this open-time transient grows with the journal and is not part of the steady-state bound. C-1 E4.4 adds to it, at open only: every record's offset and rolling hash, a decoded checkpoint snapshot and the stored versions read whole for their summaries (streamed: a node at a time, the DFS stack of node ids)"),
     ("store-inventory","store mode (C-1 E4): BATCHES (1) and stored_versions are inventories by code inspection, not enforced by a counter; the node cache is bounded by its resident-byte count (state_store::CACHE_ENTRY, Node::resident_bytes), checked by a test"),
+    ("revm-loading","the pool layer, overlay and store-mode code terms rely on revm 19.7 behaviour checked by source inspection (A13-DERIVATION §2d): a touch needs paid gas or a warm address, a touch or write in a reverted frame is undone, a loaded account or slot stays until its transaction ends; that a created account keeps the slots it loaded in out-of-gas frames is also tested"),
     ("store-file-factor","the state.redb allocator term takes the largest file as STATE_FILE_FACTOR times the stored bytes: a factor measured on stores of 1.5 to 15 MB (evidence/c1-e4 disk measurements), not established for the terabyte files of the adversarial case (every version a whole state on disk)"),
 ];
 /// The model total and its parts. `items` itemizes every group term ("group/item", bytes); the
@@ -264,11 +296,16 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // read in place through hash-checked nodes (chain::Pinned, state_store): no whole state, diff or E1
     // trie is held (the checkpoint encoder refuses an entry that holds one, checkpoint::rec_of). What is in
     // memory is the caches, the work in progress and the handles.
-    let code_set=memory::code_bytes(u128::from(cp.CODE_CAP),0)?;let code_entries=memory::code_bytes(0,accounts)?;
+    let code_set=memory::code_bytes(u128::from(cp.CODE_CAP),0)?;
     let exec_code=memory::code_bytes(memory::execution_gas(cp.GAS_LIMIT)/CODE_DEPOSIT,0)?;
-    let snapshots=POOL_LAYER_SNAPSHOTS;
+    // D-7: the pool's layer holds what its gas bound can write (no whole state is held in store mode). Each
+    // account it touched keeps its code, read from the store (a copy each, TrieState::info), at most the
+    // logical code of every existing account (CODE_CAP); and its creations (CODE_DEPOSIT, CREATE_GAS).
+    let pg=pool_gas(cp,limits)?;let (pa,ps)=layer_writes(pg)?;
+    let pool_code=memory::code_bytes(add(&[mul(pa,u128::from(cp.B_code_max))?.min(u128::from(cp.CODE_CAP)),pg/CODE_DEPOSIT])?,add(&[pa,pg/CREATE_GAS])?)?;
+    let snapshots=0;
     let items:Vec<(&'static str,u128)>=vec![
-        ("snapshots/the pool's pending layer over the stored head (counted as a whole state)",mul(POOL_LAYER_SNAPSHOTS,snapshot_bytes)?),
+        ("diffs/the pool's pending layer (D-7: what its gas bound can write)",layer_bytes(pa,ps)?),
         ("diffs/the overlay of the block being applied (C-1 E3)",overlay_max(cp)?),
         ("store/a block's new trie nodes before their commit (BATCHES batches)",mul(BATCHES,batch_max(cp)?)?),
         ("store/decoded-node cache (NODE_CACHE, resident bytes)",crate::state_store::NODE_CACHE as u128),
@@ -278,14 +315,18 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
         ("store/state.redb allocator state (per-region bitmaps over the largest file)",redb_allocator_bytes(state_file_max(cp,k_hist,side_max,limits)?)?),
         ("store/stored versions' handles and BLOCKHASH windows",mul(stored_versions(k_hist,side_max),pinned_bytes())?),
         ("store/a checkpoint being written (its bytes and its entry index)",checkpoint_bytes(cp,limits)?),
-        // Each account an execution loads brings its code from the store (TrieState::info): a copy per
-        // loaded account, at most the logical code of every existing account (code_caps, CODE_CAP) with
-        // its analysis. One execution at a time (EXECUTIONS).
-        ("code/read from the store by the execution in progress (a set)",mul(EXECUTIONS,code_set)?),
-        ("code/the pool's pending state (a set)",code_set),
-        ("code/containers in the pool's layer",mul(snapshots,code_entries)?),("code/new runtime of the execution in progress",mul(EXECUTIONS,exec_code)?)];
+        // Each account an execution loads brings its code from the store (TrieState::info), whether or not
+        // the execution runs or reads that code: a copy per loaded account, held until the transaction
+        // ends and, for a touched account, in the overlay of the block or template being built. revm 19.7
+        // loads an account before it charges for it, so a load costs as little as a warm CALL (100 gas):
+        // the gas does not bound these copies at the network profile (A13-DERIVATION §2d). They are at most
+        // the logical code of every existing account (code_caps, CODE_CAP) with its analysis. One execution
+        // and one overlay at a time (EXECUTIONS).
+        ("code/read from the store by the execution in progress and its overlay (a set)",mul(EXECUTIONS,code_set)?),
+        ("code/the pool's pending layer (D-7: its touched accounts' code and its creations)",pool_code),
+        ("code/new runtime of the execution in progress",mul(EXECUTIONS,exec_code)?)];
     (snapshots,items)}else{
-    let snapshots=add(&[1,1,u128::from(side_max),MATERIALIZED,TRANSIENT_SNAPSHOTS,POOL_LAYER_SNAPSHOTS])?;
+    let snapshots=add(&[1,1,u128::from(side_max),MATERIALIZED,TRANSIENT_SNAPSHOTS])?;
     // Code (decision package C-1 S2). A runtime is held in refcounted buffers (revm Bytecode: Bytes and
     // an Arc jump table) that a state copy shares (journal_measure::retained_states_of_one_lineage_
     // share_their_code_buffers). Each block's state is its parent's copy plus that block's changes, and
@@ -293,23 +334,25 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // lineage hold one set of buffers, at most CODE_CAP logical bytes with analysis (code_caps).
     // A separate execution of the same code makes separate buffers. Counted as a full set each:
     // - every side-branch state (unshared at worst: rebuilt from an older state);
-    // - a rebuild or restore in progress, which re-creates the code it re-executes;
-    // - the pool's pending state, which holds its own creates.
-    // The per-copy containers (map entries, Bytecode headers) are in every snapshot, and the
-    // execution in progress makes at most its gas / CODE_DEPOSIT bytes of new runtime.
+    // - a rebuild or restore in progress, which re-creates the code it re-executes.
+    // D-7: the pool's layer shares the head's buffers for the accounts it touched (a Bytecode clone shares
+    // its Bytes and jump table) and holds its own creations, at most its gas / CODE_DEPOSIT bytes. The
+    // per-copy containers (map entries, Bytecode headers) are in every snapshot, and the execution in
+    // progress makes at most its gas / CODE_DEPOSIT bytes of new runtime.
     let code_set=memory::code_bytes(u128::from(cp.CODE_CAP),0)?;let code_entries=memory::code_bytes(0,accounts)?;
     let exec_code=memory::code_bytes(memory::execution_gas(cp.GAS_LIMIT)/CODE_DEPOSIT,0)?;
+    let pg=pool_gas(cp,limits)?;let (pa,ps)=layer_writes(pg)?;let pool_code=memory::code_bytes(pg/CODE_DEPOSIT,pg/CREATE_GAS)?;
     let side_states=u128::from(side_max);
     let items:Vec<(&'static str,u128)>=vec![("snapshots/head state",snapshot_bytes),("snapshots/genesis state (counted as a full one)",snapshot_bytes),
         ("snapshots/side_max side-branch states",mul(side_states,snapshot_bytes)?),
         ("snapshots/materialized states (C-1 S3a: a parent or an RPC tag, and one kept until settle)",mul(MATERIALIZED,snapshot_bytes)?),
         ("snapshots/transient working copies (C-1 E3: a block's merged child, a rolling re-execution's two)",mul(TRANSIENT_SNAPSHOTS,snapshot_bytes)?),
-        ("snapshots/the pool's pending layer over the head (counted as a whole state)",mul(POOL_LAYER_SNAPSHOTS,snapshot_bytes)?),
         // A table that grows in a working copy keeps its old allocation until the new one is filled:
         // one table at a time (single consensus thread), at most a whole snapshot's tables.
         ("snapshots/table growth in a working copy",snapshot_bytes),
         ("diffs/retained and side states as diffs (C-1 S3a: 2·K_hist + side_max + 1)",mul(diffs_held(k_hist,side_max),diff_max(cp)?)?),
         ("diffs/the overlay of the block being applied (C-1 E3)",overlay_max(cp)?),
+        ("diffs/the pool's pending layer (D-7: what its gas bound can write)",layer_bytes(pa,ps)?),
         // C-1 E1: only the head keeps its state's trie after settle (chain::Chain::settle). A parent that is
         // not the head has its trie derived from the head's or built from its state, one at a time on the
         // consensus thread (validation, production, a rebuild's rolling re-execution); its distinct nodes are
@@ -317,7 +360,7 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
         ("trie/head state trie (C-1 E1)",trie_bytes(accounts,slots)?),("trie/a parent's trie derived or built (one at a time)",trie_bytes(accounts,slots)?),
         ("trie/the changed paths of the block executed on it",trie_paths(cp)?),
         ("code/one set for the canonical lineage (its states share the buffers)",code_set),("code/side_max side-branch states (a set each)",mul(side_states,code_set)?),
-        ("code/a rebuild or restore in progress (a set)",code_set),("code/the pool's pending state (a set)",code_set),
+        ("code/a rebuild or restore in progress (a set)",code_set),("code/the pool's pending layer (D-7: its creations)",pool_code),
         ("code/containers in every snapshot",mul(snapshots,code_entries)?),("code/new runtime of the execution in progress",mul(EXECUTIONS,exec_code)?)];
     (snapshots,items)};
     // Per block kept in memory: the map slot (Entry inline), the canonical index, header heap
@@ -386,6 +429,9 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // Queues and caches (node.rs, net.rs constants).
     let frame=net::MAX_FRAME as u128;let block=size_of::<Block>() as u128;let l=&limits.net;
     let pool=add(&[node::POOL_MAX_BYTES as u128,mul(node::POOL_MAX_BYTES as u128/MIN_TX_BYTES,32+24+24)?])?;
+    // D-7: revalidation expands one abandoned block's body at a time into the backlog, beside the pool's bytes
+    // (`Node::pool_step_until`; `Node::pool_audit` checks the sum).
+    let abandoned=add(&[u128::from(cp.BODY_MAX),mul(u128::from(cp.BODY_MAX)/MIN_TX_BYTES,32+24+24)?])?;
     let orphans=add(&[node::ORPHAN_BYTES_MAX as u128,mul((node::ORPHAN_PARENTS_MAX*node::ORPHANS_PER_PARENT) as u128,block+64)?])?;
     let future=mul(node::FUTURE_MAX as u128,frame+block)?;let templates=mul(node::TEMPLATES_MAX as u128+1,2*frame+block)?;
     let seen=add(&[mul(node::SEEN_MAX as u128+1,3*hdr+128)?,mul(node::SEEN_MAX as u128+1,192)?])?;
@@ -395,7 +441,7 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let peers=mul(l.peers_max as u128+dials as u128,add(&[l.queue_bytes_max as u128,2*frame,4096])?)?;
     // Each forwarder also holds the one event it is blocked sending (+1).
     let (main_events,net_events)=(mul(node::EVENT_QUEUE as u128,frame+256)?,mul((1+dials) as u128,mul(net::NET_EVENT_QUEUE as u128+1,frame+256)?)?);
-    let q=[("queues/transaction pool",pool),("queues/orphan blocks",orphans),("queues/future blocks",future),("queues/templates",templates),("queues/seen sets",seen),
+    let q=[("queues/transaction pool",pool),("queues/an abandoned block's transactions being revalidated (one body, D-7)",abandoned),("queues/orphan blocks",orphans),("queues/future blocks",future),("queues/templates",templates),("queues/seen sets",seen),
         ("queues/rejection and evidence caches",caches),("queues/peer send queues and frames",peers),("queues/main event queue",main_events),("queues/network event forwarders",net_events)];
     let queues=add(&q.map(|x|x.1))?;items.extend(q);
     // RPC (rpc::conn): per connection its header buffer (HEAD_MAX+READ_CHUNK, and its lossy UTF-8
@@ -456,6 +502,7 @@ pub const RESERVE_KEEP_EIGHTHS:u128=7;
 pub fn budget_required(total:u128)->Option<u128>{total.checked_mul(8).map(|x|x.div_ceil(RESERVE_KEEP_EIGHTHS))}
 /// Boot check: the bound, with the reserve, must fit the node's memory budget.
 pub fn check(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:usize)->Result<Bound,String>{
+    node::pool_gas_bound(cp,limits)?;
     let b=derive(cp,k_hist,side_max,limits,dials).ok_or_else(||"A13 memory bound: arithmetic overflow".to_string())?;
     let need=budget_required(b.total).ok_or_else(||"A13 memory bound: arithmetic overflow".to_string())?;
     if need>u128::from(limits.mem_budget){return Err(format!("A13 memory bound {} B with its 1/8 reserve needs {need} B, which exceeds the node memory budget {} B ({b:?})",b.total,limits.mem_budget))}
