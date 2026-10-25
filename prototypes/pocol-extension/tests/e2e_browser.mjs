@@ -356,8 +356,11 @@ async function main() {
     const after = tap.log.slice(atModal).map((x) => x.method);
     ok('A06 Chrome: endpoint identity re-checked after the click, before the submission (eth_chainId, pocol_status, then eth_sendRawTransaction)',
       after.indexOf('pocol_status') >= 0 && after.indexOf('eth_chainId') >= 0 && after.indexOf('pocol_status') < after.indexOf('eth_sendRawTransaction'), after.join(','));
-    const rc = await wait(() => rpc(8540, 'eth_getTransactionReceipt', [txHash]), 90000, 'receipt');
-    ok('BR14 transaction included by the devnet (status 1) and identical receipt on all nodes', rc.status === '0x1' && (await wait(async () => { const r = await Promise.all([8541, 8542].map((p) => rpc(p, 'eth_getTransactionReceipt', [txHash]))); return r.every((x) => x && x.status === '0x1' && x.blockHash === rc.blockHash) && r; }, 60000, 'receipts')), rc.blockNumber);
+    // Every poll reads all three nodes: a receipt read once can name a block a short fork then abandons (a node's own
+    // block at the inclusion height, replaced when the other branch is extended), and the others never report it.
+    const rcs = await wait(async () => { const r = await Promise.all([8540, 8541, 8542].map((p) => rpc(p, 'eth_getTransactionReceipt', [txHash]))); return r.every((x) => x && x.status === '0x1' && x.blockHash === r[0].blockHash) && r; }, 150000, 'receipts');
+    const rc = rcs[0];
+    ok('BR14 transaction included by the devnet (status 1) and identical receipt on all nodes', rc.status === '0x1', `${rc.blockNumber} ${rc.blockHash}`);
     const rejTx = fr.evaluate(([from, to]) => ethereum.request({ method: 'eth_sendTransaction', params: [{ from, to, value: '0x1' }] }).then(() => 'ok', (e) => e.code), [accts[0], s2]);
     await page.waitForSelector('#modal[data-kind=confirmTx]:not([hidden])'); await page.click('#reject');
     ok('BR14 rejected signature -> 4001 and no further eth_sendRawTransaction', (await rejTx) === 4001 && tapCount('eth_sendRawTransaction') === 1);
