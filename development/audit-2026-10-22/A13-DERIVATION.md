@@ -289,6 +289,79 @@ R21 fact (admission): (K_hist + side_max) × snapshot = 34 × 38.2 MiB = 1.27 Gi
 admitted without the simnet retentionStress exception; at network-scale caps the bound exceeds the budget
 and only that exception admits a simnet node (`resource_rules_r14_to_r21`).
 
+### 2c. C-1 E4/E5: the store-mode bound (2026-10-25, `derive` with `Limits::state_store`)
+
+In store mode every retained state is a version pinned in state.redb and read in place. No whole state,
+diff or E1 trie is held; the checkpoint encoder refuses an entry that holds one. `derive` itemizes what is
+held instead. Each term names the code it rests on (src/resources.rs). Network-profile values are from
+evidence/c1-e4/a13-final.log (commit fc24969).
+
+| item | term | why it is bounded | network |
+|---|---|---|---:|
+| snapshots/the pool's layer | 1 whole state | the pool's gas is not bounded until the D-7 value is approved | 1.63 GiB |
+| diffs/the block's overlay | `overlay_max` | as in whole-state mode (C-1 E3) | 0.004 GiB |
+| store/a block's batch | `BATCHES` (1) × `batch_max` | one batch at a time: `child_state` and `rolled` commit it before the next block (inspection) | 1.02 GiB |
+| store/node cache | `NODE_CACHE` (256 MiB) | resident bytes: `CACHE_ENTRY` + `Node::resident_bytes` per node, enforced by `Cache::put` | 0.25 GiB |
+| store/redb page cache | `STATE_PAGE_CACHE` (64 MiB) | set on the builder | 0.06 GiB |
+| store/redb allocator | `redb_allocator_bytes(state_file_max)` | redb 2.6.4 keeps, for every 4 GiB region of the file, a buddy allocator sized for the whole region; `redb_region_allocator` mirrors buddy_allocator.rs and bitmap.rs | 1.81 GiB |
+| store/stored-version handles | `stored_versions` × `pinned_bytes` | genesis, the K_hist window, side_max, a rolling rebuild, and an abandoned window until `settle` | 0.005 GiB |
+| store/a checkpoint being written | `checkpoint_bytes` | its bytes (`REC_MAX` per entry), the entry index, and redb's copy | 0.08 GiB |
+| code/read by the execution | one code set | each loaded account's code is read from the store; bounded by CODE_CAP | 1.13 GiB |
+| code/the pool's state | one code set | the pool's own creates | 1.13 GiB |
+| history/entries without a state | one empty state (C-1 E5) | every such entry shares `chain::empty_state` | 0 |
+
+**The largest state.redb file** (`state_file_max`):
+- the head's and genesis's versions whole;
+- every other version an entry or a checkpoint pins. Each of those differs from the head by the paths of
+  the blocks between them, and by at most a whole state;
+- the code every block to H_END can deploy (code is kept for good);
+- the checkpoints' snapshots.
+
+Key preimages are no longer a separate term: since E5 a leaf keeps its key's preimage, and the preimage is
+released with the leaf.
+
+Everything is counted at STATE_FILE_FACTOR (12). At the network profile every version saturates, about 108
+whole-state versions. This is the adversarial worst case on disk: every block makes maximal writes along
+65-node paths.
+
+**The file factor** is the file size over the bytes stored (journal_measure::jm_store_mode_disk_impact).
+It was measured after live import, after an open resumed from a checkpoint and after an open replayed
+from genesis, and after each close (evidence/c1-e4/disk-phases-*.log, disk-impact-final.md):
+- at most 6.07 with 14.9 MB stored;
+- at most 11.31 with 1.5 to 2.8 MB stored. redb doubles a file while it is below one region, so a small
+  file carries more slack; above one region the file grows a region at a time;
+- redb's allocated pages are at most 2.38 times the stored bytes.
+
+The first measurement gave about 18. That came from closing: a closing node released every version in a
+non-durable transaction of its own, and redb reuses those pages only after a durable commit. Since E5
+part 3 a close leaves the versions to the next open, which releases them in one durable transaction.
+
+Below one region the allocator term is one region's allocator, whatever the factor. The factor is not
+established for terabyte files (condition `store-file-factor`). Each unit of the factor is about 0.15 GiB
+of the network bound.
+
+**Result** (tests/network_budget.rs; the computed bound, not measured RAM):
+
+| profile | whole-state mode | store mode |
+|---|---:|---:|
+| network (governance.md genesis parameters) | 27.92 GiB (gate 31.91) | **9.67 GiB (gate 11.05)** |
+| devnet as pocold boots it | 2.91 GiB (gate 3.33) | 3.36 GiB (gate 3.83) |
+
+How the network store bound moved:
+- 10.58 GiB at E4.5 part 1;
+- 10.24 GiB after E5 part 1 (no preimage term);
+- 9.07 GiB after E5 part 2 (redb's allocator counted as it is built);
+- 9.67 GiB after E5 part 3 (the measured factor of 12 in place of history.redb's 8).
+
+At the devnet profile store mode is the larger bound. Its fixed caches and its worst-case batch and file
+terms outweigh the small states they replace.
+
+**Measured RSS** is in evidence/c1-e4/disk-impact-final.md. It covers small states and does not test the
+bound.
+
+What the store-mode bound still holds at the network profile, and what would lower it, is in
+DECISION-PACKAGE.md ("Measured after E4 and E5").
+
 ## 3. System gas (R18) and timing (R14/R19)
 
 - Gas: per-call maxima measured by `resources::tests::sys_gas_envelope_fixture` (worst case plus a

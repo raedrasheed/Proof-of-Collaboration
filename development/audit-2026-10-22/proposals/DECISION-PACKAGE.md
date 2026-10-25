@@ -92,6 +92,77 @@ local changes, none of them normative:
 
 These figures are projections until `derive()` prints them. They are derived and pinned stage by stage.
 
+**Measured after E4 and E5 (2026-10-25), `derive()` in store mode** (evidence/c1-e4/a13-final.log, commit
+fc24969; A13-DERIVATION §2c). E4.1–E4.5 and E5 parts 1–3 have landed. Store mode is opt-in
+(`Limits::state_store`, off by default).
+
+The network model is **9.67 GiB (gate 11.05)**, against 27.92 GiB in whole-state mode. These are
+computed bounds, not measured RAM:
+
+| group | GiB | what it is |
+|---|---:|---|
+| snapshots | 1.63 | the pool's layer, counted as a whole state |
+| code | 2.34 | code read by the execution in progress (1.13), the pool's code (1.13), containers (0.09) |
+| store | 3.23 | a block's batch 1.02; node cache 0.25; redb page cache 0.06; redb allocator 1.81; checkpoint 0.08; handles 0.005 |
+| execution | 1.10 | unchanged |
+| history | 0.63 | slimmed and offloaded metadata; one empty state shared by every entry without a state (E5) |
+| side, queues, RPC, threads, diffs | 0.73 | unchanged |
+
+How it moved:
+- 10.58 GiB at E4.5 part 1;
+- 10.24 GiB after preimages went into the leaves (E5 part 1);
+- 9.07 GiB with redb's allocator counted as redb builds it (E5 part 2);
+- 9.67 GiB with state.redb's own measured file factor, 12 instead of history.redb's 8 (E5 part 3).
+
+The first file-factor measurement (about 18) came from closing: a closing node released every version in a
+non-durable transaction of its own, so a close grew the file threefold to fourfold. A close now leaves
+the versions to the next open.
+
+**Decision needed (blocking 6 GiB at the network profile; not a normative change):**
+
+1. **The D-7 value (the pool's gas bound).** Approved in principle; its value is not.
+   - With a bound G, the pool's layer (1.63) and its code set (1.13) follow G instead of a whole state and a
+     whole code set.
+   - Projection at G = 4·GAS_LIMIT, from the D-7 work: about −2.7 GiB, to ≈ 7.0 GiB. `derive()` computes it
+     only once a value is approved.
+   - Recommended, as in the D-7 work where it was measured under load: G = 4·GAS_LIMIT.
+   - Alternatives:
+     - 2·GAS_LIMIT: a little lower, with more pool churn;
+     - none: the model stays at 9.67 GiB.
+
+**Local work that would lower it further (none of it normative; not done):**
+- **A gas-derived bound on the code one execution reads (≈ −1.0 GiB).** Today one execution may read every
+  account's code (CODE_CAP). Every account an execution loads costs gas: a cold access, an access-list
+  entry, or a transaction. Each deployed runtime is at most 24,576 bytes (EIP-170). That bound holds only after revm 19.7's
+  loading paths and the genesis programs' sizes are checked (which loads are free, and whether the set
+  lives per transaction or per block), so it is not counted.
+- **The file factor measured at scale.** It is measured on stores of 1.5 to 15 MB only. Each unit of the
+  factor is about 0.15 GiB of the bound.
+- **E5's code sets:** the rebuild and the pool still read code into their own sets.
+
+**A modelling choice for the owner (unchanged):** the batch term (1.02 GiB) takes every key path at 65 nodes
+(no limit on key-prefix grinding). A computational bound on grinding, for example paths ≤ 21 nodes (2^80
+hashes), would cut the batch to ≈ 0.33 GiB. It is an A13 assumption, so it is not adopted without approval.
+
+**Where that leaves 6 GiB.** The gate needs a model total of at most 5.25 GiB. With the D-7 value, the
+gas-derived code bound and the path assumption, the projection is ≈ 5.3 GiB: at the limit, not below it.
+Store mode stays opt-in, and the network profile does not boot, until a computed `derive()` fits.
+
+**Disk and time (measured on 5ab73d1, devnet profile, 4 vCPU KVM, ext4 on virtio;
+evidence/c1-e4/disk-impact-final.md).** Small store: 2,770 accounts, 2.8 MB stored. Larger: 16,110 accounts,
+14.9 MB stored.
+- **Import:** store mode is 1.8–2.4× slower per block on the small store, where every block's commit is
+  fsynced. On the larger state it is 1.23× slower for account-creating blocks and about equal (0.94×) for
+  full blocks.
+- **Reorg:** store mode is faster, 1.5× and 2.7×, because it reads stored versions in place.
+- **Open from a checkpoint:** 1.8× and 4.0× faster than whole-state mode's replay. Store mode's replay from
+  genesis is slower, because it refills the store.
+- **Files:** state.redb is 9.0 MB and 67.9 MB, beside history.redb (17.4 and 4.7 MB) and the journal (1.9 and
+  0.5 MB).
+- **RSS after sync and reorg:** 48.3 against 42.0 MB, and 112.7 against 113.4 MB.
+- **Variance:** fsync latency varies between runs on this disk, so store-mode times are indicative, within
+  about a factor of two.
+
 - **Consensus, genesisHash and validity:** none.
 - **Compatibility:** the journal and storage format change. This is a local migration; no on-chain or RPC
   change.

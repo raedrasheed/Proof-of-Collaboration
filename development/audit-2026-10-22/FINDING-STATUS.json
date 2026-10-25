@@ -4,11 +4,11 @@
  "pr": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/27",
  "commits": {
   "prHead": "latest commit on claude/audit-repair-a01-a14",
-  "lastImplementation": "the decision-package commit after af2f3a8 (C-1 S2 code term in pocold/src/resources.rs, consensus.md:101 template penalty in node.rs, tests for R4-1/R4-2 and S2). Before it: af2f3a8 (review fixes R2-1 to R2-5, R3-3), 6e99b19 (R1), 2ce03c1 and 49b2bc2 (C-2), 462fffc (PR #27 review threads); .github/ is unchanged since a03e089",
-  "integrationTested": "3c3792e for the full LP10 integration with real Chrome (not re-run since); pocold 184/0 and lp4 173/0 on the decision-package tree; e2e_devnet 42/42 twice on af2f3a8 binaries with the R4 checks (evidence/reviews-2026-10-24/r4-fixes/); e2e_site last on c959379",
-  "witnessTested": "3c3792e (not re-run since)",
-  "chromeTested": "3c3792e (not re-run since)",
-  "windowsTested": "462fffc (Windows CI run 26 on 43e7e0f, PASS); the run on af2f3a8 was in progress when this was written. A Windows pass is not acceptance"
+  "lastImplementation": "fc24969 (C-1 E5 part 3). Before it: 53a80e9 (E4.4 Windows test fix), 5722c23 and 90ba824 (E5 parts 2 and 1), 3c0fe15 (E4.4 follow-up), 314de11 (E4.5), 45d540f (E4.4 Windows test fix), 1a5b792 (E4.4, D-6), b91c490, 8f4b473, 6c6e192, f8a58bb, 7606a31 (E4.1-E4.3), 4ad4e83 (E3), 1774b90 (E2), 28594cc (E1), ddb0de2 (S4), 4b49d03 and bef6c4f (S3a), b517b0f (S1), d1604d0 (D-7), d567ce1 (S2); earlier: the decision-package commit after af2f3a8, af2f3a8, 6e99b19, 2ce03c1, 49b2bc2, 462fffc; .github/ is unchanged since a03e089",
+  "integrationTested": "fc24969 (evidence/c1-e4/accept/): lp4 193/0; pocold 221/0 with 20 ignored (each listed with where it ran); crash steps, kills and damage, the store-mode spec-depth test; e2e_devnet 42/42; e2e_site 20/20; extension 234/234; lp1-node 137 passed and the 11 Windows-only store_journal tests UnsupportedPlatform on Linux. Earlier: 3c3792e for the full LP10 integration before round 3",
+  "witnessTested": "3c3792e (not re-run since; not in the fc24969 pass)",
+  "chromeTested": "fc24969: real-Chromium e2e_browser 79/79 and LP10 e2e_integrated 18/18 (evidence/c1-e4/accept/). Before: 3c3792e",
+  "windowsTested": "fc24969 (Windows CI run 61, PASS on every check: lp1 12 + 150, lp4 193, pocold 221, extension 234; evidence/c1-e4/windows-runs.md). Runs 59 (cc929a7) and 60 (45d540f) failed in one E4.4 test's harness, fixed in 45d540f and 53a80e9. A Windows pass is not acceptance"
  },
  "axes": {
   "implemented": "YES | PARTIAL",
@@ -170,6 +170,21 @@
     "run": 21,
     "commit": "1cc96c4",
     "result": "PASS (the test's settings changed only)"
+   },
+   {
+    "run": 59,
+    "commit": "cc929a7",
+    "result": "FAIL, 1 test (e4_checkpoint_open_releases_what_a_crash_left_in_the_store): the test copied a data directory while its node held the journal's LOCK (OS error 33); fixed in 45d540f, test only"
+   },
+   {
+    "run": 60,
+    "commit": "45d540f",
+    "result": "FAIL, the same test: a StateStore handle clone kept state.redb open during the copy (OS error 33; Linux does not enforce redb's lock); fixed in 53a80e9, test only"
+   },
+   {
+    "run": 61,
+    "commit": "fc24969",
+    "result": "PASS on every check (C-1 E4.1-E4.5 and E5 parts 1-3, every E4/E5 test included)"
    }
   ],
   "defectsFoundAndFixed": [
@@ -269,7 +284,10 @@
    "D-A13-BUDGET (option 1, local)",
    "D-REORG-REDB (2026-10-23): a storage repair for R_keep adoption; D133 and validity unchanged; it does not cover the six consensus proposals",
    "RpcGuard implementation in pocold (the 2026-10-23 instruction to complete the authorized works, RpcGuard and the Windows verification); a local service policy (D87)",
-   "engineering decisions taken under the standing authorization (REPAIR-PLAN.md)"
+   "engineering decisions taken under the standing authorization (REPAIR-PLAN.md)",
+   "D-1 option (a): storage conformance S1-S5 toward 6 GiB at the network profile (landed: S1, S2, S3a, S4, E1-E4, E5 parts 1-3; the state store is opt-in, Limits::state_store)",
+   "D-6: local state checkpoints (implemented in C-1 E4.4, store mode)",
+   "D-7 in principle: sliced pool revalidation; its gas-bound value is not approved"
   ],
   "proposedNotApproved": [
    "LOG-ACCT-01",
@@ -280,7 +298,13 @@
    "LOG-CAP-AGGREGATE",
    "CAPS-SUSTAINABILITY N1-N8 (proposals/CAPS-SUSTAINABILITY.md)",
    "RPCGUARD P1-P4 (proposals/RPCGUARD-R2-PROPOSALS.md)",
-   "every journal mitigation (JOURNAL-GROWTH-AND-REPLAY.md §7)"
+   "every journal mitigation (JOURNAL-GROWTH-AND-REPLAY.md §7)",
+   "D-2",
+   "D-3",
+   "D-4",
+   "D-5",
+   "the D-7 value (4·GAS_LIMIT recommended; proposals/DECISION-PACKAGE.md)",
+   "the A13 key-path grinding assumption (a modelling choice; proposals/DECISION-PACKAGE.md)"
   ],
   "note": "Passing tests approve nothing. The implementation uses the recommended alternatives of the six consensus proposals provisionally."
  },
@@ -875,7 +899,20 @@
     "49b2bc2",
     "2ce03c1",
     "6e99b19",
-    "af2f3a8"
+    "af2f3a8",
+    "7606a31",
+    "f8a58bb",
+    "6c6e192",
+    "8f4b473",
+    "b91c490",
+    "1a5b792",
+    "45d540f",
+    "314de11",
+    "3c0fe15",
+    "90ba824",
+    "5722c23",
+    "53a80e9",
+    "fc24969"
    ],
    "implemented": "YES",
    "verified": {
@@ -893,14 +930,15 @@
      "Decision package C-2 items 1-3 (49b2bc2, 2ce03c1; evidence/c2-execution/): lp4 code_caps_engine_tests (known code total, once-per-phase check, revalidate_touched equals the full check), mutation controls; 380 transfers on the near-cap devnet state 22,553 ms before, 655 ms after (same host, same load)",
      "Review R3-3 (af2f3a8): consensus::replay_restores_each_adopted_branch_with_the_work_live_did (fail-before: 4 rebuilds and 76 re-executions at open against live's 0 and 2)",
      "tests/network_budget.rs: the network profile model, 150.83 GiB before C-1 S2 and 105.83 GiB after (gate 120.95 GiB); the test asserts it does not fit 6 GiB",
-     "journal track, rounds 1-3c (JOURNAL-GROWTH-AND-REPLAY.md): #[ignore] measurements in tests/journal_measure.rs (JM-BYTES, JM-REPLAY, JM-KIND, JM-EXEC, JM-STATE, JM-CREATE, JM-TXSTATE, jm_deep_reorg_latency, JM-OPENMEM-FRESH) on code whose src equals fa97594's; they measure and assert nothing about time (evidence/journal-r3/ on 7f587bb, journal-r3b/ on e3dfb47, journal-r3c/ on 1d094de)"
+     "journal track, rounds 1-3c (JOURNAL-GROWTH-AND-REPLAY.md): #[ignore] measurements in tests/journal_measure.rs (JM-BYTES, JM-REPLAY, JM-KIND, JM-EXEC, JM-STATE, JM-CREATE, JM-TXSTATE, jm_deep_reorg_latency, JM-OPENMEM-FRESH) on code whose src equals fa97594's; they measure and assert nothing about time (evidence/journal-r3/ on 7f587bb, journal-r3b/ on e3dfb47, journal-r3c/ on 1d094de)",
+     "C-1 E4/E5 (store mode, opt-in; D-6 checkpoints), evidence/c1-e4/: consensus::{e4_a_store_node_answers_as_a_whole_state_node, e4_store_node_at_the_r_keep_boundary_answers_as_a_whole_state_node, e4_store_node_rebuilds_a_fork_below_k_hist_as_a_whole_state_node, e4_store_node_at_the_spec_depth_2048_and_2049_answers_as_a_whole_state_node (release, --ignored), e4_checkpoint_open_resumes_and_equals_replay_from_genesis, e4_checkpoint_open_releases_what_a_crash_left_in_the_store, e4_checkpoint_survives_kills, e4_checkpoint_damage_falls_back_to_a_verified_state (17 cases), e4_checkpoint_crash_at_each_step (--features crash-test, 22 cases), e4_checkpoint_refuses_an_entry_bound_to_its_siblings_record, e4_checkpoint_resumes_slimmed_offloaded_and_evicting_chains, e4_checkpoint_resumes_with_replays_protect_set, e5_entries_without_a_state_share_one_empty_state, e5_a_closing_node_leaves_its_versions_to_the_next_open}; tests/state_store.rs (7); mutation controls mutants-e42/e43/e44/e44-retest/final.log; disk and time evidence/c1-e4/disk-impact-final.md; tests/network_budget.rs: the network profile model 27.92 GiB whole-state and 9.67 GiB in store mode (gate 11.05), neither fits 6 GiB"
     ],
     "witnessOnRepair": "n/a (source review)",
     "commits": {
-     "integration": "3c3792e for the full LP10 integration with real Chrome (not re-run since); pocold 184/0 and lp4 173/0 on the decision-package tree; e2e_devnet 42/42 twice on af2f3a8 binaries with the R4 checks (evidence/reviews-2026-10-24/r4-fixes/); e2e_site last on c959379",
+     "integration": "fc24969 (evidence/c1-e4/accept/): lp4 193/0, pocold 221/0, e2e_devnet 42/42, e2e_site 20/20, extension 234/234. Before: 3c3792e for the full LP10 integration",
      "witness": "3c3792e (not re-run since)",
-     "realChrome": "3c3792e (not re-run since)",
-     "windows": "462fffc (Windows CI run 26 on 43e7e0f, PASS); the run on af2f3a8 was in progress when this was written. A Windows pass is not acceptance"
+     "realChrome": "fc24969: e2e_browser 79/79, e2e_integrated 18/18. Before: 3c3792e",
+     "windows": "fc24969 (run 61, PASS). A Windows pass is not acceptance"
     },
     "windows": "Windows CI (audit-r2-windows-verify.yml, a pull_request trigger limited to PRs into claude/affectionate-pascal-rjhh2k; WINDOWS-VERIFICATION.md): runs 1-7 found and fixed four Windows defects (a retention.rkeep directory fsync Windows refuses; a dropped P2P peer's reader not woken by shutdown; a Nagle/delayed-ACK stall of about 200 ms on every RPC answer; kernel absorption of unread RPC answers, fixed by SO_SNDBUF 32 KiB plus a write cap of SEND_SOCK_BUF per call). PASS on every check: run 9 (29fd44a), run 16 (25bec25, the first run of the round-3 poll/WSAPoll code), run 19 (2b1a571), run 21 (1cc96c4) and run 22 (c959379) and run 26 (43e7e0f, code 462fffc, the last code commit). Run 20 (49ae9fa, same code as run 19) failed one timing test, abandoned_queued_bodies_are_capped_and_released; 1cc96c4 changed only that test's settings, and run 21 passed"
    },
@@ -918,7 +956,8 @@
     "History term (caps track): caps::LOG_CAP is 2^24 in the caps-test build (a smaller, still valid upper bound there); sizing the devnet TX caps to cover H_END (CAPS-SUSTAINABILITY O2) puts the model at 11.12-14.62 GiB at fa97594, which fails the 6 GiB gate unless canonical history moves off the heap (CAPS-SUSTAINABILITY §5b)",
     "INSPECTION only: transient-snapshot inventory, one EVM execution at a time, the answer-being-built tree ratio (§4.11, §4.13, §4.16)",
     "DERIVED with stated revm 19.7 facts: execution memory, operation classes (§4.4, §3a)",
-    "No guaranteed process-memory ceiling exists (§2b)"
+    "No guaranteed process-memory ceiling exists (§2b)",
+    "PARTLY ADDRESSED (C-1 E4/E5, fc24969): the redb trie (state.redb) and D-6 checkpoints are implemented as an opt-in store mode; store mode answers as whole-state mode on every compared block, receipt and state query, and open from a checkpoint equals replay from genesis. Its network-profile model is 9.67 GiB (gate 11.05), above 6 GiB, so it is not the default and the network profile does not boot. Open: the D-7 value (owner), the code one execution reads (a gas-derived bound, not done), the pool's and the rebuild's code sets (E5), and state.redb's file factor at the adversarial scale (condition store-file-factor)"
    ],
    "blocked": {
     "environment": [

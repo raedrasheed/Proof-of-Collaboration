@@ -969,6 +969,78 @@ re-execution at open.
 - damage: the store cut short, a changed byte, a missing store or history.redb, a broken seal, swapped
   roots, a changed summary, total work or binding, a node that is not its id, a missing node.
 
+### E4 and E5 status (2026-10-25): E4.1–E4.5 and E5 parts 1–3 landed; store mode opt-in; evidence/c1-e4/
+
+**Landed** (store mode is `Limits::state_store`, off by default):
+- **E4.1:** node_trie, with the View on owned values (`7606a31`, `f8a58bb`).
+- **E4.2:** state.redb, plus lp4's `apply_block_on` (`6c6e192`).
+- **E4.3:** store mode in pocold: pins, retention, reads in place, the pool and RPC (`8f4b473`, `b91c490`).
+- **E4.4 (D-6):** checkpoints (`1a5b792`); the checks its mutation pass showed were masked, and slimmed
+  stored versions (`3c0fe15`); Windows test fixes (`45d540f`, `53a80e9`).
+- **E4.5:** the store-mode A13 terms; the node cache counts resident bytes; streamed scans (`314de11`).
+- **E5 part 1** (`90ba824`): entries without a state share one empty state; a trie leaf keeps its key's
+  preimage, so preimages go with their versions (state.redb format 2; a store of another format is
+  rebuilt).
+- **E5 part 2** (`5722c23`): state.redb's allocator is counted the way redb 2.6.4 builds it.
+- **E5 part 3** (`fc24969`):
+  - state.redb's file factor is measured per phase and counted (STATE_FILE_FACTOR 12);
+  - a closing node leaves its versions to the next open;
+  - a damaged store serves nothing, not even its cache;
+  - tests for the five retest survivors.
+
+**Not done from E5's plan:** the rebuild and the pool still hold their own code sets. A13 counts 1.13 GiB
+for the code an execution reads and 1.13 GiB for the pool's.
+
+**Proofs (tests/consensus.rs, tests/state_store.rs).** A store-mode node answers as a whole-state node.
+The comparison covers every block, receipt and state query at every height, the retained states and the
+pins:
+- live, after reorgs, and after reopening;
+- at the R_keep boundary (24);
+- with a fork deeper than K_hist (rebuild from a stored version);
+- at the spec depth 2048/2049 (an ignored test, run in release on fc24969:
+  evidence/c1-e4/accept/pocold-spec-depth-store.log).
+
+Open from a checkpoint gives, field by field, the node that replay from genesis gives:
+- from checkpoints written by replay and written live;
+- with slimmed, offloaded and evicted entries;
+- with replay's protect set restored, mid-flood;
+- after kills at increasing delays;
+- after an abort at each of seven steps of a block's commit and of a checkpoint's write: 21 cases in live
+  import and one in replay;
+- after seventeen kinds of damage, a history.redb that lost an old block's records, and a close that left
+  its versions pinned.
+
+**Mutation controls:**
+- E4.1: 12/12 after N5's test.
+- E4.2: 12/12 on b91c490.
+- E4.3: 11/13 on b91c490 (C7, C10 survived). The deep-fork test killed both on 22942c7, which is 3c0fe15
+  before the rebase (evidence/c1-e4/README.md).
+- E4.4: 10/20 on 1a5b792. The retest on 22942c7 killed 8 of 13; K10a, K10b, K11b, K12 and K18 have
+  tests since E5 part 3.
+- Final pass on the final tree: evidence/c1-e4/mutants-final.log.
+
+**A13 (computed bound, not measured RAM; A13-DERIVATION §2c):**
+
+| profile | whole-state mode | store mode |
+|---|---:|---:|
+| network | 27.92 GiB | 9.67 GiB |
+| devnet as pocold boots it | 2.91 GiB | 3.36 GiB |
+
+Store mode is not the default. The 6 GiB gate is unchanged, and the network profile does not boot in
+either mode. DECISION-PACKAGE.md ("Measured after E4 and E5") lists what would lower the bound and the
+owner decision it needs.
+
+**Disk and time** (evidence/c1-e4/disk-impact-final.md, measured on 5ab73d1):
+- import is 1.8–2.4× slower per block on a small store and about equal on a larger state;
+- reorg is 1.5–2.7× faster;
+- open from a checkpoint is 1.8–4.0× faster than whole-state replay;
+- RSS after sync is within 15% of whole-state mode.
+
+**Open:**
+- E4.5's flip of the default: not now, because the model does not fit;
+- E5's code sets;
+- the state.redb file factor at the scale of the adversarial file (condition `store-file-factor`).
+
 ## S4: per-block metadata off the heap
 
 - Entries older than R_keep keep only what fork choice and contexts need for the heights still reachable
@@ -1045,8 +1117,8 @@ The journal already holds the header and ParentResult bytes, so nothing else had
 1. S1 (done).
 2. S3a (done).
 3. S4 (done).
-4. S5 with S3b, in steps: E1 (done), E2 (done), E3.1–E3.3 (done), then E4.1–E4.5 (E3.4 folded in; D-6 is
-   E4.4), and E5.
+4. S5 with S3b, in steps: E1 (done), E2 (done), E3.1–E3.3 (done), E4.1–E4.5 (done; E3.4 folded in; D-6 is
+   E4.4), and E5 (parts 1–3 done; the code sets are open).
 
 Each stage lands with its own commit, evidence directory, suites and mutation controls. Its `derive()`
 output replaces the projection in DECISION-PACKAGE.md §1.
