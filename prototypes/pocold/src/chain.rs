@@ -119,6 +119,11 @@ impl Pinned{
     pub fn new(store:std::sync::Arc<dyn pocol_lp4_execution::node_trie::TrieStore>,c:StoredChild)->Result<Pinned,Reject>{
         store.commit(&c.batch,c.trie.world).map_err(|e|Reject::Block(format!("state store: {e}")))?;Ok(Pinned{trie:c.trie,hashes:c.hashes,store})
     }
+    /// C-1 E4.4: a version already stored (a checkpoint's, restored at open) pinned once more for its entry.
+    pub fn adopt(store:std::sync::Arc<dyn pocol_lp4_execution::node_trie::TrieStore>,root:pocol_lp4_execution::node_trie::Id,hashes:HashMap<U256,B256>)->Result<Pinned,Reject>{
+        store.commit(&Default::default(),Some(root)).map_err(|e|Reject::Block(format!("state store: {e}")))?;
+        Ok(Pinned{trie:pocol_lp4_execution::node_trie::NodeTrie{world:Some(root)},hashes,store})
+    }
     pub fn view(&self)->pocol_lp4_execution::node_trie::TrieState<'_>{pocol_lp4_execution::node_trie::TrieState{store:&*self.store,trie:self.trie,block_hashes:&self.hashes}}
 }
 impl std::fmt::Debug for Pinned{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{write!(f,"Pinned({:?})",self.trie.world.map(B256::from))}}
@@ -195,7 +200,7 @@ pub trait BlockBytes{fn record_at(&self,off:u64)->Result<(Vec<u8>,Vec<u8>,Vec<u8
     fn ranges_of(&self,_hash:&[u8;32])->Option<Vec<(Address,u128,u128)>>{None}}
 /// C-1 S4: drops what a slimmed entry does not keep: the header's heap fields, the ParentResult and the
 /// nonce ranges. Fork choice, contexts and evidence read only the rest at these depths.
-fn slim(e:&mut Entry){let h=&mut e.header;h.logs_bloom=Vec::new();h.proposer=Vec::new();h.sig=Vec::new();h.shares=Vec::new();h.ut_raw=Vec::new();
+pub(crate) fn slim(e:&mut Entry){let h=&mut e.header;h.logs_bloom=Vec::new();h.proposer=Vec::new();h.sig=Vec::new();h.shares=Vec::new();h.ut_raw=Vec::new();
     h.share_list_raw=Vec::new();h.encoded=Vec::new();e.result=None;e.ranges=Vec::new();e.summary=None;e.slim=true;}
 /// The ParentResult of block `hash` from its journal record's result bytes (node::result_bytes).
 pub fn decode_result(rb:&[u8],hash:&[u8;32])->Result<Option<ParentResult>,Reject>{
@@ -212,7 +217,7 @@ pub fn decode_result(rb:&[u8],hash:&[u8;32])->Result<Option<ParentResult>,Reject
 }
 /// Drops a journaled block's bytes from memory (D-REORG-REDB): body, receipts, tx hashes and the
 /// encoded header. Fork choice, child contexts and evidence ancestry read only the metadata kept.
-fn offload(e:&mut Entry){e.body=Body::default();e.receipts=Vec::new();e.tx_hashes=Vec::new();e.header.encoded=Vec::new();e.offloaded=true;}
+pub(crate) fn offload(e:&mut Entry){e.body=Body::default();e.receipts=Vec::new();e.tx_hashes=Vec::new();e.header.encoded=Vec::new();e.offloaded=true;}
 impl Entry{
     /// A copy without the executed state (an empty, pruned state), for rolling re-execution and views.
     pub fn meta_clone(&self)->Entry{
@@ -262,7 +267,7 @@ pub struct Chain{
     pub blocks:HashMap<[u8;32],Entry>,
     pub head:[u8;32],
     pub canonical:Vec<[u8;32]>,
-    next_seq:u64,
+    pub(crate) next_seq:u64,
     /// R21 window: full states kept for heights > head-K_hist (and genesis).
     pub k_hist:u64,
     pub rebuilds:u64,
@@ -292,7 +297,7 @@ pub struct Chain{
     /// tid -> (proposer, parent, h) for equivocation detection (evidence type 1).
     pub seen_templates:BTreeMap<(u64,[u8;32]),Vec<(Vec<u8>,Vec<u8>)>>,
     /// Side blocks removed by retention (EVICTED_MAX, FIFO) and how many were removed in all.
-    evicted:std::collections::HashSet<[u8;32]>,evicted_order:std::collections::VecDeque<[u8;32]>,pub evicted_total:u64,
+    pub(crate) evicted:std::collections::HashSet<[u8;32]>,pub(crate) evicted_order:std::collections::VecDeque<[u8;32]>,pub evicted_total:u64,
     /// Local retention parameters (consensus.md:29, governance.md:15): defaults R_KEEP and SIDE_BLOCKS_MAX.
     /// Tests lower them to exercise the boundaries quickly; they never affect validity.
     pub r_keep:u64,pub side_cap:usize,
@@ -1026,7 +1031,7 @@ impl Chain{
         while x!=y{cx=x;cy=y;x=self.blocks[&x].parent.unwrap();y=self.blocks[&y].parent.unwrap();}
         self.key(&cx)<self.key(&cy)
     }
-    fn rebuild_canonical(&mut self){
+    pub(crate) fn rebuild_canonical(&mut self){
         let mut path=Vec::new();let mut cur=Some(self.head);
         while let Some(h)=cur{path.push(h);cur=self.blocks[&h].parent;}
         path.reverse();self.canonical=path;

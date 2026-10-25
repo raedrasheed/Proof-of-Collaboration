@@ -63,8 +63,10 @@ pub struct Limits{pub net:net::Limits,pub rpc:crate::rpc::Limits,
     pub slim_depth:Option<u64>,
     /// C-1 E4: states are kept as trie versions in `state.redb` (true) or whole in memory (false, the
     /// behaviour before E4 and a test reference).
-    pub state_store:bool}
-impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None,history_window:None,full_states:false,slim_depth:None,state_store:false}}}
+    pub state_store:bool,
+    /// C-1 E4.4 (D-6): journal records between two local checkpoints of a store-mode node (0: none).
+    pub checkpoint_every:u64}
+impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None,history_window:None,full_states:false,slim_depth:None,state_store:false,checkpoint_every:crate::checkpoint::EVERY}}}
 /// C-1 S1: replay refills history.redb with non-durable commits and makes them durable every this many blocks.
 const HISTORY_SYNC:u64=256;
 /// D-7: one slice of pool revalidation. The consensus thread is held for at most this, plus the
@@ -211,6 +213,19 @@ pub struct Node{
     seen_templates:HashMap<([u8;32],u64),(Vec<u8>,Vec<u8>,Vec<u8>)>,
     seen_wins:HashMap<([u8;32],u64),([u8;32],[u8;65])>,
     pub evidence_pool:Vec<Vec<u8>>,
+    /// C-1 E4.4: the node store (store mode) and the checkpoint cadence: records between checkpoints (0:
+    /// none), the records the last one covers, and the journal's rolling hash (`checkpoint::roll`).
+    state_store:Option<Arc<crate::state_store::StateStore>>,ckpt:Ckpt,
+}
+#[derive(Default)]
+struct Ckpt{every:u64,last:u64,roll:[u8;32]}
+/// C-1 E4.4: writes a checkpoint of `chain` after the journal prefix `b`. A failure is logged, never fatal:
+/// a checkpoint only shortens a later open.
+fn write_checkpoint(chain:&Chain,st:&crate::state_store::StateStore,b:&crate::checkpoint::Binding)->Result<u64,String>{
+    let (bytes,roots)=crate::checkpoint::encode(chain,b)?;
+    crate::crash_point("checkpoint-before");
+    let q=st.write_checkpoint(&bytes,&roots,crate::checkpoint::KEPT).map_err(|e|e.0)?;
+    crate::crash_point("checkpoint-after");Ok(q)
 }
 #[derive(Default,Clone,Debug)]
 pub struct Stats{pub imported:u64,pub mined:u64,pub signed_templates:u64,pub fallback_templates:u64,pub shares_seen:u64,pub hashes:u64,pub reorgs:u64,
@@ -224,7 +239,11 @@ pub struct Stats{pub imported:u64,pub mined:u64,pub signed_templates:u64,pub fal
     /// Peers whose template from Draw(h,0) for this node's parent failed its checks (consensus.md:101).
     pub template_penalties:u64,
     /// D-7: pool revalidation slices run and the longest one (ms).
-    pub pool_slices:u64,pub pool_slice_max_ms:u64}
+    pub pool_slices:u64,pub pool_slice_max_ms:u64,
+    /// C-1 E4.4: the journal records the last open resumed after (None: replayed from genesis), the
+    /// checkpoints it refused (each released), the pins it released (versions no checkpoint holds), and
+    /// the checkpoints written since.
+    pub resumed_from:Option<u64>,pub checkpoints_refused:u64,pub pins_released:u64,pub checkpoints_written:u64}
 
 fn orphan_size(b:&Block)->usize{b.header.encoded.len()+b.body.txs.iter().chain(b.body.evidence.iter()).map(|x|x.len()).sum::<usize>()}
 fn result_bytes(r:&Option<ParentResult>)->Vec<u8>{
@@ -264,16 +283,62 @@ impl Node{
         let rk_replay=retention_rkeep(&cfg.dir,cfg.limits.r_keep).map_err(|e|format!("retention.rkeep: {e}"))?;
         let mut chain=Chain::new(spec);chain.r_keep=rk_replay;chain.side_cap=cfg.limits.side_cap;chain.replaying=true;
         // C-1 S1: canonical history below the resident window lives off the heap (journal + history.redb).
+        // C-1 E4.4: a history.redb created now holds nothing a checkpoint's entries need (replay refills it).
+        let history_kept=cfg.dir.join(crate::history::FILE).exists();
         let history=crate::history::History::open(&cfg.dir).map_err(|e|format!("history: {}",e.0))?;chain.history_window=Some(cfg.limits.history_window.unwrap_or(chain.k_hist));chain.keep_full_states=cfg.limits.full_states;
         // C-1 S4: deeper than any fork (R_keep), a head that fell back by R_keep, the evidence window and
         // the 256-ancestor window: no validation reads a slimmed entry unless the head fell back further.
         chain.slim_depth=Some(cfg.limits.slim_depth.unwrap_or(2*rk_replay.max(cfg.limits.r_keep)+u64::from(chain.spec.cp().E_win)+257));
-        // C-1 E4: states in state.redb. Replay re-executes every block from genesis and refills the store, so
-        // it is started empty here (derived data, I1); E4.4's checkpoints let open resume from it instead.
+        // Every record's frame offset and the rolling hash of every journal prefix (C-1 E4.4 binding).
+        let n_rec=rec.payloads.len();let (mut offs,mut rolls)=(Vec::with_capacity(n_rec+1),Vec::with_capacity(n_rec+1));
+        {let (mut o,mut h)=(40u64,[0u8;32]);offs.push(o);rolls.push(h);for p in &rec.payloads{o+=(p.len()+store::OVERHEAD) as u64;h=crate::checkpoint::roll(&h,p);offs.push(o);rolls.push(h);}}
+        // C-1 E4: states in state.redb. C-1 E4.4 (D-6): open resumes from the newest checkpoint that verifies
+        // (`checkpoint::restore`) and replays only the records after it; one that does not is released and
+        // the one before it is tried. With none, or a store that is new, damaged or inconsistent, or a
+        // history.redb that was rebuilt, the store is started empty and replay re-executes every block
+        // from genesis and refills it (derived data, I1). Checkpoints are kept only under the R_keep replay
+        // uses (a lowered configured R_keep would make live keep less than replay).
+        let ckpt_every=if cfg.limits.state_store&&cfg.limits.r_keep==rk_replay{cfg.limits.checkpoint_every}else{0};
+        let (mut start,mut refused,mut released,mut state_store)=(0usize,0u64,0u64,None);
         if cfg.limits.state_store{
-            for f in [crate::state_store::FILE,crate::state_store::DAMAGED]{let _=std::fs::remove_file(cfg.dir.join(f));}
-            let st=crate::state_store::StateStore::open(&cfg.dir).map_err(|e|format!("state store: {}",e.0))?;
-            chain.enable_store(Arc::new(st)).map_err(|e|format!("state store: {e:?}"))?;
+            let st=Arc::new(crate::state_store::StateStore::open(&cfg.dir).map_err(|e|format!("state store: {}",e.0))?);
+            let dyn_st:Arc<dyn pocol_lp4_execution::node_trie::TrieStore>=st.clone();
+            let mut resumed=None;
+            // The pins are reset to the checkpoints' before genesis's version is pinned for its entry.
+            let snaps:Result<Vec<(u64,crate::checkpoint::Snapshot)>,String>=if ckpt_every>0&&!st.rebuilt&&!history.rebuilt&&history_kept{
+                st.checkpoints().map_err(|e|e.0).and_then(|c|c.iter().map(|(q,b,roots)|{
+                    let s=crate::checkpoint::decode(b).map_err(|e|format!("checkpoint {q}: {e}"))?;
+                    if *roots!=crate::checkpoint::roots(&s){return Err(format!("checkpoint {q}: its roots record is not its snapshot's"))}Ok((*q,s))}).collect())
+                    .and_then(|s:Vec<(u64,crate::checkpoint::Snapshot)>|if s.is_empty(){Ok(s)}else{st.reset_pins().map(|n|{released=n;s}).map_err(|e|e.0)})}else{Ok(vec![])};
+            chain.enable_store(dyn_st.clone()).map_err(|e|format!("state store: {e:?}"))?;
+            {
+                match snaps{
+                    Ok(mut snaps)=>{
+                        snaps.sort_by_key(|x|std::cmp::Reverse(x.0));
+                        let by_off:HashMap<u64,usize>=offs.iter().take(n_rec).enumerate().map(|(i,o)|(*o,i)).collect();
+                        for (q,s) in snaps{
+                            let b=s.binding;let k=b.records as usize;
+                            let r=if k>n_rec||offs[k]!=b.end||rolls[k]!=b.hash{Err("it is not bound to this journal's records".to_string())}
+                                else{crate::checkpoint::restore(&mut chain,&s,&crate::checkpoint::JournalSource{by_off:by_off.clone(),payloads:&rec.payloads,records:k,history:&history},&dyn_st)};
+                            match r{Ok(())=>{resumed=Some(k);break}
+                                Err(e)=>{refused+=1;if cfg.log{eprintln!("[{}] checkpoint {q} (record {k}) refused: {e}",cfg.name);}
+                                    if st.drop_checkpoint(q).is_err()||st.is_damaged(){break}}}
+                        }
+                    }
+                    Err(e)=>{if cfg.log{eprintln!("[{}] checkpoints unusable, the state store is rebuilt: {e}",cfg.name);}}
+                }
+            }
+            match resumed{
+                Some(k)=>{start=k;state_store=Some(st);}
+                None=>{
+                    // Started empty: every handle on the old file goes before it is removed (Windows cannot
+                    // remove an open file).
+                    if let Some(g)=chain.blocks.get_mut(&chain.head){g.stored=None;}chain.trie_store=None;drop(dyn_st);drop(st);
+                    for f in [crate::state_store::FILE,crate::state_store::DAMAGED]{let _=std::fs::remove_file(cfg.dir.join(f));}
+                    let st=Arc::new(crate::state_store::StateStore::open(&cfg.dir).map_err(|e|format!("state store: {}",e.0))?);
+                    chain.enable_store(st.clone()).map_err(|e|format!("state store: {e:?}"))?;state_store=Some(st);
+                }
+            }
         }
         // D-REORG-REDB replay. Every record is replayed in journal order with retain() after each, as
         // live import did. Live journals a block only after validating it on a present parent, and
@@ -290,9 +355,17 @@ impl Node{
             let header=decode_header(&hb).map_err(|e|format!("record {i}: {e}"))?;
             events.entry(block_hash(&header)).or_default().push_back((i,false));events.entry(header.parent_hash).or_default().push_back((i,true));
         }
-        let mut rec_off=40u64; // first record frame starts after MAGIC(8)+binding(32)
+        // C-1 E4.4: resumed after record `start`, replay's protection is what it was after that record: a
+        // block whose next journal event is a child record.
+        if start>0{
+            for q in events.values_mut(){while q.front().map_or(false,|x|x.0<start){q.pop_front();}}
+            events.retain(|_,q|!q.is_empty());
+            for (b,q) in &events{if chain.blocks.contains_key(b)&&q.front().map_or(false,|x|x.1){chain.protect.insert(*b);}}
+        }
+        let mut rec_off=offs[start]; // first record frame starts after MAGIC(8)+binding(32)
         let (mut skipped,mut restored,mut refilled)=(0u64,0usize,0u64);
-        for (i,payload) in rec.payloads.iter().enumerate(){
+        let (mut ckpt_last,mut written)=(start as u64,0u64);
+        for (i,payload) in rec.payloads.iter().enumerate().skip(start){
             let this_off=rec_off; rec_off+=(payload.len()+store::OVERHEAD) as u64;
             let (hb,bb,rb)=store::decode_record(payload).map_err(|e|format!("record {i}: {e}"))?;
             let header=decode_header(&hb).map_err(|e|format!("record {i}: {e}"))?;
@@ -330,6 +403,11 @@ impl Node{
             chain.retain_unsettled();
             if adopted{restored+=chain.restore_canonical(fork_h,&Src{journal:&rec.journal,history:&history}).map_err(|e|format!("replay {i}: restore canonical {e:?}"))?;}
             chain.settle();
+            // C-1 E4.4: replay checkpoints too, after making its history.redb writes durable.
+            if let Some(st)=&state_store{if ckpt_every>0&&(i as u64+1)-ckpt_last>=ckpt_every{
+                history.sync().map_err(|e|format!("replay {i}: history {}",e.0))?;
+                match write_checkpoint(&chain,st,&crate::checkpoint::Binding{records:i as u64+1,end:offs[i+1],hash:rolls[i+1]}){
+                    Ok(_)=>{written+=1;ckpt_last=i as u64+1;}Err(e)=>if cfg.log{eprintln!("[{}] checkpoint at record {}: {e}",cfg.name,i+1)}}}}
         }
         if refilled>0{history.sync().map_err(|e|format!("replay: history {}",e.0))?;}
         drop(events);chain.protect.clear();chain.replaying=false;chain.r_keep=cfg.limits.r_keep;chain.retain_unsettled();
@@ -342,12 +420,30 @@ impl Node{
         let net=net::Net::new(cfg.limits.net.clone());
         let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,history,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,deferred:VecDeque::new(),between:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
-            pool:Pool{code_total:pool_code,txs:vec![],pending:Default::default(),pending_base:head_state,bytes:0,meter,backlog:VecDeque::new(),backlog_bytes:0,gas:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
+            pool:Pool{code_total:pool_code,txs:vec![],pending:Default::default(),pending_base:head_state,bytes:0,meter,backlog:VecDeque::new(),backlog_bytes:0,gas:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new(),
+            state_store,ckpt:Ckpt{every:ckpt_every,last:ckpt_last,roll:rolls[n_rec]}};
         node.stats.imported=rec.payloads.len() as u64;node.stats.replay_skipped=skipped;node.stats.restored=restored as u64;node.stats.history_refilled=refilled;
+        node.stats.resumed_from=(start>0).then_some(start as u64);node.stats.checkpoints_refused=refused;node.stats.pins_released=released;node.stats.checkpoints_written=written;
         if rec.torn_tail{node.log("recovered torn journal tail into a new journal");}
         if rec.migrated_v1{node.log("migrated a fully verified v1 journal to format v2 (original kept as blocks.journal.v1-n)");}
         Ok(node)
     }
+    /// C-1 E4.4: a checkpoint every `checkpoint_every` journal records (store mode). The block's state,
+    /// history and journal record are durable already (I3), so the checkpoint describes durable data only.
+    fn checkpoint_if_due(&mut self){
+        let Some(st)=self.state_store.clone() else{return};
+        if self.ckpt.every==0||self.journal.records-self.ckpt.last<self.ckpt.every{return}
+        let b=crate::checkpoint::Binding{records:self.journal.records,end:self.journal.end_offset(),hash:self.ckpt.roll};
+        match write_checkpoint(&self.chain,&st,&b){Ok(_)=>{self.stats.checkpoints_written+=1;self.ckpt.last=b.records;}Err(e)=>self.log(&format!("checkpoint at record {}: {e}",b.records))}
+    }
+    /// C-1 E4.4: writes a checkpoint now (store mode; tests and a clean stop).
+    pub fn checkpoint_now(&mut self)->Result<u64,String>{
+        let st=self.state_store.clone().ok_or("no state store")?;
+        let b=crate::checkpoint::Binding{records:self.journal.records,end:self.journal.end_offset(),hash:self.ckpt.roll};
+        let q=write_checkpoint(&self.chain,&st,&b)?;self.stats.checkpoints_written+=1;self.ckpt.last=b.records;Ok(q)
+    }
+    /// The node store (store mode).
+    pub fn state_store(&self)->Option<&Arc<crate::state_store::StateStore>>{self.state_store.as_ref()}
     pub fn log(&self,m:&str){if self.cfg.log{eprintln!("[{} {}] {m}",self.cfg.name,now_ms()%100_000_000);}}
 
     pub fn start_network(&mut self)->Result<(),String>{
@@ -460,14 +556,18 @@ impl Node{
             Err(Reject::Block(why))=>{self.chain.mark_invalid(hash,why.clone());self.reject(hash,&why);return Err(Reject::Block(why))}
             Err(e)=>{if let Reject::Envelope(w)=&e{self.reject(hash,w);}return Err(e)}
         };
+        crate::crash_point("state-commit");
         self.observe_template(&b.header);self.observe_win(&b.header);
         // C-1 S1 (invariant I3): the receipts and transaction index are durable before the journal record.
         // A write that fails (a disk error, or a store marked damaged) stops the node as a failed journal
         // append does; the next open sets a damaged store aside and replay rebuilds it.
         if let Err(e)=self.history.put(&entry.hash,&entry.receipts,&entry.tx_hashes,&entry.ranges){self.log(&format!("FATAL history write: {}",e.0));std::process::exit(70);}
+        crate::crash_point("history");
         let record=store::encode_record(&b.header.encoded,&b.body.encode(),&result_bytes(&entry.result));
         // D-REORG-REDB: record the journal frame offset so this block's body can be read back off-heap.
         match self.journal.append(&record){Ok(off)=>entry.body_off=Some(off),Err(e)=>{self.log(&format!("FATAL journal append: {e:?}"));std::process::exit(70);}}
+        self.ckpt.roll=crate::checkpoint::roll(&self.ckpt.roll,&record);
+        crate::crash_point("journal");
         if solicited&&was_evicted{self.stats.refetched+=1;}
         self.received.insert(hash,now_ms());
         if self.received.len()>RECEIVED_MAX{let keep=self.chain.head().height.saturating_sub(8);let blocks=&self.chain.blocks;self.received.retain(|h,_|blocks.get(h).map_or(false,|e|e.height>=keep));}
@@ -486,6 +586,7 @@ impl Node{
         if new_head{match self.chain.restore_canonical(fork_h,&Src{journal:&self.journal,history:&self.history}){Ok(n)=>self.stats.restored+=n as u64,
             Err(e)=>{self.log(&format!("FATAL restore of the adopted branch: {e:?}"));std::process::exit(70);}}}
         self.chain.settle();
+        self.checkpoint_if_due();
         self.broadcast(&Msg::Block{header:b.header.encoded.clone(),body:b.body.encode()},from);
         if new_head{
             if self.chain.get(&self.chain.head).and_then(|e|e.parent)!=Some(old_head){self.stats.reorgs+=1;}

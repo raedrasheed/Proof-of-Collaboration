@@ -35,6 +35,9 @@ pocol-lp4-execution = { path = "../lp4-execution", features = ["root-check"] }
 [features]
 # validation.md:2065 caps-test build constants (simnet only, absent from the release); see lp4-execution.
 caps-test = ["pocol-lp4-execution/caps-test"]
+# C-1 E4.4 crash tests: the process aborts at a named step of a block's commit or a checkpoint's write
+# (`crash_point`, POCOLD_CRASH_AT). Tests only, absent from the release.
+crash-test = []
 
 [profile.release]
 debug = 1

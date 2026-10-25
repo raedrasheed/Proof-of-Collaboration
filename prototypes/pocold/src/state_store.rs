@@ -28,6 +28,11 @@ const ADDRS:TableDefinition<&[u8;32],&[u8;20]>=TableDefinition::new("addr");
 const SLOTS:TableDefinition<&[u8;52],&[u8;32]>=TableDefinition::new("slotkey");
 /// root id -> pins.
 const PINS:TableDefinition<&[u8;32],u32>=TableDefinition::new("pins");
+/// C-1 E4.4 (D-6): checkpoint sequence -> the sealed chain snapshot (`checkpoint::encode`).
+const CKPT:TableDefinition<u64,&[u8]>=TableDefinition::new("checkpoint");
+/// Checkpoint sequence -> the roots it pins (32 bytes each, a root once per entry that holds it), so a
+/// checkpoint is released without decoding its snapshot.
+const CKPT_ROOTS:TableDefinition<u64,&[u8]>=TableDefinition::new("checkpoint_roots");
 
 pub const FILE:&str="state.redb";
 /// Written when the store was found damaged while running; the next open rebuilds it.
@@ -72,7 +77,8 @@ impl StateStore{
             let mut db=catch_unwind(AssertUnwindSafe(||{let mut b=Database::builder();b.set_cache_size(STATE_PAGE_CACHE);b.create(p)})).map_err(|_|StateStoreError("redb panicked at open".into()))?.map_err(err)?;
             match catch_unwind(AssertUnwindSafe(||db.check_integrity())){Ok(Ok(true))=>{}_=>return Err(StateStoreError("integrity check failed".into()))}
             catch_unwind(AssertUnwindSafe(||->Result<(),StateStoreError>{let w=db.begin_write().map_err(err)?;
-                {w.open_table(NODES).map_err(err)?;w.open_table(CODE).map_err(err)?;w.open_table(ADDRS).map_err(err)?;w.open_table(SLOTS).map_err(err)?;w.open_table(PINS).map_err(err)?;}
+                {w.open_table(NODES).map_err(err)?;w.open_table(CODE).map_err(err)?;w.open_table(ADDRS).map_err(err)?;w.open_table(SLOTS).map_err(err)?;w.open_table(PINS).map_err(err)?;
+                 w.open_table(CKPT).map_err(err)?;w.open_table(CKPT_ROOTS).map_err(err)?;}
                 w.commit().map_err(err)})).map_err(|_|StateStoreError("redb panicked at open".into()))??;
             Ok(db)};
         let first=if marker.exists(){Err(StateStoreError("marked damaged".into()))}else{create(&path)};
@@ -146,6 +152,7 @@ impl StateStore{
                     }
                 }
             }
+            crate::crash_point("state-txn");
             w.commit().map_err(err)
         })
     }
@@ -155,23 +162,81 @@ impl StateStore{
         let mut gone=Vec::new();
         self.guard(||{
             let mut w=self.db.begin_write().map_err(err)?;if !durable{w.set_durability(Durability::None);}
+            {let mut p=w.open_table(PINS).map_err(err)?;let mut t=w.open_table(NODES).map_err(err)?;release(&mut p,&mut t,root,&mut gone)?;}
+            w.commit().map_err(err)
+        })?;
+        self.forget(&gone);Ok(())
+    }
+    fn forget(&self,gone:&[Id]){let mut c=self.cache.lock().unwrap();for id in gone{c.remove(id);}}
+    /// C-1 E4.4: the stored checkpoints, oldest first: (sequence, snapshot bytes, the roots it pins).
+    pub fn checkpoints(&self)->Result<Vec<(u64,Vec<u8>,Vec<Id>)>,StateStoreError>{
+        self.guard(||{let r=self.db.begin_read().map_err(err)?;let c=r.open_table(CKPT).map_err(err)?;let x=r.open_table(CKPT_ROOTS).map_err(err)?;let mut out=Vec::new();
+            for kv in c.iter().map_err(err)?{let (k,v)=kv.map_err(err)?;let seq=k.value();
+                let roots=x.get(seq).map_err(err)?.ok_or_else(||StateStoreError(format!("checkpoint {seq} has no roots record")))?.value().to_vec();
+                if roots.len()%32!=0{return Err(StateStoreError(format!("checkpoint {seq}: roots record of {} bytes",roots.len())))}
+                out.push((seq,v.value().to_vec(),roots.chunks(32).map(|c|c.try_into().unwrap()).collect()));}
+            Ok(out)})
+    }
+    /// C-1 E4.4: the pins the stored checkpoints hold.
+    pub fn checkpoint_pins(&self)->Result<u64,StateStoreError>{
+        self.guard(||{let r=self.db.begin_read().map_err(err)?;let x=r.open_table(CKPT_ROOTS).map_err(err)?;let mut n=0u64;
+            for kv in x.iter().map_err(err)?{n+=(kv.map_err(err)?.1.value().len()/32) as u64;}Ok(n)})
+    }
+    /// C-1 E4.4: stores a checkpoint under the next sequence and pins each of its roots once (as a block
+    /// commit pins its root), then releases the oldest checkpoints beyond `keep`, in one durable
+    /// transaction: a crash leaves the checkpoints before it or after it, never a part of one. Every root
+    /// must already be stored (each is an entry's pinned version). Returns the new sequence.
+    pub fn write_checkpoint(&self,snapshot:&[u8],roots:&[Id],keep:usize)->Result<u64,StateStoreError>{
+        let mut gone=Vec::new();
+        let seq=self.guard(||{
+            let w=self.db.begin_write().map_err(err)?;let seq;
             {
-                let mut p=w.open_table(PINS).map_err(err)?;
-                let n=p.get(root).map_err(err)?.map(|v|v.value()).ok_or_else(||StateStoreError(format!("root {} is not pinned",B256::from(*root))))?;
-                if n>1{p.insert(root,n-1).map_err(err)?;}else{p.remove(root).map_err(err)?;}
-                let mut t=w.open_table(NODES).map_err(err)?;let mut stack=vec![*root];
-                while let Some(id)=stack.pop(){
-                    let v=t.get(&id).map_err(err)?.map(|v|v.value().to_vec()).ok_or_else(||StateStoreError(format!("node {} is named but not stored",B256::from(id))))?;
-                    let n=u32::from_be_bytes(v[..4].try_into().unwrap());
-                    if n>1{t.insert(&id,node_value(n-1,&v[4..]).as_slice()).map_err(err)?;continue}
-                    t.remove(&id).map_err(err)?;gone.push(id);
-                    let node=Node::decode(&v[4..]).ok_or_else(||StateStoreError("a node does not decode".into()))?;stack.extend(node.children());
-                }
+                let mut c=w.open_table(CKPT).map_err(err)?;let mut x=w.open_table(CKPT_ROOTS).map_err(err)?;
+                let mut p=w.open_table(PINS).map_err(err)?;let mut t=w.open_table(NODES).map_err(err)?;
+                seq=c.last().map_err(err)?.map_or(0,|(k,_)|k.value()+1);
+                let flat:Vec<u8>=roots.iter().flat_map(|r|r.iter().copied()).collect();
+                c.insert(seq,snapshot).map_err(err)?;x.insert(seq,flat.as_slice()).map_err(err)?;
+                for r in roots{pin_stored(&mut p,&mut t,r)?;}
+                let mut seqs=Vec::new();for kv in c.iter().map_err(err)?{seqs.push(kv.map_err(err)?.0.value());}
+                for old in seqs.iter().take(seqs.len().saturating_sub(keep.max(1))){drop_one(&mut c,&mut x,&mut p,&mut t,*old,&mut gone)?;}
+            }
+            crate::crash_point("checkpoint-txn");
+            w.commit().map_err(err)?;Ok(seq)
+        })?;
+        self.forget(&gone);Ok(seq)
+    }
+    /// C-1 E4.4: releases one checkpoint (one that failed verification at open) and its pins, durably.
+    pub fn drop_checkpoint(&self,seq:u64)->Result<(),StateStoreError>{
+        let mut gone=Vec::new();
+        self.guard(||{
+            let w=self.db.begin_write().map_err(err)?;
+            {let mut c=w.open_table(CKPT).map_err(err)?;let mut x=w.open_table(CKPT_ROOTS).map_err(err)?;let mut p=w.open_table(PINS).map_err(err)?;let mut t=w.open_table(NODES).map_err(err)?;
+             drop_one(&mut c,&mut x,&mut p,&mut t,seq,&mut gone)?;}
+            w.commit().map_err(err)
+        })?;
+        self.forget(&gone);Ok(())
+    }
+    /// C-1 E4.4: at open, before any version is pinned again: the pins become exactly the stored
+    /// checkpoints' (a pin of a running node's entry, or of a block whose journal record a crash cut
+    /// off, is released with every node only it held), in one durable transaction. A root pinned fewer
+    /// times than the checkpoints name it means the counts are not what the commits made them: an error,
+    /// and the caller rebuilds the store.
+    pub fn reset_pins(&self)->Result<u64,StateStoreError>{
+        let mut gone=Vec::new();let mut released=0u64;
+        self.guard(||{
+            let w=self.db.begin_write().map_err(err)?;
+            {
+                let x=w.open_table(CKPT_ROOTS).map_err(err)?;let mut want:HashMap<Id,u32>=HashMap::new();
+                for kv in x.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;let v=v.value();if v.len()%32!=0{return Err(StateStoreError("a checkpoint roots record is not whole roots".into()))}
+                    for c in v.chunks(32){*want.entry(c.try_into().unwrap()).or_insert(0)+=1;}}
+                let mut p=w.open_table(PINS).map_err(err)?;let mut t=w.open_table(NODES).map_err(err)?;
+                let mut held=Vec::new();for kv in p.iter().map_err(err)?{let (k,v)=kv.map_err(err)?;held.push((*k.value(),v.value()));}
+                for (r,n) in &want{let h=held.iter().find(|x|x.0==*r).map_or(0,|x|x.1);if h<*n{return Err(StateStoreError(format!("root {} pinned {h} times, checkpoints name it {n} times",B256::from(*r))))}}
+                for (r,n) in held{for _ in 0..n-want.get(&r).copied().unwrap_or(0){release(&mut p,&mut t,&r,&mut gone)?;released+=1;}}
             }
             w.commit().map_err(err)
         })?;
-        let mut c=self.cache.lock().unwrap();for id in &gone{c.remove(id);}
-        Ok(())
+        self.forget(&gone);Ok(released)
     }
     /// Recounts every node's references from the pins: equal to the stored counts, and no stored node that
     /// no pin reaches (a test of the counts; it reads the whole table).
@@ -193,9 +258,36 @@ impl StateStore{
         match self.guard(||{let r=self.db.begin_read().map_err(err)?;f(&r)}){Ok(v)=>Some(v),Err(e)=>panic!("C-1 E4: state store read failed: {}",e.0)}
     }
 }
+type Pins<'a>=redb::Table<'a,&'static [u8;32],u32>;type Nodes<'a>=redb::Table<'a,&'static [u8;32],&'static [u8]>;
+/// One pin of `root` released within a write transaction: every node nothing names any more is deleted.
+fn release(p:&mut Pins<'_>,t:&mut Nodes<'_>,root:&Id,gone:&mut Vec<Id>)->Result<(),StateStoreError>{
+    let n=p.get(root).map_err(err)?.map(|v|v.value()).ok_or_else(||StateStoreError(format!("root {} is not pinned",B256::from(*root))))?;
+    if n>1{p.insert(root,n-1).map_err(err)?;}else{p.remove(root).map_err(err)?;}
+    let mut stack=vec![*root];
+    while let Some(id)=stack.pop(){
+        let v=t.get(&id).map_err(err)?.map(|v|v.value().to_vec()).ok_or_else(||StateStoreError(format!("node {} is named but not stored",B256::from(id))))?;
+        let n=u32::from_be_bytes(v[..4].try_into().unwrap());
+        if n>1{t.insert(&id,node_value(n-1,&v[4..]).as_slice()).map_err(err)?;continue}
+        t.remove(&id).map_err(err)?;gone.push(id);
+        let node=Node::decode(&v[4..]).ok_or_else(||StateStoreError("a node does not decode".into()))?;stack.extend(node.children());
+    }
+    Ok(())
+}
+/// One more pin of a stored root within a write transaction (its node counts one more reference).
+fn pin_stored(p:&mut Pins<'_>,t:&mut Nodes<'_>,root:&Id)->Result<(),StateStoreError>{
+    let v=t.get(root).map_err(err)?.map(|v|v.value().to_vec()).ok_or_else(||StateStoreError(format!("root {} is not stored",B256::from(*root))))?;
+    let n=u32::from_be_bytes(v[..4].try_into().unwrap());t.insert(root,node_value(n+1,&v[4..]).as_slice()).map_err(err)?;
+    let k=p.get(root).map_err(err)?.map_or(0,|v|v.value());p.insert(root,k+1).map_err(err)?;Ok(())
+}
+fn drop_one(c:&mut redb::Table<'_,u64,&'static [u8]>,x:&mut redb::Table<'_,u64,&'static [u8]>,p:&mut Pins<'_>,t:&mut Nodes<'_>,seq:u64,gone:&mut Vec<Id>)->Result<(),StateStoreError>{
+    let roots=x.remove(seq).map_err(err)?.map(|v|v.value().to_vec()).unwrap_or_default();c.remove(seq).map_err(err)?;
+    for r in roots.chunks(32){release(p,t,&r.try_into().unwrap(),gone)?;}Ok(())
+}
 impl NodeStore for StateStore{
-    /// A missing node is None; a damaged store panics (the caller's state cannot be read: never served).
-    fn node(&self,id:&Id)->Option<Arc<Node>>{match self.try_node(id){Ok(n)=>n,Err(e)=>panic!("C-1 E4: {}",e.0)}}
+    /// A damaged store panics (the caller's state cannot be read: never served). A missing node is None,
+    /// which every reader of a version treats as fatal (`node_trie` asks only for nodes a stored node or a
+    /// pinned root names): the store is marked damaged as well, so the next open rebuilds it (C-1 E4.4).
+    fn node(&self,id:&Id)->Option<Arc<Node>>{match self.try_node(id){Ok(Some(n))=>Some(n),Ok(None)=>{self.mark_damaged(&format!("node {} is named but not stored",B256::from(*id)));None}Err(e)=>panic!("C-1 E4: {}",e.0)}}
     /// Code that does not hash to its key marks the store damaged and is never served.
     fn code(&self,h:&B256)->Option<Bytecode>{
         let b=self.read(|r|{let t=r.open_table(CODE).map_err(err)?;Ok(t.get(&h.0).map_err(err)?.map(|v|v.value().to_vec()))}).flatten()?;
@@ -209,5 +301,6 @@ impl pocol_lp4_execution::node_trie::TrieStore for StateStore{
     /// Durable: a block's nodes are committed before its journal record (I3).
     fn commit(&self,b:&Batch,root:Option<Id>)->Result<(),String>{StateStore::commit(self,b,root,true).map_err(|e|e.0)}
     fn unpin(&self,root:&Id)->Result<(),String>{StateStore::unpin(self,root,false).map_err(|e|e.0)}
-    fn pinned(&self)->Result<u64,String>{Ok(self.pins().map_err(|e|e.0)?.iter().map(|x|u64::from(x.1)).sum())}
+    /// The pins entries hold: every pin but the checkpoints' (C-1 E4.4).
+    fn pinned(&self)->Result<u64,String>{let all:u64=self.pins().map_err(|e|e.0)?.iter().map(|x|u64::from(x.1)).sum();Ok(all-self.checkpoint_pins().map_err(|e|e.0)?)}
 }

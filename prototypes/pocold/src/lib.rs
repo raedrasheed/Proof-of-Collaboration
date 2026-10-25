@@ -32,6 +32,19 @@ pub mod threads{
 }
 pub mod history;
 pub mod state_store;
+pub mod checkpoint;
+/// C-1 E4.4 crash tests (`--features crash-test`, absent from the release): with POCOLD_CRASH_AT =
+/// "<step>:<n>", the process aborts (as a kill would stop it, nothing flushed or dropped) the n-th time
+/// it reaches `step` (counted from 1).
+#[cfg(feature="crash-test")]
+pub fn crash_point(step:&str){
+    static SEEN:std::sync::Mutex<u64>=std::sync::Mutex::new(0);
+    let Ok(v)=std::env::var("POCOLD_CRASH_AT") else{return};let Some((s,n))=v.split_once(':') else{return};
+    if s!=step{return}let mut k=SEEN.lock().unwrap();*k+=1;if Some(*k)==n.parse().ok(){std::process::abort()}
+}
+#[cfg(not(feature="crash-test"))]
+#[inline(always)]
+pub fn crash_point(_step:&str){}
 pub mod statediff;pub mod types;pub mod chain;pub mod store;pub mod miner;pub mod net;pub mod node;pub mod rpc;pub mod resources;
 /// Unit tests only: a counting allocator (per thread, while switched on) so tests can bound the
 /// heap a code path requests.

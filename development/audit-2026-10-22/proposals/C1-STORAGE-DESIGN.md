@@ -892,6 +892,83 @@ decision package.
   near-cap state and reported, not assumed;
 - deep rebuilds beyond the window cost what they cost now, plus the commits.
 
+### E4.4 design refinement (2026-10-25, written with the code): checkpoints of the running chain
+
+D-6 is owner-approved (local checkpoints). The frozen text above placed a checkpoint at one canonical
+height below head − R_keep, holding one state. E4 makes every retained state a pinned version, so a
+checkpoint can hold the chain as it is now. It is local derived data, never a validity input. Nothing
+normative changes.
+
+**What a checkpoint is (`checkpoint.rs`, `StateStore::write_checkpoint`).**
+- A sealed snapshot of the chain's metadata after a journal record, with a pin of every state version
+  an entry holds.
+- The snapshot holds, for every entry, what its journal record and history.redb do not:
+  - import sequence, total work, cumulative counters, drawn proposer;
+  - the flags (pruned, full, slim, offloaded, final);
+  - the state summary;
+  - the stored root.
+- It also holds the chain fields: head, next sequence, the slim and history cursors, the unslimmed list,
+  the eviction FIFO and its total.
+- Not kept: the invalid-block cache and the protect set. Replay recomputes the protect set from the
+  journal.
+- It is written in one durable `state.redb` transaction: the snapshot, its roots record, one pin per
+  root, and the release of checkpoints beyond `KEPT` = 2. redb commits atomically, so a crash leaves the
+  checkpoints from before or after the write, never part of one. This replaces the temporary file and
+  rename of the frozen text.
+- When it is written: every `checkpoint_every` = 1024 journal records (`Limits`, local), by a running
+  node and by replay. Replay first makes its history.redb writes durable.
+
+**Binding.** A checkpoint names the journal prefix it describes:
+- the record count;
+- the end offset;
+- a rolling hash, h_i = keccak(h_{i−1} ‖ keccak(payload_i)).
+
+It is also bound to genesis and to the retention parameters (R_keep, side cap, K_hist, side_max, the
+history window, slim depth). It is used only under the same ones.
+
+**Open (`Node::open`).**
+1. redb's full integrity check, as before.
+2. Every checkpoint's seal, and its roots record against its snapshot. A failure here means the store is
+   not sound: it is rebuilt.
+3. The pins become exactly the checkpoints' (`reset_pins`). This releases a running node's entry pins,
+   and the version of a block whose journal record a crash cut off.
+4. The newest checkpoint is tried, then the one before it. `checkpoint::restore` checks:
+   - the binding against the journal;
+   - every entry's journal record: the header hashes to the entry, its parent is restored, its total
+     work follows from the parent;
+   - every stored version's state root, computed from its stored root node, against the block's
+     committed stateRoot;
+   - every stored version read whole: each node checked against its id, a missing node marks the store
+     damaged, and its summary recomputed and compared with the sealed one.
+   A checkpoint that fails is released. A store found damaged is rebuilt.
+5. Replay continues after the checkpoint's last record, with replay's protect set recomputed from the
+   journal events. With no checkpoint usable, the store starts empty and replay begins at genesis, as
+   in E4.3.
+
+Checkpoints are not used when:
+- the store or history.redb was set aside;
+- history.redb was missing;
+- the configured R_keep is below the one replay uses.
+
+**History kept.** The journal and history.redb are never shortened. A checkpoint only shortens the
+re-execution at open.
+
+**Equivalence.**
+- From a checkpoint written by replay, replay continues exactly as replay from genesis would: the same
+  entries field by field.
+- From a checkpoint written live, the snapshot is the live chain. Live retention can differ from
+  replay's only through the protect set (a sync session's blocks against the journal's later children).
+  The tests compare the two field by field and found no difference in the runs below.
+
+**Tests (tests/consensus.rs, "C-1 E4.4"):**
+- open from a checkpoint equals replay from genesis, for a replay-written checkpoint and a live-written
+  one;
+- leftovers of a crash are released;
+- a kill at increasing delays (SIGKILL);
+- an abort at each step of a block's commit and of a checkpoint's write (`--features crash-test`);
+- damage: the store cut short, a changed byte, a missing store or history.redb, a broken seal, swapped
+  roots, a changed summary, total work or binding, a node that is not its id, a missing node.
+
 ## S4: per-block metadata off the heap
 
 - Entries older than R_keep keep only what fork choice and contexts need for the heights still reachable
