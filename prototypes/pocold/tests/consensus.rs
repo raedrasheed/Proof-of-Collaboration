@@ -2217,8 +2217,9 @@ fn e44_reference(dir:&std::path::Path,tag:&str)->(pocold::node::Node,std::path::
     assert_eq!(st.count(&orphan).unwrap(),None,"the version no journal record names is gone");assert!(n.stats.pins_released>=1);
     st.recount().unwrap();
     for b in &blocks[60..]{n.import(b.clone(),None).unwrap();}
-    // The reference is copied from a closed data directory (Windows does not let a running node's files be read).
-    drop(n);let (mut g,gd)=e44_reference(&a,"leftover-ref");let mut n=reopen(&e44_conf(&a,5));
+    // The reference is copied from a closed data directory (Windows does not let a running node's files be read):
+    // the node and every handle on its store go first.
+    drop(st);drop(n);let (mut g,gd)=e44_reference(&a,"leftover-ref");let mut n=reopen(&e44_conf(&a,5));
     e44_same(&mut n,&mut g,"after the crash leftovers were released");
     drop(n);drop(g);for d in [a,gd]{let _=std::fs::remove_dir_all(&d);}
 }
