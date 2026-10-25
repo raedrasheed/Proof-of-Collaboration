@@ -51,12 +51,15 @@ async function chromeView(b, profile, s) {
 async function main() {
   for (const p of [30300, 30301, 30302, 8540, 8541, 8542]) if (!(await portFree(p))) throw new Error('port busy ' + p);
   const t0 = Date.now();
-  devnet(['init', work, '--miners', 'a,b,c', '--t-blk', '2', '--tau', '20', '--d-att', '4', '--fb-wait', '1', '--work-bits', '15']);
+  devnet(['init', work, '--miners', 'a,b,c', '--t-blk', '2', '--tau', '20', '--c', '8', '--d-att', '41', '--fb-wait', '3', '--work-bits', '15']);
   const info = JSON.parse(readFileSync(join(work, 'net', 'devnet.json'), 'utf8')); const cid = String(info.chainId);
   const profile = JSON.parse(readFileSync(join(work, 'net', 'profile.json'), 'utf8'));
   devnet(['start', work, '--log']);
   try {
     await wait(async () => Math.min(...await heights()) >= 16, 240000, 'height 16');
+    // The state mode every node reports (POCOLD_RUN_ARGS=--state-store runs the suite in store mode).
+    const modes = await Promise.all([0, 1, 2].map(async (i) => (await rpc(8540 + i, 'pocol_status')).stateStore));
+    ok('every node runs in the requested state mode', modes.every((m) => m === (process.env.POCOLD_RUN_ARGS || '').split(/\s+/).includes('--state-store')), `stateStore=${modes}`);
     ok('fresh-directory launch: 3 pocold processes produce and agree', (await Promise.all([0, 1, 2].map((i) => rpc(8540 + i, 'eth_getBlockByNumber', ['0x8', false])))).every((x, _, a) => x.hash === a[0].hash), `t=${((Date.now() - t0) / 1000).toFixed(0)}s`);
     // BR15 (governance ORIGIN_DENY): mining interfaces refuse any request carrying an Origin; without Origin they are served.
     const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'pocol_getTemplate', params: [] });
@@ -96,6 +99,13 @@ async function main() {
     const afterHeal = await Promise.all(['a', 'b', 'c'].map((l) => chromeView(b, 'node-' + l, S)));
     const canon = await currentVersion(0, S);
     ok('reorg recovery: Chrome via c now shows the canonical version, identical on all nodes', afterHeal.every((x) => x.h1 === afterHeal[0].h1 && x.ver === afterHeal[0].ver) && afterHeal[0].h1 === `LP10 site v${canon + 1}`, `${afterHeal.map((x) => x.h1).join(' | ')} (canonical index ${canon})`);
+    // c returns the transactions of its abandoned branch to its pool (consensus.md: excluded transactions return
+    // after they are checked again); they carry the publisher's next nonces. v3 is published once every pool has
+    // settled (each such transaction included or dropped), or a v3 transaction and one of them race for a nonce.
+    let pools = [];
+    const settled = async () => { pools = (await Promise.all([0, 1, 2].map((i) => rpc(8540 + i, 'pocol_status')))).map((s) => ({ h: s.head.height, pool: s.pool, gas: s.poolGas, backlog: s.stats.poolBacklog })); return pools.every((p) => p.pool === 0 && p.backlog === 0); };
+    try { await wait(settled, 240000, 'pools settled after the heal'); } catch (e) { throw new Error(`${e.message}; pools ${JSON.stringify(pools)}`); }
+    ok('heal: the transactions c returned to its pool are included or dropped before v3', true, `heights ${(await heights()).join(',')}`);
     // ---- v3 through b on the healed network ----
     const d3 = join(work, 's3'); writeSite(d3, site(3)); publish(d3, 8541, cid, S);
     await wait(async () => (await Promise.all([0, 1, 2].map((i) => fetchCli(i, S)))).every((x, _, a) => x.digest === a[0].digest && x.digest !== cli1[0].digest && x.version === a[0].version) , 240000, 'v3 everywhere');

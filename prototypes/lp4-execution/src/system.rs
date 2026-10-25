@@ -31,6 +31,8 @@ pub(crate) struct Observation {pub raw_gas:u64,pub refund_counter:i64,pub output
 /// Disk persistence, USER integration and validated phase ordering remain P5/P9.
 pub(crate) struct Candidate<'a> {
     state:InMemoryDB,
+    /// The state's logical code total, kept across calls (decision package C-2, item 2).
+    code_total:Option<u64>,
     profile:&'a ProfileIdentity,
     block:&'a NativeBlockContext,
     proposer:Proposer,
@@ -50,7 +52,8 @@ impl<'a> Candidate<'a> {
         if block.height==U256::ZERO || block.gas_limit!=U256::from(profile.cp().GAS_LIMIT){return Err(SystemError::Context)}
         let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
         crate::code_caps::validate_snapshot(snapshot,limits).map_err(SystemError::Execution)?;
-        Ok(Self{state:snapshot.clone(),profile,block,proposer,used:0,failed:false,image:None,stage:Stage::System,tips:U256::ZERO,user:None,final_block:false,issued:U256::ZERO})
+        let code_total=Some(crate::code_caps::inventory(snapshot).map_err(SystemError::Execution)?);
+        Ok(Self{state:snapshot.clone(),profile,block,proposer,used:0,failed:false,image:None,stage:Stage::System,tips:U256::ZERO,user:None,final_block:false,issued:U256::ZERO,code_total})
     }
     pub(crate) fn call(&mut self,to:Address,data:Bytes)->Result<Observation,SystemError>{
         if self.failed{return Err(SystemError::Poisoned)}
@@ -84,7 +87,8 @@ impl<'a> Candidate<'a> {
             if raw.iter().any(|r|r.len()>self.profile.cp().TX_MAX as usize){return Err(SystemError::Budget)}
             let budget=self.profile.cp().BODY_MAX as usize;
             let users=crate::user_phase::execute_for_profile(&self.state,raw,self.block,budget,budget,self.profile).map_err(|e|SystemError::Execution(format!("{e:?}")))?;
-            self.state=users.state().clone();self.tips=users.tips();self.user=Some(users);self.stage=Stage::Ready;Ok(())
+            // The USER phase replaced the state: the next call checks it whole again (C-2 item 2).
+            self.state=users.state().clone();self.code_total=None;self.tips=users.tips();self.user=Some(users);self.stage=Stage::Ready;Ok(())
         })();if result.is_err(){self.poison();}result
     }
     /// No externally supplied amount/recipient/finality/tips/authorization flag.
@@ -126,7 +130,7 @@ impl<'a> Candidate<'a> {
         let limits=crate::code_caps::CodeLimits{runtime:self.profile.cp().B_code_max,logical:self.profile.cp().CODE_CAP};
         let tx=TxEnv{caller:origin,transact_to:TxKind::Call(to),gas_limit:allocation,
             gas_price:U256::ZERO,value:U256::ZERO,data,chain_id:Some(self.profile.spec().chain_id),..Default::default()};
-        let mut evm=native::build_engine(&self.state,tx,self.block,self.profile.spec().chain_id,Some(limits));
+        let mut evm=native::build_engine(&self.state,self.code_total,tx,self.block,self.profile.spec().chain_id,Some(limits));
         // No transact(), caller deduction, intrinsic gas or transaction post-handler.
         evm.handler.pre_execution.load_accounts(&mut evm.context).map_err(|e|SystemError::Execution(format!("{e:?}")))?;
         let precompiles=evm.handler.pre_execution.load_precompiles();
@@ -149,8 +153,18 @@ impl<'a> Candidate<'a> {
         let (state,logs)=evm.context.evm.journaled_state.finalize();
         // Initial approved programs emit none. A log is an error, never dropped.
         if !logs.is_empty(){return Err(SystemError::UnexpectedLogs)}
+        drop(evm);
+        // C-2 item 2: `new` checked the whole snapshot and set the total; each call then checks what it
+        // touched (the same Ok/Err and texts as the full scan it replaces). After the USER phase the
+        // total is unknown and the call checks the whole state, as before.
+        let touched:Vec<Address>=state.keys().copied().collect();
+        let before=match self.code_total{Some(_)=>crate::code_caps::code_of(&self.state,&touched).map_err(SystemError::Execution)?,None=>0};
         commit_epoch(&mut self.state,state);
-        crate::code_caps::validate_snapshot(&self.state,limits).map_err(SystemError::Execution)?;
+        self.code_total=Some(match self.code_total{
+            Some(total)=>crate::code_caps::revalidate_touched(&self.state,limits,&touched,total,before).map_err(SystemError::Execution)?,
+            None=>{crate::code_caps::validate_snapshot(&self.state,limits).map_err(SystemError::Execution)?;crate::code_caps::inventory(&self.state).map_err(SystemError::Execution)?}});
+        debug_assert_eq!(crate::code_caps::validate_snapshot(&self.state,limits),Ok(()));
+        debug_assert_eq!(crate::code_caps::inventory(&self.state),Ok(self.code_total.unwrap()));
         Ok(Observation{raw_gas:raw,refund_counter:result.gas.refunded(),output:result.output})
     }
     pub(crate) fn snapshot(&self)->Result<&InMemoryDB,SystemError>{if self.failed{Err(SystemError::Poisoned)}else{Ok(&self.state)}}

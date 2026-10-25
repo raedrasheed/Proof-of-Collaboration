@@ -10,20 +10,31 @@ const status = (t) => { $('status').textContent = t; };
 const fail = (t) => { $('stage').replaceChildren(Object.assign(document.createElement('p'), { className: 'err', textContent: t })); status(''); };
 
 // Confirmations are serialized; each resolves true only by an explicit click on "approve".
-const confirms = []; let showing = false;
-function confirmUI(q) {
-  return new Promise((resolve) => { confirms.push({ q, resolve }); pump(); });
+// The worker withdraws a confirmation it cancelled (wallet lock, profile or identity change, A06).
+const confirms = []; let showing = null;
+function confirmUI(q, id) {
+  return new Promise((resolve) => { confirms.push({ q, id, resolve }); pump(); });
 }
+function dismiss(id) {
+  const i = confirms.findIndex((c) => c.id === id); if (i >= 0) { confirms.splice(i, 1)[0].resolve(false); return; }
+  if (showing && showing.id === id) showing.done(false);
+}
+// The session ended (revoked or worker lost): every queued or shown confirmation is withdrawn.
+function dismissAll() { for (const c of confirms.splice(0)) c.resolve(false); if (showing) showing.done(false); }
+// Approve is armed only after a pause, so a double click on one dialog cannot approve the next.
+const ARM_MS = 600;
 function pump() {
   if (showing || !confirms.length) return;
-  showing = true; const { q, resolve } = confirms.shift();
+  const { q, id, resolve } = confirms.shift();
   const titles = { confirmExternal: 'فتح رابط خارجي في تبويب جديد', confirmAccounts: 'منح الموقع حسابك على هذه الشبكة', confirmTx: 'توقيع معاملة وإرسالها' };
   $('mtitle').textContent = titles[q.type] || q.type;
   $('mtext').textContent = q.type === 'confirmExternal' ? q.url
     : q.type === 'confirmAccounts' ? `site: ${q.site}\nnetwork: ${q.network}\naccount: ${q.address}`
-    : `network: ${q.network} (chainId ${q.chainId})\nsite: ${q.site}\nfrom: ${q.from}\nto: ${q.to}\nvalue (wei): ${q.value}\nmax cost (wei, gas·maxFee + value): ${q.maxCost}\ngas: ${q.gas}\nmaxFeePerGas (wei): ${q.maxFeePerGas}\nmaxPriorityFeePerGas (wei): ${q.maxPriorityFeePerGas}\nnonce: ${q.nonce}\ndata: ${q.data}\ntxHash: ${q.txHash}\nraw: ${q.raw}`;
+    : `network: ${q.network} (chainId ${q.chainId})\nsite: ${q.site}\nfrom: ${q.from}\nto: ${q.to}\nvalue (wei): ${q.value}\nmax cost (wei, gas·maxFee + value): ${q.maxCost}\ngas: ${q.gas}\nmaxFeePerGas (wei): ${q.maxFeePerGas}\nmaxPriorityFeePerGas (wei): ${q.maxPriorityFeePerGas}\nnonce: ${q.nonce}\ndata: ${q.data}\nsigningHash: ${q.signingHash}\nunsigned: ${q.payload}`;
   $('modal').hidden = false; $('modal').dataset.kind = q.type;
-  const done = (ok) => { $('approve').onclick = $('reject').onclick = null; $('modal').hidden = true; showing = false; resolve(ok); pump(); };
+  const done = (ok) => { if (showing !== cur) return; $('approve').onclick = $('reject').onclick = null; $('modal').hidden = true; showing = null; resolve(ok); pump(); };
+  const cur = { id, done }; showing = cur;
+  $('approve').disabled = true; setTimeout(() => { if (showing === cur) $('approve').disabled = false; }, ARM_MS);
   $('approve').onclick = () => done(true); $('reject').onclick = () => done(false);
 }
 
@@ -62,7 +73,8 @@ async function mount(path, opts = {}) {
 
 // D103 section 5: worker gone or replaced -> tear frames down, announce possible loss, reload only by the user.
 function workerLost() {
-  if (!ctx) return; teardown(); ctx.current = null; ctx.frame = Number.MAX_SAFE_INTEGER;
+  dismissAll();
+  if (!ctx || ctx.revoked) return; teardown(); ctx.current = null; ctx.frame = Number.MAX_SAFE_INTEGER;
   const p = Object.assign(document.createElement('p'), { className: 'err', textContent: 'انقطع عامل الإضافة؛ قد تكون آخر الكتابات غير محفوظة ' });
   const b = Object.assign(document.createElement('button'), { type: 'button', id: 'reload', textContent: 'إعادة التحميل' }); b.onclick = () => location.reload();
   p.append(b); $('stage').replaceChildren(p); status('');
@@ -81,7 +93,11 @@ async function start() {
   ctx = { name, site, sessionId: r.sessionId, port, files, frame: 0, current: null, entry: r.entry, version: r.version };
   port.onMessage.addListener(async (m) => {
     if (m.hello !== undefined) { if (ctx.genId && ctx.genId !== m.hello) workerLost(); ctx.genId = m.hello; return; }
-    if (m.ask !== undefined) { const ok = await confirmUI(m.q); port.postMessage({ answer: m.ask, ok }); return; }
+    // The port may be gone by the time a withdrawn dialog resolves (revocation, lost worker).
+    if (m.ask !== undefined) { const ok = await confirmUI(m.q, m.ask); try { port.postMessage({ answer: m.ask, ok }); } catch {} return; }
+    if (m.dismiss !== undefined) { dismiss(m.dismiss); return; }
+    // Identity or profile change (browser.md: 4901): the frame is torn down, nothing reloads by itself.
+    if (m.revoked) { ctx.revoked = true; dismissAll(); teardown(); ctx.frame = Number.MAX_SAFE_INTEGER; fail(`أُنهيت الجلسة (${m.revoked.code}): ${m.revoked.message}`); return; }
     if (!ctx.current || m.frame !== ctx.current.frame) return; // replies to a torn-down frame are dropped (D99)
     if (m.navigate) {
       const to = m.navigate;

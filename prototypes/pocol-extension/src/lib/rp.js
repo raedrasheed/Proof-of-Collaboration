@@ -1,17 +1,15 @@
 // RP header window (browser.md D77, D80–D84): items 1, 1b, viewFuture, 2–9 and
 // viewTargetCeil over n <= 13 headers. Items 10–17 are not evaluable by RP.
-import * as rlp from './rlp.js';
 import { keccak, sha256, recover } from './crypto.js';
+import { decodeGenesisSpec, decodeHeaderRef, MAX_SPEC_BYTES } from './refdec.js';
 import { concat, eq, be, toBig, fromHex, utf8 } from './hex.js';
 export const VIEW_SLACK_S = 4n, PHI_VIEW = 10;
 const MAX = (1n << 256n) - 1n;
+/** GenesisSpec (A07): the full accepted schema and evaluation order (refdec.js, a port of the
+ * reference decoder checked differentially), after the MAX_SPEC_BYTES input bound. */
 export function decodeSpec(b) {
-  const t = rlp.decode(b);
-  if (!rlp.isList(t) || t.length !== 6) throw new Error('GenesisSpec shape');
-  if (rlp.uint(t[0], 1) !== 1n) throw new Error('gsVersion');
-  const cp = t[2].map((x) => rlp.uint(x, 32));
-  if (cp.length !== 52) throw new Error('gsCount');
-  return { chainId: rlp.uint(t[1], 8), cp, genesisHash: keccak(b) };
+  if (b.length > MAX_SPEC_BYTES) throw Object.assign(new Error('InputTooLarge'), { gs: 'InputTooLarge', detail: String(b.length) });
+  return decodeGenesisSpec(b);
 }
 const CPI = { g_ts: 0, target_g: 1, T_blk: 2, tau: 3, nonceMode: 4, c: 5, D_att: 6, dFbWait: 7, m: 8, H_END: 45 };
 export const cpv = (spec, k) => spec.cp[CPI[k]];
@@ -24,23 +22,9 @@ export function asert(targetG, gTs, tBlk, tau, pTs, pH) {
   return Y < 1n ? 1n : (Y > MAX ? MAX : Y);
 }
 export const work = (t) => (1n << 256n) / (t + 1n);
-export function decodeHeader(b) {
-  if (b.length > 3067) throw new Error('1 size');
-  const top = rlp.decode(b);
-  if (!rlp.isList(top) || top.length !== 4 || !rlp.isList(top[0]) || top[0].length !== 2) throw new Error('1 shape');
-  const ut = top[0][0]; if (!rlp.isList(ut) || ut.length !== 18) throw new Error('1 UT');
-  const tag = new TextDecoder().decode(rlp.bytes(ut[0])); if (tag !== 'PoCol-tpl-v1') throw new Error('1 tag');
-  const f32 = (x) => { const v = rlp.bytes(x); if (v.length !== 32) throw new Error('1 hash'); return v; };
-  const nonceB = rlp.bytes(top[1]); if (nonceB.length !== 8) throw new Error('1 nonce');
-  const shares = top[2].map((s) => { const v = rlp.bytes(s); if (v.length !== 8) throw new Error('1 share'); return toBig(v); });
-  if (shares.length > 256) throw new Error('1 shares');
-  const wsig = rlp.bytes(top[3]); if (wsig.length !== 65) throw new Error('1 winnerSig');
-  const sig = rlp.bytes(top[0][1]); const proposer = rlp.bytes(ut[17]);
-  if (!(sig.length === 0 || sig.length === 65) || !(proposer.length === 0 || proposer.length === 20)) throw new Error('1 sig/proposer');
-  const utRaw = rlp.encode(ut); const tid = sha256(utRaw); const shareRoot = keccak(rlp.encode(top[2]));
-  return { chainId: rlp.uint(ut[1], 8), genesisHash: f32(ut[2]), parentHash: f32(ut[3]), h: rlp.uint(ut[4], 8), a: rlp.uint(ut[5], 4), version: rlp.uint(ut[6], 2), ts: rlp.uint(ut[7], 8),
-    target: rlp.uint(ut[8], 32), proposer, sig, nonce: toBig(nonceB), nonceB, shares, winnerSig: wsig, tid, shareRoot, hash: keccak(concat(tid, nonceB, shareRoot)) };
-}
+/** Header (A08): every field, width and canonical encoding of the reference decoder before any
+ * trust result (refdec.js). RP still does not establish execution or membership validity. */
+export const decodeHeader = decodeHeaderRef;
 const sigMsg = (tid) => keccak(concat(Uint8Array.of(0x19), utf8('PoCol template'), Uint8Array.of(0x0a), tid));
 const winMsg = (x) => keccak(concat(Uint8Array.of(0x19), utf8('PoCol winner'), Uint8Array.of(0x0a), x.tid, x.nonceB, x.shareRoot));
 /** Verifies the window; returns {ok, n, toGenesis, message} or throws {flag}. */

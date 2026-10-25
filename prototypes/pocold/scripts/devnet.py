@@ -11,6 +11,8 @@ Ports: p2p 30300+i, rpc 8540+i (i = node index). Data in WORK/data/<label>.
 import json, os, signal, subprocess, sys, time, urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.environ.get("POCOLD", os.path.join(ROOT, "target", "release", "pocold"))
+# Extra arguments for every `pocold run` and `pocold status` (experiments, e.g. POCOLD_RUN_ARGS=--state-store).
+EXTRA = os.environ.get("POCOLD_RUN_ARGS", "").split()
 
 def labels(work): return [m["label"] for m in json.load(open(os.path.join(work, "net", "devnet.json")))["miners_order"]]
 
@@ -41,7 +43,7 @@ def start(work, stop_at=None, log=False, only=None):
         if only and l not in only: continue
         peers = sum([["--peer", f"127.0.0.1:{30300+j}"] for j in range(len(ls)) if j != i], [])
         cmd = [BIN, "run", "--network", os.path.join(work, "net"), "--data", os.path.join(work, "data", l), "--name", l, "--miner", l,
-               "--listen", f"127.0.0.1:{30300+i}", "--rpc", f"127.0.0.1:{8540+i}"] + peers
+               "--listen", f"127.0.0.1:{30300+i}", "--rpc", f"127.0.0.1:{8540+i}"] + peers + EXTRA
         if stop_at: cmd += ["--stop-at", str(stop_at)]
         if log: cmd += ["--log"]
         logf = open(os.path.join(work, f"{l}.log"), "ab")

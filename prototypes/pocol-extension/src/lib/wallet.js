@@ -3,7 +3,7 @@
 // info='PoCol-wallet-v1'); auto-lock after 15 minutes. EIP-1559 signing only.
 import { sign, addressOfSecret, keccak } from './crypto.js';
 import * as rlp from './rlp.js';
-import { toHex, fromHex, concat } from './hex.js';
+import { toHex, fromHex, concat, eq } from './hex.js';
 export const PBKDF2_ITER = 600000, LOCK_MS = 15 * 60 * 1000;
 const enc = new TextEncoder();
 const b64 = (b) => btoa(String.fromCharCode(...b)); const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
@@ -26,13 +26,24 @@ export async function networkKey(seed, netKeyHex) {
   return new Uint8Array(bits);
 }
 export const addressOf = (secret) => toHex(addressOfSecret(secret));
-/** EIP-1559 envelope 0x02 || RLP([chainId, nonce, tip, maxFee, gas, to, value, data, [], y, r, s]). */
-export function signTx(secret, tx) {
+/** Unsigned EIP-1559 payload 0x02 || RLP([chainId, nonce, tip, maxFee, gas, to, value, data, []]):
+ *  the bytes the confirmation shows; keccak(payload) is the signing hash (A06). */
+export function unsignedTx(tx) {
   const u = (v) => rlp.encUint(BigInt(v));
   const fields = [u(tx.chainId), u(tx.nonce), u(tx.maxPriority), u(tx.maxFee), u(tx.gas), tx.to ? fromHex(tx.to) : new Uint8Array(0), u(tx.value || 0), fromHex(tx.data || '0x'), []];
-  const hash = keccak(concat(Uint8Array.of(2), rlp.encode(fields)));
-  const s = sign(hash, secret);
-  const all = [...fields, u(s[64]), stripZeros(s.subarray(0, 32)), stripZeros(s.subarray(32, 64))];
-  return { raw: toHex(concat(Uint8Array.of(2), rlp.encode(all))), hash: toHex(keccak(concat(Uint8Array.of(2), rlp.encode(all)))) };
+  const payload = concat(Uint8Array.of(2), rlp.encode(fields));
+  return { fields, payload, signingHash: keccak(payload) };
 }
+/** Signs exactly an unsignedTx result: envelope 0x02 || RLP([...fields, y, r, s]). The signing
+ *  hash is recomputed from the payload bytes, so the signature commits to what was shown. */
+export function signUnsigned(secret, ut) {
+  const hash = keccak(ut.payload);
+  if (!eq(hash, ut.signingHash) || !eq(ut.payload, concat(Uint8Array.of(2), rlp.encode(ut.fields)))) throw new Error('payload changed after confirmation');
+  const s = sign(hash, secret);
+  const all = [...ut.fields, rlp.encUint(BigInt(s[64])), stripZeros(s.subarray(0, 32)), stripZeros(s.subarray(32, 64))];
+  const raw = concat(Uint8Array.of(2), rlp.encode(all));
+  return { raw: toHex(raw), hash: toHex(keccak(raw)) };
+}
+/** EIP-1559 envelope 0x02 || RLP([chainId, nonce, tip, maxFee, gas, to, value, data, [], y, r, s]). */
+export const signTx = (secret, tx) => signUnsigned(secret, unsignedTx(tx));
 const stripZeros = (b) => { let i = 0; while (i < b.length && b[i] === 0) i++; return b.subarray(i); };

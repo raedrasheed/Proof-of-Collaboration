@@ -1,12 +1,15 @@
 // LP9 unit gates for the extension libraries (Node, built dist/ and fault builds).
 // BR19a (bucket table, exact), BR13, BR1-BR12 schema/allowlist cases, BR17d/e/g,
 // BR18d/g, StoreQueue admission (D101), manifest T16 negatives, wallet, netKey,
-// and the BR-neg fault controls that must FAIL their gates.
+// the BR-neg fault controls that must FAIL their gates, the A07/A08 decoder differential and the
+// A06/A09/A12/A14 worker and transport regressions.
 import { build } from '../build.mjs';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { recvGuardChecks } from './recv_guard.mjs';
 import { recordChecks } from './records_test.mjs';
+import { workerChecks } from './worker_test.mjs';
+import { decoderDiffChecks } from './decoder_diff.mjs';
 
 const load = async (dist, m) => import(pathToFileURL(join(dist, 'lib', m)).href + '?' + dist);
 const rel = build().dist;
@@ -199,6 +202,10 @@ ok('T16 size mismatch rejected', throws(() => { const f = file('/index.html', 1,
 
 for (const c of await recvGuardChecks(rel)) ok('D98 ' + c.name, c.pass, c.detail);
 for (const c of await recordChecks(rel)) ok('D103 ' + c.name, c.pass, c.detail);
+{ const r = await decoderDiffChecks(rel);
+  ok(`A07/A08 GenesisSpec and header decoders give the Rust reference verdict on all ${r.items} corpus items`, r.items > 1000 && r.mismatches.length === 0, r.mismatches.slice(0, 5).join('; '));
+  ok('A07/A08 the shipped RP entry points use the reference decoders', r.entryPoints); }
+for (const c of await workerChecks(rel)) ok(c.name, c.pass, c.detail);
 
 console.log(JSON.stringify({ result: failed.length ? 'FAIL' : 'PASS', passed, failed }, null, 1));
 process.exit(failed.length ? 1 : 0);

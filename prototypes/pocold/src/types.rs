@@ -64,6 +64,13 @@ pub fn hex(b:&[u8])->String{let mut s=String::from("0x");for x in b{s.push_str(&
 pub fn unhex(s:&str)->Result<Vec<u8>,String>{let s=s.strip_prefix("0x").unwrap_or(s);if s.len()%2!=0{return Err("odd hex".into())}
     (0..s.len()).step_by(2).map(|i|u8::from_str_radix(&s[i..i+2],16).map_err(|e|e.to_string())).collect()}
 /// MPT root keyed by RLP(i) (txRoot, evidenceRoot).
+/// Commitment of a received body list, or None when the list cannot be the committed list of any
+/// header (an empty item has no trie encoding; an over-budget list has no root). Used before the
+/// body is bound to its header, so a None is an envelope fault of that copy, never a block verdict.
+pub fn body_commitment(items:&[Vec<u8>])->Option<[u8;32]>{
+    if items.iter().any(|v|v.is_empty()){return None}
+    pocol_lp4_execution::receipts::ordered_root(items,items.len().max(1)).ok().map(|r|r.0)
+}
 pub fn ordered_root(items:&[Vec<u8>])->Result<[u8;32],crate::chain::Reject>{
     if items.iter().any(|v|v.is_empty()){return Err(crate::chain::Reject::Block("15 empty body item".into()))}
     pocol_lp4_execution::receipts::ordered_root(items,items.len().max(1)).map(|r|r.0).map_err(|e|crate::chain::Reject::Block(format!("15 root {e:?}")))
