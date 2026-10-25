@@ -1014,3 +1014,27 @@ fn jm_store_mode_churn(){
     println!("JM-CHURN {}",serde_json::json!({"cycles":cycles,"growBlocks":grow,"slotsPerBlock":per,"seconds":secs,"phases":phases}));
     let _=std::fs::remove_dir_all(&dir);
 }
+/// R14/R19 calibration against the modes (#111). The admission timing (admission::measure) applies GAS_LIMIT
+/// compute blocks to an in-memory state; a node also imports them: in store mode that adds the trie's commit to
+/// state.redb, fsynced before the journal record. JM_R14_N (10) blocks, each a GAS_LIMIT compute loop, are
+/// imported by a whole-state node and a store-mode node (JM_R14_MODES, one mode per process if wanted); each
+/// block's import time is printed beside the profile's t_exec. A measurement on this host, not a bound.
+#[test]
+#[ignore="measurement: run in release with --ignored --nocapture"]
+fn jm_r14_import_by_mode(){
+    let n_blocks=std::env::var("JM_R14_N").ok().and_then(|s|s.parse().ok()).unwrap_or(10u64);
+    let modes:Vec<String>=std::env::var("JM_R14_MODES").map(|s|s.split(',').map(str::to_string).collect()).unwrap_or_else(|_|vec!["whole-state".into(),"store".into()]);
+    let alice=devnet::account_key("alice");let mut h=net();let mut nonce=0u64;let mut blocks=vec![];
+    for _ in 0..n_blocks{let b=kind_block(&h,h.chain.head,"full_gas_compute",&alice,&mut nonce,0,0);import(&mut h,&b);blocks.push(b);}
+    let t_exec_ms=u64::from(pocold::single_host_local().t_exec)*1000;
+    for mode in modes{
+        let store=mode=="store";let dir=tmp(&format!("r14-{mode}"));
+        let mut n=Node::open(Config{dir:dir.clone(),name:"jm".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{state_store:store,..Default::default()}},admitted()).unwrap();
+        let mut ms=vec![];let mut gas=vec![];
+        for b in &blocks{let t=Instant::now();n.import(b.clone(),None).unwrap();ms.push(t.elapsed().as_secs_f64()*1e3);gas.push(n.chain.head().gas_used);}
+        assert!(gas.iter().all(|g|*g>=n.chain.spec.cp().GAS_LIMIT*9/10),"every block carries the full-gas workload: {gas:?}");
+        let max=ms.iter().cloned().fold(0.0,f64::max);
+        println!("JM-R14 {}",serde_json::json!({"mode":mode,"blocks":ms.len(),"gasUsed":gas,"importMs":ms,"medianMs":median(ms.clone()),"maxMs":max,"tExecMs":t_exec_ms,"maxOverTExec":max/t_exec_ms as f64}));
+        drop(n);let _=std::fs::remove_dir_all(&dir);
+    }
+}
