@@ -99,6 +99,11 @@ async function main() {
     const afterHeal = await Promise.all(['a', 'b', 'c'].map((l) => chromeView(b, 'node-' + l, S)));
     const canon = await currentVersion(0, S);
     ok('reorg recovery: Chrome via c now shows the canonical version, identical on all nodes', afterHeal.every((x) => x.h1 === afterHeal[0].h1 && x.ver === afterHeal[0].ver) && afterHeal[0].h1 === `LP10 site v${canon + 1}`, `${afterHeal.map((x) => x.h1).join(' | ')} (canonical index ${canon})`);
+    // c returns the transactions of its abandoned branch to its pool (consensus.md: excluded transactions return
+    // after they are checked again); they carry the publisher's next nonces. v3 is published once every pool has
+    // settled (each such transaction included or dropped), or a v3 transaction and one of them race for a nonce.
+    await wait(async () => (await Promise.all([0, 1, 2].map((i) => rpc(8540 + i, 'pocol_status')))).every((s) => s.pool === 0 && s.stats.poolBacklog === 0), 240000, 'pools settled after the heal');
+    ok('heal: the transactions c returned to its pool are included or dropped before v3', true, `heights ${(await heights()).join(',')}`);
     // ---- v3 through b on the healed network ----
     const d3 = join(work, 's3'); writeSite(d3, site(3)); publish(d3, 8541, cid, S);
     await wait(async () => (await Promise.all([0, 1, 2].map((i) => fetchCli(i, S)))).every((x, _, a) => x.digest === a[0].digest && x.digest !== cli1[0].digest && x.version === a[0].version) , 240000, 'v3 everywhere');
