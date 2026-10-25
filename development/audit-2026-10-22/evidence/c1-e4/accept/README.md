@@ -24,7 +24,7 @@
 | e2e-site | **PASS, 20 checks** |
 | e2e-browser (real Chromium) | **PASS, 79 checks, 0 failed** |
 | e2e-integrated (LP10, Chromium) | **PASS, 18 checks, 0 failed**, over at least 100 live blocks |
-| pocold-ignored-* (deep-reorg tests) | see `summary` and their logs |
+| pocold-ignored-* (`--ignored`, alongside the mutation pass) | **passed**: `adoption_at_the_spec_depth_2048_and_not_at_2049`, `d133_tie_break_at_depth_400_holds_through_eviction_and_refetch`, `a11_deep_reorg_restores_the_oldest_detached_transaction` |
 
 **What these runs exercise.** Store mode has no command-line switch; it is `Limits::state_store` only. So:
 - the network, site and Chrome e2e runs exercise the default whole-state mode, together with E5's changes

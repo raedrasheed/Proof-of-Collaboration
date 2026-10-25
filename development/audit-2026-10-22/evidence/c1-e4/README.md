@@ -31,7 +31,7 @@ one file, 5 insertions, 2 deletions). The logs keep the commit each run used.
 |---|---|---|
 | mutants-e44.log | E4.4 (D-6) pass 1: 10 of 20 killed, and what answered each survivor | 1a5b792 |
 | mutants-e44-retest.log | the retest of pass 1's survivors and of E4.3's C7 and C10: 8 of 13 killed, and the tests that answer the 5 survivors | 22942c7 |
-| mutants-final.log | the final pass: E4.4, E4.3's survivors, and E5 | fc24969 |
+| mutants-final.log | the final pass: 30 of 30 killed (E4.4's 21, E4.3's C7 and C10, E5's 7), none classed equivalent | fc24969 |
 | a13-final.log | `derive()` at the network and devnet profiles, whole-state and store mode | fc24969 |
 | disk-impact-final.md | disk, time and RSS of store mode against whole-state mode; state.redb's file factor per phase; the close A/B | 5ab73d1 |
 | disk-final-*.log | raw output of those measurements | 5ab73d1 |
@@ -47,7 +47,9 @@ one file, 5 insertions, 2 deletions). The logs keep the commit each run used.
   real-Chromium e2e_browser 79/79; LP10 e2e_integrated 18/18; the extension's 234 unit tests.
 - **Linux, not a pass:** lp1-node's 11 store_journal tests return UnsupportedPlatform, because that journal
   is Windows-only.
-- **Windows run 61:** PASS on every check (windows-runs.md).
+- **Windows run 61:** PASS on every check (windows-runs.md); run 62 on the docs-only head f14f2c2 passed too.
+- **Mutation controls:** the final pass on fc24969 killed 30 of 30 (mutants-final.log).
+- **Deep-reorg `--ignored` tests:** 2048/2049 adoption, D133 at depth 400 and A11 passed (accept/).
 - **Not run in this pass:** the debug suites, the witnesses, the D-REORG-REDB and RpcGuard mutation passes,
   the RSS run under load, and the R14/R19 calibration. They are not counted.
 

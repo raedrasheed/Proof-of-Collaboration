@@ -12,3 +12,6 @@ e2e-site exit=0
 e2e-browser exit=0
 e2e-integrated exit=0
 done
+pocold-ignored-adoption_at_the_spec_depth_2048_and_not_at_2049 exit=0
+pocold-ignored-d133_tie_break_at_depth_400_holds_through_eviction_and_refetch exit=0
+pocold-ignored-a11_deep_reorg_restores_the_oldest_detached_transaction exit=0

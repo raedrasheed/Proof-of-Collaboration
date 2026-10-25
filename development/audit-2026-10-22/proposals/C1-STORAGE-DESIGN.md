@@ -1017,7 +1017,8 @@ Open from a checkpoint gives, field by field, the node that replay from genesis 
   before the rebase (evidence/c1-e4/README.md).
 - E4.4: 10/20 on 1a5b792. The retest on 22942c7 killed 8 of 13; K10a, K10b, K11b, K12 and K18 have
   tests since E5 part 3.
-- Final pass on the final tree: evidence/c1-e4/mutants-final.log.
+- Final pass on fc24969: **30 of 30 killed**, none classed equivalent. It covers E4.4's 21 mutants, E4.3's C7
+  and C10, and E5's 7 (evidence/c1-e4/mutants-final.log).
 
 **A13 (computed bound, not measured RAM; A13-DERIVATION §2c):**
 

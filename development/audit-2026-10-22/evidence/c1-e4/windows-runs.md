@@ -9,6 +9,7 @@ The workflow runs on Windows Server 2022 with Rust 1.58.1 (lp1-node) and 1.99.1 
 | 40163936714 | cc929a7 | FAIL: pocold 211 passed, 1 failed; lp1 12 + 150, lp4 193, extension 234 passed | `e4_checkpoint_open_releases_what_a_crash_left_in_the_store` | the test copied its data directory while its node was open. Windows refused to read the journal's LOCK file (OS error 33, a locked range) | 45d540f (test only: `copy_dir` skips LOCK; the node closes first) |
 | 40166523072 | 45d540f | FAIL: pocold 211 passed, 1 failed; lp1 12 + 150, lp4 193, extension 234 passed | the same test | the test still held a clone of the node's `StateStore` handle when it copied the directory, so state.redb stayed open and locked (OS error 33). Linux does not enforce redb's file lock, so the copy passed there | 53a80e9 (test only: the handle is dropped with the node) |
 | 40172836981 (run 61) | fc24969 | **PASS** on every check: lp1 12 + 150, lp4 193, pocold 221 passed and 0 failed, extension 234 passed | | | |
+| 40175036400 (run 62) | f14f2c2 (documentation and evidence only; code as fc24969) | **PASS** | | | |
 
 Both failures were in the test harness; no product code changed in either fix. In both runs every other
 E4 test in those trees passed on Windows:
