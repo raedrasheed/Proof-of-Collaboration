@@ -2137,6 +2137,9 @@ fn e44_same(x:&mut pocold::node::Node,y:&mut pocold::node::Node,what:&str){
     let (fx,fy)=(pocold::checkpoint::fingerprint(&x.chain).unwrap(),pocold::checkpoint::fingerprint(&y.chain).unwrap());
     assert_eq!(fx.entries.len(),fy.entries.len(),"{what}: entries");
     for (a,b) in fx.entries.iter().zip(&fy.entries){assert_eq!(a,b,"{what}: entry");}
+    // The streamed encoding is the encoding of the snapshot.
+    for n in [&*x,&*y]{let bind=pocold::checkpoint::Binding{records:3,end:4,hash:[5;32]};
+        assert_eq!(pocold::checkpoint::encode(&n.chain,&bind).unwrap().0,pocold::checkpoint::encode_snapshot(&pocold::checkpoint::snapshot_of(&n.chain,&bind).unwrap()),"{what}: encode");}
     assert_eq!(fx,fy,"{what}: chain fields");
     // Every field but the (empty) whole state, whose HashMaps print in no fixed order.
     let dbg=|n:&pocold::node::Node|{let mut v:Vec<([u8;32],String)>=n.chain.blocks.values().map(|e|(e.hash,format!("{:?}",(
@@ -2347,4 +2350,33 @@ fn e4_checkpoint_kill_child(){
         }
     }
     println!("E44-STEPS {log:?}");
+}
+/// D-6: a checkpoint entry bound to its sibling's journal record is refused. The siblings share a parent
+/// and a target (equal height and total work) and neither holds a stored version, so only the check that
+/// the record's header hashes to the entry tells them apart; resumed from such a checkpoint the node would
+/// serve one block's header under the other's hash.
+#[test] fn e4_checkpoint_refuses_an_entry_bound_to_its_siblings_record(){
+    use redb::ReadableTable;
+    let mut h=net();let g=h.chain.head;let common=grow(&mut h,g,4,&|n,p|fallback(n,p,0));let fork=common.last().unwrap().hash();
+    let sib=fallback(&h,fork,1);let mut h2=net();for x in &common{import(&mut h2,x);}import(&mut h2,&sib);
+    let mut side=vec![sib.clone()];for _ in 0..2{let x=fallback(&h2,side.last().unwrap().hash(),0);import(&mut h2,&x);side.push(x);}
+    let canon=grow(&mut h,fork,45,&|n,p|fallback(n,p,0));
+    let d=e44_dir("sibling");
+    {let mut n=reopen(&e44_conf(&d,1000));for x in common.iter().chain(&side).chain(&canon){n.import(x.clone(),None).unwrap();}
+     assert_eq!(n.chain.head,canon.last().unwrap().hash());
+     for b in [&canon[0],&sib]{let e=n.chain.get(&b.hash()).unwrap();assert!(e.stored.is_none()&&e.pruned,"positive control: neither sibling holds a state (h={})",e.height);}
+     assert_eq!(n.chain.get(&canon[0].hash()).unwrap().total_work,n.chain.get(&sib.hash()).unwrap().total_work,"positive control: equal work");
+     n.checkpoint_now().unwrap();}
+    let (mut g0,gd)=e44_reference(&d,"sibling-ref");
+    {let db=redb::Database::open(d.join(pocold::state_store::FILE)).unwrap();let w=db.begin_write().unwrap();
+     {let ck:redb::TableDefinition<u64,&[u8]>=redb::TableDefinition::new("checkpoint");let mut t=w.open_table(ck).unwrap();
+      let (seq,bytes)={let (k,v)=t.last().unwrap().unwrap();(k.value(),v.value().to_vec())};let mut s=pocold::checkpoint::decode(&bytes).unwrap();
+      let i=s.entries.iter().position(|e|e.hash==canon[0].hash()).unwrap();let j=s.entries.iter().position(|e|e.hash==sib.hash()).unwrap();
+      let (a,b)=(s.entries[i].body_off,s.entries[j].body_off);s.entries[i].body_off=b;s.entries[j].body_off=a;
+      t.insert(seq,pocold::checkpoint::encode_snapshot(&s).as_slice()).unwrap();}
+     w.commit().unwrap();}
+    let mut n=reopen(&e44_conf(&d,1000));
+    assert_eq!(n.stats.resumed_from,None,"the checkpoint is refused");assert_eq!(n.stats.checkpoints_refused,1);
+    e44_same(&mut n,&mut g0,"after a sibling-bound checkpoint");
+    drop(n);drop(g0);for x in [d,gd]{let _=std::fs::remove_dir_all(&x);}
 }

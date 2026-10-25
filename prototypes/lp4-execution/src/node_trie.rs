@@ -109,6 +109,11 @@ impl Node{
         (i==b.len()).then_some(n)
     }
     pub fn id(&self)->Id{keccak256(self.encode()).0}
+    /// C-1 E4.5: the heap a decoded node holds behind its `Arc`: the Arc's two counts, the node inline and
+    /// a branch's children (A13 counts the node cache by this, not by the encoding's length).
+    pub fn resident_bytes(&self)->usize{
+        2*std::mem::size_of::<usize>()+std::mem::size_of::<Node>()+match self{Node::Branch{kids,..}=>kids.len()*std::mem::size_of::<(Id,Ref)>(),Node::Leaf{..}=>0}
+    }
     fn key(&self)->&Key{match self{Node::Leaf{key,..}|Node::Branch{key,..}=>key}}
     /// The children a store counts references to: a branch's kids, an account leaf's storage trie.
     pub fn children(&self)->Vec<Id>{

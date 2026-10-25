@@ -39,8 +39,12 @@ pub const FILE:&str="state.redb";
 pub const DAMAGED:&str="state.redb.damaged";
 /// redb's page cache for state.redb (A13).
 pub const STATE_PAGE_CACHE:usize=64<<20;
-/// The decoded-node cache in front of the node table (A13): bytes of node encodings held.
+/// The decoded-node cache in front of the node table (A13): resident bytes held (`CACHE_ENTRY` per node and
+/// what its decoded node holds, `Node::resident_bytes`).
 pub const NODE_CACHE:usize=256<<20;
+/// C-1 E4.5: the cache's own share per node: its map slot (the id, the `Arc` and its size) and its place in
+/// the eviction order, each at twice its size (a table at most half full grows by doubling).
+pub const CACHE_ENTRY:usize=2*std::mem::size_of::<(Id,(Arc<Node>,usize))>()+2*std::mem::size_of::<Id>()+1;
 
 #[derive(Debug)]
 pub struct StateStoreError(pub String);
@@ -113,7 +117,7 @@ impl StateStore{
         self.reads.fetch_add(1,Ordering::Relaxed);
         if v.len()<4||keccak256(&v[4..]).0!=*id{return Err(self.mark_damaged("a node's bytes do not hash to its id"))}
         let n=Node::decode(&v[4..]).ok_or_else(||self.mark_damaged("a node does not decode"))?;let n=Arc::new(n);
-        self.cache.lock().unwrap().put(*id,n.clone(),v.len()-4,self.cache_cap);Ok(Some(n))
+        let len=CACHE_ENTRY+n.resident_bytes();self.cache.lock().unwrap().put(*id,n.clone(),len,self.cache_cap);Ok(Some(n))
     }
     /// The reference count stored with a node (None: not stored).
     pub fn count(&self,id:&Id)->Result<Option<u32>,StateStoreError>{
@@ -123,7 +127,7 @@ impl StateStore{
         self.guard(||{let r=self.db.begin_read().map_err(err)?;let t=r.open_table(PINS).map_err(err)?;let mut out=Vec::new();
             for kv in t.iter().map_err(err)?{let (k,v)=kv.map_err(err)?;out.push((*k.value(),v.value()));}Ok(out)})
     }
-    /// Bytes of node encodings the cache holds (at most its bound).
+    /// Resident bytes the cache holds (at most its bound).
     pub fn cache_bytes(&self)->usize{self.cache.lock().unwrap().bytes}
     pub fn node_count(&self)->Result<u64,StateStoreError>{self.guard(||{let r=self.db.begin_read().map_err(err)?;let t=r.open_table(NODES).map_err(err)?;t.len().map_err(err)})}
     /// Stores the nodes of `root` that the batch holds (every node reachable from it that is not stored

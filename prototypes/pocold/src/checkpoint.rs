@@ -81,39 +81,52 @@ fn get_summary(r:&mut R<'_>)->Result<Summary,String>{
 /// beside a stored version) is an error: no checkpoint is written.
 pub fn snapshot_of(c:&Chain,b:&Binding)->Result<Snapshot,String>{
     if c.trie_store.is_none(){return Err("a checkpoint is of a store-mode chain".into())}
-    let mut es:Vec<&Entry>=c.blocks.values().collect();es.sort_by_key(|e|(e.height,e.hash));
-    let mut entries=Vec::with_capacity(es.len());
-    for e in es{
-        if !e.state.accounts.is_empty()||e.diff.is_some()||e.trie.is_some(){return Err(format!("entry {} holds more than a stored version",B256::from(e.hash)))}
-        let mut f=0u16;
-        for (on,bit) in [(e.pruned,F_PRUNED),(e.full,F_FULL),(e.slim,F_SLIM),(e.offloaded,F_OFFLOADED),(e.is_final,F_FINAL),(e.summary.is_some(),F_SUMMARY),(e.stored.is_some(),F_STORED),
-            (e.stored.as_ref().map_or(false,|s|s.trie.world.is_some()),F_WORLD),(e.body_off.is_some(),F_OFF)]{if on{f|=bit}}
-        entries.push(Rec{hash:e.hash,body_off:e.body_off,import_seq:e.import_seq,total_work:e.total_work,flags:f,cum_txs:e.cum_txs,cum_tx_bytes:e.cum_tx_bytes,cum_log_bytes:e.cum_log_bytes,
-            drawn:e.drawn,summary:e.summary.as_deref().copied(),root:e.stored.as_ref().and_then(|s|s.trie.world)});
-    }
+    let entries=sorted(c).into_iter().map(rec_of).collect::<Result<Vec<_>,_>>()?;
     Ok(Snapshot{genesis:c.spec.genesis_hash(),params:Params::of(c),binding:*b,head:c.head,next_seq:c.next_seq,slim_cursor:c.slim_cursor,history_cursor:c.history_cursor,
         evicted_total:c.evicted_total,unslimmed:c.unslimmed.clone(),evicted_order:c.evicted_order.iter().copied().collect(),entries})
 }
+fn sorted(c:&Chain)->Vec<&Entry>{let mut es:Vec<&Entry>=c.blocks.values().collect();es.sort_by_key(|e|(e.height,e.hash));es}
+fn rec_of(e:&Entry)->Result<Rec,String>{
+    if !e.state.accounts.is_empty()||e.diff.is_some()||e.trie.is_some(){return Err(format!("entry {} holds more than a stored version",B256::from(e.hash)))}
+    let mut f=0u16;
+    for (on,bit) in [(e.pruned,F_PRUNED),(e.full,F_FULL),(e.slim,F_SLIM),(e.offloaded,F_OFFLOADED),(e.is_final,F_FINAL),(e.summary.is_some(),F_SUMMARY),(e.stored.is_some(),F_STORED),
+        (e.stored.as_ref().map_or(false,|s|s.trie.world.is_some()),F_WORLD),(e.body_off.is_some(),F_OFF)]{if on{f|=bit}}
+    Ok(Rec{hash:e.hash,body_off:e.body_off,import_seq:e.import_seq,total_work:e.total_work,flags:f,cum_txs:e.cum_txs,cum_tx_bytes:e.cum_tx_bytes,cum_log_bytes:e.cum_log_bytes,
+        drawn:e.drawn,summary:e.summary.as_deref().copied(),root:e.stored.as_ref().and_then(|s|s.trie.world)})
+}
+/// Most bytes one entry takes in a snapshot (A13: a checkpoint being written holds the snapshot's bytes).
+pub const REC_MAX:usize=32+2+8+8+32+8*3+20+(4+16+8*6+64+1)+32;
+fn put_rec(w:&mut W,e:&Rec){
+    w.b(&e.hash);w.b(&e.flags.to_be_bytes());w.u(e.body_off.unwrap_or(0));w.u(e.import_seq);w.b(&e.total_work.to_be_bytes::<32>());
+    w.u(e.cum_txs);w.u(e.cum_tx_bytes);w.u(e.cum_log_bytes);w.b(e.drawn.as_slice());
+    if e.flags&F_SUMMARY!=0{if let Some(x)=&e.summary{put_summary(w,x)}}
+    if e.flags&F_WORLD!=0{if let Some(r)=&e.root{w.b(r)}}
+}
+fn put_head(w:&mut W,genesis:&[u8;32],p:&Params,b:&Binding,head:&[u8;32],next_seq:u64,slim_cursor:u64,history_cursor:u64,evicted_total:u64,unslimmed:&[[u8;32]],evicted:&[[u8;32]],n:usize){
+    w.b(MAGIC);w.b(genesis);
+    w.u(p.r_keep);w.u(p.side_cap);w.u(p.k_hist);w.u(p.side_max);w.o(p.history_window);w.o(p.slim_depth);w.0.push(u8::from(p.keep_full));
+    w.u(b.records);w.u(b.end);w.b(&b.hash);
+    w.b(head);w.u(next_seq);w.u(slim_cursor);w.u(history_cursor);w.u(evicted_total);
+    w.hs(unslimmed);w.hs(evicted);w.u(n as u64);
+}
 /// A snapshot's bytes, sealed (Keccak-256 of everything before the seal).
 pub fn encode_snapshot(s:&Snapshot)->Vec<u8>{
-    let p=&s.params;let mut w=W(Vec::with_capacity(256+s.entries.len()*200));
-    w.b(MAGIC);w.b(&s.genesis);
-    w.u(p.r_keep);w.u(p.side_cap);w.u(p.k_hist);w.u(p.side_max);w.o(p.history_window);w.o(p.slim_depth);w.0.push(u8::from(p.keep_full));
-    w.u(s.binding.records);w.u(s.binding.end);w.b(&s.binding.hash);
-    w.b(&s.head);w.u(s.next_seq);w.u(s.slim_cursor);w.u(s.history_cursor);w.u(s.evicted_total);
-    w.hs(&s.unslimmed);w.hs(&s.evicted_order);
-    w.u(s.entries.len() as u64);
-    for e in &s.entries{
-        w.b(&e.hash);w.b(&e.flags.to_be_bytes());w.u(e.body_off.unwrap_or(0));w.u(e.import_seq);w.b(&e.total_work.to_be_bytes::<32>());
-        w.u(e.cum_txs);w.u(e.cum_tx_bytes);w.u(e.cum_log_bytes);w.b(e.drawn.as_slice());
-        if e.flags&F_SUMMARY!=0{if let Some(x)=&e.summary{put_summary(&mut w,x)}}
-        if e.flags&F_WORLD!=0{if let Some(r)=&e.root{w.b(r)}}
-    }
+    let mut w=W(Vec::with_capacity(256+s.entries.len()*REC_MAX));
+    put_head(&mut w,&s.genesis,&s.params,&s.binding,&s.head,s.next_seq,s.slim_cursor,s.history_cursor,s.evicted_total,&s.unslimmed,&s.evicted_order,s.entries.len());
+    for e in &s.entries{put_rec(&mut w,e)}
     let seal=keccak256(&w.0);w.b(&seal.0);w.0
 }
 /// The sealed snapshot of a store-mode chain and the roots it pins (one per entry that holds a stored
-/// version).
-pub fn encode(c:&Chain,b:&Binding)->Result<(Vec<u8>,Vec<Id>),String>{let s=snapshot_of(c,b)?;Ok((encode_snapshot(&s),roots(&s)))}
+/// version): `encode_snapshot(snapshot_of(c, b))`, written one entry at a time (C-1 E4.5: what a
+/// checkpoint being written holds is its bytes, an index of the entries and the roots).
+pub fn encode(c:&Chain,b:&Binding)->Result<(Vec<u8>,Vec<Id>),String>{
+    if c.trie_store.is_none(){return Err("a checkpoint is of a store-mode chain".into())}
+    let es=sorted(c);let mut w=W(Vec::with_capacity(256+(c.unslimmed.len()+c.evicted_order.len())*32+es.len()*REC_MAX));let mut roots=Vec::new();
+    let evicted:Vec<[u8;32]>=c.evicted_order.iter().copied().collect();
+    put_head(&mut w,&c.spec.genesis_hash(),&Params::of(c),b,&c.head,c.next_seq,c.slim_cursor,c.history_cursor,c.evicted_total,&c.unslimmed,&evicted,es.len());
+    for e in es{let r=rec_of(e)?;if let Some(x)=r.root{roots.push(x)}put_rec(&mut w,&r);}
+    let seal=keccak256(&w.0);w.b(&seal.0);Ok((w.0,roots))
+}
 
 /// A snapshot read back: its seal checked, then every field; trailing or missing bytes are an error.
 pub fn decode(bytes:&[u8])->Result<Snapshot,String>{

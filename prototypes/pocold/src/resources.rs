@@ -122,6 +122,63 @@ pub fn trie_paths(cp:&ConsensusParams)->Option<u128>{
     use pocol_lp4_execution::state_trie::node_bytes;let (accounts,slots)=block_writes(cp)?;let w=size_of::<usize>() as u128;
     add(&[mul(mul(slots,TRIE_PATH_NODES)?,u128::from(node_bytes(false))+w)?,mul(mul(accounts,TRIE_PATH_NODES)?,u128::from(node_bytes(true))+w)?])
 }
+/// C-1 E4 (store mode): a block's batch (`node_trie::Batch`, the new nodes of its child version until
+/// `Pinned::new` commits them) is alive one at a time: validation commits it in `child_state` and a
+/// rolling re-execution in `rolled` before the next block runs; production keeps no execution output
+/// (`node::Production`). An inventory by inspection (CONDITIONS, `transient-snapshot-inventory`).
+pub const BATCHES:u128=1;
+/// The heap one decoded node holds at most (`Node::resident_bytes` of a branch with 16 children).
+pub fn node_resident_max()->u128{use pocol_lp4_execution::{node_trie::{Id,Node},state_trie::Ref};(2*size_of::<usize>()+size_of::<Node>()+16*size_of::<(Id,Ref)>()) as u128}
+/// The largest node serialization (`Node::encode`): a branch of 16 children, each an id and a 33-byte
+/// reference, with its key and its own reference.
+pub const NODE_ENC_MAX:u128=1+1+2+32+1+33+16*(32+1+33);
+/// C-1 E4: one batch at most: the nodes on the copied path of every changed slot and account (as
+/// `trie_paths` counts them), each decoded behind an `Arc` with its map slot, the preimages of the changed
+/// keys, and the block's write set (`state_trie::Touched`). Its code is shared with the execution's.
+pub fn batch_max(cp:&ConsensusParams)->Option<u128>{
+    use pocol_lp4_execution::node_trie::{Id,Node};use revm::primitives::{Address,U256};let (accounts,slots)=block_writes(cp)?;
+    let nodes=mul(accounts+slots,TRIE_PATH_NODES)?;let slot=|n:usize|memory::entry_bytes(n as u128);
+    add(&[mul(nodes,node_resident_max()+slot(size_of::<(Id,std::sync::Arc<Node>)>()))?,mul(accounts,slot(size_of::<([u8;32],Address)>()))?,mul(slots,slot(size_of::<((Address,[u8;32]),U256)>()))?,
+        mul(accounts,slot(size_of::<(Address,Option<Vec<U256>>)>()))?,mul(slots,memory::VEC*size_of::<U256>() as u128)?])
+}
+/// C-1 E4: entries that hold a stored version at once: genesis, the K_hist canonical window, side_max side
+/// states, a rolling re-execution's entry, and during an adopting import, until `settle`, the abandoned
+/// window (K_hist more). The pool's base and production share an entry's handle.
+pub fn stored_versions(k_hist:u32,side_max:u32)->u128{2*u128::from(k_hist)+u128::from(side_max)+2}
+/// One stored version's handle (`chain::Pinned` behind its `Arc`) and its BLOCKHASH window (257 entries).
+pub fn pinned_bytes()->u128{size_of::<chain::Pinned>() as u128+16+257*memory::entry_bytes(64)+memory::table_bytes(64)}
+/// C-1 E4.4: a checkpoint being written: its bytes (every entry at most `checkpoint::REC_MAX`, the
+/// unslimmed list and the eviction FIFO), the index of entries it sorts, and redb's copy of the value in
+/// its dirty pages.
+pub fn checkpoint_bytes(cp:&ConsensusParams,limits:&Limits)->Option<u128>{
+    let entries=add(&[u128::from(cp.H_END)+1,limits.side_cap as u128,mul(2,u128::from(limits.r_keep))?])?;
+    let bytes=add(&[256,mul(entries,crate::checkpoint::REC_MAX as u128)?,mul(u128::from(cp.H_END)+1+chain::EVICTED_MAX as u128,32)?])?;
+    add(&[mul(2,bytes)?,mul(entries,size_of::<usize>() as u128)?])
+}
+/// C-1 E4.5: the largest state.redb file, for its allocator term (A13 counts the file's allocator state
+/// at one byte per 4 KiB page, as for history.redb; the file itself is disk, not memory). Nodes: the
+/// head's and genesis's versions whole, and every other version that a stored entry or a checkpoint pins
+/// differing from the head's by the paths of the blocks between them (a window state: K_hist blocks; a
+/// side state: 2·R_keep; a checkpoint's versions: KEPT·checkpoint_every + 2·R_keep), at most a whole
+/// state. Preimages and code are kept for good (the code table, storage.md; the key preimages, until E5):
+/// the writes of every block to H_END. The checkpoints' snapshots. All at HISTORY_FILE_FACTOR times their
+/// bytes.
+pub fn state_file_max(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits)->Option<u128>{let p=state_file_parts(cp,k_hist,side_max,limits)?;add(&p)}
+/// `state_file_max`'s parts: (versions' nodes, key preimages, code, checkpoint snapshots), each at
+/// HISTORY_FILE_FACTOR times its bytes.
+pub fn state_file_parts(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits)->Option<[u128;4]>{
+    let full=mul(2,add(&[u128::from(cp.ACCT_CAP),5,u128::from(cp.SLOT_CAP),u128::from(cp.SYS_SLOT_MAX)])?)?;
+    let (wa,ws)=block_writes(cp)?;let per_block=mul(wa+ws,TRIE_PATH_NODES)?;
+    let span=|blocks:u128|mul(blocks,per_block).map(|n|n.min(full));
+    let (k,sm,kept)=(u128::from(k_hist),u128::from(side_max),crate::checkpoint::KEPT as u128);
+    let ck_span=add(&[mul(kept,u128::from(limits.checkpoint_every.max(1)))?,mul(2,u128::from(limits.r_keep))?])?;
+    let nodes=add(&[mul(2,full)?,mul(k,span(k)?)?,mul(sm,span(mul(2,u128::from(limits.r_keep))?)?)?,mul(mul(kept,k+sm+2)?,span(ck_span)?)?])?;
+    let blocks=u128::from(cp.H_END)+1;
+    let preimages=mul(blocks,add(&[mul(wa,32+20)?,mul(ws,52+32)?])?)?;
+    let code=mul(blocks,memory::execution_gas(cp.GAS_LIMIT)/CODE_DEPOSIT)?;
+    let ckpts=mul(kept,checkpoint_bytes(cp,limits)?/2)?;
+    Some([mul(HISTORY_FILE_FACTOR,mul(nodes,NODE_ENC_MAX+4+32)?)?,mul(HISTORY_FILE_FACTOR,preimages)?,mul(HISTORY_FILE_FACTOR,code)?,mul(HISTORY_FILE_FACTOR,ckpts)?])
+}
 /// Receipt encoding without logs: status, cumulative gas, a 256-byte bloom, list headers.
 pub const RECEIPT_BASE:u128=300;
 /// C-1 S1: history.redb's file size over the bytes it stores (receipts records, index entries, keys),
@@ -145,13 +202,17 @@ pub const CONDITIONS:&[(&str,&str)]=&[
     ("cpu-and-timing","CPU costs (world-root rebuild, chain scans, pool re-execution, deep-fork rebuild) are not memory terms; worst-case timing is not bounded"),
     ("s3a-removal","a diff keeps no storage for a removed account: under Cancun (revm 19.7, EIP-6780) only an account created in the same transaction is destroyed, and an account without code, nonce and balance holds no storage; by inspection, not enforced by a counter"),
     ("redb-representation","the history.redb terms rely on redb 2.6.4 behaviour checked by source inspection (cache split and write-buffer flush, allocator bitmaps) and on a measured file-size factor (HISTORY_FILE_FACTOR)"),
-    ("open-replay-transient","Node::open holds the whole journal's payloads (store::open, pre-existing) and a replay index of two entries per record while replaying; this open-time transient grows with the journal and is not part of the steady-state bound"),
+    ("open-replay-transient","Node::open holds the whole journal's payloads (store::open, pre-existing) and a replay index of two entries per record while replaying; this open-time transient grows with the journal and is not part of the steady-state bound. C-1 E4.4 adds to it, at open only: every record's offset and rolling hash, a decoded checkpoint snapshot and the stored versions read whole for their summaries (streamed: a node at a time, the DFS stack of node ids)"),
+    ("store-inventory","store mode (C-1 E4): BATCHES (1) and stored_versions are inventories by code inspection, not enforced by a counter; the node cache is bounded by its resident-byte count (state_store::CACHE_ENTRY, Node::resident_bytes), checked by a test"),
+    ("store-file-factor","the state.redb allocator term takes the largest file as HISTORY_FILE_FACTOR (measured for history.redb) times the stored bytes; for state.redb the factor is measured in evidence/c1-e4 (disk measurements), and its versions' nodes are the adversarial worst case (every version a whole state on disk)"),
 ];
 /// The model total and its parts. `items` itemizes every group term ("group/item", bytes); the
 /// group fields are the sums of their items and `total` is the sum of all items.
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct Bound{
-    pub snapshots:u128,pub snapshot_bytes:u128,pub diffs:u128,pub trie:u128,pub code:u128,pub history:u128,pub side_blocks:u128,
+    /// Whole states counted (`snapshots` of `snapshot_bytes` each) and the snapshot group's total (with
+    /// the table growth of a working copy). C-1 E4: `store` is the node store's terms (store mode).
+    pub snapshots:u128,pub snapshot_bytes:u128,pub snapshot_total:u128,pub diffs:u128,pub trie:u128,pub code:u128,pub store:u128,pub history:u128,pub side_blocks:u128,
     pub queues:u128,pub rpc:u128,pub threads:u128,pub execution:u128,pub total:u128,
     pub items:Vec<(&'static str,u128)>,
 }
@@ -168,6 +229,35 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let snapshot_bytes=memory::snapshot(accounts,slots,accounts.checked_add(2)?)?;
     // C-1 S3a: full states are the head, genesis, the side states within side_max, and the materialized
     // ones (MATERIALIZED); every other retained state is a diff (below). Before S3a: 1 + K_hist + side_max.
+    let (snapshots,mut items)=if limits.state_store{
+    // C-1 E4 (store mode, `Limits::state_store`): every retained state is a version pinned in state.redb,
+    // read in place through hash-checked nodes (chain::Pinned, state_store): no whole state, diff or E1
+    // trie is held (the checkpoint encoder refuses an entry that holds one, checkpoint::rec_of). What is in
+    // memory is the caches, the work in progress and the handles.
+    let code_set=memory::code_bytes(u128::from(cp.CODE_CAP),0)?;let code_entries=memory::code_bytes(0,accounts)?;
+    let exec_code=memory::code_bytes(memory::execution_gas(cp.GAS_LIMIT)/CODE_DEPOSIT,0)?;
+    let snapshots=POOL_LAYER_SNAPSHOTS;
+    let items:Vec<(&'static str,u128)>=vec![
+        ("snapshots/the pool's pending layer over the stored head (counted as a whole state)",mul(POOL_LAYER_SNAPSHOTS,snapshot_bytes)?),
+        ("diffs/the overlay of the block being applied (C-1 E3)",overlay_max(cp)?),
+        ("store/a block's new trie nodes before their commit (BATCHES batches)",mul(BATCHES,batch_max(cp)?)?),
+        ("store/decoded-node cache (NODE_CACHE, resident bytes)",crate::state_store::NODE_CACHE as u128),
+        ("store/state.redb page cache (STATE_PAGE_CACHE)",crate::state_store::STATE_PAGE_CACHE as u128),
+        // redb 2.6.4 keeps, per region, a free and an allocated bitmap for every page order (buddy_allocator.rs:
+        // about 4 bits per page); counted at one byte per 4 KiB page of the largest file, by its parts.
+        ("store/state.redb allocator state: the versions' nodes",state_file_parts(cp,k_hist,side_max,limits)?[0]/4096),
+        ("store/state.redb allocator state: key preimages, kept for good",state_file_parts(cp,k_hist,side_max,limits)?[1]/4096),
+        ("store/state.redb allocator state: code, kept for good",state_file_parts(cp,k_hist,side_max,limits)?[2]/4096),
+        ("store/state.redb allocator state: the checkpoints' snapshots",state_file_parts(cp,k_hist,side_max,limits)?[3]/4096),
+        ("store/stored versions' handles and BLOCKHASH windows",mul(stored_versions(k_hist,side_max),pinned_bytes())?),
+        ("store/a checkpoint being written (its bytes and its entry index)",checkpoint_bytes(cp,limits)?),
+        // Each account an execution loads brings its code from the store (TrieState::info): a copy per
+        // loaded account, at most the logical code of every existing account (code_caps, CODE_CAP) with
+        // its analysis. One execution at a time (EXECUTIONS).
+        ("code/read from the store by the execution in progress (a set)",mul(EXECUTIONS,code_set)?),
+        ("code/the pool's pending state (a set)",code_set),
+        ("code/containers in the pool's layer",mul(snapshots,code_entries)?),("code/new runtime of the execution in progress",mul(EXECUTIONS,exec_code)?)];
+    (snapshots,items)}else{
     let snapshots=add(&[1,1,u128::from(side_max),MATERIALIZED,TRANSIENT_SNAPSHOTS,POOL_LAYER_SNAPSHOTS])?;
     // Code (decision package C-1 S2). A runtime is held in refcounted buffers (revm Bytecode: Bytes and
     // an Arc jump table) that a state copy shares (journal_measure::retained_states_of_one_lineage_
@@ -183,8 +273,7 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let code_set=memory::code_bytes(u128::from(cp.CODE_CAP),0)?;let code_entries=memory::code_bytes(0,accounts)?;
     let exec_code=memory::code_bytes(memory::execution_gas(cp.GAS_LIMIT)/CODE_DEPOSIT,0)?;
     let side_states=u128::from(side_max);
-    let code=add(&[code_set,mul(side_states,code_set)?,code_set,code_set,mul(snapshots,code_entries)?,mul(EXECUTIONS,exec_code)?])?;
-    let mut items=vec![("snapshots/head state",snapshot_bytes),("snapshots/genesis state (counted as a full one)",snapshot_bytes),
+    let items:Vec<(&'static str,u128)>=vec![("snapshots/head state",snapshot_bytes),("snapshots/genesis state (counted as a full one)",snapshot_bytes),
         ("snapshots/side_max side-branch states",mul(side_states,snapshot_bytes)?),
         ("snapshots/materialized states (C-1 S3a: a parent or an RPC tag, and one kept until settle)",mul(MATERIALIZED,snapshot_bytes)?),
         ("snapshots/transient working copies (C-1 E3: a block's merged child, a rolling re-execution's two)",mul(TRANSIENT_SNAPSHOTS,snapshot_bytes)?),
@@ -203,6 +292,7 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
         ("code/one set for the canonical lineage (its states share the buffers)",code_set),("code/side_max side-branch states (a set each)",mul(side_states,code_set)?),
         ("code/a rebuild or restore in progress (a set)",code_set),("code/the pool's pending state (a set)",code_set),
         ("code/containers in every snapshot",mul(snapshots,code_entries)?),("code/new runtime of the execution in progress",mul(EXECUTIONS,exec_code)?)];
+    (snapshots,items)};
     // Per block kept in memory: the map slot (Entry inline), the canonical index, header heap
     // (encoded, ut_raw, bloom, proposer, sig, share nonces), ParentResult shares, nonce ranges
     // (members <= M_max), an empty pruned state and evidence (E_max items <= EVID_BYTES_MAX).
@@ -323,11 +413,12 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let execution=mul(EXECUTIONS,memory::execution(gas,code_max)?)?;let fixed=mul(EXECUTIONS,memory::fixed_heap(gas,code_max)?)?;
     items.extend([("execution/frames, code analysis, preallocations, precompiles",fixed),("execution/memory and operation classes (worst gas split)",execution.checked_sub(fixed)?)]);
     let total=add(&items.iter().map(|x|x.1).collect::<Vec<_>>())?;
-    let trie=add(&[mul(2,trie_bytes(accounts,slots)?)?,trie_paths(cp)?])?;
-    let diffs=add(&[mul(diffs_held(k_hist,side_max),diff_max(cp)?)?,overlay_max(cp)?])?;
-    debug_assert_eq!(Some(total),add(&[mul(snapshots,snapshot_bytes)?,snapshot_bytes,diffs,trie,code,history,side_blocks,queues,rpc,threads,execution]));
+    // Each group is the sum of its items.
+    let group=|g:&str|add(&items.iter().filter(|x|x.0.split('/').next()==Some(g)).map(|x|x.1).collect::<Vec<_>>());
+    let (snapshot_total,diffs,trie,code,store)=(group("snapshots")?,group("diffs")?,group("trie")?,group("code")?,group("store")?);
+    debug_assert_eq!(Some(total),add(&[snapshot_total,diffs,trie,code,store,history,side_blocks,queues,rpc,threads,execution]));
     let _=size_of::<Header>()+size_of::<Body>();
-    Some(Bound{snapshots,snapshot_bytes,diffs,trie,code,history,side_blocks,queues,rpc,threads,execution,total,items})
+    Some(Bound{snapshots,snapshot_bytes,snapshot_total,diffs,trie,code,store,history,side_blocks,queues,rpc,threads,execution,total,items})
 }
 /// The share of the budget kept outside the model (D-A13-BUDGET): allocator headers, size-class
 /// rounding and fragmentation are not modelled (CONDITIONS), so the model total must fit in

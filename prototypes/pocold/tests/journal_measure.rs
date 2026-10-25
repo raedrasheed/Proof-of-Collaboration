@@ -920,3 +920,50 @@ fn history_integrity_check_cost(){
     println!("JM-HIST-CHECK {}",serde_json::json!({"fileBytes":size,"payloadBytes":blocks*4*rec_b,"receiptBytes":rec_b,"blocks":blocks,"openMs":open_ms,"checkMs":check_ms,"clean":ok,"msPerGiB":(check_ms as f64)*((1u64<<30) as f64)/(size as f64)}));
     drop(h);let _=std::fs::remove_dir_all(&dir);
 }
+
+// ============================ C-1 E4.5: store mode against whole-state mode ============================
+/// Block execution (each import), the sync of a whole chain, a reorg and open, on a whole-state node and a
+/// store-mode node (`Limits::state_store`), with the state's size, the files' sizes and the process RSS.
+/// JM_ST_FILL (12) blocks that create accounts, JM_ST_FULL (40) full-gas transfer blocks, then a heavier
+/// fallback branch from JM_ST_FORK (8) blocks below the tip. JM_ST_MODES picks "whole-state", "store" or
+/// both (default); one mode per process gives each mode's RSS alone. Release only.
+#[test]
+#[ignore="measurement: run in release with --ignored --nocapture"]
+fn jm_store_mode_disk_impact(){
+    let env_n=|k:&str,d:u64|std::env::var(k).ok().and_then(|s|s.parse().ok()).unwrap_or(d);
+    let (fill,full,fork)=(env_n("JM_ST_FILL",12),env_n("JM_ST_FULL",40),env_n("JM_ST_FORK",8) as usize);
+    let modes:Vec<String>=std::env::var("JM_ST_MODES").map(|s|s.split(',').map(str::to_string).collect()).unwrap_or_else(|_|vec!["whole-state".into(),"store".into()]);
+    let alice=devnet::account_key("alice");let mut h=net();let mut nonce=0u64;let mut blocks=vec![];let t=Instant::now();
+    for i in 0..fill{let b=signed(&h,h.chain.head,Body{txs:vec![deploy(&alice,nonce,FULL_GAS,1_000_000,fill_accts_init((i+1)<<40))],evidence:vec![]});nonce+=1;import(&mut h,&b);blocks.push(b);}
+    for _ in 0..full{let txs=pack_txs(&h,h.chain.head,nonce,400,|i|pay(&alice,i));nonce+=txs.len() as u64;let b=signed(&h,h.chain.head,Body{txs,evidence:vec![]});import(&mut h,&b);blocks.push(b);}
+    let tip=h.chain.head;let base=blocks.len()-fork;let mut h2=net();for b in &blocks[..base]{import(&mut h2,b);}
+    let (mut side,mut p)=(vec![],blocks[base-1].hash());
+    while h2.chain.get(&p).unwrap().total_work<=h.chain.get(&tip).unwrap().total_work{let b=fallback(&h2,p,0);import(&mut h2,&b);p=b.hash();side.push(b);}
+    let build_s=t.elapsed().as_secs_f64();drop(h2);
+    let size=|d:&std::path::Path,f:&str|std::fs::metadata(d.join(f)).map(|m|m.len()).unwrap_or(0);
+    for mode in modes{
+        let store=mode=="store";let dir=tmp(&format!("st-{mode}"));let d=dir.clone();
+        let conf=move|every:u64|Config{dir:d.clone(),name:"jm".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{state_store:store,checkpoint_every:every,..Default::default()}};
+        let (rss0,hwm0)=(rss_bytes(),vmhwm_bytes());
+        let mut n=Node::open(conf(16),admitted()).unwrap();let (mut fill_ms,mut full_ms)=(vec![],vec![]);let t=Instant::now();
+        for (i,b) in blocks.iter().enumerate(){let t=Instant::now();n.import(b.clone(),None).unwrap();let ms=t.elapsed().as_secs_f64()*1e3;if (i as u64)<fill{fill_ms.push(ms)}else{full_ms.push(ms)}}
+        let sync_s=t.elapsed().as_secs_f64();
+        let t=Instant::now();for b in &side{n.import(b.clone(),None).unwrap();}let reorg_s=t.elapsed().as_secs_f64();assert_eq!(n.chain.head,side.last().unwrap().hash(),"the heavier branch is adopted");
+        let (rss1,hwm1)=(rss_bytes(),vmhwm_bytes());
+        let st=pocold::chain::StateHandle::of(n.chain.head()).whole();
+        let (accounts,slots)=(st.accounts.len(),st.accounts.values().map(|a|a.storage.values().filter(|v|!v.is_zero()).count()).sum::<usize>());
+        let txs:u64=n.chain.head().cum_txs;let stored=n.chain.blocks.values().filter(|e|e.stored.is_some()).count();
+        let nodes=n.state_store().map(|s|s.node_count().unwrap()).unwrap_or(0);let cache=n.state_store().map(|s|s.cache_bytes()).unwrap_or(0);
+        let files=serde_json::json!({"journal":size(&dir,"blocks.journal"),"history":size(&dir,"history.redb"),"state":size(&dir,"state.redb")});
+        let written=n.stats.checkpoints_written;drop(n);
+        let t=Instant::now();let n=Node::open(conf(16),admitted()).unwrap();let open_s=t.elapsed().as_secs_f64();let resumed=n.stats.resumed_from;drop(n);
+        let t=Instant::now();let n=Node::open(conf(0),admitted()).unwrap();let open_genesis_s=t.elapsed().as_secs_f64();assert_eq!(n.stats.resumed_from,None);drop(n);
+        let stats=|v:&[f64]|serde_json::json!({"n":v.len(),"medianMs":median(v.to_vec()),"maxMs":v.iter().cloned().fold(0.0,f64::max),"meanMs":v.iter().sum::<f64>()/v.len().max(1) as f64});
+        println!("JM-STORE {}",serde_json::json!({"mode":mode,"blocks":blocks.len(),"fillBlocks":fill,"fullBlocks":full,"forkDepth":fork,"sideBlocks":side.len(),"transactions":txs,
+            "stateAccounts":accounts,"stateNonzeroSlots":slots,"storedVersions":stored,"storeNodes":nodes,"nodeCacheBytes":cache,"checkpointsWritten":written,
+            "importFillBlocks":stats(&fill_ms),"importFullBlocks":stats(&full_ms),"syncSeconds":sync_s,"reorgSeconds":reorg_s,
+            "openSeconds":open_s,"openResumedFrom":resumed,"openFromGenesisSeconds":open_genesis_s,"filesBytes":files,
+            "rssBeforeBytes":rss0,"rssAfterBytes":rss1,"vmHwmBeforeBytes":hwm0,"vmHwmAfterBytes":hwm1,"buildSeconds":build_s}));
+        let _=std::fs::remove_dir_all(&dir);
+    }
+}

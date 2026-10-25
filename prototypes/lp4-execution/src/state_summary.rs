@@ -62,8 +62,9 @@ impl Summary{
     /// `scan` of any state view, with `contracts_clean` left true (C-1 E3: an overlay's intermediate state).
     pub fn scan_view(db:&dyn View,runtime:u32)->Summary{
         let mut s=Summary{runtime,code_total:0,code_missing:0,code_mismatch:0,over_runtime:0,user_accounts:0,user_slots:0,sys_slots:0,balance:U512::ZERO,contracts_clean:true};
-        let mut parts=Vec::new();db.each_account(&mut |addr,a|parts.push((*addr,part(db,addr,&a,runtime,true))));
-        for (addr,p) in &parts{s.add(addr,p);}
+        // C-1 E4.5: summed as the accounts are read (a stored version is read once, holding nothing per
+        // account; the sums do not depend on the order).
+        db.each_account(&mut |addr,a|{let p=part(db,addr,&a,runtime,true);s.add(addr,&p);});
         s
     }
     fn add(&mut self,addr:&Address,p:&Part){
