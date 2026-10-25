@@ -445,6 +445,60 @@ mod a03{
     assert!(state.contracts.len()>net.genesis.state().contracts.len()&&s.code_total>=g.code_total+30,"positive control: ten runtimes were created ({s:?})");
 }
 
+/// C-1 E4.1: a node-trie version kept in a store from each block's write set (`BlockOutput.writes`), as
+/// pocold will keep the head, has the block's stateRoot, and every account, code and slot of the block's
+/// state reads the same through `node_trie::TrieState`. Two versions stay pinned, older ones are released,
+/// and the store's reference counts equal a recount after every block.
+#[test] fn e4_a_node_trie_kept_from_the_write_sets_reads_as_every_block_state(){
+    use crate::node_trie::{Batch,MemStore,NodeTrie,TrieState};use crate::view::View;
+    let net=devnet3();let ids:Vec<Address>=net.miners.iter().map(|m|m.id).collect();
+    let alice=devnet::account_key("alice");let bob=devnet::account_key("bob").address();
+    let tx=|nonce:u64,to:Option<Address>,data:Vec<u8>,gas:u64|crate::txsign::Tx{chain_id:777900,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas,to,value:U256::from(if to.is_some(){7u64}else{0}),data:data.into()}.sign_1559(&alice);
+    // Init code storing slot 1 and returning a 5-byte runtime (PUSH1 1 PUSH1 0 SSTORE) that stores slot 0
+    // when called.
+    let init=vec![0x60,0x2a,0x60,0x01,0x55,0x64,0x60,0x01,0x60,0x00,0x55,0x60,0,0x52,0x60,5,0x60,27,0xf3];
+    let (mut state,mut trie,mut sum)=(net.genesis.state().clone(),None::<crate::state_trie::StateTrie>,None::<crate::state_summary::Summary>);
+    let mut store=MemStore::default();let mut b=Batch::default();let mut nt=NodeTrie::build(&state,&store,&mut b);store.commit(&b,nt.world);
+    let mut pinned=std::collections::VecDeque::from([nt.world]);
+    let (mut prev,mut base_fee,mut parent_gas,mut nonce)=(None::<ParentResult>,U256::from(1_000_000_000u64),0u64,0u64);
+    let mut with_writes=0;
+    for h in 1..=30u64{
+        if h>1{base_fee=crate::fees::next_base_fee(base_fee,parent_gas,8_000_000).unwrap();}
+        let created=|n:u64|alice.address().create(n);
+        let txs:Vec<Vec<u8>>=match h%3{0=>{nonce+=1;vec![tx(nonce-1,Some(created(1)),vec![],60_000)]},1=>{nonce+=2;vec![tx(nonce-2,Some(bob),vec![],21000),tx(nonce-1,None,init.clone(),200_000)]},_=>{nonce+=1;vec![tx(nonce-1,Some(bob),vec![],21000)]}};
+        let input=BlockInput{height:h,timestamp:1_800_000_000+2*h,base_fee,gas_limit:8_000_000,prevrandao:B256::ZERO,
+            proposer:if h%2==0{Proposer::Signed(ids[(h as usize)%3])}else{Proposer::Fallback},
+            parent_result:prev.clone(),evidence:vec![],evidence_raw:&[],transactions:&txs,ancestors:vec![(0,net.genesis_hash)],cum_log_bytes:0};
+        let o=apply_block_with(&state,trie.as_ref(),sum.as_ref(),&net.genesis,&net.profile,&input).unwrap_or_else(|e|panic!("h={h}: {e:?}"));
+        let touched=match &o.writes{Some(w)=>{with_writes+=1;w.clone()},None=>crate::state_trie::Touched::between(&state,&o.state)};
+        let mut b=Batch::default();let next=nt.update(&store,&mut b,&o.state,&touched);
+        assert_eq!(next.root(&store,&b),o.state_root,"h={h}: the node trie's root is the block's stateRoot");
+        store.commit(&b,next.world);pinned.push_back(next.world);
+        if pinned.len()>2{if let Some(old)=pinned.pop_front().unwrap(){store.unpin(&old)}}
+        store.recount().unwrap_or_else(|e|panic!("h={h}: {e}"));
+        let ts=TrieState{store:&store,trie:next,block_hashes:&o.state.block_hashes};
+        let mut n_slots=0;
+        for (a,x) in &o.state.accounts{
+            let exists=!matches!(x.account_state,revm::db::AccountState::NotExisting);
+            let got=ts.account(a);assert_eq!(got.is_some(),exists,"h={h}: {a} exists");
+            if let Some(g)=got{
+                assert_eq!((g.info.nonce,g.info.balance,g.info.code_hash),(x.info.nonce,x.info.balance,x.info.code_hash),"h={h}: {a}");
+                let want=x.info.code.clone().or_else(||o.state.contracts.get(&x.info.code_hash).cloned()).map(|c|c.original_bytes());
+                assert_eq!(g.info.code.map(|c|c.original_bytes()),want,"h={h}: code of {a}");
+                for (k,v) in &x.storage{assert_eq!(ts.slot(a,k),*v,"h={h}: {a} slot {k}");if *v!=U256::ZERO{n_slots+=1}}
+                let mut got_slots=Vec::new();ts.each_slot(a,&mut |k,v|got_slots.push((*k,*v)));got_slots.sort();
+                let mut want_slots:Vec<(U256,U256)>=x.storage.iter().filter(|(_,v)|**v!=U256::ZERO).map(|(k,v)|(*k,*v)).collect();want_slots.sort();
+                assert_eq!(got_slots,want_slots,"h={h}: slots of {a}");
+            }
+        }
+        assert!(n_slots>0,"positive control: the state holds slots");
+        parent_gas=o.gas_used;state=o.state;trie=Some(o.trie);sum=Some(o.summary);nt=next;
+        let w=ids[(h as usize)%3];prev=Some(ParentResult{block_hash:B256::from(U256::from(h)),winner:w,shares:vec![(10,ids[(h as usize+1)%3])]});
+    }
+    assert!(with_writes>=29,"positive control: the blocks ran on overlays and gave their write sets ({with_writes})");
+    let created=alice.address().create(1);assert_ne!(state.slot(&created,&U256::from(0)),U256::ZERO,"positive control: the created contract's runtime wrote a slot");
+}
+
 /// C-1 E2: a candidate that fails one check fails it with the summary as without it (the same error).
 #[test] fn e2_failing_candidates_fail_alike(){
     use crate::state_summary::Summary;use revm::primitives::{AccountInfo,Bytecode,Bytes};

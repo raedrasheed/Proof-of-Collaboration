@@ -154,6 +154,7 @@ pub mod rpc_http;
 pub mod apply;
 // C-1 E1: the state root kept incrementally (world_root stays the reference).
 pub mod state_trie;
+pub mod node_trie;
 // C-1 E2: the per-block whole-state checks from a state summary.
 pub mod state_summary;
 // C-1 E3: the executor's state, whole or as an overlay over a parent.

@@ -17,16 +17,16 @@
 use std::{collections::HashMap,sync::Arc};
 use revm::{db::{AccountState,DbAccount},primitives::{keccak256,Address,B256,U256},InMemoryDB};
 
-type Key=[u8;32];
-fn nib(k:&Key,i:usize)->u8{let b=k[i/2];if i%2==0{b>>4}else{b&15}}
+pub(crate) type Key=[u8;32];
+pub(crate) fn nib(k:&Key,i:usize)->u8{let b=k[i/2];if i%2==0{b>>4}else{b&15}}
 /// First nibble index in [from, 64) where the keys differ (64 if none).
-fn diverge(a:&Key,b:&Key,from:usize)->usize{(from..64).find(|i|nib(a,*i)!=nib(b,*i)).unwrap_or(64)}
+pub(crate) fn diverge(a:&Key,b:&Key,from:usize)->usize{(from..64).find(|i|nib(a,*i)!=nib(b,*i)).unwrap_or(64)}
 
-fn rlp_bytes(b:&[u8],out:&mut Vec<u8>){crate::rlp::encode_bytes(b,out)}
-fn rlp_list(payload:&[u8])->Vec<u8>{let mut out=Vec::with_capacity(payload.len()+3);crate::rlp::encode_list_payload(payload,&mut out);out}
-fn rlp_uint(n:&U256,out:&mut Vec<u8>){let b=n.to_be_bytes::<32>();rlp_bytes(&b[b.iter().position(|v|*v!=0).unwrap_or(32)..],out)}
+pub(crate) fn rlp_bytes(b:&[u8],out:&mut Vec<u8>){crate::rlp::encode_bytes(b,out)}
+pub(crate) fn rlp_list(payload:&[u8])->Vec<u8>{let mut out=Vec::with_capacity(payload.len()+3);crate::rlp::encode_list_payload(payload,&mut out);out}
+pub(crate) fn rlp_uint(n:&U256,out:&mut Vec<u8>){let b=n.to_be_bytes::<32>();rlp_bytes(&b[b.iter().position(|v|*v!=0).unwrap_or(32)..],out)}
 /// Hex-prefix encoding of key[from..to] (`p1_trie::compact`).
-fn compact(k:&Key,from:usize,to:usize,leaf:bool)->Vec<u8>{
+pub(crate) fn compact(k:&Key,from:usize,to:usize,leaf:bool)->Vec<u8>{
     let odd=(to-from)%2==1;let flag=if leaf{2}else{0};
     let mut out=vec![((flag+odd as u8)<<4)|if odd{nib(k,from)}else{0}];
     let mut i=from+odd as usize;while i<to{out.push(nib(k,i)<<4|nib(k,i+1));i+=2}
@@ -35,17 +35,17 @@ fn compact(k:&Key,from:usize,to:usize,leaf:bool)->Vec<u8>{
 
 /// A node's reference in its parent (`p1_trie::child`): its encoding when shorter than 32 bytes, else
 /// RLP(Keccak(encoding)), 33 bytes.
-#[derive(Clone,Copy)]
-struct Ref{len:u8,b:[u8;33]}
+#[derive(Clone,Copy,PartialEq,Eq)]
+pub struct Ref{pub(crate) len:u8,pub(crate) b:[u8;33]}
 impl Ref{
-    fn of(enc:&[u8])->Ref{
+    pub(crate) fn of(enc:&[u8])->Ref{
         let mut b=[0u8;33];
         if enc.len()<32{b[..enc.len()].copy_from_slice(enc);Ref{len:enc.len() as u8,b}}
         else{b[0]=0xa0;b[1..].copy_from_slice(keccak256(enc).as_slice());Ref{len:33,b}}
     }
-    fn bytes(&self)->&[u8]{&self.b[..usize::from(self.len)]}
+    pub(crate) fn bytes(&self)->&[u8]{&self.b[..usize::from(self.len)]}
     /// The root of a trie whose top node has this reference: the root is always hashed.
-    fn root(&self)->B256{if self.len==33{B256::from_slice(&self.b[1..])}else{keccak256(self.bytes())}}
+    pub(crate) fn root(&self)->B256{if self.len==33{B256::from_slice(&self.b[1..])}else{keccak256(self.bytes())}}
 }
 
 /// The bytes a leaf commits to (the value `p1_trie::root` takes for its key).
@@ -168,8 +168,8 @@ fn stats<V>(n:&Node<V>,world:bool,s:&mut TrieStats,sub:&dyn Fn(&V,&mut TrieStats
         Node::Branch{kids,..}=>{s.branches+=1;s.kid_slots+=kids.len() as u64;s.heap_bytes+=(kids.len()*std::mem::size_of::<usize>()) as u64;for k in kids.iter(){stats(k,world,s,sub)}}}
 }
 
-fn hashed(a:&Address)->Key{keccak256(a.as_slice()).0}
-fn hashed_slot(s:&U256)->Key{keccak256(s.to_be_bytes::<32>()).0}
+pub(crate) fn hashed(a:&Address)->Key{keccak256(a.as_slice()).0}
+pub(crate) fn hashed_slot(s:&U256)->Key{keccak256(s.to_be_bytes::<32>()).0}
 fn exists(a:&DbAccount)->bool{!matches!(a.account_state,AccountState::NotExisting)}
 fn storage_rows(a:&DbAccount)->Vec<(Key,U256)>{
     let mut rows:Vec<(Key,U256)>=a.storage.iter().filter(|(_,v)|**v!=U256::ZERO).map(|(k,v)|(hashed_slot(k),*v)).collect();rows.sort_unstable_by(|x,y|x.0.cmp(&y.0));rows

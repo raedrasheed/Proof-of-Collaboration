@@ -22,7 +22,7 @@ pub struct NativeContext {
 /// (decision package C-2, item 3). Callers still cannot submit an eligibility/success flag.
 fn durable(pre_transaction: &dyn crate::view::View, recipient: Address) -> bool {
     pre_transaction.account(&recipient).map(|account| {
-        *account.state != revm::db::AccountState::NotExisting
+        account.state != revm::db::AccountState::NotExisting
             && (account.info.nonce > 0
                 || (account.info.code_hash != revm::primitives::KECCAK_EMPTY
                     && account.info.code_hash != revm::primitives::B256::ZERO))

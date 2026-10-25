@@ -12,7 +12,7 @@ pub struct CodeLimits { pub runtime: u32, pub logical: u64 }
 /// Resolve actual runtime bytes and verify their content address. An unknown
 /// nonempty hash must never silently resolve to EmptyDB's empty-code fallback.
 pub(crate) fn code_len(db:&dyn crate::view::View, info:&AccountInfo)->Result<u64,String> {
-    let code=info.code.as_ref().or_else(||db.contract(&info.code_hash));
+    let code=info.code.clone().or_else(||db.contract(&info.code_hash));
     match code {
         Some(code) if code.hash_slow()==info.code_hash =>
             u64::try_from(code.original_bytes().len()).map_err(|_|"code length overflow".into()),

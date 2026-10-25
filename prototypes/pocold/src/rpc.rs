@@ -934,7 +934,7 @@ fn call(n:&mut Node,m:&str,p:&[Value],b:&mut Budget)->R{
         "eth_getTransactionCount"=>{let a=p.first().and_then(parse_addr).ok_or(bad("address"))?;let s=state_for(n,p.get(1).unwrap_or(&Value::Null))?;
             Ok(json!(qty(s.v().account(&a).map(|x|x.info.nonce).unwrap_or(0))))}
         "eth_getCode"=>{let a=p.first().and_then(parse_addr).ok_or(bad("address"))?;let s=state_for(n,p.get(1).unwrap_or(&Value::Null))?;
-            Ok(json!(hex(&s.v().account(&a).and_then(|x|x.info.code.as_ref()).map(|c|c.original_bytes().to_vec()).unwrap_or_default())))}
+            Ok(json!(hex(&s.v().account(&a).and_then(|x|x.info.code).map(|c|c.original_bytes().to_vec()).unwrap_or_default())))}
         "eth_getStorageAt"=>{let a=p.first().and_then(parse_addr).ok_or(bad("address"))?;let k=p.get(1).and_then(parse_u256).ok_or(bad("slot"))?;
             let s=state_for(n,p.get(2).unwrap_or(&Value::Null))?;let v=s.v().slot(&a,&k);
             Ok(json!(hex(&v.to_be_bytes::<32>())))}
@@ -1058,7 +1058,7 @@ fn simulate(n:&Node,o:&Value,tag:&Value,gas:Option<u64>,b:&Budget)->Result<Execu
     let base=n.chain.state_of(&e.hash).ok_or_else(||Fail::from((-32017,"state outside the retained trie window (K_hist)".to_string())))?;
     // eth_call simulation: fund the caller for value transfers, never committed (C-1 E3: on an overlay,
     // not a copy of the state).
-    let mut st=pocol_lp4_execution::view::Overlay::new(&base);
+    let mut st=pocol_lp4_execution::view::Overlay::new(&*base);
     {use pocol_lp4_execution::view::WorkState;if let Some(a)=st.info_mut(&tx.caller){a.balance=a.balance.max(tx.value);}}
     // Cancellation (network.md:286): the stop hook ends the execution at its next poll once the
     // deadline has passed (native::simulate_for_profile: every STOP_GAS gas of a frame, before every

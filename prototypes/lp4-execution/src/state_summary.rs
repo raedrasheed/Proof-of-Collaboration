@@ -44,9 +44,9 @@ fn clean(db:&InMemoryDB)->bool{
 /// One account's part of a summary, with its storage counted whole or not at all.
 #[derive(Default)]
 struct Part{code:u128,missing:u64,mismatch:u64,over:u64,user:u64,slots:u64,balance:U512}
-fn part(db:&dyn View,addr:&Address,a:Acc<'_>,runtime:u32,with_slots:bool)->Part{
+fn part(db:&dyn View,addr:&Address,a:&Acc,runtime:u32,with_slots:bool)->Part{
     let mut p=Part::default();if !a.exists(){return p}
-    match code_caps::code_len(db,a.info){
+    match code_caps::code_len(db,&a.info){
         Ok(n)=>{p.code=u128::from(n);if n>u64::from(runtime){p.over=1}}
         Err(e) if e=="missing runtime bytes"=>p.missing=1,
         Err(_)=>p.mismatch=1,
@@ -62,7 +62,7 @@ impl Summary{
     /// `scan` of any state view, with `contracts_clean` left true (C-1 E3: an overlay's intermediate state).
     pub fn scan_view(db:&dyn View,runtime:u32)->Summary{
         let mut s=Summary{runtime,code_total:0,code_missing:0,code_mismatch:0,over_runtime:0,user_accounts:0,user_slots:0,sys_slots:0,balance:U512::ZERO,contracts_clean:true};
-        let mut parts=Vec::new();db.each_account(&mut |addr,a|parts.push((*addr,part(db,addr,a,runtime,true))));
+        let mut parts=Vec::new();db.each_account(&mut |addr,a|parts.push((*addr,part(db,addr,&a,runtime,true))));
         for (addr,p) in &parts{s.add(addr,p);}
         s
     }
@@ -80,11 +80,11 @@ impl Summary{
         let mut s=*self;
         for (addr,slots) in touched.iter(){
             let (old,new)=(from.account(addr),to.account(addr));
-            let both=old.map_or(false,|a|a.exists())&&new.map_or(false,|a|a.exists());
+            let both=old.as_ref().map_or(false,|a|a.exists())&&new.as_ref().map_or(false,|a|a.exists());
             // Slots one by one only while the account exists on both sides; otherwise its storage whole.
             let whole=!both||slots.is_none();
-            if let Some(a)=old{s.sub(addr,&part(from,addr,a,self.runtime,whole));}
-            if let Some(a)=new{s.add(addr,&part(to,addr,a,self.runtime,whole));}
+            if let Some(a)=&old{s.sub(addr,&part(from,addr,a,self.runtime,whole));}
+            if let Some(a)=&new{s.add(addr,&part(to,addr,a,self.runtime,whole));}
             if let (false,Some(list),Some(o),Some(n))=(whole,slots,old,new){
                 let mut list=list.to_vec();list.sort_unstable();list.dedup();
                 let _=(o,n);let (mut gone,mut came)=(0u64,0u64);for k in &list{if from.slot(addr,k)!=U256::ZERO{gone+=1}if to.slot(addr,k)!=U256::ZERO{came+=1}}

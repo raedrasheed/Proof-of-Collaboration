@@ -1,0 +1,426 @@
+//! C-1 E4: the state trie as hash-addressed nodes in a store, and a state read from its root.
+//!
+//! The trie is E1's (`state_trie`): the same keys (Keccak-256 of the address or of the slot), the same
+//! node encodings (`p1_trie::node`), the same roots. What differs is where the nodes are. A node here
+//! names its children by an `Id`, the Keccak-256 of the child's own serialization, and carries each
+//! child's reference at the depth it hangs at, so a branch is re-encoded without reading its unchanged
+//! children. Nodes are immutable and identified by content: two versions that share a subtree share its
+//! nodes, a write is idempotent, and a version is its root `Id`.
+//!
+//! `NodeStore` is where nodes, code and key preimages are read from. An update collects what it creates in
+//! a `Batch`, read before the store, so a version can be computed before it is committed; `MemStore` is a
+//! store in memory with the reference counts a disk store keeps (pocold's `state.redb` implements the
+//! same trait). `TrieState` is a `view::View` of one version: what the executor reads of a state, read
+//! from the trie.
+use std::{collections::HashMap,sync::Arc};
+use revm::{db::AccountState,primitives::{keccak256,AccountInfo,Address,Bytecode,B256,KECCAK_EMPTY,U256},InMemoryDB};
+use crate::state_trie::{compact,diverge,hashed,hashed_slot,nib,rlp_bytes,rlp_list,rlp_uint,Key,Ref,Touched};
+use crate::view::{Acc,View};
+
+/// A node's identity: Keccak-256 of its serialization (`Node::encode`).
+pub type Id=[u8;32];
+
+/// What a leaf holds.
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub enum Val{
+    /// A storage slot's nonzero value.
+    Slot(U256),
+    /// An account: its fields, its storage trie's root and that trie's top node (None: no storage).
+    Acct{nonce:u64,balance:U256,code_hash:B256,storage_root:B256,storage:Option<Id>},
+}
+impl Val{
+    /// The bytes the leaf commits to in the trie (as `state_trie`'s values).
+    fn commit(&self,out:&mut Vec<u8>){
+        match self{
+            Val::Slot(v)=>rlp_uint(v,out),
+            Val::Acct{nonce,balance,code_hash,storage_root,..}=>{
+                let mut p=Vec::with_capacity(110);rlp_uint(&U256::from(*nonce),&mut p);rlp_uint(balance,&mut p);
+                rlp_bytes(storage_root.as_slice(),&mut p);rlp_bytes(code_hash.as_slice(),&mut p);out.extend(rlp_list(&p));
+            }
+        }
+    }
+}
+
+/// A stored node. A branch keeps one key below it (`key`, for the extension above it), its children's
+/// `Id`s with their references at depth `at + 1`, and its own reference at depth `at`.
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub enum Node{
+    Leaf{key:Key,val:Val},
+    Branch{at:u8,mask:u16,key:Key,kids:Box<[(Id,Ref)]>,bref:Ref},
+}
+impl std::fmt::Debug for Ref{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{write!(f,"Ref({:02x?})",self.bytes())}}
+
+fn put_ref(r:&Ref,out:&mut Vec<u8>){out.push(r.len);out.extend_from_slice(r.bytes());}
+fn get_ref(b:&[u8],i:&mut usize)->Option<Ref>{
+    let len=*b.get(*i)? as usize;if len>33{return None}
+    let bytes=b.get(*i+1..*i+1+len)?;let mut r=Ref{len:len as u8,b:[0;33]};r.b[..len].copy_from_slice(bytes);*i+=1+len;Some(r)
+}
+fn take<'a>(b:&'a [u8],i:&mut usize,n:usize)->Option<&'a [u8]>{let s=b.get(*i..*i+n)?;*i+=n;Some(s)}
+impl Node{
+    /// The serialization a store keeps and the `Id` is taken of.
+    pub fn encode(&self)->Vec<u8>{
+        let mut out=Vec::with_capacity(160);
+        match self{
+            Node::Leaf{key,val}=>{
+                out.push(0);out.extend_from_slice(key);
+                match val{
+                    Val::Slot(v)=>{out.push(0);out.extend_from_slice(&v.to_be_bytes::<32>());}
+                    Val::Acct{nonce,balance,code_hash,storage_root,storage}=>{
+                        out.push(1);out.extend_from_slice(&nonce.to_be_bytes());out.extend_from_slice(&balance.to_be_bytes::<32>());
+                        out.extend_from_slice(code_hash.as_slice());out.extend_from_slice(storage_root.as_slice());
+                        match storage{Some(id)=>{out.push(1);out.extend_from_slice(id);}None=>out.push(0)}
+                    }
+                }
+            }
+            Node::Branch{at,mask,key,kids,bref}=>{
+                out.push(1);out.push(*at);out.extend_from_slice(&mask.to_be_bytes());out.extend_from_slice(key);put_ref(bref,&mut out);
+                for (id,r) in kids.iter(){out.extend_from_slice(id);put_ref(r,&mut out);}
+            }
+        }
+        out
+    }
+    /// The inverse of `encode` (None for bytes that are not a node's serialization).
+    pub fn decode(b:&[u8])->Option<Node>{
+        let mut i=0;let tag=*take(b,&mut i,1)?.first()?;
+        let n=match tag{
+            0=>{
+                let key:Key=take(b,&mut i,32)?.try_into().ok()?;
+                let val=match *take(b,&mut i,1)?.first()?{
+                    0=>Val::Slot(U256::from_be_slice(take(b,&mut i,32)?)),
+                    1=>{
+                        let nonce=u64::from_be_bytes(take(b,&mut i,8)?.try_into().ok()?);let balance=U256::from_be_slice(take(b,&mut i,32)?);
+                        let code_hash=B256::from_slice(take(b,&mut i,32)?);let storage_root=B256::from_slice(take(b,&mut i,32)?);
+                        let storage=match *take(b,&mut i,1)?.first()?{0=>None,1=>Some(take(b,&mut i,32)?.try_into().ok()?),_=>return None};
+                        Val::Acct{nonce,balance,code_hash,storage_root,storage}
+                    }
+                    _=>return None,
+                };
+                Node::Leaf{key,val}
+            }
+            1=>{
+                let at=*take(b,&mut i,1)?.first()?;let mask=u16::from_be_bytes(take(b,&mut i,2)?.try_into().ok()?);
+                let key:Key=take(b,&mut i,32)?.try_into().ok()?;let bref=get_ref(b,&mut i)?;
+                let mut kids=Vec::with_capacity(mask.count_ones() as usize);
+                for _ in 0..mask.count_ones(){let id:Id=take(b,&mut i,32)?.try_into().ok()?;kids.push((id,get_ref(b,&mut i)?));}
+                Node::Branch{at,mask,key,kids:kids.into(),bref}
+            }
+            _=>return None,
+        };
+        (i==b.len()).then_some(n)
+    }
+    pub fn id(&self)->Id{keccak256(self.encode()).0}
+    fn key(&self)->&Key{match self{Node::Leaf{key,..}|Node::Branch{key,..}=>key}}
+    /// The children a store counts references to: a branch's kids, an account leaf's storage trie.
+    pub fn children(&self)->Vec<Id>{
+        match self{
+            Node::Branch{kids,..}=>kids.iter().map(|(id,_)|*id).collect(),
+            Node::Leaf{val:Val::Acct{storage:Some(s),..},..}=>vec![*s],
+            Node::Leaf{..}=>vec![],
+        }
+    }
+}
+/// The node's reference when it hangs at depth d (`state_trie::node_ref`).
+fn node_ref(n:&Node,d:usize)->Ref{
+    match n{
+        Node::Leaf{key,val}=>{let mut p=Vec::with_capacity(120);rlp_bytes(&compact(key,d,64,true),&mut p);let mut v=Vec::with_capacity(110);val.commit(&mut v);rlp_bytes(&v,&mut p);Ref::of(&rlp_list(&p))}
+        Node::Branch{at,key,bref,..}=>{
+            let at=usize::from(*at);if d==at{return *bref}
+            let mut p=Vec::with_capacity(70);rlp_bytes(&compact(key,d,at,false),&mut p);p.extend_from_slice(bref.bytes());Ref::of(&rlp_list(&p))
+        }
+    }
+}
+
+/// Where nodes, code and key preimages are read from.
+pub trait NodeStore{
+    fn node(&self,id:&Id)->Option<Arc<Node>>;
+    fn code(&self,h:&B256)->Option<Bytecode>;
+    /// The address whose Keccak-256 is `k`.
+    fn address(&self,k:&Key)->Option<Address>;
+    /// The slot of `a` whose Keccak-256 is `k`.
+    fn slot_key(&self,a:&Address,k:&Key)->Option<U256>;
+}
+
+/// What an update creates, before it is committed: nodes, and the code and preimages they need.
+#[derive(Default,Clone)]
+pub struct Batch{pub nodes:HashMap<Id,Arc<Node>>,pub code:HashMap<B256,Bytecode>,pub addrs:HashMap<Key,Address>,pub slots:HashMap<(Address,Key),U256>}
+/// A store read through a batch.
+pub struct Over<'a>{pub store:&'a dyn NodeStore,pub batch:&'a Batch}
+impl NodeStore for Over<'_>{
+    fn node(&self,id:&Id)->Option<Arc<Node>>{self.batch.nodes.get(id).cloned().or_else(||self.store.node(id))}
+    fn code(&self,h:&B256)->Option<Bytecode>{self.batch.code.get(h).cloned().or_else(||self.store.code(h))}
+    fn address(&self,k:&Key)->Option<Address>{self.batch.addrs.get(k).copied().or_else(||self.store.address(k))}
+    fn slot_key(&self,a:&Address,k:&Key)->Option<U256>{self.batch.slots.get(&(*a,*k)).copied().or_else(||self.store.slot_key(a,k))}
+}
+
+fn load(s:&dyn NodeStore,b:&Batch,id:&Id)->Arc<Node>{
+    b.nodes.get(id).cloned().or_else(||s.node(id)).unwrap_or_else(||panic!("C-1 E4: trie node {} is missing from the store",B256::from(*id)))
+}
+fn put(b:&mut Batch,n:Node)->(Id,Arc<Node>){let n=Arc::new(n);let id=n.id();b.nodes.entry(id).or_insert_with(||n.clone());(id,n)}
+
+/// A child in a branch being rebuilt: kept as it was (its reference at the branch's depth is known), or
+/// new or moved (its node is at hand).
+enum Kid{Kept(Id,Ref),Node(Id,Arc<Node>)}
+fn branch(b:&mut Batch,at:usize,kids:Vec<(u8,Kid)>)->(Id,Arc<Node>){
+    let mut p=Vec::with_capacity(16*33+1);let mut mask=0u16;let mut out=Vec::with_capacity(kids.len());let mut key=None;
+    let mut k=kids.into_iter().peekable();
+    for nibble in 0..16u8{
+        match k.peek(){Some((n,_)) if *n==nibble=>{
+            let (_,kid)=k.next().unwrap();
+            let (id,r,first)=match kid{Kid::Kept(id,r)=>(id,r,None),Kid::Node(id,n)=>(id,node_ref(&n,at+1),Some(*n.key()))};
+            if key.is_none(){key=first;}
+            p.extend_from_slice(r.bytes());mask|=1<<nibble;out.push((id,r));
+        }_=>p.push(0x80)}
+    }
+    p.push(0x80);
+    // Callers give at least one child node (`finish` loads one when all are kept).
+    let key=key.expect("a branch is built with at least one child node at hand");
+    put(b,Node::Branch{at:at as u8,mask,key,kids:out.into(),bref:Ref::of(&rlp_list(&p))})
+}
+
+/// The subtree of `rows` (sorted, distinct keys) hanging at depth d.
+fn build(b:&mut Batch,d:usize,rows:&[(Key,Val)])->Option<(Id,Arc<Node>)>{
+    match rows.len(){
+        0=>None,
+        1=>Some(put(b,Node::Leaf{key:rows[0].0,val:rows[0].1.clone()})),
+        _=>{
+            let at=diverge(&rows[0].0,&rows[rows.len()-1].0,d);let mut kids=Vec::new();let mut i=0;
+            while i<rows.len(){let n=nib(&rows[i].0,at);let s=i;while i<rows.len()&&nib(&rows[i].0,at)==n{i+=1}
+                let (id,node)=build(b,at+1,&rows[s..i]).expect("nonempty");kids.push((n,Kid::Node(id,node)));}
+            Some(branch(b,at,kids))
+        }
+    }
+}
+fn finish(s:&dyn NodeStore,b:&mut Batch,at:usize,kids:Vec<(u8,Kid)>)->Option<(Id,Arc<Node>)>{
+    match kids.len(){
+        0=>None,
+        1=>Some(match kids.into_iter().next().unwrap().1{Kid::Node(id,n)=>(id,n),Kid::Kept(id,_)=>(id,load(s,b,&id))}),
+        _=>{
+            // The branch's key is any key below it: from a child node at hand, or a kept child's.
+            let has_node=kids.iter().any(|(_,k)|matches!(k,Kid::Node(..)));
+            let mut kids=kids;
+            if !has_node{let (n,k)=kids.remove(0);let Kid::Kept(id,_)=k else{unreachable!()};let node=load(s,b,&id);kids.insert(0,(n,Kid::Node(id,node)));}
+            Some(branch(b,at,kids))
+        }
+    }
+}
+fn groups<V>(ch:&[(Key,Option<V>)],i:usize)->Vec<(u8,&[(Key,Option<V>)])>{
+    let mut out=Vec::new();let mut s=0;
+    while s<ch.len(){let n=nib(&ch[s].0,i);let mut e=s;while e<ch.len()&&nib(&ch[e].0,i)==n{e+=1}out.push((n,&ch[s..e]));s=e;}
+    out
+}
+/// `state_trie::update` over stored nodes: the subtree hanging at depth d after `ch` (sorted, distinct
+/// keys; None deletes) is applied to the node `n`.
+fn update(s:&dyn NodeStore,b:&mut Batch,n:Option<(Id,Arc<Node>)>,d:usize,ch:&[(Key,Option<Val>)])->Option<(Id,Arc<Node>)>{
+    if ch.is_empty(){return n}
+    let Some((nid,node))=n else{
+        let rows:Vec<(Key,Val)>=ch.iter().filter_map(|(k,v)|v.clone().map(|v|(*k,v))).collect();return build(b,d,&rows);
+    };
+    match &*node{
+        Node::Leaf{key,val}=>{
+            let mut rows:Vec<(Key,Val)>=ch.iter().filter_map(|(k,v)|v.clone().map(|v|(*k,v))).collect();
+            if !ch.iter().any(|(k,_)|k==key){let at=rows.partition_point(|(k,_)|k<key);rows.insert(at,(*key,val.clone()));}
+            build(b,d,&rows)
+        }
+        Node::Branch{at,mask,key:prefix,kids,..}=>{
+            let at=usize::from(*at);let prefix=*prefix;
+            let p=ch.iter().filter(|(_,v)|v.is_some()).map(|(k,_)|diverge(&prefix,k,d)).min().unwrap_or(64).min(at);
+            let kept:Vec<(Key,Option<Val>)>;
+            let ch=if ch.iter().any(|(k,v)|v.is_none()&&diverge(&prefix,k,d)<p){kept=ch.iter().filter(|(k,v)|v.is_some()||diverge(&prefix,k,d)>=p).cloned().collect();&kept[..]}else{ch};
+            if ch.is_empty(){return Some((nid,node.clone()))}
+            if p<at{
+                let own=nib(&prefix,p);let mut out=Vec::new();let mut placed=false;
+                for (n,g) in groups(ch,p){
+                    if n==own{placed=true;if let Some((id,c))=update(s,b,Some((nid,node.clone())),p+1,g){out.push((n,Kid::Node(id,c)))}}
+                    else if let Some((id,c))=update(s,b,None,p+1,g){out.push((n,Kid::Node(id,c)))}
+                }
+                if !placed{let at_own=out.partition_point(|(n,_)|*n<own);out.insert(at_own,(own,Kid::Node(nid,node.clone())));}
+                return finish(s,b,p,out);
+            }
+            let present:Vec<u8>=(0..16u8).filter(|i|mask&(1<<i)!=0).collect();
+            let mut out:Vec<(u8,Kid)>=Vec::with_capacity(16);let mut j=0;
+            let gs=groups(ch,at);let mut g=gs.iter().peekable();
+            for nibble in 0..16u8{
+                let old=if present.get(j)==Some(&nibble){j+=1;Some(kids[j-1])}else{None};
+                match g.peek(){
+                    Some((n,run)) if *n==nibble=>{
+                        let oldn=old.map(|(id,_)|(id,load(s,b,&id)));
+                        if let Some((id,c))=update(s,b,oldn,at+1,run){out.push((nibble,Kid::Node(id,c)))}
+                        g.next();
+                    }
+                    _=>if let Some((id,r))=old{out.push((nibble,Kid::Kept(id,r)))},
+                }
+            }
+            finish(s,b,at,out)
+        }
+    }
+}
+/// The leaf value under key k, from the subtree at `id`.
+fn get(s:&dyn NodeStore,id:&Id,k:&Key)->Option<Val>{
+    let mut n=s.node(id).unwrap_or_else(||panic!("C-1 E4: trie node {} is missing from the store",B256::from(*id)));
+    loop{
+        let next=match &*n{
+            Node::Leaf{key,val}=>return (key==k).then(||val.clone()),
+            Node::Branch{at,mask,kids,..}=>{let i=nib(k,usize::from(*at));if mask&(1<<i)==0{return None}kids[(mask&((1u16<<i)-1)).count_ones() as usize].0}
+        };
+        n=s.node(&next).unwrap_or_else(||panic!("C-1 E4: trie node {} is missing from the store",B256::from(next)));
+    }
+}
+/// Every leaf of the subtree at `id`, in key order.
+fn walk(s:&dyn NodeStore,id:&Id,f:&mut dyn FnMut(&Key,&Val)){
+    let mut stack=vec![*id];
+    while let Some(x)=stack.pop(){
+        let n=s.node(&x).unwrap_or_else(||panic!("C-1 E4: trie node {} is missing from the store",B256::from(x)));
+        match &*n{Node::Leaf{key,val}=>f(key,val),Node::Branch{kids,..}=>for (c,_) in kids.iter().rev(){stack.push(*c)}}
+    }
+}
+fn root_of(n:Option<&Node>)->B256{match n{None=>keccak256([0x80u8]),Some(n)=>node_ref(n,0).root()}}
+
+/// One version of the state trie: its world trie's top node.
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
+pub struct NodeTrie{pub world:Option<Id>}
+fn exists(a:&revm::db::DbAccount)->bool{!matches!(a.account_state,AccountState::NotExisting)}
+fn acct_val(info:&AccountInfo,storage:Option<(Id,Arc<Node>)>)->Val{
+    let storage_root=root_of(storage.as_ref().map(|(_,n)|&**n));
+    Val::Acct{nonce:info.nonce,balance:info.balance,code_hash:info.code_hash,storage_root,storage:storage.map(|(id,_)|id)}
+}
+/// The code and preimages a state's account brings to the batch.
+fn note(b:&mut Batch,s:&dyn NodeStore,addr:&Address,info:&AccountInfo,code:Option<Bytecode>){
+    b.addrs.entry(hashed(addr)).or_insert(*addr);
+    if info.code_hash!=KECCAK_EMPTY&&!info.code_hash.is_zero()&&s.code(&info.code_hash).is_none(){if let Some(c)=code{b.code.entry(info.code_hash).or_insert(c);}}
+}
+impl NodeTrie{
+    /// The trie of a whole state (what `world_root` reads: existing accounts and their nonzero slots).
+    pub fn build(db:&InMemoryDB,s:&dyn NodeStore,b:&mut Batch)->NodeTrie{
+        let mut rows:Vec<(Key,Val)>=Vec::with_capacity(db.accounts.len());
+        for (addr,a) in db.accounts.iter().filter(|(_,a)|exists(a)){
+            let mut sr:Vec<(Key,Val)>=a.storage.iter().filter(|(_,v)|**v!=U256::ZERO).map(|(k,v)|{let h=hashed_slot(k);b.slots.entry((*addr,h)).or_insert(*k);(h,Val::Slot(*v))}).collect();
+            sr.sort_unstable_by(|x,y|x.0.cmp(&y.0));
+            let storage=build(b,0,&sr);
+            note(b,s,addr,&a.info,a.info.code.clone().or_else(||db.contracts.get(&a.info.code_hash).cloned()));
+            rows.push((hashed(addr),acct_val(&a.info,storage)));
+        }
+        rows.sort_unstable_by(|x,y|x.0.cmp(&y.0));
+        NodeTrie{world:build(b,0,&rows).map(|(id,_)|id)}
+    }
+    /// The state root.
+    pub fn root(&self,s:&dyn NodeStore,b:&Batch)->B256{root_of(self.world.map(|id|load(s,b,&id)).as_deref())}
+    /// The trie of `child`, given that only the `touched` accounts and slots differ from this version's
+    /// state (the executor's write set, `view::Overlay::touched`).
+    pub fn update(&self,s:&dyn NodeStore,b:&mut Batch,child:&dyn View,touched:&Touched)->NodeTrie{
+        let mut ch:Vec<(Key,Option<Val>)>=Vec::new();
+        for (addr,slots) in touched.iter(){
+            let k=hashed(addr);
+            let Some(a)=child.account(addr).filter(|a|a.exists()) else{ch.push((k,None));continue};
+            let old=self.world.and_then(|w|get(&Over{store:s,batch:b},&w,&k));
+            let old_storage=match &old{Some(Val::Acct{storage,..})=>*storage,_=>None};
+            let storage=match (&old,slots){
+                (Some(_),Some(slots))=>{
+                    let mut sc:Vec<(Key,Option<Val>)>=slots.iter().map(|sl|{let h=hashed_slot(sl);let v=child.slot(addr,sl);if v!=U256::ZERO{b.slots.entry((*addr,h)).or_insert(*sl);}(h,(v!=U256::ZERO).then_some(Val::Slot(v)))}).collect();
+                    sc.sort_unstable_by(|x,y|x.0.cmp(&y.0));sc.dedup_by(|x,y|x.0==y.0);
+                    let start=old_storage.map(|id|(id,load(s,b,&id)));update(s,b,start,0,&sc)
+                }
+                _=>{
+                    let mut sr:Vec<(Key,Val)>=Vec::new();
+                    child.each_slot(addr,&mut |sl,v|{if *v!=U256::ZERO{let h=hashed_slot(sl);b.slots.entry((*addr,h)).or_insert(*sl);sr.push((h,Val::Slot(*v)))}});
+                    sr.sort_unstable_by(|x,y|x.0.cmp(&y.0));sr.dedup_by(|x,y|x.0==y.0);build(b,0,&sr)
+                }
+            };
+            let code=a.info.code.clone().or_else(||child.contract(&a.info.code_hash));
+            note(b,s,addr,&a.info,code);
+            ch.push((k,Some(acct_val(&a.info,storage))));
+        }
+        ch.sort_unstable_by(|x,y|x.0.cmp(&y.0));
+        let start=self.world.map(|id|(id,load(s,b,&id)));
+        NodeTrie{world:update(s,b,start,0,&ch).map(|(id,_)|id)}
+    }
+}
+
+/// A store in memory with reference counts: a node lives while a pinned root or a stored node names it.
+#[derive(Default)]
+pub struct MemStore{pub nodes:HashMap<Id,(Arc<Node>,u32)>,pub code:HashMap<B256,Bytecode>,pub addrs:HashMap<Key,Address>,pub slots:HashMap<(Address,Key),U256>,pub pins:HashMap<Id,u32>}
+impl NodeStore for MemStore{
+    fn node(&self,id:&Id)->Option<Arc<Node>>{self.nodes.get(id).map(|x|x.0.clone())}
+    fn code(&self,h:&B256)->Option<Bytecode>{self.code.get(h).cloned()}
+    fn address(&self,k:&Key)->Option<Address>{self.addrs.get(k).copied()}
+    fn slot_key(&self,a:&Address,k:&Key)->Option<U256>{self.slots.get(&(*a,*k)).copied()}
+}
+impl MemStore{
+    /// Stores the nodes of `root` that the batch holds (every node reachable from it that is not stored
+    /// yet), with the code and preimages, and pins the root once.
+    pub fn commit(&mut self,b:&Batch,root:Option<Id>){
+        for (h,c) in &b.code{self.code.entry(*h).or_insert_with(||c.clone());}
+        for (k,a) in &b.addrs{self.addrs.entry(*k).or_insert(*a);}
+        for (k,v) in &b.slots{self.slots.entry(*k).or_insert(*v);}
+        let Some(root)=root else{return};
+        *self.pins.entry(root).or_insert(0)+=1;
+        let mut stack=vec![root];
+        while let Some(id)=stack.pop(){
+            if let Some(e)=self.nodes.get_mut(&id){e.1+=1;continue}
+            let n=b.nodes.get(&id).cloned().unwrap_or_else(||panic!("C-1 E4: node {} is neither stored nor in the batch",B256::from(id)));
+            stack.extend(n.children());self.nodes.insert(id,(n,1));
+        }
+    }
+    /// Releases one pin of `root`: a node no pinned root or stored node names any more is deleted, with
+    /// the references it held.
+    pub fn unpin(&mut self,root:&Id){
+        match self.pins.get_mut(root){Some(c) if *c>1=>{*c-=1}Some(_)=>{self.pins.remove(root);}None=>panic!("C-1 E4: root {} is not pinned",B256::from(*root))}
+        let mut stack=vec![*root];
+        while let Some(id)=stack.pop(){
+            let e=self.nodes.get_mut(&id).expect("a referenced node is stored");
+            e.1-=1;if e.1==0{let (n,_)=self.nodes.remove(&id).unwrap();stack.extend(n.children());}
+        }
+    }
+    /// Recounts every node's references from the pinned roots: equal to the stored counts, and no node
+    /// stored that no root reaches (a test of the counts, not used by the store itself).
+    pub fn recount(&self)->Result<(),String>{
+        let mut count:HashMap<Id,u32>=HashMap::new();let mut seen=std::collections::HashSet::new();
+        for (r,c) in &self.pins{*count.entry(*r).or_insert(0)+=*c;}
+        let mut stack:Vec<Id>=self.pins.keys().copied().collect();
+        while let Some(id)=stack.pop(){
+            if !seen.insert(id){continue}
+            let n=self.nodes.get(&id).ok_or_else(||format!("node {} is reachable but not stored",B256::from(id)))?;
+            for c in n.0.children(){*count.entry(c).or_insert(0)+=1;stack.push(c);}
+        }
+        if seen.len()!=self.nodes.len(){return Err(format!("{} nodes stored, {} reachable",self.nodes.len(),seen.len()))}
+        for (id,(_,c)) in &self.nodes{if count.get(id)!=Some(c){return Err(format!("node {}: stored count {c}, recounted {:?}",B256::from(*id),count.get(id)))}}
+        Ok(())
+    }
+}
+
+/// A state read from one trie version: what the executor reads (`view::View`), from the trie, the code
+/// table and the preimages, with the version's BLOCKHASH window.
+pub struct TrieState<'a>{pub store:&'a dyn NodeStore,pub trie:NodeTrie,pub block_hashes:&'a HashMap<U256,B256>}
+impl TrieState<'_>{
+    fn acct(&self,a:&Address)->Option<(u64,U256,B256,Option<Id>)>{
+        let w=self.trie.world?;
+        match get(self.store,&w,&hashed(a))?{Val::Acct{nonce,balance,code_hash,storage,..}=>Some((nonce,balance,code_hash,storage)),Val::Slot(_)=>None}
+    }
+    fn info(&self,nonce:u64,balance:U256,code_hash:B256)->AccountInfo{
+        let code=if code_hash==KECCAK_EMPTY||code_hash.is_zero(){Some(Bytecode::default())}else{self.store.code(&code_hash)};
+        AccountInfo{balance,nonce,code_hash,code}
+    }
+}
+impl View for TrieState<'_>{
+    fn account(&self,a:&Address)->Option<Acc>{
+        self.acct(a).map(|(nonce,balance,code_hash,_)|Acc{info:self.info(nonce,balance,code_hash),state:AccountState::Touched})
+    }
+    fn slot(&self,a:&Address,k:&U256)->U256{
+        let Some((_,_,_,Some(st)))=self.acct(a) else{return U256::ZERO};
+        match get(self.store,&st,&hashed_slot(k)){Some(Val::Slot(v))=>v,_=>U256::ZERO}
+    }
+    fn each_slot(&self,a:&Address,f:&mut dyn FnMut(&U256,&U256)){
+        let Some((_,_,_,Some(st)))=self.acct(a) else{return};
+        walk(self.store,&st,&mut |k,v|{if let Val::Slot(v)=v{
+            let slot=self.store.slot_key(a,k).unwrap_or_else(||panic!("C-1 E4: no preimage for a slot of {a}"));f(&slot,v)}});
+    }
+    fn contract(&self,h:&B256)->Option<Bytecode>{self.store.code(h)}
+    fn block_hash(&self,n:u64)->B256{self.block_hashes.get(&U256::from(n)).copied().unwrap_or_else(||keccak256(n.to_string().as_bytes()))}
+    fn each_account(&self,f:&mut dyn FnMut(&Address,Acc)){
+        let Some(w)=self.trie.world else{return};
+        walk(self.store,&w,&mut |k,v|{if let Val::Acct{nonce,balance,code_hash,..}=v{
+            let a=self.store.address(k).unwrap_or_else(||panic!("C-1 E4: no preimage for an account key"));
+            f(&a,Acc{info:self.info(*nonce,*balance,*code_hash),state:AccountState::Touched})}});
+    }
+}
+
+#[cfg(test)] mod tests;

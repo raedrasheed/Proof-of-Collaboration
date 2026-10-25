@@ -9,10 +9,11 @@
 use std::collections::{HashMap,HashSet};
 use revm::{db::{AccountState,DbAccount},primitives::{keccak256,Account,AccountInfo,Address,Bytecode,B256,U256,KECCAK_EMPTY},InMemoryDB};
 
-/// An account as a whole state holds it.
-#[derive(Clone,Copy)]
-pub struct Acc<'a>{pub info:&'a AccountInfo,pub state:&'a AccountState}
-impl Acc<'_>{
+/// An account as a whole state holds it (C-1 E4: owned, so a state read from a store need not lend
+/// references into its cache; code is shared, so a copy is cheap).
+#[derive(Clone)]
+pub struct Acc{pub info:AccountInfo,pub state:AccountState}
+impl Acc{
     pub fn exists(&self)->bool{!matches!(self.state,AccountState::NotExisting)}
     /// `DbAccount::info`: the info of an existing account.
     pub fn info(&self)->Option<AccountInfo>{self.exists().then(||self.info.clone())}
@@ -20,35 +21,35 @@ impl Acc<'_>{
 
 /// The executor's reads of a state.
 pub trait View{
-    fn account(&self,a:&Address)->Option<Acc<'_>>;
+    fn account(&self,a:&Address)->Option<Acc>;
     /// A slot's stored value (zero when the account or the slot is absent).
     fn slot(&self,a:&Address,k:&U256)->U256;
     /// Every stored slot of the account (stored zeros included), in no order.
     fn each_slot(&self,a:&Address,f:&mut dyn FnMut(&U256,&U256));
-    fn contract(&self,h:&B256)->Option<&Bytecode>;
+    fn contract(&self,h:&B256)->Option<Bytecode>;
     /// BLOCKHASH as the engine reads it (`CacheDB::block_hash_ref` over `EmptyDB`).
     fn block_hash(&self,n:u64)->B256;
     /// Every account the state holds, in no order.
-    fn each_account(&self,f:&mut dyn FnMut(&Address,Acc<'_>));
+    fn each_account(&self,f:&mut dyn FnMut(&Address,Acc));
 }
 fn empty_block_hash(n:u64)->B256{keccak256(n.to_string().as_bytes())}
 impl View for InMemoryDB{
-    fn account(&self,a:&Address)->Option<Acc<'_>>{self.accounts.get(a).map(|x|Acc{info:&x.info,state:&x.account_state})}
+    fn account(&self,a:&Address)->Option<Acc>{self.accounts.get(a).map(|x|Acc{info:x.info.clone(),state:x.account_state.clone()})}
     fn slot(&self,a:&Address,k:&U256)->U256{self.accounts.get(a).and_then(|x|x.storage.get(k).copied()).unwrap_or_default()}
     fn each_slot(&self,a:&Address,f:&mut dyn FnMut(&U256,&U256)){if let Some(x)=self.accounts.get(a){for (k,v) in &x.storage{f(k,v)}}}
-    fn contract(&self,h:&B256)->Option<&Bytecode>{self.contracts.get(h)}
+    fn contract(&self,h:&B256)->Option<Bytecode>{self.contracts.get(h).cloned()}
     fn block_hash(&self,n:u64)->B256{self.block_hashes.get(&U256::from(n)).copied().unwrap_or_else(||empty_block_hash(n))}
-    fn each_account(&self,f:&mut dyn FnMut(&Address,Acc<'_>)){for (a,x) in &self.accounts{f(a,Acc{info:&x.info,state:&x.account_state})}}
+    fn each_account(&self,f:&mut dyn FnMut(&Address,Acc)){for (a,x) in &self.accounts{f(a,Acc{info:x.info.clone(),state:x.account_state.clone()})}}
 }
 
 /// A shared state reads as the state it holds (pocold keeps entry states in an Arc).
 impl<T:View+?Sized> View for std::sync::Arc<T>{
-    fn account(&self,a:&Address)->Option<Acc<'_>>{(**self).account(a)}
+    fn account(&self,a:&Address)->Option<Acc>{(**self).account(a)}
     fn slot(&self,a:&Address,k:&U256)->U256{(**self).slot(a,k)}
     fn each_slot(&self,a:&Address,f:&mut dyn FnMut(&U256,&U256)){(**self).each_slot(a,f)}
-    fn contract(&self,h:&B256)->Option<&Bytecode>{(**self).contract(h)}
+    fn contract(&self,h:&B256)->Option<Bytecode>{(**self).contract(h)}
     fn block_hash(&self,n:u64)->B256{(**self).block_hash(n)}
-    fn each_account(&self,f:&mut dyn FnMut(&Address,Acc<'_>)){(**self).each_account(f)}
+    fn each_account(&self,f:&mut dyn FnMut(&Address,Acc)){(**self).each_account(f)}
 }
 
 /// The executor's writes to a state.
@@ -91,53 +92,56 @@ impl WorkState for InMemoryDB{
 ///
 /// The executor normalizes every commit it makes on an overlay (`commit_tx_on(.., true)`); an
 /// unnormalized commit sequence is not modelled. The BLOCKHASH window, once set, replaces the parent's.
-pub struct Overlay<'a>{pub base:&'a InMemoryDB,l:Layer}
+///
+/// C-1 E4: the base is any `View` (`B`, an `InMemoryDB` unless named): a state read from its root in the
+/// store as well as a whole one. Only `merge` needs a whole base.
+pub struct Overlay<'a,B:View+?Sized=InMemoryDB>{pub base:&'a B,l:Layer}
 /// An overlay's writes without the parent it lies over, to keep between uses (the pool's pending state
 /// over the head). It is only meaningful over the state it was written on.
 #[derive(Clone,Default)]
 pub struct Layer{top:InMemoryDB,cleared:HashSet<Address>,deleted:HashSet<Address>,retain:HashSet<Address>,hashes_set:bool}
 /// A layer read over its base, without changing either (the pool's executions and checks).
-pub struct LayerView<'a>{pub base:&'a InMemoryDB,pub layer:&'a Layer}
+pub struct LayerView<'a,B:View+?Sized=InMemoryDB>{pub base:&'a B,pub layer:&'a Layer}
 impl Layer{
     /// Accounts written (A13: the layer's size is bounded by what wrote it).
     pub fn written(&self)->usize{self.top.accounts.len()}
     pub fn is_empty(&self)->bool{self.top.accounts.is_empty()&&self.top.contracts.is_empty()&&!self.hashes_set}
-    fn account<'s>(&'s self,base:&'s InMemoryDB,a:&Address)->Option<Acc<'s>>{
-        match self.top.accounts.get(a){Some(x)=>(!self.deleted.contains(a)).then_some(Acc{info:&x.info,state:&x.account_state}),None=>base.account(a)}
+    fn account(&self,base:&(impl View+?Sized),a:&Address)->Option<Acc>{
+        match self.top.accounts.get(a){Some(x)=>(!self.deleted.contains(a)).then(||Acc{info:x.info.clone(),state:x.account_state.clone()}),None=>base.account(a)}
     }
-    fn slot(&self,base:&InMemoryDB,a:&Address,k:&U256)->U256{
+    fn slot(&self,base:&(impl View+?Sized),a:&Address,k:&U256)->U256{
         if let Some(x)=self.top.accounts.get(a){if let Some(v)=x.storage.get(k){return *v}if self.cleared.contains(a){return U256::ZERO}}
         base.slot(a,k)
     }
-    fn each_slot(&self,base:&InMemoryDB,a:&Address,f:&mut dyn FnMut(&U256,&U256)){
+    fn each_slot(&self,base:&(impl View+?Sized),a:&Address,f:&mut dyn FnMut(&U256,&U256)){
         let top=self.top.accounts.get(a);
-        if !self.cleared.contains(a){if let Some(b)=base.accounts.get(a){for (k,v) in &b.storage{if top.map_or(true,|t|!t.storage.contains_key(k)){f(k,v)}}}}
+        if !self.cleared.contains(a){base.each_slot(a,&mut |k,v|{if top.map_or(true,|t|!t.storage.contains_key(k)){f(k,v)}})}
         if let Some(t)=top{for (k,v) in &t.storage{f(k,v)}}
     }
-    fn contract<'s>(&'s self,base:&'s InMemoryDB,h:&B256)->Option<&'s Bytecode>{self.top.contracts.get(h).or_else(||base.contracts.get(h))}
-    fn block_hash(&self,base:&InMemoryDB,n:u64)->B256{
+    fn contract(&self,base:&(impl View+?Sized),h:&B256)->Option<Bytecode>{self.top.contracts.get(h).cloned().or_else(||base.contract(h))}
+    fn block_hash(&self,base:&(impl View+?Sized),n:u64)->B256{
         if self.hashes_set{self.top.block_hashes.get(&U256::from(n)).copied().unwrap_or_else(||empty_block_hash(n))}else{base.block_hash(n)}
     }
-    fn each_account(&self,base:&InMemoryDB,f:&mut dyn FnMut(&Address,Acc<'_>)){
-        for (a,x) in &base.accounts{if !self.top.accounts.contains_key(a){f(a,Acc{info:&x.info,state:&x.account_state})}}
-        for (a,x) in &self.top.accounts{if !self.deleted.contains(a){f(a,Acc{info:&x.info,state:&x.account_state})}}
+    fn each_account(&self,base:&(impl View+?Sized),f:&mut dyn FnMut(&Address,Acc)){
+        base.each_account(&mut |a,x|{if !self.top.accounts.contains_key(a){f(a,x)}});
+        for (a,x) in &self.top.accounts{if !self.deleted.contains(a){f(a,Acc{info:x.info.clone(),state:x.account_state.clone()})}}
     }
 }
-macro_rules! layered_view{($t:ty)=>{impl View for $t{
-    fn account(&self,a:&Address)->Option<Acc<'_>>{self.layer().account(self.base,a)}
+macro_rules! layered_view{($t:ident)=>{impl<B:View+?Sized> View for $t<'_,B>{
+    fn account(&self,a:&Address)->Option<Acc>{self.layer().account(self.base,a)}
     fn slot(&self,a:&Address,k:&U256)->U256{self.layer().slot(self.base,a,k)}
     fn each_slot(&self,a:&Address,f:&mut dyn FnMut(&U256,&U256)){self.layer().each_slot(self.base,a,f)}
-    fn contract(&self,h:&B256)->Option<&Bytecode>{self.layer().contract(self.base,h)}
+    fn contract(&self,h:&B256)->Option<Bytecode>{self.layer().contract(self.base,h)}
     fn block_hash(&self,n:u64)->B256{self.layer().block_hash(self.base,n)}
-    fn each_account(&self,f:&mut dyn FnMut(&Address,Acc<'_>)){self.layer().each_account(self.base,f)}
+    fn each_account(&self,f:&mut dyn FnMut(&Address,Acc)){self.layer().each_account(self.base,f)}
 }}}
-impl LayerView<'_>{fn layer(&self)->&Layer{self.layer}}
-layered_view!(LayerView<'_>);
-layered_view!(Overlay<'_>);
-impl<'a> Overlay<'a>{
-    pub fn new(base:&'a InMemoryDB)->Self{Overlay{base,l:Layer::default()}}
+impl<B:View+?Sized> LayerView<'_,B>{fn layer(&self)->&Layer{self.layer}}
+layered_view!(LayerView);
+layered_view!(Overlay);
+impl<'a,B:View+?Sized> Overlay<'a,B>{
+    pub fn new(base:&'a B)->Self{Overlay{base,l:Layer::default()}}
     /// The overlay of `layer` over `base`, which must be the state the layer was written on.
-    pub fn from_layer(base:&'a InMemoryDB,layer:Layer)->Self{Overlay{base,l:layer}}
+    pub fn from_layer(base:&'a B,layer:Layer)->Self{Overlay{base,l:layer}}
     pub fn into_layer(self)->Layer{self.l}
     fn layer(&self)->&Layer{&self.l}
     /// The entry for `a` to write: created from the parent's info and state with no slots, or fresh
@@ -145,20 +149,32 @@ impl<'a> Overlay<'a>{
     fn entry(&mut self,a:Address)->&mut DbAccount{
         let base=self.base;let l=&mut self.l;
         if l.deleted.remove(&a){let e=l.top.accounts.get_mut(&a).expect("a deleted account has a tombstone");*e=DbAccount::default();l.retain.remove(&a);return e}
-        l.top.accounts.entry(a).or_insert_with(||base.accounts.get(&a).map(|x|DbAccount{info:x.info.clone(),account_state:x.account_state.clone(),storage:Default::default()}).unwrap_or_default())
+        l.top.accounts.entry(a).or_insert_with(||base.account(&a).map(|x|DbAccount{info:x.info,account_state:x.state,storage:Default::default()}).unwrap_or_default())
     }
     /// The accounts and slots written (complete: every write goes through the layer). An account whose
     /// storage was cleared here, or that exists on one side only, is listed whole.
     pub fn touched(&self)->crate::state_trie::Touched{
         let mut t=crate::state_trie::Touched::default();
         for (a,x) in &self.l.top.accounts{
-            let was=self.base.accounts.get(a).map_or(false,|y|!matches!(y.account_state,AccountState::NotExisting));
+            let was=self.base.account(a).map_or(false,|y|y.exists());
             let is=!self.l.deleted.contains(a)&&!matches!(x.account_state,AccountState::NotExisting);
             if self.l.cleared.contains(a)||was!=is{t.whole_account(*a);continue}
             t.account(*a);for k in x.storage.keys(){t.slot(*a,*k)}
         }
         t
     }
+    /// Accounts with an entry in the layer (A13: the overlay's size).
+    pub fn written(&self)->usize{self.l.top.accounts.len()}
+    /// CacheDB::insert_contract: the parent's map may hold the code already (an or_insert either way).
+    fn contract_of(&mut self,info:&mut AccountInfo){
+        if let Some(code)=&info.code{if !code.is_empty(){
+            if info.code_hash==KECCAK_EMPTY{info.code_hash=code.hash_slow();}
+            if self.base.contract(&info.code_hash).is_none(){self.l.top.contracts.entry(info.code_hash).or_insert_with(||code.clone());}
+        }}
+        if info.code_hash.is_zero(){info.code_hash=KECCAK_EMPTY;}
+    }
+}
+impl Overlay<'_,InMemoryDB>{
     /// The state the parent's copy would have reached: the parent with every write applied and the
     /// normalization of the full-state code.
     pub fn merge(&self)->InMemoryDB{
@@ -175,18 +191,8 @@ impl<'a> Overlay<'a>{
         if full.accounts.capacity()>2*full.accounts.len()+16{full.accounts.shrink_to_fit()}
         full
     }
-    /// Accounts with an entry in the layer (A13: the overlay's size).
-    pub fn written(&self)->usize{self.l.top.accounts.len()}
-    /// CacheDB::insert_contract: the parent's map may hold the code already (an or_insert either way).
-    fn contract_of(&mut self,info:&mut AccountInfo){
-        if let Some(code)=&info.code{if !code.is_empty(){
-            if info.code_hash==KECCAK_EMPTY{info.code_hash=code.hash_slow();}
-            if !self.base.contracts.contains_key(&info.code_hash){self.l.top.contracts.entry(info.code_hash).or_insert_with(||code.clone());}
-        }}
-        if info.code_hash.is_zero(){info.code_hash=KECCAK_EMPTY;}
-    }
 }
-impl WorkState for Overlay<'_>{
+impl<B:View+?Sized> WorkState for Overlay<'_,B>{
     fn commit(&mut self,changes:HashMap<Address,Account>){
         // CacheDB::commit on the parent's entries, recorded in the layer.
         for (address,mut account) in changes{

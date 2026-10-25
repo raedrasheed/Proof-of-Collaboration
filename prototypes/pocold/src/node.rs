@@ -995,7 +995,7 @@ impl Node{
     /// A stored block's committed body (resident or from the journal).
     pub fn body_of(&self,hash:&[u8;32])->Result<Body,Reject>{let e=self.chain.get(hash).ok_or(Reject::UnknownParent)?;self.chain.body_of(e,Some(&self.journal))}
     /// The pending state as a whole state (the layer merged over its base; tests and inspection).
-    pub fn pool_state(&self)->InMemoryDB{pocol_lp4_execution::view::Overlay::from_layer(&self.pool.pending_base,self.pool.pending.clone()).merge()}
+    pub fn pool_state(&self)->InMemoryDB{pocol_lp4_execution::view::Overlay::from_layer(&*self.pool.pending_base,self.pool.pending.clone()).merge()}
     /// The pending state read in place (RPC "pending").
     pub fn pool_view(&self)->pocol_lp4_execution::view::LayerView<'_>{pocol_lp4_execution::view::LayerView{base:&self.pool.pending_base,layer:&self.pool.pending}}
     /// Accounts the pool's layer has written (A13).

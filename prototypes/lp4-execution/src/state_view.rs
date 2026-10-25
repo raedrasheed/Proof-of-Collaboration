@@ -20,7 +20,7 @@ impl<'a> StateRef<'a> {
 impl DatabaseRef for StateRef<'_> {
     type Error = Infallible;
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Infallible> { Ok(self.db.account(&address).and_then(|a| a.info())) }
-    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Infallible> { Ok(self.db.contract(&code_hash).cloned().unwrap_or_default()) }
+    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Infallible> { Ok(self.db.contract(&code_hash).unwrap_or_default()) }
     fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Infallible> { Ok(self.db.slot(&address, &index)) }
     fn block_hash_ref(&self, number: u64) -> Result<B256, Infallible> { Ok(self.db.block_hash(number)) }
 }
