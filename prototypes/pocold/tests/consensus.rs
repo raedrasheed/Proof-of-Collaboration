@@ -2310,6 +2310,20 @@ fn e4_checkpoint_kill_child(){
         ("a stored version's summary",Box::new(|d|tamper(d,&|s|{let e=s.entries.iter_mut().rev().find(|e|e.root.is_some()).unwrap();e.summary.as_mut().unwrap().user_slots+=1;})),Some(older.binding.records),false),
         ("a roots record that is not its snapshot's",Box::new(|d|{let db=redb::Database::open(d.join(pocold::state_store::FILE)).unwrap();let w=db.begin_write().unwrap();
             {let mut t=w.open_table(roots).unwrap();let (seq,mut v)={let (k,v)=t.last().unwrap().unwrap();(k.value(),v.value().to_vec())};v.truncate(v.len()-32);t.insert(seq,v.as_slice()).unwrap();}w.commit().unwrap();}),None,false),
+        // Another of the checkpoint's own versions in place of one, both named by both checkpoints and the one
+        // named twice also pinned by an entry of the closed node: open's pin reset then finds every count it
+        // needs and releases no node, so only the check of the record against its snapshot tells (C-1 E4.4
+        // retest K12).
+        ("a roots record naming one of its versions in place of another",Box::new(|d|{let db=redb::Database::open(d.join(pocold::state_store::FILE)).unwrap();let w=db.begin_write().unwrap();
+            {let pins:redb::TableDefinition<&[u8;32],u32>=redb::TableDefinition::new("pins");let pins=w.open_table(pins).unwrap();
+             let mut t=w.open_table(roots).unwrap();let (seq,v)={let (k,v)=t.last().unwrap().unwrap();(k.value(),v.value().to_vec())};let first=t.first().unwrap().unwrap().1.value().to_vec();
+             let chunks=|v:&[u8]|v.chunks(32).map(|c|c.to_vec()).collect::<Vec<_>>();let (new,old)=(chunks(&v),chunks(&first));
+             let named=|r:&Vec<u8>|(new.iter().chain(&old).filter(|z|*z==r).count()) as u32;
+             let held=|r:&Vec<u8>|pins.get(&<[u8;32]>::try_from(r.as_slice()).unwrap()).unwrap().map_or(0,|v|v.value());
+             let both:Vec<&Vec<u8>>=new.iter().filter(|r|old.contains(r)).collect();
+             let y=both.iter().find(|r|held(r)>named(r)).expect("a version both checkpoints and an entry pin").to_vec();let x=both.iter().find(|r|***r!=y).unwrap().to_vec();
+             let i=new.iter().position(|r|*r==x).unwrap();let mut out=new.clone();out[i]=y;let flat:Vec<u8>=out.concat();drop(pins);t.insert(seq,flat.as_slice()).unwrap();}
+            w.commit().unwrap();}),None,false),
         ("bound to other records",Box::new(|d|tamper(d,&|s|{s.binding.hash[0]^=1;})),Some(older.binding.records),false),
         ("bound to more records than the journal holds",Box::new(|d|tamper(d,&|s|{s.binding.records+=3;})),Some(older.binding.records),false),
         ("a next import sequence below an entry's",Box::new(|d|tamper(d,&|s|{s.next_seq=1;})),Some(older.binding.records),false),
@@ -2435,7 +2449,72 @@ fn e4_checkpoint_kill_child(){
     assert!(fl(pocold::checkpoint::flags::SLIM)>50&&fl(pocold::checkpoint::flags::OFFLOADED)>50,"positive control: slimmed {} and offloaded {} entries",fl(pocold::checkpoint::flags::SLIM),fl(pocold::checkpoint::flags::OFFLOADED));
     assert!(!f.evicted_order.is_empty()&&n.chain.evicted_total>0,"positive control: side blocks were evicted");
     e44_same(&mut n,&mut r0,"resumed with slimmed, offloaded and evicted entries");
-    drop(n);drop(r0);for d in [a,g,c]{let _=std::fs::remove_dir_all(&d);}
+    // A history.redb that lost the records of one old block whose entry is offloaded and slimmed (restore
+    // reads neither its receipts nor its ranges): neither checkpoint is used, and replay from genesis
+    // refills the records (C-1 E4.4 retest K11b).
+    let newest=pocold::checkpoint::decode(&n.state_store().unwrap().checkpoints().unwrap().last().unwrap().1).unwrap();drop(n);
+    let both=pocold::checkpoint::flags::SLIM|pocold::checkpoint::flags::OFFLOADED;
+    let old=blocks.iter().find(|b|!b.body.txs.is_empty()&&newest.entries.iter().any(|e|e.hash==b.hash()&&e.flags&both==both)).expect("an offloaded, slimmed block with transactions").hash();
+    let h=e44_dir("kinds-history");copy_dir(&c,&h);
+    {let db=redb::Database::open(h.join(pocold::history::FILE)).unwrap();let w=db.begin_write().unwrap();
+     for t in ["receipts","ranges"]{let d:redb::TableDefinition<&[u8;32],&[u8]>=redb::TableDefinition::new(t);assert!(w.open_table(d).unwrap().remove(&old).unwrap().is_some());}
+     w.commit().unwrap();}
+    let mut n=reopen(&e44_conf_with(&h,every,lim));assert_eq!(n.stats.resumed_from,None,"no checkpoint naming a block history.redb lost is used");assert!(n.stats.checkpoints_refused>=1);
+    e44_same(&mut n,&mut r0,"after history.redb lost an offloaded block's records");
+    drop(n);drop(r0);for d in [a,g,c,h]{let _=std::fs::remove_dir_all(&d);}
+}
+
+/// D-6 and replay's protect set (D-REORG-REDB: replay keeps a block whose next journal event is a child
+/// record from the side cap). The journal of the flood scenario
+/// (`a_session_branch_is_adopted_through_a_flood_of_competing_side_branches`) is replayed with one
+/// checkpoint just after the last session block that is not adopted yet, S: the flood records between S
+/// and its child take replay past cap + protect_max side blocks, each then evicts the lowest-work
+/// unprotected leaf, and S (the session tip, the lowest-work leaf) is spared only by its protection.
+/// Open resumes from the checkpoint with the protect set the journal gives after its last record (the set
+/// the checkpoint seals), so no record is skipped and the node is the one replay from genesis gives. A
+/// checkpoint whose sealed protect set is not that one is refused.
+#[test] fn e4_checkpoint_resumes_with_replays_protect_set(){
+    use redb::ReadableTable;
+    let lim:fn(&mut pocold::node::Limits)=|l|{l.r_keep=16;l.side_cap=4;};
+    let mut a=net();let g=a.chain.head;
+    let ours=grow(&mut a,g,12,&|n,p|fallback(n,p,1));let parent=ours[ours.len()-2].hash();
+    let mut noise:Vec<Block>=vec![];for att in 1..44u32{let y=fallback(&a,parent,att);if !noise.iter().any(|z|z.hash()==y.hash()){noise.push(y);}}
+    let mut b=net();let theirs=heavier(&mut b,g,a.chain.head().total_work,1);let tip=theirs.last().unwrap().hash();
+    let live=e44_dir("protect");
+    // after[k]: the journal's records once theirs[k] is journaled (before the flood blocks that follow it).
+    let (records,after)={let mut n=reopen(&e44_conf_with(&live,0,lim));for x in &ours{n.import(x.clone(),None).unwrap();}
+        let per=noise.len().div_ceil(theirs.len()-1);let mut after=vec![];
+        for (k,x) in theirs.iter().enumerate(){n.import_with(x.clone(),None,true).unwrap();after.push(n.journal_records());for y in noise.iter().skip(per*k).take(per){let _=n.import(y.clone(),None);}}
+        assert_eq!(n.chain.head,tip);(n.journal_records(),after)};
+    let gd=e44_dir("protect-ref");copy_dir(&live,&gd);let mut reference=reopen(&e44_conf_with(&gd,0,lim));
+    assert_eq!((reference.stats.resumed_from,reference.stats.replay_skipped,reference.chain.head),(None,0,tip),"the reference replays from genesis, every record");
+    // S: the session block before the one that makes the branch heavier (heavier(): the last two are the
+    // first heavier block and one more). One replay checkpoint, right after S's record.
+    let s_ix=theirs.len()-3;let s_hash=theirs[s_ix].hash();let every=after[s_ix];assert!(2*every>records&&records-every>=3);
+    let d=e44_dir("protect-replayed");copy_dir(&live,&d);std::fs::remove_file(d.join(pocold::state_store::FILE)).unwrap();
+    drop(reopen(&e44_conf_with(&d,every,lim)));
+    let s={let st=pocold::state_store::StateStore::open(&d).unwrap();let c=st.checkpoints().unwrap();assert_eq!(c.len(),1);pocold::checkpoint::decode(&c[0].1).unwrap()};
+    assert_eq!(s.binding.records,every);
+    assert!(s.protect.as_ref().unwrap().contains(&s_hash),"positive control: the checkpoint names S, which a later record builds on");
+    // At the checkpoint ours is canonical: every other block but genesis is a side block. The flood records
+    // before S's child (its record is after[s_ix+1]) add one side block each.
+    let side=s.entries.iter().filter(|e|e.hash!=g&&!ours.iter().any(|x|x.hash()==e.hash)).count();let flood=(after[s_ix+1]-every-1) as usize;
+    assert!(side+flood>4+32,"positive control: replay passes cap + protect_max side blocks before S's child ({side} + {flood})");
+    // A copy whose checkpoint seals the set without that session block (re-sealed, its roots record unchanged).
+    let t=e44_dir("protect-tampered");copy_dir(&d,&t);
+    {let ckpt:redb::TableDefinition<u64,&[u8]>=redb::TableDefinition::new("checkpoint");
+     let db=redb::Database::open(t.join(pocold::state_store::FILE)).unwrap();let w=db.begin_write().unwrap();
+     {let mut c=w.open_table(ckpt).unwrap();let (seq,bytes)={let (k,v)=c.last().unwrap().unwrap();(k.value(),v.value().to_vec())};
+      let mut x=pocold::checkpoint::decode(&bytes).unwrap();let p=x.protect.as_mut().unwrap();let i=p.iter().position(|h|*h==s_hash).unwrap();p.remove(i);
+      c.insert(seq,pocold::checkpoint::encode_snapshot(&x).as_slice()).unwrap();}
+     w.commit().unwrap();}
+    let mut n=reopen(&e44_conf_with(&d,every,lim));
+    assert_eq!((n.stats.resumed_from,n.stats.replay_skipped),(Some(every),0),"resumed after the checkpoint, every later record's parent kept");
+    e44_same(&mut n,&mut reference,"resumed from a replay checkpoint with replay's protect set");drop(n);
+    let mut n=reopen(&e44_conf_with(&t,every,lim));
+    assert_eq!(n.stats.resumed_from,None,"a checkpoint sealing another protect set is refused");assert!(n.stats.checkpoints_refused>=1);
+    e44_same(&mut n,&mut reference,"after refusing a checkpoint with another protect set");
+    drop(n);drop(reference);for x in [live,gd,d,t]{let _=std::fs::remove_dir_all(&x);}
 }
 
 /// C-1 E5 (A13 counts one empty state for all entries): every entry that holds no whole state, pruned,
@@ -2452,4 +2531,21 @@ fn e4_checkpoint_kill_child(){
         check(&n,&format!("store={store}, live"));drop(n);let n=reopen(&mk(&d));check(&n,&format!("store={store}, reopened"));
         drop(n);let _=std::fs::remove_dir_all(&d);
     }
+}
+
+/// C-1 E5: a closing node leaves its entries' versions pinned (StateStore::close) rather than releasing each
+/// in a transaction of its own; the next open releases them in one durable transaction (the pin reset it
+/// does after a crash) and is the node replay from genesis gives.
+#[test] fn e5_a_closing_node_leaves_its_versions_to_the_next_open(){
+    let blocks=e44_blocks();let a=e44_dir("close");
+    let stored={let mut n=reopen(&e44_conf(&a,7));for b in &blocks[..80]{n.import(b.clone(),None).unwrap();}
+        let st=n.state_store().unwrap().clone();assert_eq!(st.pins().unwrap().iter().map(|x|u64::from(x.1)).sum::<u64>(),st.checkpoint_pins().unwrap()+n.chain.blocks.values().filter(|e|e.stored.is_some()).count() as u64);
+        n.chain.blocks.values().filter(|e|e.stored.is_some()).count() as u64};
+    assert!(stored>=8,"positive control: {stored} stored versions");
+    {let st=pocold::state_store::StateStore::open(&a).unwrap();let all:u64=st.pins().unwrap().iter().map(|x|u64::from(x.1)).sum();
+     assert_eq!(all-st.checkpoint_pins().unwrap(),stored,"the closed node's versions are still pinned");}
+    let n=reopen(&e44_conf(&a,7));assert_eq!(n.stats.resumed_from,Some(77));assert_eq!(n.stats.pins_released,stored,"the next open released them");
+    drop(n);let (mut g,gd)=e44_reference(&a,"close-ref");let mut n=reopen(&e44_conf(&a,7));
+    e44_same(&mut n,&mut g,"after a close that left its versions pinned");
+    drop(n);drop(g);for d in [a,gd]{let _=std::fs::remove_dir_all(&d);}
 }

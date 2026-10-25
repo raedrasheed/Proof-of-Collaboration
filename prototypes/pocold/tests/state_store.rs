@@ -150,3 +150,23 @@ fn dir(tag:&str)->std::path::PathBuf{let d=std::env::temp_dir().join(format!("po
     let s=StateStore::open(&d).unwrap();assert!(s.rebuilt,"format 1 is set aside and rebuilt");assert!(d.join(format!("{}.aside",pocold::state_store::FILE)).exists());
     drop(s);let _=std::fs::remove_dir_all(&d);
 }
+
+/// C-1 E4.4: a node a stored node names but the table does not hold (a record lost from the file) is not
+/// served: the read answers None, which every reader of a version treats as fatal, and the store is marked
+/// damaged, so nothing more is served from it and the next open rebuilds it.
+#[test] fn a_missing_node_marks_the_store_damaged(){
+    let c=codes();let mut r=Rng(31);let d=dir("missing");let db=state(&mut r,60,&c);
+    let (world,child)={let s=StateStore::open(&d).unwrap();let mut b=Batch::default();let t=NodeTrie::build(&db,&s,&mut b);s.commit(&b,t.world,true).unwrap();
+        let w=t.world.unwrap();(w,s.try_node(&w).unwrap().unwrap().children()[0])};
+    {
+        let db2=redb::Database::open(d.join("state.redb")).unwrap();const NODES:redb::TableDefinition<&[u8;32],&[u8]>=redb::TableDefinition::new("node");
+        let w=db2.begin_write().unwrap();{let mut t=w.open_table(NODES).unwrap();assert!(t.remove(&child).unwrap().is_some());}w.commit().unwrap();
+    }
+    let s=StateStore::open(&d).unwrap();assert!(!s.rebuilt,"redb's checksums hold: a record is missing, not a page");
+    assert!(s.try_node(&world).unwrap().is_some()&&!s.is_damaged(),"positive control: the root itself is intact");
+    assert!(NodeStore::node(&s,&child).is_none(),"the missing node is not served");
+    assert!(s.is_damaged()&&d.join("state.redb.damaged").exists(),"and the store is marked damaged");
+    assert!(s.try_node(&world).is_err(),"a damaged store serves nothing");
+    drop(s);assert!(StateStore::open(&d).unwrap().rebuilt,"the next open rebuilds it");
+    let _=std::fs::remove_dir_all(&d);
+}

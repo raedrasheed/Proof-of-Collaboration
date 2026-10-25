@@ -955,12 +955,20 @@ fn jm_store_mode_disk_impact(){
         let txs:u64=n.chain.head().cum_txs;let stored=n.chain.blocks.values().filter(|e|e.stored.is_some()).count();
         let nodes=n.state_store().map(|s|s.node_count().unwrap()).unwrap_or(0);let stored_bytes=n.state_store().map(|s|s.stored_bytes().unwrap()).unwrap_or(0);let cache=n.state_store().map(|s|s.cache_bytes()).unwrap_or(0);
         let files=serde_json::json!({"journal":size(&dir,"blocks.journal"),"history":size(&dir,"history.redb"),"state":size(&dir,"state.redb")});
-        let written=n.stats.checkpoints_written;drop(n);
-        let t=Instant::now();let n=Node::open(conf(16),admitted()).unwrap();let open_s=t.elapsed().as_secs_f64();let resumed=n.stats.resumed_from;drop(n);
-        let t=Instant::now();let n=Node::open(conf(0),admitted()).unwrap();let open_genesis_s=t.elapsed().as_secs_f64();assert_eq!(n.stats.resumed_from,None);drop(n);
+        // The file against what it stores, after each phase: live import, an open that resumes from a
+        // checkpoint, and an open that replays from genesis into an empty store (C-1 E5).
+        let phase=|n:&Node,what:&str|{let s=n.state_store();let (alloc,frag,meta)=s.map(|s|s.file_stats().unwrap()).unwrap_or((0,0,0));
+            let stored=s.map(|s|s.stored_bytes().unwrap()).unwrap_or(0);let file=size(&dir,"state.redb");
+            serde_json::json!({"phase":what,"fileBytes":file,"storedBytes":stored,"allocatedBytes":alloc,"fragmentedBytes":frag,"metadataBytes":meta,
+                "fileOverStored":if stored>0{file as f64/stored as f64}else{0.0},"allocatedOverStored":if stored>0{alloc as f64/stored as f64}else{0.0},"vmHwmBytes":vmhwm_bytes()})};
+        let closed=|what:&str|serde_json::json!({"phase":what,"fileBytes":size(&dir,"state.redb")});
+        let mut phases=vec![phase(&n,"live import")];
+        let written=n.stats.checkpoints_written;drop(n);phases.push(closed("closed after live import"));
+        let t=Instant::now();let n=Node::open(conf(16),admitted()).unwrap();let open_s=t.elapsed().as_secs_f64();let resumed=n.stats.resumed_from;phases.push(phase(&n,"open resumed from a checkpoint"));drop(n);phases.push(closed("closed after the resumed open"));
+        let t=Instant::now();let n=Node::open(conf(0),admitted()).unwrap();let open_genesis_s=t.elapsed().as_secs_f64();assert_eq!(n.stats.resumed_from,None);phases.push(phase(&n,"open replayed from genesis"));drop(n);phases.push(closed("closed after the replay from genesis"));
         let stats=|v:&[f64]|serde_json::json!({"n":v.len(),"medianMs":median(v.to_vec()),"maxMs":v.iter().cloned().fold(0.0,f64::max),"meanMs":v.iter().sum::<f64>()/v.len().max(1) as f64});
         println!("JM-STORE {}",serde_json::json!({"mode":mode,"blocks":blocks.len(),"fillBlocks":fill,"fullBlocks":full,"forkDepth":fork,"sideBlocks":side.len(),"transactions":txs,
-            "stateAccounts":accounts,"stateNonzeroSlots":slots,"storedVersions":stored,"storeNodes":nodes,"storeStoredBytes":stored_bytes,"stateFileFactor":if stored_bytes>0{size(&dir,"state.redb") as f64/stored_bytes as f64}else{0.0},"nodeCacheBytes":cache,"checkpointsWritten":written,
+            "stateAccounts":accounts,"stateNonzeroSlots":slots,"storedVersions":stored,"storeNodes":nodes,"storeStoredBytes":stored_bytes,"stateFilePhases":phases,"nodeCacheBytes":cache,"checkpointsWritten":written,
             "importFillBlocks":stats(&fill_ms),"importFullBlocks":stats(&full_ms),"syncSeconds":sync_s,"reorgSeconds":reorg_s,
             "openSeconds":open_s,"openResumedFrom":resumed,"openFromGenesisSeconds":open_genesis_s,"filesBytes":files,
             "rssBeforeBytes":rss0,"rssAfterBytes":rss1,"vmHwmBeforeBytes":hwm0,"vmHwmAfterBytes":hwm1,"buildSeconds":build_s}));

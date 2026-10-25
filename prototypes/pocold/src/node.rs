@@ -270,6 +270,8 @@ fn retention_rkeep(dir:&std::path::Path,configured:u64)->std::io::Result<u64>{
     Ok(rk)
 }
 
+/// C-1 E5: a closing node leaves its entries' versions pinned (`StateStore::close`); the next open releases them.
+impl Drop for Node{fn drop(&mut self){if let Some(s)=&self.state_store{s.close();}}}
 impl Node{
     /// Opens the journal, replays and re-executes every committed block.
     pub fn open(cfg:Config,spec:Spec)->Result<Self,String>{

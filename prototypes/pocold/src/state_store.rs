@@ -64,6 +64,8 @@ impl Cache{
 }
 
 pub struct StateStore{db:Database,path:PathBuf,dir:PathBuf,pub rebuilt:bool,damaged:AtomicBool,cache:Mutex<Cache>,cache_cap:usize,
+    /// Set when the node closes (`close`): versions are no longer released one by one.
+    closing:AtomicBool,
     /// Nodes read from the table (cache misses) and nodes written, since open (measurements).
     pub reads:std::sync::atomic::AtomicU64,pub writes:std::sync::atomic::AtomicU64}
 
@@ -93,7 +95,7 @@ impl StateStore{
             Err(_)=>{let aside=dir.join(format!("{FILE}.aside"));let _=std::fs::remove_file(&aside);let _=std::fs::rename(&path,&aside);
                 let db=create(&path)?;let _=std::fs::remove_file(&marker);(db,true)}
         };
-        Ok(Self{db,path,dir:dir.to_path_buf(),rebuilt,damaged:AtomicBool::new(false),cache:Mutex::new(Cache::default()),cache_cap,reads:Default::default(),writes:Default::default()})
+        Ok(Self{db,path,dir:dir.to_path_buf(),rebuilt,damaged:AtomicBool::new(false),cache:Mutex::new(Cache::default()),cache_cap,closing:AtomicBool::new(false),reads:Default::default(),writes:Default::default()})
     }
     pub fn path(&self)->&Path{&self.path}
     pub fn is_damaged(&self)->bool{self.damaged.load(Ordering::SeqCst)}
@@ -111,8 +113,9 @@ impl StateStore{
         let db=&mut self.db;catch_unwind(AssertUnwindSafe(||db.check_integrity())).map_err(|_|StateStoreError("redb panicked in check_integrity".into()))?.map_err(err)
     }
     /// A node read from the table and checked: its bytes hash to its id and decode. A failure marks the
-    /// store damaged.
+    /// store damaged. A damaged store serves nothing, not even a node its cache holds.
     pub fn try_node(&self,id:&Id)->Result<Option<Arc<Node>>,StateStoreError>{
+        if self.is_damaged(){return Err(StateStoreError("state store damaged".into()))}
         if let Some(n)=self.cache.lock().unwrap().get(id){return Ok(Some(n))}
         let v=self.guard(||{let r=self.db.begin_read().map_err(err)?;let t=r.open_table(NODES).map_err(err)?;Ok(t.get(id).map_err(err)?.map(|v|v.value().to_vec()))})?;
         let Some(v)=v else{return Ok(None)};
@@ -139,6 +142,11 @@ impl StateStore{
             {let t=r.open_table(CKPT).map_err(err)?;for kv in t.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;n+=8+v.value().len() as u64;}}
             {let t=r.open_table(CKPT_ROOTS).map_err(err)?;for kv in t.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;n+=8+v.value().len() as u64;}}
             Ok(n)})
+    }
+    /// C-1 E5: redb's own account of the file (measurements): (allocated pages' bytes, fragmented bytes,
+    /// metadata bytes), read in a write transaction that is dropped uncommitted.
+    pub fn file_stats(&self)->Result<(u64,u64,u64),StateStoreError>{
+        self.guard(||{let w=self.db.begin_write().map_err(err)?;let s=w.stats().map_err(err)?;let r=(s.allocated_pages()*s.page_size() as u64,s.fragmented_bytes(),s.metadata_bytes());w.abort().map_err(err)?;Ok(r)})
     }
     /// Resident bytes the cache holds (at most its bound).
     pub fn cache_bytes(&self)->usize{self.cache.lock().unwrap().bytes}
@@ -182,6 +190,12 @@ impl StateStore{
         })?;
         self.forget(&gone);Ok(())
     }
+    /// C-1 E5: the node is closing. The versions its entries pin are left pinned rather than released one
+    /// transaction each as the entries drop (non-durable transactions whose pages redb reuses only after a
+    /// durable commit, so a close released every version into new pages: closing after a replay from genesis
+    /// grew the file from 17 MB to 34 MB and from 68 MB to 270 MB, evidence/c1-e4/disk-close-ab-*.log). The next open releases them in one durable transaction
+    /// (`reset_pins`, what it does after a crash), or starts the store empty when no checkpoint is kept.
+    pub fn close(&self){self.closing.store(true,Ordering::SeqCst);}
     fn forget(&self,gone:&[Id]){let mut c=self.cache.lock().unwrap();for id in gone{c.remove(id);}}
     /// C-1 E4.4: the stored checkpoints, oldest first: (sequence, snapshot bytes, the roots it pins).
     pub fn checkpoints(&self)->Result<Vec<(u64,Vec<u8>,Vec<Id>)>,StateStoreError>{
@@ -313,7 +327,7 @@ impl NodeStore for StateStore{
 impl pocol_lp4_execution::node_trie::TrieStore for StateStore{
     /// Durable: a block's nodes are committed before its journal record (I3).
     fn commit(&self,b:&Batch,root:Option<Id>)->Result<(),String>{StateStore::commit(self,b,root,true).map_err(|e|e.0)}
-    fn unpin(&self,root:&Id)->Result<(),String>{StateStore::unpin(self,root,false).map_err(|e|e.0)}
+    fn unpin(&self,root:&Id)->Result<(),String>{if self.closing.load(Ordering::SeqCst){return Ok(())}StateStore::unpin(self,root,false).map_err(|e|e.0)}
     /// The pins entries hold: every pin but the checkpoints' (C-1 E4.4).
     fn pinned(&self)->Result<u64,String>{let all:u64=self.pins().map_err(|e|e.0)?.iter().map(|x|u64::from(x.1)).sum();Ok(all-self.checkpoint_pins().map_err(|e|e.0)?)}
 }

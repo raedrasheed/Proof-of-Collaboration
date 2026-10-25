@@ -184,10 +184,10 @@ pub fn redb_allocator_bytes(bytes:u128)->Option<u128>{mul(bytes.div_ceil(REDB_RE
 /// side state: 2·R_keep; a checkpoint's versions: KEPT·checkpoint_every + 2·R_keep), at most a whole
 /// state. Code is kept for good (storage.md): the code every block to H_END can deploy. (C-1 E5: a leaf
 /// keeps its key's preimage, released with it; no preimage is kept for good.) The checkpoints' snapshots.
-/// All at HISTORY_FILE_FACTOR times their bytes.
+/// All at STATE_FILE_FACTOR times their bytes.
 pub fn state_file_max(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits)->Option<u128>{let p=state_file_parts(cp,k_hist,side_max,limits)?;add(&p)}
 /// `state_file_max`'s parts: (versions' nodes, key preimages, code, checkpoint snapshots), each at
-/// HISTORY_FILE_FACTOR times its bytes.
+/// STATE_FILE_FACTOR times its bytes.
 pub fn state_file_parts(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits)->Option<[u128;4]>{
     let full=mul(2,add(&[u128::from(cp.ACCT_CAP),5,u128::from(cp.SLOT_CAP),u128::from(cp.SYS_SLOT_MAX)])?)?;
     let (wa,ws)=block_writes(cp)?;let per_block=mul(wa+ws,TRIE_PATH_NODES)?;
@@ -199,8 +199,16 @@ pub fn state_file_parts(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limi
     let preimages=0;
     let code=mul(blocks,memory::execution_gas(cp.GAS_LIMIT)/CODE_DEPOSIT)?;
     let ckpts=mul(kept,checkpoint_bytes(cp,limits)?/2)?;
-    Some([mul(HISTORY_FILE_FACTOR,mul(nodes,NODE_ENC_MAX+4+32)?)?,mul(HISTORY_FILE_FACTOR,preimages)?,mul(HISTORY_FILE_FACTOR,code)?,mul(HISTORY_FILE_FACTOR,ckpts)?])
+    Some([mul(STATE_FILE_FACTOR,mul(nodes,NODE_ENC_MAX+4+32)?)?,mul(STATE_FILE_FACTOR,preimages)?,mul(STATE_FILE_FACTOR,code)?,mul(STATE_FILE_FACTOR,ckpts)?])
 }
+/// C-1 E5: state.redb's file size over the bytes it stores (every key and value), for its allocator term.
+/// Measured (journal_measure::jm_store_mode_disk_impact, evidence/c1-e4) after live import, an open that
+/// resumes from a checkpoint and an open that replays from genesis, and after each close: at most 6.07
+/// with 14.9 MB stored, at most 11.31 with 1.5 to 2.8 MB stored (redb doubles a file below one region,
+/// so a small file carries more slack; above one region it grows a region at a time); redb's allocated
+/// pages at most 2.38 times the stored bytes. Counted at 12, above every measurement. Below one region
+/// (REDB_REGION_BYTES) the term is one region's allocator whatever the factor.
+pub const STATE_FILE_FACTOR:u128=12;
 /// Receipt encoding without logs: status, cumulative gas, a 256-byte bloom, list headers.
 pub const RECEIPT_BASE:u128=300;
 /// C-1 S1: history.redb's file size over the bytes it stores (receipts records, index entries, keys),
@@ -226,7 +234,7 @@ pub const CONDITIONS:&[(&str,&str)]=&[
     ("redb-representation","the history.redb terms rely on redb 2.6.4 behaviour checked by source inspection (cache split and write-buffer flush, allocator bitmaps) and on a measured file-size factor (HISTORY_FILE_FACTOR)"),
     ("open-replay-transient","Node::open holds the whole journal's payloads (store::open, pre-existing) and a replay index of two entries per record while replaying; this open-time transient grows with the journal and is not part of the steady-state bound. C-1 E4.4 adds to it, at open only: every record's offset and rolling hash, a decoded checkpoint snapshot and the stored versions read whole for their summaries (streamed: a node at a time, the DFS stack of node ids)"),
     ("store-inventory","store mode (C-1 E4): BATCHES (1) and stored_versions are inventories by code inspection, not enforced by a counter; the node cache is bounded by its resident-byte count (state_store::CACHE_ENTRY, Node::resident_bytes), checked by a test"),
-    ("store-file-factor","the state.redb allocator term takes the largest file as HISTORY_FILE_FACTOR (measured for history.redb) times the stored bytes; for state.redb the factor is measured in evidence/c1-e4 (disk measurements), and its versions' nodes are the adversarial worst case (every version a whole state on disk)"),
+    ("store-file-factor","the state.redb allocator term takes the largest file as STATE_FILE_FACTOR times the stored bytes: a factor measured on stores of 1.5 to 15 MB (evidence/c1-e4 disk measurements), not established for the terabyte files of the adversarial case (every version a whole state on disk)"),
 ];
 /// The model total and its parts. `items` itemizes every group term ("group/item", bytes); the
 /// group fields are the sums of their items and `total` is the sum of all items.
