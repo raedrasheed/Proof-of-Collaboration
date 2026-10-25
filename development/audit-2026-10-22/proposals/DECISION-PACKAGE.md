@@ -68,6 +68,7 @@ were not results. The table below replaces them.
 | S3b (with S5) | transient working copies as copy-on-write overlays (an executor change) | the 10 transient copies and the growth copy (17.96) and their code containers (0.94) | ≈ 19.1 + new: overlays bounded by the written entries of the work in progress |
 | S4 ✔ | old canonical entries slimmed, restored exactly from the journal and history.redb | history 4.28 → 0.83 | **37.96 (measured)**, gate 43.38 |
 | E1 ✔ (S5 step 1) | incremental state root (C-2 item 4): the head's trie in memory, any other parent's derived from it through the diffs or built | added: the trie group 2.23 (the head's trie, one derived or built, a block's changed paths); it moves to state.redb with E4 | **40.20 (measured)**, gate 45.94 |
+| E2 ✔ (S5 step 2) | the per-block whole-state checks (candidate checks, code checks, code drop) from a state summary moved through the changed keys | added: one boxed summary per entry (devnet +2.1 MB) | **40.20 (measured)** |
 | S5 | live state on disk behind a bounded cache (redb live trie, storage.md:63–67) | the remaining full copies: head, genesis, side_max, materialized (9.80), their containers (0.51) and the side code sets (2.25) | ≈ 6.5, or 6.0 with the diffs (0.46) in the store, + new: state cache, overlays; target ≤ 5.25 (budget less the 1/8 reserve) |
 
 After S3a the projections are taken from the measured S3a items (evidence/c1-s3a/a13-network-profile-s3a.log).
@@ -239,6 +240,9 @@ rebuilds the world root.
   - a CREATE2-heavy child: 554 → **290 ms**;
   - the root alone: 314 ms → 3.6 ms, plus 12.9 ms to list the changed keys.
 
+- **E2 (2026-10-24, evidence/c1-e2/)** reads the per-block whole-state checks from a state summary. At the
+  near-cap state: an empty child 262 → **62 ms**; 380 transfers 349 → **174 ms**; CREATE2-heavy 290 →
+  **122 ms**. What remains is mostly the state copies (E3).
   Acceptance test 4 (incremental against full root on every block of the suites) passes: the tests build
   with lp4's `root-check` feature. A parent whose trie cannot be derived (more than 64 diffs from the head,
   or a side block deeper than side_max) costs what it did before E1.

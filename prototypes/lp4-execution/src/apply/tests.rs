@@ -458,4 +458,43 @@ mod a03{
     for k in 0..=cp.SLOT_CAP{d.insert_account_storage(a,U256::from(k),U256::from(1)).unwrap();}assert!(same(&d).is_err());
     let mut d=g.clone();let sys=program_address(4);for k in 0..=u64::from(cp.SYS_SLOT_MAX){d.insert_account_storage(sys,U256::from(k)+U256::from(1u64<<40),U256::from(1)).unwrap();}assert!(same(&d).is_err());
     let mut d=g.clone();for i in 0..=cp.ACCT_CAP{d.insert_account_info(Address::from_word(B256::from(U256::from(i+1000))),AccountInfo::from_balance(U256::from(1)));}assert!(same(&d).is_err());
+    // And at each cap exactly, both pass: the counts are the checks' (system programs and their slots are
+    // not user accounts or slots).
+    let (slots,accts)=crate::user_phase::live_counts(&g);
+    let mut d=g.clone();for i in 0..cp.ACCT_CAP-accts{d.insert_account_info(Address::from_word(B256::from(U256::from(i+1000))),AccountInfo::from_balance(U256::from(1)));}
+    let a=Address::from_word(B256::from(U256::from(1000)));let k0=crate::user_phase::live_counts(&d).0;for k in 0..cp.SLOT_CAP-k0{d.insert_account_storage(a,U256::from(k),U256::from(1)).unwrap();}
+    assert_eq!(crate::user_phase::live_counts(&d),(cp.SLOT_CAP,cp.ACCT_CAP),"positive control: both caps reached exactly");let _=slots;
+    assert!(same(&d).is_ok());
+    let sys_now=Summary::scan(&g,cp.B_code_max).sys_slots;let sys=program_address(4);let mut d=g.clone();
+    for k in 0..u64::from(cp.SYS_SLOT_MAX)-sys_now{d.insert_account_storage(sys,U256::from(k)+U256::from(1u64<<40),U256::from(1)).unwrap();}
+    assert_eq!(Summary::scan(&d,cp.B_code_max).sys_slots,u64::from(cp.SYS_SLOT_MAX));assert!(same(&d).is_ok());
+}
+
+/// C-1 E2: CODE_CAP reached exactly by a create, with the parent's summary as without it: the running code
+/// total the SYSTEM calls and the USER phase start from is the parent's exact total.
+#[test] fn e2_code_cap_reached_exactly_with_the_summary(){
+    use crate::state_summary::Summary;
+    let first=devnet3();let total=Summary::scan(first.genesis.state(),first.profile.cp().B_code_max).code_total as u64;
+    let mut c=DevnetConfig::new(777900,1_800_000_000,&["a","b","c"]);c.code_cap=total+3;let net=devnet::build(&c).expect("devnet");
+    assert_eq!(Summary::scan(net.genesis.state(),net.profile.cp().B_code_max).code_total as u64,total);
+    let alice=devnet::account_key("alice");let init=vec![0x62,0x60,0x00,0x55,0x60,0,0x52,0x60,3,0x60,29,0xf3];
+    let tx=|nonce:u64|crate::txsign::Tx{chain_id:777900,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:200_000,to:None,value:U256::ZERO,data:init.clone().into()}.sign_1559(&alice);
+    let ids:Vec<Address>=net.miners.iter().map(|m|m.id).collect();let g=net.genesis.state().clone();
+    let s=Summary::scan(&g,net.profile.cp().B_code_max);let t=crate::state_trie::StateTrie::build(&g);
+    // Two creates: the first reaches CODE_CAP exactly, the second would pass it.
+    let txs=vec![tx(0),tx(1)];
+    let input=BlockInput{height:1,timestamp:1_800_000_002,base_fee:U256::from(1_000_000_000u64),gas_limit:8_000_000,prevrandao:B256::ZERO,proposer:Proposer::Signed(ids[1]),
+        parent_result:None,evidence:vec![],evidence_raw:&[],transactions:&txs,ancestors:vec![(0,net.genesis_hash)],cum_log_bytes:0};
+    let r=apply_block(&g,&net.genesis,&net.profile,&input).unwrap();
+    let o=apply_block_with(&g,Some(&t),Some(&s),&net.genesis,&net.profile,&input).unwrap();
+    assert_eq!((o.state_root,o.receipts_root,o.summary),(r.state_root,r.receipts_root,r.summary));
+    assert_eq!(r.summary.code_total as u64,total+3,"positive control: the first create reached CODE_CAP");
+    assert_eq!(o.state.contracts.len(),r.state.contracts.len());
+    // A child of the full state: its SYSTEM calls start from a total of exactly CODE_CAP.
+    let pr=ParentResult{block_hash:B256::from(U256::from(1)),winner:ids[1],shares:vec![]};
+    let input2=BlockInput{height:2,timestamp:1_800_000_004,base_fee:crate::fees::next_base_fee(U256::from(1_000_000_000u64),r.gas_used,8_000_000).unwrap(),gas_limit:8_000_000,prevrandao:B256::ZERO,proposer:Proposer::Fallback,
+        parent_result:Some(pr),evidence:vec![],evidence_raw:&[],transactions:&[],ancestors:vec![(0,net.genesis_hash)],cum_log_bytes:0};
+    let r2=apply_block(&r.state,&net.genesis,&net.profile,&input2).unwrap();
+    let o2=apply_block_with(&o.state,Some(&o.trie),Some(&o.summary),&net.genesis,&net.profile,&input2).unwrap();
+    assert_eq!((o2.state_root,o2.summary),(r2.state_root,r2.summary));
 }

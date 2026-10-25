@@ -79,3 +79,14 @@ fn the_drop_is_skipped_only_when_nothing_could_be_dropped(){
         assert_eq!(a,b);assert!(Summary::scan(&next,3).contracts_clean);
     }
 }
+
+#[test]
+fn a_contracts_map_that_grew_with_unreferenced_code_is_dropped(){
+    // Not produced by execution (revm's commit skips a destroyed account's code), but the skip must not
+    // rely on that: a grown map is dropped whole.
+    let mut db=InMemoryDB::default();db.insert_account_info(Address::from([1;20]),AccountInfo::from_balance(U256::from(1)));
+    crate::user_phase::drop_unreferenced_code(&mut db);let s=Summary::scan(&db,3);assert!(s.contracts_clean);
+    let mut next=db.clone();let c=Bytecode::new_raw(Bytes::from_static(&[0x60,1]));next.contracts.insert(c.hash_slow(),c);
+    let t=Touched::between(&db,&next);assert!(t.is_empty());
+    assert!(drop_unreferenced_code(&db,&s,&mut next,&t));assert_eq!(next.contracts.len(),db.contracts.len());
+}

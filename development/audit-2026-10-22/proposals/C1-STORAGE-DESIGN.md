@@ -489,6 +489,123 @@ keeps it on every entry, since it is a few words, and computes genesis's with `s
 - mutation controls: a stale field, a skipped touched account, a drop skipped when the contracts map
   grew.
 
+### E2 status (2026-10-24): landed; evidence/c1-e2/
+
+As designed above, with these specifics:
+- **lp4:**
+  - `state_summary.rs`: `Summary`, `scan`, `moved`, `code_check` and the incremental `drop_unreferenced_code`;
+  - `GenesisImage::verify_summary`;
+  - `apply_block_with(parent, parent_trie, parent_summary, …)`; `BlockOutput.summary`.
+- **pocold:** `Entry.summary` (boxed, dropped by `slim`); genesis's from `scan`. Rebuilds and restores
+  give re-executed entries their summary.
+
+**Validation time** at the near-cap devnet state (`validation-near-cap-e2.log`, reference checks off):
+
+| | before E1 | E1 | **E2** |
+|---|---:|---:|---:|
+| empty child | 491 ms | 262 ms | **62 ms** |
+| 380 transfers | 672 ms | 349 ms | **174 ms** |
+| CREATE2-heavy child | 554 ms | 290 ms | **122 ms** |
+| 149 one-create transactions | 556 ms | 321 ms | **154 ms** |
+
+What remains in a block is mostly the state copies (E3), the two touched-set comparisons (about 14 ms
+each; E3 replaces them with the executor's written set) and S3a's diff (13 ms).
+
+**A13:** devnet 3,486,909,657 → **3,489,051,177 B** (each entry's summary). Network profile 40.20 GiB.
+
+**Acceptance tests (pass):**
+- **lp4 `state_summary` unit tests:**
+  - 40 random state sequences of 25 steps, with `moved` equal to `scan` at every step. The steps include
+    removed, not-existing and storage-cleared accounts, code that is missing, mismatched or over the
+    limit, and system slots; a positive control requires every count to occur;
+  - the code check against `validate_snapshot`;
+  - 200 random drops against the full drop.
+- **lp4 `e2_blocks_with_trie_and_summary_equal_the_reference`:** 30 blocks with transfers and contract
+  creations, applied with trie and summary. They equal `apply_block` without them in roots, receipts, gas,
+  state, contracts and summary.
+- **lp4 `e2_failing_candidates_fail_alike`:** each of the following fails with the same error with the
+  summary as without it:
+  - a balance over the supply bound;
+  - code over B_code_max;
+  - missing code;
+  - SLOT_CAP + 1 slots;
+  - SYS_SLOT_MAX + 1 system slots;
+  - ACCT_CAP + 1 accounts.
+- **The suites, release, reference comparisons on:** lp4 184 passed / 0 failed; pocold 199 passed / 0
+  failed / 17 ignored. The pocold E1 path test also checks every entry's summary.
+- **Mutation controls: 11 of 12 killed** (evidence/c1-e2/mutants.log).
+  - Tests were added after pass 1 for E2M4, E2M9 and E2M11:
+    - a grown contracts map is dropped;
+    - the states at exactly ACCT_CAP, SLOT_CAP and SYS_SLOT_MAX pass alike;
+    - CODE_CAP is reached exactly, then a child is applied.
+  - E2M8 (the post-USER code check result dropped) cannot be reached by execution: the create hook
+    enforces both code limits inside the USER phase.
+
+### E3 design (2026-10-24, before code): the executor on an overlay
+
+**Where the transient copies are.**
+- In `apply_block_with`:
+  - `parent.clone()`;
+  - the USER phase's `snapshot.clone()`;
+  - `users.state().clone()`.
+
+  C-2 item 3 already removed the per-transaction engine and PAY copies (`state_view::StateRef`).
+- In pocold:
+  - production's parent copies;
+  - the pool's pending state and its execution copies;
+  - the rolling rebuild's state;
+  - materialized parents.
+
+A13 still counts 10 transient copies and a growth copy (17.96 GiB at the network profile).
+
+**The overlay.** revm's `CacheDB<B>` is an overlay already.
+- Reads of an account or slot it does not hold fall through to `B` (`DatabaseRef`).
+- Its `commit` records creates, self-destructs and storage clears with the same semantics as on a full
+  state.
+- `InMemoryDB` is `CacheDB<EmptyDB>`, so code written for `CacheDB<B>` behaves exactly as today when `B` is
+  `EmptyDB`.
+
+E3 makes the executor generic over `CacheDB<B>`:
+1. **Reads.** Every lp4 read of the state goes through view helpers (`view::info`, `view::slot`,
+   `view::exists`, `view::code`). The helpers read the overlay entry first: a held slot, or zero when the
+   entry is created, cleared or not existing. Otherwise they read the base. Over `EmptyDB` the base answers
+   "absent" and zero, which is what the direct map reads return today.
+2. **Normalization over a base.** On a full state, normalization removes NotExisting accounts and zero
+   slots. Over a base it must keep them as tombstones, because removing them would expose the base.
+   `normalize` and the halt and commit paths take the base into account: over `EmptyDB` they behave as
+   today.
+3. **The write set.** After a block, the overlay holds exactly the accounts and slots the block wrote.
+   - It is the touched set, complete by construction. It replaces both `Touched::between` walks.
+   - The child's full state is `parent.clone()` with the overlay applied and normalized, built once at
+     the end, where the old code cloned at the start.
+   - The S3a diff, the trie and the summary are computed from the write set.
+4. **The USER phase** runs on the same overlay, passed by value, so its two copies go.
+
+**Steps, each verified before the next:**
+- **E3.1 (lp4):**
+  - view helpers; executor generic over `CacheDB<B>`;
+  - `apply_block_with` runs on `CacheDB<&InMemoryDB>` over the parent and returns the write set with the
+    merged child state.
+  - Proof: under `root_check()` every block is also applied the old way (a clone), and the two child
+    states are compared field by field (accounts, storage, code, contracts), with the roots, receipts
+    and summaries.
+- **E3.2 (pocold):** the S3a diff from the write set and the parent, instead of `StateDiff::between`. Under
+  the reference check both diffs are compared.
+- **E3.3 (pocold):** production, the pool's pending state, RPC simulation and rebuilds on overlays over
+  a borrowed base:
+  - the pool keeps only its write set, and builds a view over the head state for each operation;
+  - A13's transient inventory is recounted from the code, and each remaining full copy is named.
+- **E3.4 (pocold):** a child that becomes the head takes its parent's state by move, with the write set
+  applied in place. The parent keeps its diff (S3a), so no copy is made when the head extends. A side
+  child still gets a full copy (side states are full).
+
+**Unchanged:** validity, every root, receipt and RPC answer. Any step that changes one stops and goes back
+to the decision package.
+
+**A13 after E3** (to be derived): the transient copies become write sets, each bounded by
+`block_writes` (and, for the pool, by its own caps). The full copies left are the head, genesis, side_max,
+the materialized states and the side child under construction. E4 then moves the head into `state.redb`.
+
 ## S4: per-block metadata off the heap
 
 - Entries older than R_keep keep only what fork choice and contexts need for the heights still reachable
