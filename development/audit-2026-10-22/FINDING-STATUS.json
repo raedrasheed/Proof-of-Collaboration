@@ -4,11 +4,11 @@
  "pr": "https://github.com/raedrasheed/Proof-of-Collaboration/pull/27",
  "commits": {
   "prHead": "latest commit on claude/audit-repair-a01-a14",
-  "lastImplementation": "fc24969 (C-1 E5 part 3). Before it: 53a80e9 (E4.4 Windows test fix), 5722c23 and 90ba824 (E5 parts 2 and 1), 3c0fe15 (E4.4 follow-up), 314de11 (E4.5), 45d540f (E4.4 Windows test fix), 1a5b792 (E4.4, D-6), b91c490, 8f4b473, 6c6e192, f8a58bb, 7606a31 (E4.1-E4.3), 4ad4e83 (E3), 1774b90 (E2), 28594cc (E1), ddb0de2 (S4), 4b49d03 and bef6c4f (S3a), b517b0f (S1), d1604d0 (D-7), d567ce1 (S2); earlier: the decision-package commit after af2f3a8, af2f3a8, 6e99b19, 2ce03c1, 49b2bc2, 462fffc; .github/ is unchanged since a03e089",
-  "integrationTested": "fc24969 (evidence/c1-e4/accept/): lp4 193/0; pocold 221/0 with 20 ignored (each listed with where it ran); crash steps, kills and damage, the store-mode spec-depth test; e2e_devnet 42/42; e2e_site 20/20; extension 234/234; lp1-node 137 passed and the 11 Windows-only store_journal tests UnsupportedPlatform on Linux. Earlier: 3c3792e for the full LP10 integration before round 3",
-  "witnessTested": "3c3792e (not re-run since; not in the fc24969 pass)",
-  "chromeTested": "fc24969: real-Chromium e2e_browser 79/79 and LP10 e2e_integrated 18/18 (evidence/c1-e4/accept/). Before: 3c3792e",
-  "windowsTested": "fc24969 (Windows CI run 61, PASS on every check: lp1 12 + 150, lp4 193, pocold 221, extension 234; evidence/c1-e4/windows-runs.md). Runs 59 (cc929a7) and 60 (45d540f) failed in one E4.4 test's harness, fixed in 45d540f and 53a80e9. A Windows pass is not acceptance"
+  "lastImplementation": "8584283 (D-7 re-insertion: a transaction returned from an abandoned block is offered to the peers; local relay policy). After it, tests only: d939d1a and 0833b6c (e2e_browser: a navigation race and a receipt read once across a short fork). Before it: ee14458 (D-7 at 4·GAS_LIMIT; A13 pool, overlay and code terms after the revm code-loading audit; --state-store). After it, tests only: 9bd9bc0 (jm_r14_import_by_mode), 919a50c (e2e_integrated settles pools before v3). Before it: fc24969 (C-1 E5 part 3). Before it: 53a80e9 (E4.4 Windows test fix), 5722c23 and 90ba824 (E5 parts 2 and 1), 3c0fe15 (E4.4 follow-up), 314de11 (E4.5), 45d540f (E4.4 Windows test fix), 1a5b792 (E4.4, D-6), b91c490, 8f4b473, 6c6e192, f8a58bb, 7606a31 (E4.1-E4.3), 4ad4e83 (E3), 1774b90 (E2), 28594cc (E1), ddb0de2 (S4), 4b49d03 and bef6c4f (S3a), b517b0f (S1), d1604d0 (D-7), d567ce1 (S2); earlier: the decision-package commit after af2f3a8, af2f3a8, 6e99b19, 2ce03c1, 49b2bc2, 462fffc; .github/ is unchanged since a03e089",
+  "integrationTested": "8584283 (evidence/d7-bound/accept-8584283/): pocold 231/0 with 22 ignored; e2e in both modes: devnet 43/43, site 21/21, integrated 20/20 in three runs of three per mode (in each, node c offered its 7 returned transactions after the heal); browser: store 80/80, whole-state FAIL 1 of 49 (a navigation race in the test, fixed in d939d1a); browser on d939d1a: whole-state 3 of 3, store 1 of 3 (BR14 read a receipt once across a short fork; fixed in 0833b6c); browser on 0833b6c: PASS 80/80 in three runs of three per mode. Not rerun on 8584283 (unchanged by it): lp4, lp1-node, the crash/kill/damage steps, the spec-depth and deep-reorg tests, the A13 models, RSS, R14 and churn (their last runs are on 9bd9bc0). The 919a50c integrated reruns (evidence/d7-bound/integrated-919a50c/): 2 of 4 FAIL, the node defect fixed in 8584283. Before: 9bd9bc0 (evidence/d7-bound/accept-9bd9bc0/): lp4 193/0; pocold 229/0 with 22 ignored; crash steps, kills and damage, the store-mode spec-depth test, the deep-reorg tests; e2e in whole-state mode: devnet 43/43, site 21/21, browser 80/80, integrated FAIL 1 of 11 (a race in the test after the heal; fixed in 919a50c, whose reruns then exposed the defect fixed in 8584283); e2e in store mode (--state-store): devnet 43/43, site 21/21, browser 80/80, integrated 19/19; extension 234/234; lp1-node 137 passed and the 11 Windows-only store_journal tests UnsupportedPlatform on Linux. Before: fc24969 (evidence/c1-e4/accept/): lp4 193/0; pocold 221/0 with 20 ignored (each listed with where it ran); crash steps, kills and damage, the store-mode spec-depth test; e2e_devnet 42/42; e2e_site 20/20; extension 234/234; lp1-node 137 passed and the 11 Windows-only store_journal tests UnsupportedPlatform on Linux. Earlier: 3c3792e for the full LP10 integration before round 3",
+  "witnessTested": "8584283 (evidence/d7-bound/witnesses-8584283.log and witnesses-8584283-rerun.log; the first run lost A02, A05 and A10 to a full disk, rerun after space was freed): every witness NOT_REPRODUCED with its positive control OK (A01-A14; whole-state mode). Before: 9bd9bc0 (evidence/d7-bound/witnesses-9bd9bc0.log): every witness NOT_REPRODUCED with its positive control OK (A01-A14; whole-state mode). Before: 3c3792e",
+  "chromeTested": "0833b6c: PASS 80/80 in three runs of three per mode; 8584283: e2e_integrated 20/20 in three runs of three per mode, e2e_browser store 80/80 (whole-state: see integrationTested). Before: 9bd9bc0: real-Chromium e2e_browser 80/80 in both modes; e2e_integrated 19/19 in store mode (whole-state: see integrationTested). Before: fc24969: real-Chromium e2e_browser 79/79 and LP10 e2e_integrated 18/18 (evidence/c1-e4/accept/). Before: 3c3792e",
+  "windowsTested": "8584283 (Windows CI run 66, PASS on every check, the two relay tests included); 919a50c (run 65, PASS). Before: 9bd9bc0 (Windows CI run 64, PASS on every check). Before: fc24969 (Windows CI run 61, PASS on every check: lp1 12 + 150, lp4 193, pocold 221, extension 234; evidence/c1-e4/windows-runs.md). Runs 59 (cc929a7) and 60 (45d540f) failed in one E4.4 test's harness, fixed in 45d540f and 53a80e9. A Windows pass is not acceptance"
  },
  "axes": {
   "implemented": "YES | PARTIAL",
@@ -190,6 +190,26 @@
     "run": 62,
     "commit": "f14f2c2",
     "result": "PASS (documentation and evidence only; code as fc24969)"
+   },
+   {
+    "run": 63,
+    "commit": "5e77a70",
+    "result": "PASS (documentation and evidence only; code as fc24969)"
+   },
+   {
+    "run": 64,
+    "commit": "9bd9bc0",
+    "result": "PASS on every check (D-7 bound, A13 audit terms, store-mode switch)"
+   },
+   {
+    "run": 65,
+    "commit": "919a50c",
+    "result": "PASS (test change only; node code as ee14458)"
+   },
+   {
+    "run": 66,
+    "commit": "8584283",
+    "result": "PASS on every check (the re-insertion relay and its two tests)"
    }
   ],
   "defectsFoundAndFixed": [
@@ -292,7 +312,7 @@
    "engineering decisions taken under the standing authorization (REPAIR-PLAN.md)",
    "D-1 option (a): storage conformance S1-S5 toward 6 GiB at the network profile (landed: S1, S2, S3a, S4, E1-E4, E5 parts 1-3; the state store is opt-in, Limits::state_store)",
    "D-6: local state checkpoints (implemented in C-1 E4.4, store mode)",
-   "D-7 in principle: sliced pool revalidation; its gas-bound value is not approved"
+   "D-7 (2026-10-25): sliced pool revalidation and a local bound on the pooled transactions' summed declared gas limits of 4·GAS_LIMIT, configurable within the resource limits; pool policy only (implemented in ee14458); within its re-insertion behaviour, a returned transaction admitted again is offered to the peers (local relay policy, 8584283)"
   ],
   "proposedNotApproved": [
    "LOG-ACCT-01",
@@ -308,8 +328,7 @@
    "D-3",
    "D-4",
    "D-5",
-   "the D-7 value (4·GAS_LIMIT recommended; proposals/DECISION-PACKAGE.md)",
-   "the A13 key-path grinding assumption (a modelling choice; proposals/DECISION-PACKAGE.md)"
+   "the A13 key-path assumption (paths of at most 21 nodes): presented 2026-10-25 with its rationale, worst case and the conservative alternative (proposals/DECISION-PACKAGE.md); not adopted"
   ],
   "note": "Passing tests approve nothing. The implementation uses the recommended alternatives of the six consensus proposals provisionally."
  },
@@ -917,7 +936,8 @@
     "90ba824",
     "5722c23",
     "53a80e9",
-    "fc24969"
+    "fc24969",
+    "ee14458"
    ],
    "implemented": "YES",
    "verified": {
@@ -962,7 +982,8 @@
     "INSPECTION only: transient-snapshot inventory, one EVM execution at a time, the answer-being-built tree ratio (§4.11, §4.13, §4.16)",
     "DERIVED with stated revm 19.7 facts: execution memory, operation classes (§4.4, §3a)",
     "No guaranteed process-memory ceiling exists (§2b)",
-    "PARTLY ADDRESSED (C-1 E4/E5, fc24969): the redb trie (state.redb) and D-6 checkpoints are implemented as an opt-in store mode; store mode answers as whole-state mode on every compared block, receipt and state query, and open from a checkpoint equals replay from genesis. Its network-profile model is 9.67 GiB (gate 11.05), above 6 GiB, so it is not the default and the network profile does not boot. Open: the D-7 value (owner), the code one execution reads (a gas-derived bound, not done), the pool's and the rebuild's code sets (E5), and state.redb's file factor at the adversarial scale (condition store-file-factor)"
+    "PARTLY ADDRESSED (C-1 E4/E5, fc24969): the redb trie (state.redb) and D-6 checkpoints are implemented as an opt-in store mode; store mode answers as whole-state mode on every compared block, receipt and state query, and open from a checkpoint equals replay from genesis. Its network-profile model is 9.67 GiB (gate 11.05), above 6 GiB, so it is not the default and the network profile does not boot. Open: the D-7 value (owner), the code one execution reads (a gas-derived bound, not done), the pool's and the rebuild's code sets (E5), and state.redb's file factor at the adversarial scale (condition store-file-factor) [superseded on 2026-10-25: the D-7 value is approved and implemented, and the code sets are derived; see the D-7 entry]",
+    "PARTLY ADDRESSED (D-7 and the code-loading audit, ee14458; A13-DERIVATION §2d): the pool's layer follows its 4·GAS_LIMIT bound; a created account keeps every slot it loaded (one per 100 gas, witnessed), so the overlay and layer terms count it; store-mode code read by an execution stays one CODE_CAP set (an account load costs as little as 100 gas). Network model: store mode 7.61 GiB (gate 8.69), whole-state 25.24 GiB; above the 5.25 GiB cap by 2.36 GiB, and no non-normative option reaches it (proposals/DECISION-PACKAGE.md). R14/R19 timing does not include store mode's commit and fsync (evidence/d7-bound)"
    ],
    "blocked": {
     "environment": [
@@ -1072,6 +1093,40 @@
    "accepted": "NOT ACCEPTED (owner acceptance pending)",
    "independentReview": "three agent reviews (CV-1..CV-12, R2C-1..R2C-6, C3R-1..C3R-4); the round-3b changes are not reviewed yet",
    "disposition": "BLOCKED BY DECISION"
+  },
+  {
+   "id": "POOL-REINSERT-01",
+   "origin": "found during the repair (D-7 acceptance, e2e_integrated on 919a50c, 2026-10-25); not an audit finding, so there is no reproduction on 090eae4",
+   "severity": "not rated by the audit",
+   "title": "A transaction returned to the pool from an abandoned block was never relayed: when the node that held it alone was not drawn (it had left the active set during a partition longer than W_act), the transaction was never included",
+   "normative": false,
+   "conformance": "network.md (pool): a transaction returned after a reorg is re-checked; relaying it is a local policy. consensus.md §2: A_h (lastShare or graceStart within W_act) is unchanged",
+   "repairCommits": [
+    "8584283"
+   ],
+   "implemented": "YES",
+   "verified": {
+    "status": "VERIFIED (Linux and Windows CI)",
+    "tests": [
+     "pocold tests/consensus.rs transactions_returned_from_an_abandoned_block_are_offered_to_the_peers (a loopback peer: each returned transaction once, the previous pool's not again, the peer kept, the counters) and src/net.rs an_offer_past_half_the_queue_is_refused_and_keeps_the_peer",
+     "mutation controls (evidence/d7-bound/mutants-relay.log): 6 of 7 killed; R5 (the offer arm calling send) survives: it needs a peer queue half full while transactions return, which a loopback test does not produce deterministically. Not an equivalent mutant",
+     "e2e_integrated on 8584283: 20/20 in three runs of three per mode; in each, c offered its 7 returned transactions (reinsertedOffered 7, reinsertedUnoffered 0). On 919a50c, before it: 2 of 4 FAIL (evidence/d7-bound/integrated-919a50c/)",
+     "Windows CI run 66: PASS"
+    ]
+   },
+   "openRelated": [
+    "A returned transaction that a peer refused, or that no peer had room for, stays with this node until it is drawn; it is not offered again",
+    "A member that left A_h returns only through reactivate (consensus.md §2); unchanged"
+   ],
+   "accepted": "NOT ACCEPTED (owner acceptance pending)",
+   "independentReview": "none yet",
+   "disposition": "VERIFIED (Linux and Windows CI) — BLOCKED BY ENVIRONMENT (Windows e2e)",
+   "blocked": {
+    "environment": [
+     "The e2e_integrated runs that exercise it are Linux-only: the Windows workflow runs the Rust tests (run 66) but not the e2e or Chrome suites"
+    ],
+    "decision": []
+   }
   }
  ],
  "summary": {

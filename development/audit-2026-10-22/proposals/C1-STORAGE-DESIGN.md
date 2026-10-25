@@ -1042,6 +1042,55 @@ owner decision it needs.
 - E5's code sets;
 - the state.redb file factor at the scale of the adversarial file (condition `store-file-factor`).
 
+### After D-7 and the code-loading audit (2026-10-25; evidence/d7-bound/)
+
+The section above is kept as recorded.
+
+- **Store mode can be chosen for experiments.** `pocold run --state-store [--checkpoint-every N]`; the
+  default stays whole-state. The e2e scripts pass `POCOLD_RUN_ARGS` to every node and check the mode each
+  node reports.
+  - On 9bd9bc0, in store mode: e2e_devnet 43/43, e2e_site 21/21, e2e_browser (Chromium) 80/80,
+    e2e_integrated 19/19.
+  - On 8584283 (the re-insertion relay), in store mode: e2e_devnet 43/43, e2e_site 21/21, e2e_browser 80/80,
+    and e2e_integrated 20/20 in three runs of three. The browser reruns after the two test fixes (d939d1a,
+    0833b6c): PASS 80/80 in three runs of three per mode.
+  - The whole-state runs and the integrated reruns are in evidence/d7-bound/README.md.
+  - **What these runs do not test in store mode:**
+    - the network profile (A13 is computed there);
+    - the adversarial file factor;
+    - R14/R19 calibrated in store mode;
+    - the witnesses, which run in whole-state mode.
+- **E5's code sets.** The pool's code is now derived from D-7's gas bound:
+  - store mode: its touched accounts' code, at most CODE_CAP, plus its creations, 0.62 GiB at the network
+    profile;
+  - whole-state mode: its creations.
+
+  The code an execution reads stays one CODE_CAP set. revm 19.7 loads an account, and in store mode its
+  code, before it charges for it, so gas does not bound those copies (A13-DERIVATION §2d). The rebuild's
+  code is that execution set.
+- **A13 now** (computed):
+
+  | profile | whole-state mode | store mode |
+  |---|---:|---:|
+  | network | 25.24 GiB | 7.61 GiB |
+  | devnet | 3.04 GiB | 3.48 GiB |
+
+  The devnet bounds rose: the D-7 layer and the overlay count the slots a created account keeps, which
+  "one whole state" did not bound.
+- **state.redb under churn** (30 cycles of growth, update and delete, about 10 MB stored): the file stayed
+  at 67.9 MB from cycle 5 on. File over stored was at most 7.95, allocated over stored at most 1.83. This is
+  measured, not a bound; A13 counts 12.
+- **R14/R19.** The admission timing applies blocks in memory. Store mode adds the commit and its fsync:
+  - a GAS_LIMIT compute block imports in 64 ms (whole-state 29 ms);
+  - state-heavy blocks took up to 4.8 s.
+
+  Calibrating R14/R19 in the mode the node boots is open.
+- **Open:**
+  - flipping the default;
+  - the network target (D-1): 7.61 GiB against the 5.25 GiB cap;
+  - the file factor at the adversarial scale;
+  - R14/R19 in store mode.
+
 ## S4: per-block metadata off the heap
 
 - Entries older than R_keep keep only what fork choice and contexts need for the heights still reachable

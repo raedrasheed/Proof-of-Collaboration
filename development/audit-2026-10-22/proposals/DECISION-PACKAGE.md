@@ -148,6 +148,60 @@ hashes), would cut the batch to ≈ 0.33 GiB. It is an A13 assumption, so it is 
 gas-derived code bound and the path assumption, the projection is ≈ 5.3 GiB: at the limit, not below it.
 Store mode stays opt-in, and the network profile does not boot, until a computed `derive()` fits.
 
+**After D-7 and the code-loading audit (2026-10-25; A13-DERIVATION §2d, evidence/d7-bound).** The paragraphs
+above are kept as recorded. D-7 is approved at 4·GAS_LIMIT and implemented as the default. Before any term
+was lowered, revm 19.7's loading paths were audited.
+
+The network store-mode model is now **7.61 GiB (gate 8.69)**; whole-state mode 25.24 GiB:
+- the pool's layer follows G: 1.633 → 0.127 GiB;
+- the pool's code in store mode is its touched accounts' code and its creations: 1.125 → 0.618 GiB;
+- the block overlay is re-derived upward (0.004 → 0.041 GiB), because a created account keeps every slot it
+  loaded, which was not counted.
+
+**Withdrawn:** the projection "a gas-derived bound on the code one execution reads, about −1.0 GiB". In store
+mode every account load reads its code, and revm loads an account before it charges for it, so a load can
+cost as little as 100 gas. The term stays one CODE_CAP set.
+
+**Still over: 7.61 GiB against the 5.25 GiB cap, by 2.36 GiB.** The options, with their numbers. Each figure
+is the computed network store-mode total with only that change; they combine roughly additively:
+
+| option | kind | total | effect |
+|---|---|---:|---|
+| none | — | 7.61 | store mode stays opt-in; the network profile does not boot |
+| G = 2·GAS_LIMIT instead of 4 | your D-7 value | 7.23 | more pool churn under load; as approved, not taken |
+| key paths ≤ 21 nodes (below) | A13 assumption | 6.79 | batch 1.02 → 0.33, allocator 1.81 → 1.68 |
+| pool layer keeps no code copies (code read again on demand) | local implementation | ≈ 7.0 | −0.62; more state.redb reads per pool execution; not implemented |
+| NODE_CACHE 256 → 64 MiB | local setting | ≈ 7.42 | slower reads in store mode |
+| state.redb factor 12 → 6 (the largest measured) | measurement at scale | ≈ 6.70 | not established for terabyte files; cannot be counted until measured there |
+| CODE_CAP 1 GiB → 256 MiB | **normative** (genesis parameter) | 6.43 | less contract code on the network |
+| key paths ≤ 21 + CODE_CAP 128 MiB | assumption + normative | 5.33 | still above 5.25 |
+
+Measured on 9bd9bc0, not bounds (evidence/d7-bound/README.md):
+- **state.redb under churn:** 30 cycles; the file stays at 67.9 MB from cycle 5 on, at most 7.95 times what it
+  stores.
+- **R14/R19:** the admission timing does not include store mode's commit and fsync. A GAS_LIMIT compute
+  block imports in 64 ms in store mode against 29 ms whole-state, and state-heavy blocks took up to 4.8 s.
+  Calibrating in the booting mode is open.
+
+No combination of local, non-normative options reaches 5.25 GiB. The remaining terms are the redb
+allocator over the adversarial file (1.81), the execution's code set (1.125), the EVM execution at 30M gas
+(1.10) and the batch (1.02). Recommendation: keep store mode opt-in, and decide the network target (D-1)
+with these figures. No bound was lowered to reach the budget.
+
+**The key-path assumption (not adopted; presented as asked).**
+- **Definition.** Every key path in a state trie has at most 21 nodes. Today `TRIE_PATH_NODES` = 65: a
+  branch at each of the 64 nibbles of a hashed key, and the leaf.
+- **Rationale.** Keys are keccak hashes. A path has one branch for each depth at which another key diverges
+  from it, so a path longer than 21 nodes needs keys that share at least 20 nibbles (80 bits) of hash
+  prefix with it. Producing those is a computational cost (on the order of 2^76–2^80 hashes per such path),
+  not something a protocol rule prevents.
+- **Worst case if it fails.** The terms that count paths undercount: the batch (1.02 GiB at 65 nodes, 0.33
+  at 21), the whole-state trie paths, and the state.redb file behind the allocator term. Each key with a
+  longer path adds up to 44 nodes to its block's batch. The node would then run past its computed bound
+  in proportion to how many such keys an adversary paid for.
+- **Conservative alternative (current).** Count 65 nodes. It holds with no assumption and costs 0.82 GiB of
+  the network store-mode bound against the assumption.
+
 **Disk and time (measured on 5ab73d1, devnet profile, 4 vCPU KVM, ext4 on virtio;
 evidence/c1-e4/disk-impact-final.md).** Small store: 2,770 accounts, 2.8 MB stored. Larger: 16,110 accounts,
 14.9 MB stored.
@@ -386,6 +440,26 @@ bound on its hold, measurements under load, and then a recommended value.
 - It is derived from approved profile values, so that worst-case revalidation ends within half a block
   interval.
 - Implemented as `Limits::pool_gas_max`, **off by default until you approve it**.
+
+**Owner's decision (2026-10-25): approved at 4·GAS_LIMIT** as the local default bound on the pooled
+transactions' summed declared gas limits, configurable within the resource limits; pool policy only.
+Implemented (A13-DERIVATION §2d):
+- `POOL_GAS_BLOCKS` = 4, so G = 32,000,000 at both profiles. `Limits::pool_gas_max` or `pocold run
+  --pool-gas-max` sets another value. One below GAS_LIMIT is refused at open, and A13 counts the pool at G,
+  so one the budget cannot hold is refused too.
+- Admission refuses past G with −32016 "pool full (gas)" before executing. A duplicate returns its hash.
+- There is no replacement: a same-nonce transaction fails on the pending state and counts nothing.
+- Removal happens only at a new head, which re-executes and recounts.
+- After a reorganization the abandoned blocks' transactions come first, then the pool, each within every
+  bound. One that no longer fits is dropped.
+- A returned transaction admitted again is offered to every peer (local relay policy). A peer with half its
+  queue in use does not get it and is kept.
+  - Found by e2e_integrated: a node that had left the active set during a long partition (W_act = 32;
+    consensus.md §2) was not drawn after the heal, so the transactions it alone held were never included.
+  - The membership behaviour is the specified one and is unchanged.
+- The counters are checked against the contents (`Node::pool_audit`) through 160 mixed steps.
+- Under `Node::run`, with the pool at its bound, a second block is imported while revalidation is still
+  pending. The gas bound bounds no time; the slice plus one measured transaction does.
 
 **Acceptance tests** (all pass):
 - `sliced_pool_revalidation_equals_the_whole_rebuild`;

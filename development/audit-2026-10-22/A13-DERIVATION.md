@@ -362,6 +362,195 @@ bound.
 What the store-mode bound still holds at the network profile, and what would lower it, is in
 DECISION-PACKAGE.md ("Measured after E4 and E5").
 
+### 2d. D-7 and the audit of what an execution loads and keeps (2026-10-25)
+
+§2c is kept as recorded. This section adds the pool's gas bound (decision D-7, approved 2026-10-25) and
+re-derives the terms that depend on it. Before any term was lowered, the code paths of revm 19.7 that load
+accounts, slots and code were audited, together with how long the loaded data stays. The audit changed
+three terms: one up and two down. It also withdraws one projection.
+
+**D-7, as implemented** (src/node.rs; tests in tests/consensus.rs):
+- **The bound.** The pooled transactions' declared gas limits sum to at most G. G is
+  `POOL_GAS_BLOCKS` × GAS_LIMIT (4 × 8,000,000 = 32,000,000 at both profiles).
+  - It is a local setting: `Limits::pool_gas_max`, or `pocold run --pool-gas-max GAS`.
+  - A value below GAS_LIMIT is refused at open, because a transaction a block can hold must fit an empty
+    pool.
+  - A13 counts the pool at G, so a G the budget cannot hold is refused at open too ("within the resource
+    limits").
+  - It is pool policy only. No block-validity or consensus rule changes.
+- **Admission** (`admit_tx`), in this order:
+  1. size: -32014;
+  2. decoding and chain: as before;
+  3. a duplicate is answered with its hash and counts nothing;
+  4. the byte and count bounds: -32016 pool full;
+  5. the gas bound: -32016 pool full (gas). This is checked before execution, so a refused transaction
+     costs no execution and changes nothing;
+  6. execution on the pending state;
+  7. the cap meter.
+- **Replacement.** There is none. A second transaction with a pooled one's sender and nonce, whatever its
+  fee, fails its execution on the pending state (-32000, NonceTooLow) and changes no counter. The pooled one
+  leaves only when a new head makes it invalid.
+- **Removal.** Only at a new head (`rebuild_pool`). Every pooled transaction is re-executed on the new head.
+  One the head included, or one that is no longer valid, is dropped, and the counters are recounted from
+  what stays. There is no expiry.
+- **Re-insertion after a reorganization** (consensus.md: excluded transactions return to the pool once
+  checked again). The order is:
+  1. the abandoned blocks' transactions, oldest block first, each block in its own order;
+  2. then the previous pool, in its order;
+  3. then its backlog.
+
+  Each is admitted within every pool bound. One that no longer fits the gas bound is dropped and is not
+  pooled later; a later, smaller one is still admitted.
+
+  **Relay of a returned transaction** (a local policy). A transaction that leaves an abandoned block and is
+  admitted again is offered to every peer (`Relay::Offer`, through `Peer::offer`):
+  - a peer with half its outbound queue in use does not get it, and the peer is kept;
+  - one reorganization can return up to a whole pool at once, so plain gossip, which drops a peer whose queue
+    is full, is not used;
+  - the previous pool's transactions are not sent again, since they were relayed when first admitted;
+  - `pocol_status` reports `stats.reinsertedOffered` and `stats.reinsertedUnoffered`.
+
+  Why: e2e_integrated failed 2 of 4 runs on 919a50c, and failed again in a diagnostic run, at "pools
+  settled after the heal". Node c held 7 returned transactions (8,356,420 gas) and no other node had them.
+  - A node that is not drawn never builds a block, and c was not drawn at any of the 215–224 heights after
+    the heal, nor did it win any of them.
+  - The cause is the active set (consensus.md §2: A_h = {lastShare ≥ h−W_act or graceStart ≥ h−W_act}, with
+    W_act = 32). At the heal the majority branch was 31–61 heights past the fork point, and c was no longer in A_h. It
+    has no assignment and no longer mines (its production reads "mining=false"). It returns only through
+    `reactivate`.
+  - In the passing run that was checked, the branch was 12 heights past the fork point, and c was drawn 17
+    times after the heal.
+  - So the membership behaviour is the specified one. The defect was that the returned transactions reached
+    nobody else.
+
+  Still open: a returned transaction that a peer refused, or that no peer had room for, stays here until
+  this node is drawn. It is not offered again. The peer queue bound is unchanged (the A13 peer term counts
+  `queue_bytes_max` per peer).
+- **Counters.** `Node::pool_audit` recomputes them from the pool's contents: gas and bytes summed over the
+  admitted transactions, backlog bytes over the backlog, each transaction pooled once, and every bound.
+  - It held after each of 160 mixed steps: submissions inside and past the bound, duplicates, same-nonce and
+    wrong-nonce transactions, relays during a backlog, one-item slices, new heads and reorganizations.
+  - Count of each kind of step: 31 admitted, 41 refused for gas, 2 relays in a backlog, 12 heads, 13
+    reorganizations.
+- **RPC.** eth_sendRawTransaction past the bound answers -32016 with the message "-32016 pool full (gas)".
+  pocol_status reports `poolGas` and `poolGasMax`.
+- **Revalidation does not hold up consensus.** The run loop takes one event between two slices of
+  revalidation. The test runs `Node::run` with the pool at its bound: four BLAKE2F transactions of 7.9M gas,
+  which no stop hook can cut short.
+  - Two blocks arrive back to back. The second is imported while the first head's revalidation is still
+    pending, and an RPC request is answered between slices.
+  - In release on 9bd9bc0 (evidence/d7-bound), one such transaction took 189 ms. The second block and the
+    answer took 736 ms, against about four transactions plus two imports.
+  - The hold measurement at the bound (`d7_pool_revalidation_hold_under_a_heavy_pool`, four such
+    transactions): sliced, the longest hold was 193 ms (one transaction); revalidating at once, the import
+    held the thread 627 ms.
+  - The gas bound alone bounds no time. What bounds the hold is the slice (POOL_SLICE, 50 ms) plus one
+    transaction, and that transaction's time is measured, not derived. Gas is not time:
+    - BLAKE2F is priced per round;
+    - in store mode each cold account is a state.redb read.
+
+**The audit of revm 19.7.** Sources: revm-19.7.0 journaled_state.rs and context/, revm-interpreter-15.2.0
+instructions/host.rs and interpreter/contract.rs, and this repository's state_view.rs, view.rs, node_trie.rs
+and state_store.rs.
+
+| path | gas paid before the load | code loaded | how long it stays |
+|---|---|---|---|
+| sender (validation, fee) | none (intrinsic) | store mode: its code is read with the account (`TrieState::info`); a sender with code is then rejected (EIP-3607) | until the transaction ends |
+| recipient of the transaction (`make_call_frame`, `load_code`) | none (intrinsic) | yes | until the transaction ends; kept if touched (a call touches it) |
+| coinbase (fee) | none (warm, EIP-3651) | store mode: with the account | as above; touched by the fee |
+| access-list addresses (`initial_account_load`) | 2,400 each, intrinsic | store mode: with the account | until the transaction ends (untouched) |
+| BALANCE, EXTCODESIZE, EXTCODEHASH, EXTCODECOPY, CALL family, SELFDESTRUCT's beneficiary | **none before the load**: the account (and, through `load_code`, its code) is loaded, then the cold or warm cost is charged. A frame that cannot pay keeps the load and fails; a frame costs at least a warm CALL (100) | EXTCODE\* and calls: yes; BALANCE and SELFDESTRUCT: store mode only, with the account | until the transaction ends (a revert only marks it cold) |
+| SLOAD | none before the load (the slot is inserted, then 2,100 or 100 is charged) | — | until the transaction ends; an account created in the same transaction keeps every slot it loaded in its committed entry |
+| a frame's code | — | revm analyses raw code per frame (`Contract::new` → `to_analysed`): a padded copy and a jump table | until the frame returns (execution term, `fixed_heap`) |
+| created code | 200 per byte (deposit) | analysed once | in the state, the layer or the overlay |
+
+Findings:
+1. **Store mode reads code with every account.** `TrieState::info` reads the code with the account, and
+   `StateStore::code` returns a fresh copy. So in store mode every account load brings its code, whether or
+   not the execution runs or reads it. In whole-state mode a load clones the state's `Bytecode`, which
+   shares its buffers.
+2. **Gas does not bound those copies at the network profile.** An account load costs as little as 100 gas,
+   through a frame that runs out of gas after the load.
+   - One 30M-gas execution could load 300,000 accounts × B_code_max (32,768) bytes = 9.2 GiB.
+   - CODE_CAP (1 GiB) is smaller. The copies are of distinct existing accounts, so they are at most the
+     logical code of every existing account.
+   - So the store-mode term "code read by the execution in progress" stays one CODE_CAP set: 1.125 GiB at
+     the network profile. That set also covers the copies a block's or template's overlay keeps for its
+     touched accounts, since one execution and one overlay run at a time.
+   - **The projection "a gas-derived execution code bound, about −1.0 GiB" (DECISION-PACKAGE.md, "Measured
+     after E4 and E5") is withdrawn.**
+   - Loading code lazily (code_hash only, code read on demand) would not change the worst case. EXTCODESIZE
+     and EXTCODEHASH load the whole code (`load_code`), unpaid in the same way.
+3. **The pool's layer keeps only touched accounts.** `Overlay::commit` takes only touched accounts, and a
+   touch is paid:
+   - a call or a transfer to a cold account (2,600);
+   - a call or transfer to a warm account not loaded before: an access-list entry (2,400 paid), the
+     precompiles, the coinbase;
+   - a creation (32,000);
+   - a self-destruct's beneficiary.
+
+   A touch in a reverted frame is undone (AccountTouched). So with G gas the layer has at most
+   3·⌊G/21,000⌋ + ⌊G/2,400⌋ + 32 accounts (`layer_writes`): 17,934 at 32M.
+   - In store mode each keeps its code copy, so the pool's code is at most
+     min(CODE_CAP, 17,934 × B_code_max) plus its creations (G/200 bytes).
+   - In whole-state mode the touched accounts share the head's buffers, and only the creations are new.
+4. **A created account keeps every slot it loaded.** That includes zero-valued slots and slots loaded in
+   frames that ran out of gas. This was not counted before.
+   - **Confirmed by a witness** run on a local node only and kept outside the repository, like the other
+     adversarial programs; its log is in evidence/d7-bound. One transaction of 1,000,000 gas left 2,000 slot
+     entries in the pool's layer, where counting one slot per 2,900 gas of writes allows 344.
+   - So a layer's slot entries are at most ⌊g/2,900⌋ + ⌊g/100⌋ (SLOT_LOAD_GAS_MIN).
+   - **Consequence for the block overlay.** `overlay_max` counted changed slots only (one per 2,900 gas) and
+     each element at twice its inline size. It is re-derived with `layer_bytes`, every element at
+     `memory::entry_bytes`: 0.004 → 0.041 GiB.
+   - **Consequence for the pool's layer.** "One whole state" did not bound the layer either: zero-valued
+     slots are not counted by SLOT_CAP. Before D-7 the pool's gas was bounded only by POOL_MAX_TXS ×
+     GAS_LIMIT, so that term was an undercount. With D-7 the layer is bounded by G.
+
+**The terms after D-7 and the audit** (src/resources.rs: `layer_writes`, `layer_bytes`, `pool_gas`, `overlay_max`;
+test `d7_a13_pool_terms_follow_the_gas_bound`):
+
+| item | before (§2c, fc24969) | now | network | devnet |
+|---|---|---|---:|---:|
+| the pool's layer | one whole state (snapshots) | `layer_bytes(layer_writes(G))` (diffs) | 1.633 → 0.127 GiB | 0.037 → 0.127 GiB |
+| the pool's code, store mode | one CODE_CAP set | touched accounts' code (≤ CODE_CAP) + creations | 1.125 → 0.618 GiB | 0.0022 → 0.0041 GiB |
+| the pool's code, whole-state mode | one CODE_CAP set | its creations (G/200 bytes) | 1.125 → 0.0003 GiB | 0.0022 → 0.0003 GiB |
+| containers of the pool's layer | one snapshot's | inside the two terms above | 0.090 → 0 GiB | |
+| the block overlay | changed slots, ×2 | `layer_bytes` of 5/4 GAS_LIMIT + SYSTEM | 0.004 → 0.041 GiB | 0.004 → 0.041 GiB |
+| an abandoned body in revalidation | not counted | BODY_MAX + its transactions' headers | +0.0004 GiB | +0.0004 GiB |
+| code read by the execution, store mode | one CODE_CAP set | unchanged (finding 2) | 1.125 GiB | 0.0022 GiB |
+
+A bound past POOL_MAX_TXS × GAS_LIMIT counts as that, since the count bound binds first. CODE_CAP binds
+the store-mode pool code at the devnet profile, not at the network one. Condition `revm-loading` records
+what rests on source inspection.
+
+**Result** (tests/network_budget.rs; the computed bound, not measured RAM):
+
+| profile | whole-state mode | store mode |
+|---|---:|---:|
+| network | 27.92 → **25.24 GiB** (gate 28.85) | 9.67 → **7.61 GiB** (gate 8.69) |
+| devnet | 2.91 → 3.04 GiB (gate 3.47) | 3.36 → 3.48 GiB (gate 3.98) |
+
+At the devnet profile both bounds rose. Their states are small, so the D-7 layer (0.127 GiB) is larger than
+the whole state it replaces (0.037 GiB), and the overlay is re-derived. That whole state was not a bound on
+the layer (finding 4).
+
+**The network store-mode bound is 7.61 GiB. The model cap is 5.25 GiB (6 GiB with its reserve), so it is
+2.36 GiB over.** Its largest terms:
+
+| item | GiB |
+|---|---:|
+| state.redb allocator | 1.81 (a 14.3 TiB adversarial file, 3,653 regions) |
+| execution's code set | 1.125 |
+| EVM execution | 1.10 |
+| a block's batch | 1.02 |
+| history | 0.63 |
+| the pool's code | 0.62 |
+| node cache | 0.25 |
+
+The options, with their numbers and effects, are in DECISION-PACKAGE.md ("After D-7 and the code-loading
+audit"). No bound was lowered to reach the budget.
+
 ## 3. System gas (R18) and timing (R14/R19)
 
 - Gas: per-call maxima measured by `resources::tests::sys_gas_envelope_fixture` (worst case plus a
