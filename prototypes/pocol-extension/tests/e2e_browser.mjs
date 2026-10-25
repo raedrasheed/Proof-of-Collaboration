@@ -144,6 +144,9 @@ const probeNetwork = async (fr) => fr.evaluate(async ({ CANARY, UDP, HOST_IP }) 
   return out;
 }, { CANARY, UDP, HOST_IP }).catch((e) => ({ evaluateError: e.message.slice(0, 120) }));
 const raw = (fr, text) => fr.evaluate((t) => pocol.raw(t), text);
+// pocol.navigate tears the calling frame down. Called within the evaluated function, the teardown can land before
+// Playwright receives the evaluate's answer ("Frame was detached"); scheduled for a later task, it cannot.
+const navigate = (fr, path) => fr.evaluate((p) => { setTimeout(() => { pocol.navigate(p); }, 0); }, path);
 const req = (fr, kind, method, params) => fr.evaluate(async ([k, m, p]) => { try { return { result: await pocol.request(k, m, p) }; } catch (e) { return { error: { code: e.code, message: e.message, data: e.data } }; } }, [kind, method, params]);
 const msg = (id, kind, method, params) => JSON.stringify({ id, kind, payload: { method, params } });
 /** Confirmed site dictionary as stored (D103): the largest (epoch, seq) record under the key. */
@@ -281,10 +284,10 @@ async function main() {
 
     // --- navigation (BR18, D26/D99) ---
     const pagesBefore = b.ctx.pages().length;
-    await fr.evaluate(() => { pocol.navigate('/about.html'); });
+    await navigate(fr, '/about.html');
     ({ fr, n } = await siteFrame(page, n + 1));
     ok('BR18a site_navigate(/about.html): old frame torn down, new frame shows about.html, no new tab', (await fr.textContent('#about')) === 'About' && (await page.$$('#stage iframe')).length === 1 && b.ctx.pages().length === pagesBefore, `frame ${n}`);
-    await fr.evaluate(() => { pocol.navigate('/docs/'); }); ({ fr, n } = await siteFrame(page, n + 1));
+    await navigate(fr, '/docs/'); ({ fr, n } = await siteFrame(page, n + 1));
     ok('BR18b /docs/ -> docs/index.html', (await fr.textContent('#docs')).startsWith('Docs page'));
     await fr.click('#home'); ({ fr, n } = await siteFrame(page, n + 1));
     ok('link interception: relative ../ link -> site_navigate -> entry', (await fr.textContent('#t')) === 'PoCol on-chain site v1');
@@ -294,9 +297,9 @@ async function main() {
     await sleep(2100);
     await fr.click('#docs'); ({ fr, n } = await siteFrame(page, n + 1));
     ok('link interception: <a href=docs/> navigates inside the site', (await fr.textContent('#docs')).startsWith('Docs page'));
-    await sleep(2100); await fr.evaluate(() => { pocol.navigate('/a/../b.html'); }); ({ fr, n } = await siteFrame(page, n + 1));
+    await sleep(2100); await navigate(fr, '/a/../b.html'); ({ fr, n } = await siteFrame(page, n + 1));
     ok('BR18c /a/../b.html -> viewer 404 page', (await fr.textContent('h1')) === '404' && (await page.textContent('#status')) === '404');
-    await sleep(2100); await fr.evaluate(() => { pocol.navigate('/'); }); ({ fr, n } = await siteFrame(page, n + 1));
+    await sleep(2100); await navigate(fr, '/'); ({ fr, n } = await siteFrame(page, n + 1));
     // External links: confirm outside the frame.
     const extP = fr.evaluate(() => pocol.openExternal('https://example.org/').then((r) => ({ r }), (e) => ({ code: e.code })));
     await page.waitForSelector('#modal:not([hidden])'); const shown = await page.textContent('#mtext');
