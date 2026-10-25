@@ -2120,9 +2120,10 @@ fn e44_blocks()->&'static Vec<Block>{
         let back=heavier(&mut h,p,h2.chain.head().total_work,1);
         blocks.into_iter().chain(side).chain(back).collect()})
 }
-fn e44_conf(dir:&std::path::Path,every:u64)->impl Fn()->pocold::node::Config{
+fn e44_conf(dir:&std::path::Path,every:u64)->impl Fn()->pocold::node::Config{e44_conf_with(dir,every,|_|{})}
+fn e44_conf_with(dir:&std::path::Path,every:u64,f:fn(&mut pocold::node::Limits))->impl Fn()->pocold::node::Config{
     use pocold::node::{Config,Limits};let d=dir.to_path_buf();
-    move||Config{dir:d.clone(),name:"e44".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:true,limits:Limits{state_store:true,checkpoint_every:every,..Default::default()}}
+    move||{let mut l=Limits{state_store:true,checkpoint_every:every,..Default::default()};f(&mut l);Config{dir:d.clone(),name:"e44".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:true,limits:l}}
 }
 fn e44_dir(tag:&str)->std::path::PathBuf{let d=std::env::temp_dir().join(format!("pocold-e44-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&d);d}
 fn copy_dir(from:&std::path::Path,to:&std::path::Path){let _=std::fs::remove_dir_all(to);std::fs::create_dir_all(to).unwrap();
@@ -2141,6 +2142,8 @@ fn e44_same(x:&mut pocold::node::Node,y:&mut pocold::node::Node,what:&str){
     for n in [&*x,&*y]{let bind=pocold::checkpoint::Binding{records:3,end:4,hash:[5;32]};
         assert_eq!(pocold::checkpoint::encode(&n.chain,&bind).unwrap().0,pocold::checkpoint::encode_snapshot(&pocold::checkpoint::snapshot_of(&n.chain,&bind).unwrap()),"{what}: encode");}
     assert_eq!(fx,fy,"{what}: chain fields");
+    // The eviction set (a churn guard: an evicted block received unsolicited is refused) is the FIFO's.
+    for h in &fx.evicted_order{assert!(x.chain.was_evicted(h)&&y.chain.was_evicted(h),"{what}: an evicted block is remembered");}
     // Every field but the (empty) whole state, whose HashMaps print in no fixed order.
     let dbg=|n:&pocold::node::Node|{let mut v:Vec<([u8;32],String)>=n.chain.blocks.values().map(|e|(e.hash,format!("{:?}",(
         (e.hash,&e.header,&e.body,e.height,e.parent,e.total_work,e.import_seq,e.signed,e.ts,e.target,e.base_fee,e.gas_used),
@@ -2182,6 +2185,8 @@ fn e44_reference(dir:&std::path::Path,tag:&str)->(pocold::node::Node,std::path::
     // (1) a copy without its store: replay from genesis writes checkpoints; the next open resumes from one.
     let r=e44_dir("replayed");copy_dir(&a,&r);std::fs::remove_file(r.join(pocold::state_store::FILE)).unwrap();
     {let mut n=reopen(&e44_conf(&r,every));assert_eq!(n.stats.resumed_from,None);assert_eq!(n.stats.checkpoints_written,blocks.len() as u64/every,"replay checkpoints too");e44_same(&mut n,&mut g,"replayed from genesis, writing checkpoints");}
+    {let st=pocold::state_store::StateStore::open(&r).unwrap();let c=st.checkpoints().unwrap();let s=pocold::checkpoint::decode(&c.last().unwrap().1).unwrap();
+     assert!(s.protect.as_ref().map_or(false,|p|!p.is_empty()),"positive control: the replay checkpoint names the blocks later records build on");}
     {let mut n=reopen(&e44_conf(&r,every));let k=(blocks.len() as u64/every)*every;
      assert_eq!(n.stats.resumed_from,Some(k),"resumed after the newest checkpoint");
      e44_same(&mut n,&mut g,"resumed from a replay checkpoint");}
@@ -2294,12 +2299,29 @@ fn e4_checkpoint_kill_child(){
             {let mut t=w.open_table(ckpt).unwrap();let (seq,mut bytes)={let (k,v)=t.last().unwrap().unwrap();(k.value(),v.value().to_vec())};let i=bytes.len()/2;bytes[i]^=1;t.insert(seq,bytes.as_slice()).unwrap();}w.commit().unwrap();}),None,false),
         ("two stored roots swapped",Box::new(|d|tamper(d,&|s|{let ix:Vec<usize>=s.entries.iter().enumerate().filter(|(_,e)|e.root.is_some()).map(|(i,_)|i).collect();
             let (i,j)=(ix[ix.len()-1],ix[ix.len()-2]);let (x,y)=(s.entries[i].root,s.entries[j].root);s.entries[i].root=y;s.entries[j].root=x;})),Some(older.binding.records),false),
+        // Each entry then names a version whose summary matches it: only the state-root check (the version's
+        // root against the block's committed stateRoot) tells them apart.
+        ("two stored roots swapped with their summaries",Box::new(|d|tamper(d,&|s|{let ix:Vec<usize>=s.entries.iter().enumerate().filter(|(_,e)|e.root.is_some()).map(|(i,_)|i).collect();
+            let (i,j)=(ix[ix.len()-1],ix[ix.len()-2]);let (x,y)=((s.entries[i].root,s.entries[i].summary),(s.entries[j].root,s.entries[j].summary));
+            (s.entries[i].root,s.entries[i].summary)=y;(s.entries[j].root,s.entries[j].summary)=x;})),Some(older.binding.records),false),
         ("a stored version's summary",Box::new(|d|tamper(d,&|s|{let e=s.entries.iter_mut().rev().find(|e|e.root.is_some()).unwrap();e.summary.as_mut().unwrap().user_slots+=1;})),Some(older.binding.records),false),
+        ("a roots record that is not its snapshot's",Box::new(|d|{let db=redb::Database::open(d.join(pocold::state_store::FILE)).unwrap();let w=db.begin_write().unwrap();
+            {let mut t=w.open_table(roots).unwrap();let (seq,mut v)={let (k,v)=t.last().unwrap().unwrap();(k.value(),v.value().to_vec())};v.truncate(v.len()-32);t.insert(seq,v.as_slice()).unwrap();}w.commit().unwrap();}),None,false),
         ("bound to other records",Box::new(|d|tamper(d,&|s|{s.binding.hash[0]^=1;})),Some(older.binding.records),false),
         ("bound to more records than the journal holds",Box::new(|d|tamper(d,&|s|{s.binding.records+=3;})),Some(older.binding.records),false),
+        ("a next import sequence below an entry's",Box::new(|d|tamper(d,&|s|{s.next_seq=1;})),Some(older.binding.records),false),
         ("a total work",Box::new(|d|tamper(d,&|s|{let e=s.entries.last_mut().unwrap();e.total_work+=U256::from(1u64);})),Some(older.binding.records),false),
         ("a node whose bytes are not its id",Box::new(move|d|{let db=redb::Database::open(d.join(pocold::state_store::FILE)).unwrap();let w=db.begin_write().unwrap();
             {let mut t=w.open_table(nodes).unwrap();let mut v=t.get(&head_root).unwrap().unwrap().value().to_vec();let l=v.len();v[l-1]^=1;t.insert(&head_root,v.as_slice()).unwrap();}w.commit().unwrap();}),None,false),
+        // A node only the newest checkpoint's head version names: the older checkpoint would verify without
+        // it, but a store that lost a node it named is not used (marked damaged and rebuilt).
+        ("a missing node only the newest checkpoint names",Box::new(move|d|{let db=redb::Database::open(d.join(pocold::state_store::FILE)).unwrap();let w=db.begin_write().unwrap();
+            {let mut t=w.open_table(nodes).unwrap();
+             let reach=|t:&redb::Table<&[u8;32],&[u8]>,roots:&[[u8;32]]|{let mut seen=std::collections::HashSet::new();let mut st:Vec<[u8;32]>=roots.to_vec();
+                while let Some(id)=st.pop(){if !seen.insert(id){continue}let v=t.get(&id).unwrap().unwrap().value().to_vec();st.extend(pocol_lp4_execution::node_trie::Node::decode(&v[4..]).unwrap().children());}seen};
+             let old=reach(&t,&pocold::checkpoint::roots(&older));let new=reach(&t,&[head_root]);
+             let only=*new.iter().find(|x|!old.contains(*x)).expect("a node only the newest head version names");t.remove(&only).unwrap();}
+            w.commit().unwrap();}),None,false),
         ("a missing node",Box::new(move|d|{let db=redb::Database::open(d.join(pocold::state_store::FILE)).unwrap();let w=db.begin_write().unwrap();
             {let mut t=w.open_table(nodes).unwrap();let v=t.get(&head_root).unwrap().unwrap().value().to_vec();
              let child=pocol_lp4_execution::node_trie::Node::decode(&v[4..]).unwrap().children().into_iter().next().unwrap();t.remove(&child).unwrap();}w.commit().unwrap();}),None,false),
@@ -2350,6 +2372,17 @@ fn e4_checkpoint_kill_child(){
         }
     }
     println!("E44-STEPS {log:?}");
+    // A crash during replay, just after a replay checkpoint: replay made its history.redb writes durable
+    // first, so the next open resumes from that checkpoint.
+    let d=e44_dir("step-replay");let file=d.with_extension("blocks");
+    {let mut out=vec![];for b in blocks{for p in [b.header.encoded.clone(),b.body.encode()]{out.extend((p.len() as u32).to_be_bytes());out.extend(p);}}std::fs::write(&file,out).unwrap();}
+    assert!(run(&d,&file,None),"a first run imports every block");
+    for f in [pocold::state_store::FILE,pocold::history::FILE]{std::fs::remove_file(d.join(f)).unwrap();}
+    assert!(!run(&d,&file,Some("checkpoint-after:30".into())),"the replay stops at its 30th checkpoint");
+    let (mut g,gd)=e44_reference(&d,"step-replay-ref");let mut x=reopen(&e44_conf(&d,1));
+    assert_eq!(x.stats.resumed_from,Some(30),"resumed from the replay checkpoint written before the crash");
+    e44_same(&mut x,&mut g,"after a crash just after a replay checkpoint");
+    drop(x);drop(g);for p in [d,gd]{let _=std::fs::remove_dir_all(&p);}let _=std::fs::remove_file(&file);
 }
 /// D-6: a checkpoint entry bound to its sibling's journal record is refused. The siblings share a parent
 /// and a target (equal height and total work) and neither holds a stored version, so only the check that
@@ -2379,4 +2412,25 @@ fn e4_checkpoint_kill_child(){
     assert_eq!(n.stats.resumed_from,None,"the checkpoint is refused");assert_eq!(n.stats.checkpoints_refused,1);
     e44_same(&mut n,&mut g0,"after a sibling-bound checkpoint");
     drop(n);drop(g0);for x in [d,gd]{let _=std::fs::remove_dir_all(&x);}
+}
+
+/// D-6 with every kind of entry a checkpoint holds: canonical entries offloaded below a 4-block history
+/// window and slimmed below an 8-block slim depth, side blocks offloaded, and side blocks evicted by a side
+/// cap of 1 (remembered in the eviction FIFO). Replay from genesis writes checkpoints; the next open resumes
+/// from one and is the node replay from genesis gives, field by field.
+#[test] fn e4_checkpoint_resumes_slimmed_offloaded_and_evicting_chains(){
+    let blocks=e44_blocks();let every=7u64;
+    let lim:fn(&mut pocold::node::Limits)=|l|{l.slim_depth=Some(8);l.history_window=Some(4);l.side_cap=1;l.r_keep=24;};
+    // A side block whose parent the cap evicted is an orphan here (not journaled): the journal is what live kept.
+    let a=e44_dir("kinds");{let mut n=reopen(&e44_conf_with(&a,every,lim));for b in blocks{let _=n.import(b.clone(),None);}}
+    let g=e44_dir("kinds-ref");copy_dir(&a,&g);let mut r0=reopen(&e44_conf_with(&g,0,lim));assert_eq!(r0.stats.resumed_from,None);
+    let c=e44_dir("kinds-replayed");copy_dir(&a,&c);std::fs::remove_file(c.join(pocold::state_store::FILE)).unwrap();
+    drop(reopen(&e44_conf_with(&c,every,lim)));
+    let mut n=reopen(&e44_conf_with(&c,every,lim));let records=n.journal_records();assert!(records<blocks.len() as u64,"positive control: orphans were not journaled");
+    assert_eq!(n.stats.resumed_from,Some((records/every)*every),"resumed after the newest replay checkpoint");
+    let f=pocold::checkpoint::fingerprint(&n.chain).unwrap();let fl=|b:u16|f.entries.iter().filter(|e|e.flags&b!=0).count();
+    assert!(fl(pocold::checkpoint::flags::SLIM)>50&&fl(pocold::checkpoint::flags::OFFLOADED)>50,"positive control: slimmed {} and offloaded {} entries",fl(pocold::checkpoint::flags::SLIM),fl(pocold::checkpoint::flags::OFFLOADED));
+    assert!(!f.evicted_order.is_empty()&&n.chain.evicted_total>0,"positive control: side blocks were evicted");
+    e44_same(&mut n,&mut r0,"resumed with slimmed, offloaded and evicted entries");
+    drop(n);drop(r0);for d in [a,g,c]{let _=std::fs::remove_dir_all(&d);}
 }

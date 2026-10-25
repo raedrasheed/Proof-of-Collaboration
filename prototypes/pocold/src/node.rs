@@ -289,6 +289,12 @@ impl Node{
         // C-1 S4: deeper than any fork (R_keep), a head that fell back by R_keep, the evidence window and
         // the 256-ancestor window: no validation reads a slimmed entry unless the head fell back further.
         chain.slim_depth=Some(cfg.limits.slim_depth.unwrap_or(2*rk_replay.max(cfg.limits.r_keep)+u64::from(chain.spec.cp().E_win)+257));
+        let mut events:HashMap<[u8;32],VecDeque<(usize,bool)>>=HashMap::new(); // (record, is_child)
+        for (i,payload) in rec.payloads.iter().enumerate(){
+            let (hb,_,_)=store::decode_record(payload).map_err(|e|format!("record {i}: {e}"))?;
+            let header=decode_header(&hb).map_err(|e|format!("record {i}: {e}"))?;
+            events.entry(block_hash(&header)).or_default().push_back((i,false));events.entry(header.parent_hash).or_default().push_back((i,true));
+        }
         // Every record's frame offset and the rolling hash of every journal prefix (C-1 E4.4 binding).
         let n_rec=rec.payloads.len();let (mut offs,mut rolls)=(Vec::with_capacity(n_rec+1),Vec::with_capacity(n_rec+1));
         {let (mut o,mut h)=(40u64,[0u8;32]);offs.push(o);rolls.push(h);for p in &rec.payloads{o+=(p.len()+store::OVERHEAD) as u64;h=crate::checkpoint::roll(&h,p);offs.push(o);rolls.push(h);}}
@@ -318,9 +324,12 @@ impl Node{
                         let by_off:HashMap<u64,usize>=offs.iter().take(n_rec).enumerate().map(|(i,o)|(*o,i)).collect();
                         for (q,s) in snaps{
                             let b=s.binding;let k=b.records as usize;
+                            // Replay's protect set after record k: the blocks whose next journal event is a child record.
+                            let protect:std::collections::HashSet<[u8;32]>=s.entries.iter().filter(|e|events.get(&e.hash).and_then(|q|q.iter().find(|x|x.0>=k)).map_or(false,|x|x.1)).map(|e|e.hash).collect();
                             let r=if k>n_rec||offs[k]!=b.end||rolls[k]!=b.hash{Err("it is not bound to this journal's records".to_string())}
+                                else if s.protect.as_ref().map_or(false,|p|p.len()!=protect.len()||p.iter().any(|h|!protect.contains(h))){Err("its protect set is not the one replay had after its last record".to_string())}
                                 else{crate::checkpoint::restore(&mut chain,&s,&crate::checkpoint::JournalSource{by_off:by_off.clone(),payloads:&rec.payloads,records:k,history:&history},&dyn_st)};
-                            match r{Ok(())=>{resumed=Some(k);break}
+                            match r{Ok(())=>{resumed=Some(k);chain.protect=protect;break}
                                 Err(e)=>{refused+=1;if cfg.log{eprintln!("[{}] checkpoint {q} (record {k}) refused: {e}",cfg.name);}
                                     if st.drop_checkpoint(q).is_err()||st.is_damaged(){break}}}
                         }
@@ -349,18 +358,11 @@ impl Node{
         // (2) a record of a block already present is a re-import after live removed it, so it takes a
         // new importSeq (consensus.md:205). With the same R_keep boundary, every replayed head equals
         // the live head after the same record (D-REORG-REDB-DESIGN-FREEZE.md Revision 2).
-        let mut events:HashMap<[u8;32],VecDeque<(usize,bool)>>=HashMap::new(); // (record, is_child)
-        for (i,payload) in rec.payloads.iter().enumerate(){
-            let (hb,_,_)=store::decode_record(payload).map_err(|e|format!("record {i}: {e}"))?;
-            let header=decode_header(&hb).map_err(|e|format!("record {i}: {e}"))?;
-            events.entry(block_hash(&header)).or_default().push_back((i,false));events.entry(header.parent_hash).or_default().push_back((i,true));
-        }
-        // C-1 E4.4: resumed after record `start`, replay's protection is what it was after that record: a
-        // block whose next journal event is a child record.
+        // C-1 E4.4: resumed after record `start`: the events up to it are behind (the protect set they leave,
+        // the blocks whose next event is a child record, was set when the checkpoint was restored).
         if start>0{
             for q in events.values_mut(){while q.front().map_or(false,|x|x.0<start){q.pop_front();}}
             events.retain(|_,q|!q.is_empty());
-            for (b,q) in &events{if chain.blocks.contains_key(b)&&q.front().map_or(false,|x|x.1){chain.protect.insert(*b);}}
         }
         let mut rec_off=offs[start]; // first record frame starts after MAGIC(8)+binding(32)
         let (mut skipped,mut restored,mut refilled)=(0u64,0usize,0u64);

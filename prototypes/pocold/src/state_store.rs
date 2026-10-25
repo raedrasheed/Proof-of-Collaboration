@@ -127,6 +127,19 @@ impl StateStore{
         self.guard(||{let r=self.db.begin_read().map_err(err)?;let t=r.open_table(PINS).map_err(err)?;let mut out=Vec::new();
             for kv in t.iter().map_err(err)?{let (k,v)=kv.map_err(err)?;out.push((*k.value(),v.value()));}Ok(out)})
     }
+    /// C-1 E4.5: the bytes of every key and value stored, over all tables (file size over this is the
+    /// file factor measured in evidence/c1-e4).
+    pub fn stored_bytes(&self)->Result<u64,StateStoreError>{
+        self.guard(||{let r=self.db.begin_read().map_err(err)?;let mut n=0u64;
+            {let t=r.open_table(NODES).map_err(err)?;for kv in t.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;n+=32+v.value().len() as u64;}}
+            {let t=r.open_table(CODE).map_err(err)?;for kv in t.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;n+=32+v.value().len() as u64;}}
+            {let t=r.open_table(ADDRS).map_err(err)?;n+=t.len().map_err(err)?*(32+20);}
+            {let t=r.open_table(SLOTS).map_err(err)?;n+=t.len().map_err(err)?*(52+32);}
+            {let t=r.open_table(PINS).map_err(err)?;n+=t.len().map_err(err)?*(32+4);}
+            {let t=r.open_table(CKPT).map_err(err)?;for kv in t.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;n+=8+v.value().len() as u64;}}
+            {let t=r.open_table(CKPT_ROOTS).map_err(err)?;for kv in t.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;n+=8+v.value().len() as u64;}}
+            Ok(n)})
+    }
     /// Resident bytes the cache holds (at most its bound).
     pub fn cache_bytes(&self)->usize{self.cache.lock().unwrap().bytes}
     pub fn node_count(&self)->Result<u64,StateStoreError>{self.guard(||{let r=self.db.begin_read().map_err(err)?;let t=r.open_table(NODES).map_err(err)?;t.len().map_err(err)})}

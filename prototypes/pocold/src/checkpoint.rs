@@ -50,7 +50,10 @@ pub struct Rec{pub hash:[u8;32],pub body_off:Option<u64>,pub import_seq:u64,pub 
 /// A decoded snapshot.
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct Snapshot{pub genesis:[u8;32],pub params:Params,pub binding:Binding,pub head:[u8;32],pub next_seq:u64,pub slim_cursor:u64,pub history_cursor:u64,pub evicted_total:u64,
-    pub unslimmed:Vec<[u8;32]>,pub evicted_order:Vec<[u8;32]>,pub entries:Vec<Rec>}
+    pub unslimmed:Vec<[u8;32]>,pub evicted_order:Vec<[u8;32]>,
+    /// Written by replay: its protect set (blocks a later record builds on), which open recomputes from the
+    /// journal and compares. None from a running node (its protect set is a sync session's).
+    pub protect:Option<Vec<[u8;32]>>,pub entries:Vec<Rec>}
 
 struct W(Vec<u8>);
 impl W{fn u(&mut self,x:u64){self.0.extend_from_slice(&x.to_be_bytes())}fn b(&mut self,x:&[u8]){self.0.extend_from_slice(x)}fn o(&mut self,x:Option<u64>){match x{Some(v)=>{self.0.push(1);self.u(v)}None=>self.0.push(0)}}
@@ -83,8 +86,9 @@ pub fn snapshot_of(c:&Chain,b:&Binding)->Result<Snapshot,String>{
     if c.trie_store.is_none(){return Err("a checkpoint is of a store-mode chain".into())}
     let entries=sorted(c).into_iter().map(rec_of).collect::<Result<Vec<_>,_>>()?;
     Ok(Snapshot{genesis:c.spec.genesis_hash(),params:Params::of(c),binding:*b,head:c.head,next_seq:c.next_seq,slim_cursor:c.slim_cursor,history_cursor:c.history_cursor,
-        evicted_total:c.evicted_total,unslimmed:c.unslimmed.clone(),evicted_order:c.evicted_order.iter().copied().collect(),entries})
+        evicted_total:c.evicted_total,unslimmed:c.unslimmed.clone(),evicted_order:c.evicted_order.iter().copied().collect(),protect:protect_of(c),entries})
 }
+fn protect_of(c:&Chain)->Option<Vec<[u8;32]>>{c.replaying.then(||{let mut v:Vec<[u8;32]>=c.protect.iter().copied().collect();v.sort();v})}
 fn sorted(c:&Chain)->Vec<&Entry>{let mut es:Vec<&Entry>=c.blocks.values().collect();es.sort_by_key(|e|(e.height,e.hash));es}
 fn rec_of(e:&Entry)->Result<Rec,String>{
     if !e.state.accounts.is_empty()||e.diff.is_some()||e.trie.is_some(){return Err(format!("entry {} holds more than a stored version",B256::from(e.hash)))}
@@ -102,17 +106,17 @@ fn put_rec(w:&mut W,e:&Rec){
     if e.flags&F_SUMMARY!=0{if let Some(x)=&e.summary{put_summary(w,x)}}
     if e.flags&F_WORLD!=0{if let Some(r)=&e.root{w.b(r)}}
 }
-fn put_head(w:&mut W,genesis:&[u8;32],p:&Params,b:&Binding,head:&[u8;32],next_seq:u64,slim_cursor:u64,history_cursor:u64,evicted_total:u64,unslimmed:&[[u8;32]],evicted:&[[u8;32]],n:usize){
+fn put_head(w:&mut W,genesis:&[u8;32],p:&Params,b:&Binding,head:&[u8;32],next_seq:u64,slim_cursor:u64,history_cursor:u64,evicted_total:u64,unslimmed:&[[u8;32]],evicted:&[[u8;32]],protect:&Option<Vec<[u8;32]>>,n:usize){
     w.b(MAGIC);w.b(genesis);
     w.u(p.r_keep);w.u(p.side_cap);w.u(p.k_hist);w.u(p.side_max);w.o(p.history_window);w.o(p.slim_depth);w.0.push(u8::from(p.keep_full));
     w.u(b.records);w.u(b.end);w.b(&b.hash);
     w.b(head);w.u(next_seq);w.u(slim_cursor);w.u(history_cursor);w.u(evicted_total);
-    w.hs(unslimmed);w.hs(evicted);w.u(n as u64);
+    w.hs(unslimmed);w.hs(evicted);match protect{Some(v)=>{w.0.push(1);w.hs(v)}None=>w.0.push(0)}w.u(n as u64);
 }
 /// A snapshot's bytes, sealed (Keccak-256 of everything before the seal).
 pub fn encode_snapshot(s:&Snapshot)->Vec<u8>{
     let mut w=W(Vec::with_capacity(256+s.entries.len()*REC_MAX));
-    put_head(&mut w,&s.genesis,&s.params,&s.binding,&s.head,s.next_seq,s.slim_cursor,s.history_cursor,s.evicted_total,&s.unslimmed,&s.evicted_order,s.entries.len());
+    put_head(&mut w,&s.genesis,&s.params,&s.binding,&s.head,s.next_seq,s.slim_cursor,s.history_cursor,s.evicted_total,&s.unslimmed,&s.evicted_order,&s.protect,s.entries.len());
     for e in &s.entries{put_rec(&mut w,e)}
     let seal=keccak256(&w.0);w.b(&seal.0);w.0
 }
@@ -123,7 +127,7 @@ pub fn encode(c:&Chain,b:&Binding)->Result<(Vec<u8>,Vec<Id>),String>{
     if c.trie_store.is_none(){return Err("a checkpoint is of a store-mode chain".into())}
     let es=sorted(c);let mut w=W(Vec::with_capacity(256+(c.unslimmed.len()+c.evicted_order.len())*32+es.len()*REC_MAX));let mut roots=Vec::new();
     let evicted:Vec<[u8;32]>=c.evicted_order.iter().copied().collect();
-    put_head(&mut w,&c.spec.genesis_hash(),&Params::of(c),b,&c.head,c.next_seq,c.slim_cursor,c.history_cursor,c.evicted_total,&c.unslimmed,&evicted,es.len());
+    put_head(&mut w,&c.spec.genesis_hash(),&Params::of(c),b,&c.head,c.next_seq,c.slim_cursor,c.history_cursor,c.evicted_total,&c.unslimmed,&evicted,&protect_of(c),es.len());
     for e in es{let r=rec_of(e)?;if let Some(x)=r.root{roots.push(x)}put_rec(&mut w,&r);}
     let seal=keccak256(&w.0);w.b(&seal.0);Ok((w.0,roots))
 }
@@ -138,6 +142,7 @@ pub fn decode(bytes:&[u8])->Result<Snapshot,String>{
     let binding=Binding{records:r.u()?,end:r.u()?,hash:r.h()?};
     let (head,next_seq,slim_cursor,history_cursor,evicted_total)=(r.h()?,r.u()?,r.u()?,r.u()?,r.u()?);
     let (unslimmed,evicted_order)=(r.hs()?,r.hs()?);
+    let protect=match r.take(1)?[0]{0=>None,1=>Some(r.hs()?),_=>return Err("snapshot option tag".into())};
     let n=r.n(32+2+8*6+32+20)?;let mut entries=Vec::with_capacity(n);
     for _ in 0..n{
         let hash=r.h()?;let flags=u16::from_be_bytes(r.take(2)?.try_into().unwrap());let off=r.u()?;let import_seq=r.u()?;
@@ -149,7 +154,7 @@ pub fn decode(bytes:&[u8])->Result<Snapshot,String>{
         entries.push(Rec{hash,body_off:(flags&F_OFF!=0).then_some(off),import_seq,total_work,flags,cum_txs,cum_tx_bytes,cum_log_bytes,drawn,summary,root});
     }
     if r.i!=body.len(){return Err("snapshot has trailing bytes".into())}
-    Ok(Snapshot{genesis,params,binding,head,next_seq,slim_cursor,history_cursor,evicted_total,unslimmed,evicted_order,entries})
+    Ok(Snapshot{genesis,params,binding,head,next_seq,slim_cursor,history_cursor,evicted_total,unslimmed,evicted_order,protect,entries})
 }
 /// The roots a snapshot pins, as `encode` lists them.
 pub fn roots(s:&Snapshot)->Vec<Id>{s.entries.iter().filter_map(|e|e.root).collect()}
@@ -160,6 +165,8 @@ pub trait Source{
     fn payload_at(&self,off:u64)->Option<&[u8]>;
     fn receipts(&self,hash:&[u8;32])->Result<Option<Vec<Vec<u8>>>,String>;
     fn ranges(&self,hash:&[u8;32])->Result<Option<Vec<(Address,u128,u128)>>,String>;
+    /// Whether history.redb holds the block's receipts and nonce ranges.
+    fn has(&self,hash:&[u8;32])->Result<bool,String>;
 }
 
 /// Restores a snapshot into `c`: a chain that holds only genesis, with its store enabled and the
@@ -182,11 +189,15 @@ pub fn restore(c:&mut Chain,s:&Snapshot,src:&dyn Source,store:&Arc<dyn TrieStore
             if r.hash!=gh||r.body_off.is_some(){return Err(why("the first entry is not genesis"))}
             let mut g=c.blocks[&gh].clone();
             if g.summary.as_deref()!=r.summary.as_ref(){return Err(why("genesis summary"))}
+            // Genesis's version is the one `enable_store` just built from the admitted genesis state.
             if r.root!=g.stored.as_ref().and_then(|p|p.trie.world){if r.root.is_some(){return Err(why("genesis root"))}g.stored=None;}
-            if let Some(p)=&g.stored{if p.trie.root(&**store,&Default::default())!=c.spec.genesis().root(){return Err(why("the genesis version's state root"))}}
             g
         }else{
             let off=r.body_off.ok_or_else(||why("no journal record"))?;
+            // Every journaled block's receipts and ranges are in history.redb (written before its record,
+            // I3; replay makes them durable before it checkpoints): one an old entry would read on demand
+            // must be there too.
+            if !src.has(&r.hash)?{return Err(why("not in history.redb"))}
             let payload=src.payload_at(off).ok_or_else(||why("its journal offset is not a record of the bound prefix"))?;
             let (hb,bb,rb)=crate::store::decode_record(payload).map_err(|e|why(&format!("record: {e}")))?;
             let header=decode_header(&hb).map_err(|e|why(&format!("header: {e}")))?;
@@ -220,10 +231,11 @@ pub fn restore(c:&mut Chain,s:&Snapshot,src:&dyn Source,store:&Arc<dyn TrieStore
         let mut e=e;e.pruned=r.flags&F_PRUNED!=0;e.full=r.flags&F_FULL!=0;e.import_seq=r.import_seq;e.cum_txs=r.cum_txs;e.cum_tx_bytes=r.cum_tx_bytes;e.cum_log_bytes=r.cum_log_bytes;e.drawn=r.drawn;e.is_final=r.flags&F_FINAL!=0;
         // Every stored version is read whole: each node is checked against its id as it is read, a node
         // that is missing marks the store damaged, and the summary must be the sealed one.
+        // A slimmed entry may still hold its version (a slim depth below K_hist): it keeps no summary, which
+        // execution then computes from the version (`Chain::execute`); the version is still read whole here.
         if let Some(pin)=&e.stored{
-            let want=r.summary.ok_or_else(||why("a stored version without its summary"))?;
             let got=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||Summary::scan_view(&pin.view(),code_max))).map_err(|_|why("the stored version could not be read whole"))?;
-            if got!=want{return Err(why("the stored version's summary is not the sealed one"))}
+            match r.summary{Some(want) if got!=want=>return Err(why("the stored version's summary is not the sealed one")),None if r.flags&F_SLIM==0=>return Err(why("a stored version without its summary")),_=>{}}
         }
         blocks.insert(e.hash,e);
     }
@@ -243,6 +255,7 @@ impl Source for JournalSource<'_>{
     fn payload_at(&self,off:u64)->Option<&[u8]>{self.by_off.get(&off).filter(|i|**i<self.records).map(|i|self.payloads[*i].as_slice())}
     fn receipts(&self,hash:&[u8;32])->Result<Option<Vec<Vec<u8>>>,String>{self.history.receipts(hash).map_err(|e|e.0)}
     fn ranges(&self,hash:&[u8;32])->Result<Option<Vec<(Address,u128,u128)>>,String>{self.history.ranges(hash).map_err(|e|e.0)}
+    fn has(&self,hash:&[u8;32])->Result<bool,String>{self.history.has(hash).map_err(|e|e.0)}
 }
 /// The chain's persistent fields as a snapshot sees them (tests compare two chains with it).
 pub fn fingerprint(c:&Chain)->Result<Snapshot,String>{snapshot_of(c,&Binding{records:0,end:0,hash:[0;32]})}
