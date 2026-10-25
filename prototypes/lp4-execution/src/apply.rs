@@ -244,7 +244,7 @@ fn enc_u256(out:&mut Vec<u8>,v:U256){out.extend(v.to_be_bytes::<32>())}
 fn enc_addr(out:&mut Vec<u8>,a:Address){out.extend(a.into_word().0)}
 
 /// Final predicate (consensus §8) from the parent state and this block's (h, ts).
-pub fn is_final_block(parent:&InMemoryDB,profile:&ProfileIdentity,h:u64,ts:u64)->bool{
+pub fn is_final_block(parent:&dyn crate::view::View,profile:&ProfileIdentity,h:u64,ts:u64)->bool{
     let f=chain_facts(parent);
     crate::finality_core::final_predicate(crate::finality_core::ParentFacts{closing:f.closing,close_h:f.close_h,cursor_done:f.cursor_done,is_final:false},
         h,ts,u32::from(profile.cp().D),profile.cp().H_END,profile.cp().T_END)
@@ -295,9 +295,22 @@ fn same_outputs(a:&BlockOutput,b:&BlockOutput,h:u64){
     assert_eq!(x.block_hashes,y.block_hashes,"C-1 E3: h={h} block hashes");
     assert_eq!(x.logs.len(),y.logs.len(),"C-1 E3: h={h} logs");
 }
-fn apply_impl(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie::StateTrie>,parent_summary:Option<&crate::state_summary::Summary>,genesis:&Genesis,profile:&ProfileIdentity,input:&BlockInput<'_>)->Result<BlockOutput,ApplyError>{
-    use crate::{state_summary::Summary,state_trie::Touched};
-    let cp=profile.cp();
+/// C-1 E4: a block run on a parent with its summary, before the child state is merged or stored: the
+/// block's writes as a layer over the parent and every output but the state root, which the caller takes
+/// from the trie it keeps (E1's in memory, or a stored node trie).
+pub struct BlockRun{
+    /// The child state is `Overlay::from_layer(parent, layer)`.
+    pub layer:crate::view::Layer,
+    /// The accounts and slots the block wrote (complete).
+    pub writes:crate::state_trie::Touched,
+    /// The child's summary (`contracts_clean` left true: there is no contracts map to drop from here).
+    pub summary:crate::state_summary::Summary,
+    pub transactions_root:B256,pub receipts_root:B256,pub evidence_root:B256,pub logs_bloom:[u8;256],pub gas_used:u64,
+    pub receipts:Vec<Vec<u8>>,pub tips:U256,pub issued:U256,pub system_gas:u64,pub is_final:bool,pub facts:ChainFacts,pub meter:Meter,
+    pub log_bytes:u64,pub halts:Vec<(usize,crate::user_phase::Halt)>,pub dirty_accounts:u64,
+}
+/// The context checks every block passes before it runs.
+fn context_checks(cp:&crate::profile::ConsensusParams,input:&BlockInput<'_>)->Result<(),ApplyError>{
     let h=input.height;
     if h==0||h>cp.H_END{return Err(ApplyError::Context("height"))}
     if input.gas_limit!=cp.GAS_LIMIT{return Err(ApplyError::Context("gasLimit"))}
@@ -306,39 +319,74 @@ fn apply_impl(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie::StateTri
     let body_bytes:usize=input.transactions.iter().chain(input.evidence_raw.iter()).map(|t|t.len()).sum();
     if body_bytes>cp.BODY_MAX as usize{return Err(ApplyError::Budget("BODY_MAX"))}
     if input.evidence_raw.len()>usize::from(cp.E_max)||input.evidence_raw.iter().any(|e|e.len()>cp.EVID_BYTES_MAX as usize){return Err(ApplyError::Budget("evidence"))}
-    let check=root_check();
-    match parent_summary{
-        Some(sum)=>{let r=genesis.image.verify_summary(parent,sum,profile);
-            if check{assert_eq!(*sum,Summary::scan(parent,cp.B_code_max),"C-1 E2: the parent's summary differs from a scan");assert_eq!(r,genesis.image.verify_candidate(parent,profile),"C-1 E2: parent check");}
-            r}
-        None=>genesis.image.verify_candidate(parent,profile),
-    }.map_err(|e|ApplyError::Genesis(format!("parent {e:?}")))?;
+    for (n,_) in &input.ancestors{if *n>=h||h-*n>256{return Err(ApplyError::Context("ancestor window"))}}
+    Ok(())
+}
+fn job<'a>(parent:&'a dyn crate::view::View,parent_summary:Option<&'a crate::state_summary::Summary>,profile:&'a ProfileIdentity,input:&'a BlockInput<'a>,check:bool)->Result<Job<'a>,ApplyError>{
+    let cp=profile.cp();let h=input.height;
     let is_final=is_final_block(parent,profile,h,input.timestamp);
     let limits=CodeLimits{runtime:cp.B_code_max,logical:cp.CODE_CAP};
     let origin=match input.proposer{Proposer::Signed(a) if a!=Address::ZERO=>a,Proposer::Signed(_)=>return Err(ApplyError::Context("proposer")),Proposer::Fallback=>Address::ZERO};
-    for (n,_) in &input.ancestors{if *n>=h||h-*n>256{return Err(ApplyError::Context("ancestor window"))}}
     let block=NativeBlockContext{height:U256::from(h),timestamp:U256::from(input.timestamp),gas_limit:U256::from(input.gas_limit),base_fee:input.base_fee,prevrandao:input.prevrandao};
-    let job=Job{parent,parent_summary,profile,input,block,origin,limits,is_final,check};
-    // C-1 E3: with the parent's summary the block runs on an overlay over the parent (no copy until the
-    // end); without it on an owned copy of the parent, as before.
-    let (mut state,touched,ran)=match parent_summary{
-        Some(_)=>{let r=job.run(crate::view::Overlay::new(parent))?;let t=r.state.touched();let m=r.state.merge();(m,Some(t),r.rest)}
-        None=>{let r=job.run(parent.clone())?;let t=parent_trie.is_some().then(||Touched::between(parent,&r.state));(r.state,t,r.rest)}
-    };
+    Ok(Job{parent,parent_summary,profile,input,block,origin,limits,is_final,check})
+}
+/// C-1 E4: `apply_block_with` on a parent read through any view (a stored trie version), given the
+/// parent's summary. Every check reads summaries and views; nothing walks or copies the parent. Under
+/// `root_check()` the summaries are compared with whole-state scans of the views.
+pub fn apply_block_on<B:crate::view::View>(parent:&B,parent_summary:&crate::state_summary::Summary,genesis:&Genesis,profile:&ProfileIdentity,input:&BlockInput<'_>)->Result<BlockRun,ApplyError>{
+    use crate::state_summary::Summary;
+    let cp=profile.cp();let h=input.height;let check=root_check();let pv:&dyn crate::view::View=parent;
+    context_checks(cp,input)?;
+    let r=genesis.image.verify_summary(pv,parent_summary,profile);
+    if check{assert!(same_counts(parent_summary,&Summary::scan_view(pv,cp.B_code_max)),"C-1 E2: the parent's summary differs from a scan");}
+    r.map_err(|e|ApplyError::Genesis(format!("parent {e:?}")))?;
+    let job=job(pv,Some(parent_summary),profile,input,check)?;let is_final=job.is_final;
+    let ran=job.run(crate::view::Overlay::new(parent))?;
+    let writes=ran.state.touched();
+    let Rest{users,tips,issued,system_gas,meter}=ran.rest;
+    let child=&ran.state;
+    let summary=parent_summary.moved(pv,child,&writes);
+    let r=genesis.image.verify_summary(child,&summary,profile);
+    if check{assert!(same_counts(&summary,&Summary::scan_view(child,cp.B_code_max)),"C-1 E2: the candidate's summary differs from a scan");}
+    r.map_err(|e|ApplyError::Genesis(format!("candidate {e:?}")))?;
+    check_escrow_invariant(child,profile,h,is_final)?;
+    let c=users.commitments().clone();
+    let evidence_root=crate::trie::ordered_root(input.evidence_raw,usize::from(cp.E_max)).map(B256::from).map_err(|_|ApplyError::Root)?;
+    let facts=chain_facts(child);
+    Ok(BlockRun{layer:ran.state.into_layer(),writes,summary,transactions_root:c.transactions_root,receipts_root:c.receipts_root,evidence_root,logs_bloom:c.logs_bloom,gas_used:c.gas_used,
+        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts()})
+}
+fn apply_impl(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie::StateTrie>,parent_summary:Option<&crate::state_summary::Summary>,genesis:&Genesis,profile:&ProfileIdentity,input:&BlockInput<'_>)->Result<BlockOutput,ApplyError>{
+    use crate::{state_summary::Summary,state_trie::Touched};
+    let cp=profile.cp();let h=input.height;let check=root_check();
+    // C-1 E3/E4: with the parent's summary the block runs on an overlay over the parent (`apply_block_on`)
+    // and is merged once at the end; without it on an owned copy of the parent, as before.
+    if let Some(sum)=parent_summary{
+        if check{assert_eq!(*sum,Summary::scan(parent,cp.B_code_max),"C-1 E2: the parent's summary differs from a scan");
+            assert_eq!(genesis.image.verify_summary(parent,sum,profile),genesis.image.verify_candidate(parent,profile),"C-1 E2: parent check");}
+        let run=apply_block_on(parent,sum,genesis,profile,input)?;
+        let mut state=crate::view::Overlay::from_layer(parent,run.layer).merge();let t=run.writes;
+        if check{assert!(same_touched(&t,&Touched::between(parent,&state)),"C-1 E3: the overlay's write set misses a change");
+            assert_eq!(genesis.image.verify_candidate(&state,profile),Ok(()),"C-1 E2: candidate check");}
+        let reference=check.then(||{let mut r=state.clone();crate::user_phase::drop_unreferenced_code(&mut r);r.contracts});
+        let clean=crate::state_summary::drop_unreferenced_code(parent,sum,&mut state,&t);
+        if let Some(r)=reference{assert!(r.len()==state.contracts.len()&&r.keys().all(|k|state.contracts.contains_key(k)),"C-1 E2: the code drop differs");}
+        let summary=Summary{contracts_clean:clean,..run.summary};
+        if check{assert_eq!(summary,Summary::scan(&state,cp.B_code_max),"C-1 E2: the candidate's summary differs from a scan");}
+        let trie=match parent_trie{Some(p)=>p.update(&state,&t),None=>crate::state_trie::StateTrie::build(&state)};
+        let state_root=trie.root();
+        if check{assert_eq!(state_root,self::state_root(&state)?,"C-1 E1: the incremental state root differs from the full computation at height {h}")}
+        return Ok(BlockOutput{state,state_root,transactions_root:run.transactions_root,receipts_root:run.receipts_root,evidence_root:run.evidence_root,logs_bloom:run.logs_bloom,gas_used:run.gas_used,
+            receipts:run.receipts,tips:run.tips,issued:run.issued,system_gas:run.system_gas,is_final:run.is_final,facts:run.facts,meter:run.meter,log_bytes:run.log_bytes,halts:run.halts,dirty_accounts:run.dirty_accounts,trie,summary,writes:Some(t)});
+    }
+    context_checks(cp,input)?;
+    genesis.image.verify_candidate(parent,profile).map_err(|e|ApplyError::Genesis(format!("parent {e:?}")))?;
+    let job=job(parent,None,profile,input,check)?;let is_final=job.is_final;
+    let r=job.run(parent.clone())?;let touched=parent_trie.is_some().then(||Touched::between(parent,&r.state));let (mut state,ran)=(r.state,r.rest);
     let Rest{users,tips,issued,system_gas,meter}=ran;
-    let summary=match (parent_summary,&touched){
-        (Some(sum),Some(t))=>{
-            if check{assert!(same_touched(t,&Touched::between(parent,&state)),"C-1 E3: the overlay's write set misses a change");}
-            let reference=check.then(||{let mut r=state.clone();crate::user_phase::drop_unreferenced_code(&mut r);r.contracts});
-            let clean=crate::state_summary::drop_unreferenced_code(parent,sum,&mut state,t);
-            if let Some(r)=reference{assert!(r.len()==state.contracts.len()&&r.keys().all(|k|state.contracts.contains_key(k)),"C-1 E2: the code drop differs");}
-            let mut f=sum.moved(parent,&state,t);f.contracts_clean=clean;
-            let r=genesis.image.verify_summary(&state,&f,profile);
-            if check{assert_eq!(f,Summary::scan(&state,cp.B_code_max),"C-1 E2: the candidate's summary differs from a scan");assert_eq!(r,genesis.image.verify_candidate(&state,profile),"C-1 E2: candidate check");}
-            r.map_err(|e|ApplyError::Genesis(format!("candidate {e:?}")))?;f}
-        _=>{crate::user_phase::drop_unreferenced_code(&mut state);
-            genesis.image.verify_candidate(&state,profile).map_err(|e|ApplyError::Genesis(format!("candidate {e:?}")))?;Summary::scan(&state,cp.B_code_max)}
-    };
+    crate::user_phase::drop_unreferenced_code(&mut state);
+    genesis.image.verify_candidate(&state,profile).map_err(|e|ApplyError::Genesis(format!("candidate {e:?}")))?;
+    let summary=Summary::scan(&state,cp.B_code_max);
     check_escrow_invariant(&state,profile,h,is_final)?;
 
     // Phase 3: roots.
@@ -349,17 +397,18 @@ fn apply_impl(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie::StateTri
     if root_check(){assert_eq!(state_root,self::state_root(&state)?,"C-1 E1: the incremental state root differs from the full computation at height {h}")}
     let facts=chain_facts(&state);
     Ok(BlockOutput{state,state_root,transactions_root:c.transactions_root,receipts_root:c.receipts_root,evidence_root,logs_bloom:c.logs_bloom,gas_used:c.gas_used,
-        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts(),trie,summary,writes:parent_summary.and(touched)})
+        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts(),trie,summary,writes:None})
 }
 /// What `apply_block_with` runs on a working state (phases 0 to 2), with what it borrows.
-struct Job<'a>{parent:&'a InMemoryDB,parent_summary:Option<&'a crate::state_summary::Summary>,profile:&'a ProfileIdentity,input:&'a BlockInput<'a>,block:NativeBlockContext,origin:Address,limits:CodeLimits,is_final:bool,check:bool}
+struct Job<'a>{parent:&'a dyn crate::view::View,parent_summary:Option<&'a crate::state_summary::Summary>,profile:&'a ProfileIdentity,input:&'a BlockInput<'a>,block:NativeBlockContext,origin:Address,limits:CodeLimits,is_final:bool,check:bool}
 struct Ran<S>{state:S,rest:Rest}
 struct Rest{users:crate::user_phase::UserCandidate<()>,tips:U256,issued:U256,system_gas:u64,meter:Meter}
 /// The written set of a working state since the parent (C-1 E3): complete for an overlay, a whole-state
 /// comparison for a copy.
-trait Since:crate::view::WorkState+Sized{fn since(&self,parent:&InMemoryDB)->crate::state_trie::Touched;fn placeholder(&self)->Self;}
-impl Since for InMemoryDB{fn since(&self,parent:&InMemoryDB)->crate::state_trie::Touched{crate::state_trie::Touched::between(parent,self)}fn placeholder(&self)->Self{InMemoryDB::default()}}
-impl Since for crate::view::Overlay<'_>{fn since(&self,_:&InMemoryDB)->crate::state_trie::Touched{self.touched()}fn placeholder(&self)->Self{crate::view::Overlay::new(self.base)}}
+trait Since:crate::view::WorkState+Sized{fn since(&self)->crate::state_trie::Touched;fn placeholder(&self)->Self;}
+/// A copy runs only without the parent's summary, where nothing asks for its written set.
+impl Since for InMemoryDB{fn since(&self)->crate::state_trie::Touched{unreachable!("C-1 E3: a block on a copy has no summary to move")}fn placeholder(&self)->Self{InMemoryDB::default()}}
+impl<B:crate::view::View+?Sized> Since for crate::view::Overlay<'_,B>{fn since(&self)->crate::state_trie::Touched{self.touched()}fn placeholder(&self)->Self{crate::view::Overlay::new(self.base)}}
 impl Job<'_>{
     fn run<S:Since>(&self,mut state:S)->Result<Ran<S>,ApplyError>{
         use crate::state_summary::Summary;
@@ -398,7 +447,7 @@ impl Job<'_>{
         // The live user counts and the code total: from the parent's summary moved to this state, or a
         // whole-state count as before.
         let (live,known)=match self.parent_summary{
-            Some(sum)=>{let u=sum.moved(parent,ex.state.as_view(),&ex.state.since(parent));
+            Some(sum)=>{let u=sum.moved(parent,ex.state.as_view(),&ex.state.since());
                 if check{let full=Summary::scan_view(ex.state.as_view(),cp.B_code_max);assert!(same_counts(&u,&full),"C-1 E3: the summary before the USER phase differs from a scan");}
                 ((u.user_slots,u.user_accounts),ex.code_total)}
             None=>(crate::user_phase::live_counts_view(ex.state.as_view()),None),
@@ -410,7 +459,7 @@ impl Job<'_>{
         // The USER phase replaced the state: without a summary the next SYSTEM call checks it whole again, as
         // before C-2; with one, the summary moved to the USER phase's state gives the check and the total.
         ex.code_total=match self.parent_summary{
-            Some(sum)=>{let t=ex.state.since(parent);let u=sum.moved(parent,ex.state.as_view(),&t);let r=u.code_check(limits);
+            Some(sum)=>{let t=ex.state.since();let u=sum.moved(parent,ex.state.as_view(),&t);let r=u.code_check(limits);
                 if check{assert!(same_counts(&u,&Summary::scan_view(ex.state.as_view(),cp.B_code_max)),"C-1 E2: the USER phase's summary differs from a scan");
                     assert_eq!(r.is_ok(),code_caps::validate_snapshot(ex.state.as_view(),limits).is_ok(),"C-1 E2: USER phase code check");}
                 r.map_err(ApplyError::Caps)?;Some(u.inventory())}
@@ -458,7 +507,7 @@ pub fn root_check()->bool{
 /// T17: Escrow surplus = balance-(Σpending+heldTotal+burnedTotal) >= 0, and
 /// pending[j] exists for every j in [h-D+1,h] (non-final) with winners recorded
 /// for j<h; at F no pending remains.
-pub fn check_escrow_invariant(db:&InMemoryDB,profile:&ProfileIdentity,h:u64,is_final:bool)->Result<(),ApplyError>{
+pub fn check_escrow_invariant(db:&dyn crate::view::View,profile:&ProfileIdentity,h:u64,is_final:bool)->Result<(),ApplyError>{
     let d=u64::from(profile.cp().D);let lo=h.saturating_sub(d)+1;
     let mut sum=U256::ZERO;
     for j in lo.max(1)..=h{
@@ -470,7 +519,7 @@ pub fn check_escrow_invariant(db:&InMemoryDB,profile:&ProfileIdentity,h:u64,is_f
         sum=sum.checked_add(amount).ok_or(ApplyError::Supply("sum"))?;
     }
     let f=chain_facts(db);
-    let balance=db.accounts.get(&escrow()).map(|a|a.info.balance).unwrap_or_default();
+    let balance=db.account(&escrow()).map(|a|a.info.balance).unwrap_or_default();
     let need=sum.checked_add(f.held_total).and_then(|v|v.checked_add(f.burned_total)).ok_or(ApplyError::Supply("need"))?;
     if balance<need{return Err(ApplyError::Supply("escrow surplus negative"))}
     Ok(())

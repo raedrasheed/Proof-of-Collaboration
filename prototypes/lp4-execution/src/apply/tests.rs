@@ -451,6 +451,7 @@ mod a03{
 /// and the store's reference counts equal a recount after every block.
 #[test] fn e4_a_node_trie_kept_from_the_write_sets_reads_as_every_block_state(){
     use crate::node_trie::{Batch,MemStore,NodeTrie,TrieState};use crate::view::View;
+    // C-1 E4.3: and every block run on its parent read from the store gives the same outputs.
     let net=devnet3();let ids:Vec<Address>=net.miners.iter().map(|m|m.id).collect();
     let alice=devnet::account_key("alice");let bob=devnet::account_key("bob").address();
     let tx=|nonce:u64,to:Option<Address>,data:Vec<u8>,gas:u64|crate::txsign::Tx{chain_id:777900,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas,to,value:U256::from(if to.is_some(){7u64}else{0}),data:data.into()}.sign_1559(&alice);
@@ -461,7 +462,7 @@ mod a03{
     let mut store=MemStore::default();let mut b=Batch::default();let mut nt=NodeTrie::build(&state,&store,&mut b);store.commit(&b,nt.world);
     let mut pinned=std::collections::VecDeque::from([nt.world]);
     let (mut prev,mut base_fee,mut parent_gas,mut nonce)=(None::<ParentResult>,U256::from(1_000_000_000u64),0u64,0u64);
-    let mut with_writes=0;
+    let (mut with_writes,mut on_store)=(0,0);
     for h in 1..=30u64{
         if h>1{base_fee=crate::fees::next_base_fee(base_fee,parent_gas,8_000_000).unwrap();}
         let created=|n:u64|alice.address().create(n);
@@ -470,6 +471,18 @@ mod a03{
             proposer:if h%2==0{Proposer::Signed(ids[(h as usize)%3])}else{Proposer::Fallback},
             parent_result:prev.clone(),evidence:vec![],evidence_raw:&[],transactions:&txs,ancestors:vec![(0,net.genesis_hash)],cum_log_bytes:0};
         let o=apply_block_with(&state,trie.as_ref(),sum.as_ref(),&net.genesis,&net.profile,&input).unwrap_or_else(|e|panic!("h={h}: {e:?}"));
+        // The same block run on the parent read from the store (`apply_block_on` over a `TrieState`), its
+        // root from the node trie updated through the child overlay: the same outputs.
+        if let Some(ps)=&sum{
+            let parent_ts=TrieState{store:&store,trie:nt,block_hashes:&state.block_hashes};
+            let run=apply_block_on(&parent_ts,ps,&net.genesis,&net.profile,&input).unwrap_or_else(|e|panic!("h={h} on the store: {e:?}"));
+            let child=crate::view::Overlay::from_layer(&parent_ts,run.layer.clone());
+            let mut b=Batch::default();let via=nt.update(&store,&mut b,&child,&run.writes);
+            assert_eq!(via.root(&store,&b),o.state_root,"h={h}: the root from the store-backed run");
+            assert_eq!((run.receipts_root,run.transactions_root,run.gas_used,&run.receipts,run.tips,run.issued,run.is_final,run.facts),(o.receipts_root,o.transactions_root,o.gas_used,&o.receipts,o.tips,o.issued,o.is_final,o.facts),"h={h}");
+            assert_eq!(crate::state_summary::Summary{contracts_clean:true,..run.summary},crate::state_summary::Summary{contracts_clean:true,..o.summary},"h={h}: summary");
+            on_store+=1;
+        }
         let touched=match &o.writes{Some(w)=>{with_writes+=1;w.clone()},None=>crate::state_trie::Touched::between(&state,&o.state)};
         let mut b=Batch::default();let next=nt.update(&store,&mut b,&o.state,&touched);
         assert_eq!(next.root(&store,&b),o.state_root,"h={h}: the node trie's root is the block's stateRoot");
@@ -496,6 +509,7 @@ mod a03{
         let w=ids[(h as usize)%3];prev=Some(ParentResult{block_hash:B256::from(U256::from(h)),winner:w,shares:vec![(10,ids[(h as usize+1)%3])]});
     }
     assert!(with_writes>=29,"positive control: the blocks ran on overlays and gave their write sets ({with_writes})");
+    assert!(on_store>=29,"positive control: the blocks also ran on the store ({on_store})");
     let created=alice.address().create(1);assert_ne!(state.slot(&created,&U256::from(0)),U256::ZERO,"positive control: the created contract's runtime wrote a slot");
 }
 

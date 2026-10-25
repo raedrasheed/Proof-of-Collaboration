@@ -335,6 +335,27 @@ impl NodeTrie{
     }
 }
 
+/// A node store that keeps versions: commits a batch under a pinned root and releases pins (pocold's
+/// `state.redb`, or `SharedMem` in memory).
+pub trait TrieStore:NodeStore+Send+Sync{
+    /// Stores the root's new nodes from the batch, with its code and preimages, and pins the root once.
+    fn commit(&self,b:&Batch,root:Option<Id>)->Result<(),String>;
+    /// Releases one pin of the root and every node only it held.
+    fn unpin(&self,root:&Id)->Result<(),String>;
+}
+/// `MemStore` behind a lock, as a `TrieStore` (tests, and a node without a data directory).
+#[derive(Default)]
+pub struct SharedMem(pub std::sync::Mutex<MemStore>);
+impl NodeStore for SharedMem{
+    fn node(&self,id:&Id)->Option<Arc<Node>>{self.0.lock().unwrap().node(id)}
+    fn code(&self,h:&B256)->Option<Bytecode>{self.0.lock().unwrap().code(h)}
+    fn address(&self,k:&Key)->Option<Address>{self.0.lock().unwrap().address(k)}
+    fn slot_key(&self,a:&Address,k:&Key)->Option<U256>{self.0.lock().unwrap().slot_key(a,k)}
+}
+impl TrieStore for SharedMem{
+    fn commit(&self,b:&Batch,root:Option<Id>)->Result<(),String>{self.0.lock().unwrap().commit(b,root);Ok(())}
+    fn unpin(&self,root:&Id)->Result<(),String>{self.0.lock().unwrap().unpin(root);Ok(())}
+}
 /// A store in memory with reference counts: a node lives while a pinned root or a stored node names it.
 #[derive(Default)]
 pub struct MemStore{pub nodes:HashMap<Id,(Arc<Node>,u32)>,pub code:HashMap<B256,Bytecode>,pub addrs:HashMap<Key,Address>,pub slots:HashMap<(Address,Key),U256>,pub pins:HashMap<Id,u32>}

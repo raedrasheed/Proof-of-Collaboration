@@ -31,6 +31,7 @@ pub mod threads{
     }
 }
 pub mod history;
+pub mod state_store;
 pub mod statediff;pub mod types;pub mod chain;pub mod store;pub mod miner;pub mod net;pub mod node;pub mod rpc;pub mod resources;
 /// Unit tests only: a counting allocator (per thread, while switched on) so tests can bound the
 /// heap a code path requests.

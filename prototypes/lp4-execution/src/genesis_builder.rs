@@ -11,7 +11,7 @@ impl GenesisImage{
  pub(crate) fn initial_supply(&self)->U256{self.alloc_sum+self.bonds}
  /// C-1 E2: `verify_candidate` with the whole-state counts read from `s`, the summary of `db`
  /// (state_summary): the same outcome. The fixed accounts are read from `db` as before.
- pub(crate) fn verify_summary(&self,db:&InMemoryDB,s:&crate::state_summary::Summary,p:&ProfileIdentity)->Result<(),GenesisError>{
+ pub(crate) fn verify_summary(&self,db:&dyn crate::view::View,s:&crate::state_summary::Summary,p:&ProfileIdentity)->Result<(),GenesisError>{
   if B256::from(p.genesis_hash())!=self.profile{return Err(GenesisError::Profile)}
   s.code_check(CodeLimits{runtime:p.cp().B_code_max,logical:p.cp().CODE_CAP}).map_err(|_|GenesisError::Code)?;
   if s.user_accounts>p.cp().ACCT_CAP||s.user_slots>p.cp().SLOT_CAP{return Err(GenesisError::Capacity)}
@@ -19,10 +19,10 @@ impl GenesisImage{
   if s.balance>revm::primitives::alloy_primitives::U512::from(self.supply_bound){return Err(GenesisError::Supply)}
   self.fixed_accounts(db,p)
  }
- fn fixed_accounts(&self,db:&InMemoryDB,p:&ProfileIdentity)->Result<(),GenesisError>{
-  if let Some(a)=db.accounts.get(&crate::pay_address()).and_then(|a|a.info()){if a.code_hash!=revm::primitives::KECCAK_EMPTY{return Err(GenesisError::Code)}}
-  for (i,hash) in self.codes.iter().enumerate(){let a=db.accounts.get(&system(i)).and_then(|a|a.info()).ok_or(GenesisError::Code)?;if a.code_hash!=*hash{return Err(GenesisError::Code)}}
-  for (i,value) in p.spec().cp.iter().enumerate(){let a=db.accounts.get(&system(3)).ok_or(GenesisError::Code)?;if a.storage.get(&U256::from(i)).copied().unwrap_or_default()!=number(*value){return Err(GenesisError::Profile)}}
+ fn fixed_accounts(&self,db:&dyn crate::view::View,p:&ProfileIdentity)->Result<(),GenesisError>{
+  if let Some(a)=db.account(&crate::pay_address()).and_then(|a|a.info()){if a.code_hash!=revm::primitives::KECCAK_EMPTY{return Err(GenesisError::Code)}}
+  for (i,hash) in self.codes.iter().enumerate(){let a=db.account(&system(i)).and_then(|a|a.info()).ok_or(GenesisError::Code)?;if a.code_hash!=*hash{return Err(GenesisError::Code)}}
+  for (i,value) in p.spec().cp.iter().enumerate(){db.account(&system(3)).ok_or(GenesisError::Code)?;if db.slot(&system(3),&U256::from(i))!=number(*value){return Err(GenesisError::Profile)}}
   Ok(())
  }
  pub(crate) fn verify_candidate(&self,db:&InMemoryDB,p:&ProfileIdentity)->Result<(),GenesisError>{
