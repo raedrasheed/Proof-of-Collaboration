@@ -906,10 +906,11 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     // -> 3,322,680,105 B; C-1 E1: the head's state trie, one derived or built trie and a block's changed
     // paths, and the entry's trie handle, -> 3,486,909,657 B; C-1 E2: each entry's boxed state summary,
     // -> 3,489,051,177 B; C-1 E3: blocks, production, the pool and RPC on overlays, 10 transient working
-    // copies -> 2, plus the pool's layer and the applied block's overlay, -> 3,186,963,844 B). Some terms are type
+    // copies -> 2, plus the pool's layer and the applied block's overlay, -> 3,186,963,844 B; C-1 E4.3: each entry's handle to a
+    // stored version, 8 B, -> 3,187,591,348 B). Some terms are type
     // sizes (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
     // target checks that it boots within the budget with its reserve.
-    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_186_963_844,"the A13 model total changed");}
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_187_591_348,"the A13 model total changed");}
     // C-1 S1: a window of the whole chain is the model before S1, plus history.redb's cache and allocator.
     let all=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits{history_window:Some(u64::MAX),..Default::default()},2).unwrap();
     let redb:u128=all.items.iter().filter(|x|x.0.starts_with("history/history.redb")).map(|x|x.1).sum();
@@ -1558,6 +1559,69 @@ fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::cha
     // With the head's own trie back, the same sibling's parent trie is derived.
     n.chain.blocks.get_mut(&head).unwrap().trie=None;let t=pocol_lp4_execution::state_trie::StateTrie::build(&n.chain.head().state);n.chain.blocks.get_mut(&head).unwrap().trie=Some(t);
     n.chain.validate(&sib,None,0).expect("sibling validates");assert_eq!(ld(&n.chain.trie_derived),1);
+}
+
+/// C-1 E4.3: a node whose states are trie versions in state.redb answers every state query (balance,
+/// nonce, code, storage, eth_call, "pending") at every height and tag exactly as a node that keeps whole
+/// states, live, after a reorg and back, and after reopening, with the same blocks, heads and rebuild
+/// work; it holds no whole state.
+#[test] fn e4_a_store_node_answers_as_a_whole_state_node(){
+    use pocold::node::{Config,Limits,Node};
+    let mk=|tag:&str,store:bool|{let dir=std::env::temp_dir().join(format!("pocold-e4-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+        let d=dir.clone();let t=tag.to_string();let conf=move||Config{dir:d.clone(),name:t.clone(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{state_store:store,..Default::default()}};
+        (Node::open(conf(),admitted(&cfg(&["a","b","c"]))).unwrap(),dir,conf)};
+    let (mut a,da,ca)=mk("store",true);let (mut b,db,cb)=mk("mem",false);
+    let (mut h,blocks,p)=s1_chain();
+    let fork=h.chain.get(&p).unwrap().parent.unwrap();let fork=h.chain.get(&fork).unwrap().parent.unwrap();
+    let mut h2=net();for x in &blocks{import(&mut h2,x);}
+    let bob=devnet::account_key("bob");
+    let mut side=vec![signed(&h2,fork,Body{txs:vec![pay(&bob,0,3)],evidence:vec![]},0)];import(&mut h2,&side[0]);
+    side.extend(heavier(&mut h2,side[0].hash(),h.chain.get(&p).unwrap().total_work,2));
+    let back=heavier(&mut h,p,h2.chain.head().total_work,1);
+    let alice=devnet::account_key("alice");let alice_a=alice.address();
+    let accounts:Vec<Address>=std::iter::once(alice_a).chain([bob.address(),Address::ZERO]).chain((0..50u64).map(|k|alice_a.create(k))).collect();
+    let full=|n:&mut Node,m:&str,p:serde_json::Value|{let body=json!({"jsonrpc":"2.0","id":1,"method":m,"params":p}).to_string();let (t,_r)=std::sync::mpsc::channel();
+        let r=pocold::rpc::answer(n,&pocold::rpc::Request::local(body.into_bytes(),t,std::time::Instant::now()+std::time::Duration::from_secs(120),false));
+        let v:serde_json::Value=serde_json::from_str(&r.body).unwrap();if v.get("error").is_some(){json!({"error":v["error"]["code"]})}else{json!({"result":v["result"]})}};
+    let answers=|n:&mut Node|->Vec<serde_json::Value>{let top=n.chain.head().height;let mut v=vec![];
+        let tags:Vec<serde_json::Value>=(0..=top).map(|x|json!(format!("{x:#x}"))).chain(["latest","safe","finalized","earliest","pending"].map(|t|json!(t))).collect();
+        for t in &tags{for a in &accounts{let a=format!("{a:#x}");
+            for m in ["eth_getBalance","eth_getTransactionCount","eth_getCode"]{v.push(full(n,m,json!([a,t])));}
+            v.push(full(n,"eth_getStorageAt",json!([a,"0x0",t])));v.push(full(n,"eth_getStorageAt",json!([a,"0x1",t])));}
+            v.push(full(n,"eth_call",json!([{"to":format!("{:#x}",alice_a.create(1)),"data":"0x"},t])));}
+        v.push(full(n,"pocol_getMiners",json!([])));
+        v};
+    let compare=|a:&mut Node,b:&mut Node,what:&str|{let (x,y)=(answers(a),answers(b));assert_eq!(x.len(),y.len());
+        let ok=x.iter().filter(|r|r.get("result").is_some()).count();
+        for (i,(p,q)) in x.iter().zip(&y).enumerate(){if p!=q{
+            let ht=i/266;let fl=|n:&Node|n.chain.canonical_at(ht as u64).map(|e|(e.height,e.pruned,e.full,e.stored.is_some(),e.diff.is_some()));
+            panic!("{what}: answer {i} (height {ht}, head {} / {}): store {p} {:?}, memory {q} {:?}",a.chain.head().height,b.chain.head().height,fl(a),fl(b));}}
+        assert!(ok>1000,"positive control ({what}): {ok} answers");
+        assert_eq!((a.chain.head,a.chain.head().header.state_root),(b.chain.head,b.chain.head().header.state_root),"{what}: the same head");};
+    let whole=|n:&Node|n.chain.blocks.values().filter(|e|!e.state.accounts.is_empty()).count();
+    let stored=|n:&Node|n.chain.blocks.values().filter(|e|e.stored.is_some()).count();
+    // Every pin the store holds is a stored version an entry holds (the pool's base shares the head's):
+    // nothing leaks when retention drops a state.
+    let pins=|n:&Node|n.chain.trie_store.as_ref().unwrap().pinned().unwrap() as usize;
+    // The store node keeps a version of exactly the states the whole-state node can still read (retention
+    // is unchanged): no state is kept longer, none dropped sooner.
+    let same_states=|a:&Node,b:&Node,what:&str|{
+        let mut x:Vec<[u8;32]>=a.chain.blocks.values().filter(|e|e.stored.is_some()).map(|e|e.hash).collect();
+        let mut y:Vec<[u8;32]>=b.chain.blocks.values().filter(|e|b.chain.view(e).is_some()).map(|e|e.hash).collect();x.sort();y.sort();
+        assert_eq!(x,y,"{what}: the retained states");};
+    for x in &blocks{a.import(x.clone(),None).unwrap();b.import(x.clone(),None).unwrap();}
+    // Pool transactions on both: the pending state is a layer over the stored head.
+    for (k,t) in [pay(&alice,blocks.len() as u64*0+a.chain.head().cum_txs,1)].into_iter().enumerate(){let _=k;let ra=a.submit_tx(t.clone(),false);let rb=b.submit_tx(t,false);assert_eq!(ra.is_ok(),rb.is_ok());}
+    assert_eq!(whole(&a),0,"the store node holds no whole state");assert!(stored(&a)>10,"positive control: {} stored versions",stored(&a));
+    assert_eq!(pins(&a),stored(&a),"pins equal the stored versions held");same_states(&a,&b,"live");
+    compare(&mut a,&mut b,"live");
+    for x in side.iter().chain(&back){a.import(x.clone(),None).unwrap();b.import(x.clone(),None).unwrap();}
+    assert_eq!(a.chain.head,back.last().unwrap().hash());assert!(a.stats.reorgs>=2,"positive control: two reorgs");
+    compare(&mut a,&mut b,"after the reorgs");assert_eq!(whole(&a),0);assert_eq!(pins(&a),stored(&a),"after the reorgs: no pin leaked");same_states(&a,&b,"after the reorgs");
+    assert_eq!((a.chain.rebuilds>0,a.stats.reorgs),(b.chain.rebuilds>0,b.stats.reorgs),"the same kind of work");
+    drop(a);drop(b);let mut a=Node::open(ca(),admitted(&cfg(&["a","b","c"]))).unwrap();let mut b=Node::open(cb(),admitted(&cfg(&["a","b","c"]))).unwrap();
+    compare(&mut a,&mut b,"after reopen");assert_eq!(whole(&a),0);assert_eq!(pins(&a),stored(&a),"after reopen");same_states(&a,&b,"after reopen");
+    for d in [da,db]{let _=std::fs::remove_dir_all(&d);}
 }
 
 /// C-1 S3a at the node: every state query (balance, nonce, code, storage, eth_call) at every height and

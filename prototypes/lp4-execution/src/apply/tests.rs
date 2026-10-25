@@ -538,6 +538,37 @@ mod a03{
     assert_eq!(Summary::scan(&d,cp.B_code_max).sys_slots,u64::from(cp.SYS_SLOT_MAX));assert!(same(&d).is_ok());
 }
 
+/// C-1 E4.3: a child that fails a whole-state check fails it on the overlay path (`apply_block_on`, the
+/// parent read through a view) as without the summary: a parent at exactly SYS_SLOT_MAX whose next block's
+/// SYSTEM calls add a system slot, and a parent whose escrow is one wei short of what it holds. Execution
+/// alone never reaches either (the admission gate and the escrow program keep them); the states are made.
+#[test] fn e4_failing_children_fail_alike_on_the_overlay_path(){
+    use crate::state_summary::Summary;
+    let net=devnet3();let cp=net.profile.cp().clone();let ids:Vec<Address>=net.miners.iter().map(|m|m.id).collect();
+    let input=|h:u64,prev:Option<ParentResult>|BlockInput{height:h,timestamp:1_800_000_000+2*h,base_fee:U256::from(1_000_000_000u64),gas_limit:cp.GAS_LIMIT,prevrandao:B256::ZERO,
+        proposer:Proposer::Fallback,parent_result:prev,evidence:vec![],evidence_raw:&[],transactions:&[],ancestors:vec![(0,net.genesis_hash)],cum_log_bytes:0};
+    let pr=|h:u64|Some(ParentResult{block_hash:B256::from(U256::from(h)),winner:ids[0],shares:vec![(10,ids[1])]});
+    let o1=apply_block(net.genesis.state(),&net.genesis,&net.profile,&input(1,None)).unwrap();
+    // A parent at exactly SYS_SLOT_MAX: block 2's SYSTEM calls record its parent's shares and result.
+    let mut d=o1.state.clone();let sys=program_address(4);let now=Summary::scan(&d,cp.B_code_max).sys_slots;
+    for k in 0..u64::from(cp.SYS_SLOT_MAX)-now{d.insert_account_storage(sys,U256::from(k)+U256::from(1u64<<40),U256::from(1)).unwrap();}
+    let sum=Summary::scan(&d,cp.B_code_max);assert_eq!(sum.sys_slots,u64::from(cp.SYS_SLOT_MAX),"positive control: the parent is at the bound");
+    let whole=apply_block(&d,&net.genesis,&net.profile,&input(2,pr(1)));assert!(matches!(whole,Err(ApplyError::Genesis(_))),"positive control: the child is over it ({:?})",whole.as_ref().err());
+    let on=apply_block_on(&d,&sum,&net.genesis,&net.profile,&input(2,pr(1)));
+    assert!(matches!(on,Err(ApplyError::Genesis(_))),"the overlay path refuses it too");
+    assert!(matches!(apply_block_with(&d,None,Some(&sum),&net.genesis,&net.profile,&input(2,pr(1))),Err(ApplyError::Genesis(_))));
+    // A parent one system slot over the bound is refused as the parent, before the block runs.
+    d.insert_account_storage(sys,U256::from(1u64<<41),U256::from(1)).unwrap();let sum=Summary::scan(&d,cp.B_code_max);
+    let parent_err=|r:Result<BlockRun,ApplyError>|match r{Err(ApplyError::Genesis(m))=>m.starts_with("parent"),_=>false};
+    assert!(parent_err(apply_block_on(&d,&sum,&net.genesis,&net.profile,&input(2,pr(1)))),"the parent check refuses a parent over the bound");
+    // A parent whose escrow is one wei short: the child's escrow invariant fails.
+    let o2=apply_block(&o1.state,&net.genesis,&net.profile,&input(2,pr(1))).unwrap();
+    let mut d=o2.state.clone();let e=escrow();let mut info=d.accounts[&e].info.clone();info.balance-=U256::from(1);d.insert_account_info(e,info);
+    let sum=Summary::scan(&d,cp.B_code_max);
+    let whole=apply_block(&d,&net.genesis,&net.profile,&input(3,pr(2)));assert!(matches!(whole,Err(ApplyError::Supply(_))),"positive control: the invariant fails ({:?})",whole.as_ref().err());
+    assert!(matches!(apply_block_on(&d,&sum,&net.genesis,&net.profile,&input(3,pr(2))),Err(ApplyError::Supply(_))),"the overlay path refuses it too");
+}
+
 /// C-1 E2: CODE_CAP reached exactly by a create, with the parent's summary as without it: the running code
 /// total the SYSTEM calls and the USER phase start from is the parent's exact total.
 #[test] fn e2_code_cap_reached_exactly_with_the_summary(){

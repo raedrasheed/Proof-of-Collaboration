@@ -900,14 +900,14 @@ fn whole<'a>(n:&'a Node,e:&'a Entry)->Result<std::borrow::Cow<'a,Entry>,Fail>{
 /// The state a tag names. C-1 S3a: a retained state that is not the head's is materialized from the head
 /// through the diffs (the same answer as when every retained state was held full).
 /// C-1 E3: "pending" is read in place on the pool's layer over the head.
-enum TagState<'a>{Full(std::borrow::Cow<'a,revm::InMemoryDB>),Pending(pocol_lp4_execution::view::LayerView<'a>)}
-impl TagState<'_>{fn v(&self)->&dyn pocol_lp4_execution::view::View{match self{TagState::Full(c)=>&**c,TagState::Pending(l)=>l}}}
+enum TagState<'a>{Full(crate::chain::StateView<'a>),Pending(pocol_lp4_execution::view::LayerView<'a,crate::chain::StateHandle>)}
+impl TagState<'_>{fn v(&self)->&dyn pocol_lp4_execution::view::View{match self{TagState::Full(c)=>c.v(),TagState::Pending(l)=>l}}}
 fn state_for<'a>(n:&'a Node,tag:&Value)->Result<TagState<'a>,(i64,String)>{
     if tag.as_str()==Some("pending"){return Ok(TagState::Pending(n.pool_view()))}
     let e=meta_by_tag(n,tag).ok_or((-32001,"unknown block".to_string()))?;
     let pruned=||(-32017,"state outside the retained trie window (K_hist)".to_string());
     if e.pruned{return Err(pruned())}
-    n.chain.state_of(&e.hash).map(TagState::Full).ok_or_else(pruned)
+    n.chain.view_of(&e.hash).map(TagState::Full).ok_or_else(pruned)
 }
 fn call(n:&mut Node,m:&str,p:&[Value],b:&mut Budget)->R{
     let cp=n.chain.spec.cp();
@@ -991,8 +991,8 @@ fn call(n:&mut Node,m:&str,p:&[Value],b:&mut Budget)->R{
             let mut out=vec![];for h in from..from+count{let Some(e)=n.chain.canonical_at(h) else{break};if h>0{out.push(hex(&whole(n,e)?.header.encoded));}}Ok(json!(out))}
         "pocol_getBlockRlp"=>{let e=meta_by_tag(n,p.first().unwrap_or(&Value::Null)).ok_or((-32001,"unknown block".to_string()))?;let e=whole(n,e)?;
             Ok(json!({"header":hex(&e.header.encoded),"body":hex(&e.body.encode())}))}
-        "pocol_getMiners"=>{let s=&n.chain.head().state;Ok(json!(apply::record_list(s).iter().map(|id|{let r=apply::miner_record(s,*id).unwrap();
-            json!({"id":format!("{id:#x}"),"status":r.status,"tomb":r.tomb,"bondState":r.bond_state,"lastShare":r.last_share,"reward":format!("{:#x}",r.reward),"rewardBalance":qty256(s.accounts.get(&r.reward).map(|a|a.info.balance).unwrap_or_default())})}).collect::<Vec<_>>()))}
+        "pocol_getMiners"=>{let head=n.chain.head;let s=n.chain.view_of(&head).ok_or((-32001,"head state".to_string()))?;let s=s.v();Ok(json!(apply::record_list(s).iter().map(|id|{let r=apply::miner_record(s,*id).unwrap();
+            json!({"id":format!("{id:#x}"),"status":r.status,"tomb":r.tomb,"bondState":r.bond_state,"lastShare":r.last_share,"reward":format!("{:#x}",r.reward),"rewardBalance":qty256(s.account(&r.reward).map(|a|a.info.balance).unwrap_or_default())})}).collect::<Vec<_>>()))}
         "pocol_getTemplate"=>Ok(n.template_json()),
         _=>Err(Fail::from(not_found(m))),
     }
@@ -1055,10 +1055,10 @@ fn simulate(n:&Node,o:&Value,tag:&Value,gas:Option<u64>,b:&Budget)->Result<Execu
         gas_limit:gas.or_else(||parse_u64(&o["gas"])).unwrap_or(CALL_GAS_MAX).min(CALL_GAS_MAX),gas_price:U256::ZERO,value:parse_u256(&o["value"]).unwrap_or_default(),
         data:Bytes::from(data),nonce:None,chain_id:Some(n.chain.spec.chain_id()),..Default::default()};
     let ctx=NativeBlockContext{height:U256::from(e.height+1),timestamp:U256::from(e.ts+1),gas_limit:U256::from(cp.GAS_LIMIT.max(CALL_GAS_MAX)),base_fee:U256::ZERO,prevrandao:B256::ZERO};
-    let base=n.chain.state_of(&e.hash).ok_or_else(||Fail::from((-32017,"state outside the retained trie window (K_hist)".to_string())))?;
+    let base=n.chain.view_of(&e.hash).ok_or_else(||Fail::from((-32017,"state outside the retained trie window (K_hist)".to_string())))?;
     // eth_call simulation: fund the caller for value transfers, never committed (C-1 E3: on an overlay,
     // not a copy of the state).
-    let mut st=pocol_lp4_execution::view::Overlay::new(&*base);
+    let mut st=pocol_lp4_execution::view::Overlay::new(&base);
     {use pocol_lp4_execution::view::WorkState;if let Some(a)=st.info_mut(&tx.caller){a.balance=a.balance.max(tx.value);}}
     // Cancellation (network.md:286): the stop hook ends the execution at its next poll once the
     // deadline has passed (native::simulate_for_profile: every STOP_GAS gas of a frame, before every

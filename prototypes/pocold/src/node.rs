@@ -60,8 +60,11 @@ pub struct Limits{pub net:net::Limits,pub rpc:crate::rpc::Limits,
     pub full_states:bool,
     /// C-1 S4: canonical journaled entries deeper than this are slimmed (None: 2·R_keep + E_win + 257;
     /// u64::MAX: never, a test reference).
-    pub slim_depth:Option<u64>}
-impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None,history_window:None,full_states:false,slim_depth:None}}}
+    pub slim_depth:Option<u64>,
+    /// C-1 E4: states are kept as trie versions in `state.redb` (true) or whole in memory (false, the
+    /// behaviour before E4 and a test reference).
+    pub state_store:bool}
+impl Default for Limits{fn default()->Self{Self{net:Default::default(),rpc:Default::default(),mem_budget:MEM_BUDGET,r_keep:chain::R_KEEP,side_cap:chain::SIDE_BLOCKS_MAX,pool_slice:POOL_SLICE,pool_gas_max:None,history_window:None,full_states:false,slim_depth:None,state_store:false}}}
 /// C-1 S1: replay refills history.redb with non-durable commits and makes them durable every this many blocks.
 const HISTORY_SYNC:u64=256;
 /// D-7: one slice of pool revalidation. The consensus thread is held for at most this, plus the
@@ -135,18 +138,23 @@ fn checked_code_total(state:&InMemoryDB,spec:&Spec)->Option<u64>{
 /// whole-state check without one).
 fn summary_code_total(e:&Entry,spec:&Spec)->Option<u64>{
     let cp=spec.cp();let lim=pocol_lp4_execution::code_caps::CodeLimits{runtime:cp.B_code_max,logical:cp.CODE_CAP};
-    match &e.summary{Some(s)=>s.code_check(lim).ok().map(|_|s.inventory()),None=>checked_code_total(&e.state,spec)}
+    match &e.summary{Some(s)=>s.code_check(lim).ok().map(|_|s.inventory()),
+        // C-1 E4: a stored state without its summary is summarized in place.
+        None if e.stored.is_some()=>{let s=pocol_lp4_execution::state_summary::Summary::scan_view(&chain::StateHandle::of(e),cp.B_code_max);s.code_check(lim).ok().map(|_|s.inventory())}
+        None=>checked_code_total(&e.state,spec)}
 }
 /// The pool's meter and code total for a new pending state over `head`: from its summary, or counted.
 fn pool_start(head:&Entry,spec:&Spec)->(PoolMeter,Option<u64>){
-    let meter=match &head.summary{Some(s)=>PoolMeter::from_counts(s.user_slots,s.user_accounts,s.sys_slots,spec.profile()),None=>PoolMeter::of(&head.state,spec.profile())};
+    let meter=match &head.summary{Some(s)=>PoolMeter::from_counts(s.user_slots,s.user_accounts,s.sys_slots,spec.profile()),
+        None if head.stored.is_some()=>{let s=pocol_lp4_execution::state_summary::Summary::scan_view(&chain::StateHandle::of(head),spec.cp().B_code_max);PoolMeter::from_counts(s.user_slots,s.user_accounts,s.sys_slots,spec.profile())}
+        None=>PoolMeter::of(&head.state,spec.profile())};
     (meter,summary_code_total(head,spec))
 }
 /// `code_total`: the pending state's logical code total once it is known to pass the code limits (the head
 /// state is checked once per new head; decision package C-2), so a submission does not rescan the state.
 /// C-1 E3: the pending state is a layer of the pool's writes over the head state it was started on
 /// (`pending_base`, shared with the head entry), not a copy of the head.
-pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending:pocol_lp4_execution::view::Layer,pending_base:Arc<InMemoryDB>,pub bytes:usize,meter:PoolMeter,code_total:Option<u64>,
+pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending:pocol_lp4_execution::view::Layer,pending_base:chain::StateHandle,pub bytes:usize,meter:PoolMeter,code_total:Option<u64>,
     /// D-7: what a new head left to revalidate, in pool order. An abandoned block (its journal
     /// offset) expands to its transactions when reached; a transaction is re-executed on the pending
     /// state. `backlog_bytes` counts the transactions held here against POOL_MAX_BYTES.
@@ -260,6 +268,13 @@ impl Node{
         // C-1 S4: deeper than any fork (R_keep), a head that fell back by R_keep, the evidence window and
         // the 256-ancestor window: no validation reads a slimmed entry unless the head fell back further.
         chain.slim_depth=Some(cfg.limits.slim_depth.unwrap_or(2*rk_replay.max(cfg.limits.r_keep)+u64::from(chain.spec.cp().E_win)+257));
+        // C-1 E4: states in state.redb. Replay re-executes every block from genesis and refills the store, so
+        // it is started empty here (derived data, I1); E4.4's checkpoints let open resume from it instead.
+        if cfg.limits.state_store{
+            for f in [crate::state_store::FILE,crate::state_store::DAMAGED]{let _=std::fs::remove_file(cfg.dir.join(f));}
+            let st=crate::state_store::StateStore::open(&cfg.dir).map_err(|e|format!("state store: {}",e.0))?;
+            chain.enable_store(Arc::new(st)).map_err(|e|format!("state store: {e:?}"))?;
+        }
         // D-REORG-REDB replay. Every record is replayed in journal order with retain() after each, as
         // live import did. Live journals a block only after validating it on a present parent, and
         // only when it is absent, so: (1) a block whose NEXT journal event is a child record is
@@ -323,7 +338,7 @@ impl Node{
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
         let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.light_queue);let resp=crate::rpc::RespPools::new(&cfg.limits.rpc);
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
-        let head_state=chain.head().state.clone();let (meter,pool_code)=pool_start(chain.head(),&chain.spec);
+        let head_state=chain::StateHandle::of(chain.head());let (meter,pool_code)=pool_start(chain.head(),&chain.spec);
         let net=net::Net::new(cfg.limits.net.clone());
         let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,history,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,deferred:VecDeque::new(),between:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
@@ -622,7 +637,7 @@ impl Node{
         // then its own backlog); each is re-executed on the new head (nonce, balance, fee), so one the
         // new branch includes is not taken again.
         let old=std::mem::take(&mut self.pool.txs);let rest=std::mem::take(&mut self.pool.backlog);
-        self.pool.bytes=0;self.pool.gas=0;self.pool.pending=Default::default();self.pool.pending_base=self.chain.head().state.clone();
+        self.pool.bytes=0;self.pool.gas=0;self.pool.pending=Default::default();self.pool.pending_base=chain::StateHandle::of(self.chain.head());
         let (meter,code)=pool_start(self.chain.head(),&self.chain.spec);self.pool.code_total=code;self.pool.meter=meter;
         let mut q:VecDeque<PoolItem>=detached.into_iter().map(PoolItem::Block).collect();
         for (_,raw) in old{self.pool.backlog_bytes+=raw.len();q.push_back(PoolItem::Tx(raw,false));}
@@ -646,7 +661,8 @@ impl Node{
         // retry.) Without a checked parent state the selection is made as before.
         let profile=self.chain.spec.profile();let ctx=self.child_block_ctx(p);
         // C-1 E3: on an overlay over p's state, not a copy of it.
-        let mut sim=if p.pruned||!p.full{None}else{summary_code_total(p,&self.chain.spec).map(|t|(pocol_lp4_execution::view::Overlay::new(&p.state),t))};
+        let handle=chain::StateHandle::of(p);
+        let mut sim=if p.pruned||!p.full{None}else{summary_code_total(p,&self.chain.spec).map(|t|(pocol_lp4_execution::view::Overlay::new(&handle),t))};
         // D-7: candidates are the admitted transactions, then the backlog's (each is executed here on p's
         // state anyway); an abandoned block not yet expanded is not a candidate.
         let backlog=self.pool.backlog.iter().filter_map(|i|match i{PoolItem::Tx(r,_)=>Some(r),PoolItem::Block(_)=>None});
@@ -995,9 +1011,9 @@ impl Node{
     /// A stored block's committed body (resident or from the journal).
     pub fn body_of(&self,hash:&[u8;32])->Result<Body,Reject>{let e=self.chain.get(hash).ok_or(Reject::UnknownParent)?;self.chain.body_of(e,Some(&self.journal))}
     /// The pending state as a whole state (the layer merged over its base; tests and inspection).
-    pub fn pool_state(&self)->InMemoryDB{pocol_lp4_execution::view::Overlay::from_layer(&*self.pool.pending_base,self.pool.pending.clone()).merge()}
+    pub fn pool_state(&self)->InMemoryDB{let base=self.pool.pending_base.whole();pocol_lp4_execution::view::Overlay::from_layer(&base,self.pool.pending.clone()).merge()}
     /// The pending state read in place (RPC "pending").
-    pub fn pool_view(&self)->pocol_lp4_execution::view::LayerView<'_>{pocol_lp4_execution::view::LayerView{base:&self.pool.pending_base,layer:&self.pool.pending}}
+    pub fn pool_view(&self)->pocol_lp4_execution::view::LayerView<'_,chain::StateHandle>{pocol_lp4_execution::view::LayerView{base:&self.pool.pending_base,layer:&self.pool.pending}}
     /// Accounts the pool's layer has written (A13).
     pub fn pool_written(&self)->usize{self.pool.pending.written()}
     /// The pool meter's (user slots, user accounts, system slots).

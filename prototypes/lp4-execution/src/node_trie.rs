@@ -342,6 +342,8 @@ pub trait TrieStore:NodeStore+Send+Sync{
     fn commit(&self,b:&Batch,root:Option<Id>)->Result<(),String>;
     /// Releases one pin of the root and every node only it held.
     fn unpin(&self,root:&Id)->Result<(),String>;
+    /// The pins held, summed over roots (a leak check).
+    fn pinned(&self)->Result<u64,String>;
 }
 /// `MemStore` behind a lock, as a `TrieStore` (tests, and a node without a data directory).
 #[derive(Default)]
@@ -355,6 +357,7 @@ impl NodeStore for SharedMem{
 impl TrieStore for SharedMem{
     fn commit(&self,b:&Batch,root:Option<Id>)->Result<(),String>{self.0.lock().unwrap().commit(b,root);Ok(())}
     fn unpin(&self,root:&Id)->Result<(),String>{self.0.lock().unwrap().unpin(root);Ok(())}
+    fn pinned(&self)->Result<u64,String>{Ok(self.0.lock().unwrap().pins.values().map(|c|u64::from(*c)).sum())}
 }
 /// A store in memory with reference counts: a node lives while a pinned root or a stored node names it.
 #[derive(Default)]

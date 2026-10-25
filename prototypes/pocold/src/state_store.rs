@@ -209,4 +209,5 @@ impl pocol_lp4_execution::node_trie::TrieStore for StateStore{
     /// Durable: a block's nodes are committed before its journal record (I3).
     fn commit(&self,b:&Batch,root:Option<Id>)->Result<(),String>{StateStore::commit(self,b,root,true).map_err(|e|e.0)}
     fn unpin(&self,root:&Id)->Result<(),String>{StateStore::unpin(self,root,false).map_err(|e|e.0)}
+    fn pinned(&self)->Result<u64,String>{Ok(self.pins().map_err(|e|e.0)?.iter().map(|x|u64::from(x.1)).sum())}
 }
