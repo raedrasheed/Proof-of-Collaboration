@@ -156,6 +156,27 @@ pub fn checkpoint_bytes(cp:&ConsensusParams,limits:&Limits)->Option<u128>{
     let bytes=add(&[256,mul(entries,crate::checkpoint::REC_MAX as u128)?,mul(u128::from(cp.H_END)+1+chain::EVICTED_MAX as u128,32)?])?;
     add(&[mul(2,bytes)?,mul(entries,size_of::<usize>() as u128)?])
 }
+/// C-1 E4.5: redb 2.6.4's usable bytes per region (page_manager.rs MAX_USABLE_REGION_SPACE) and its pages
+/// (4 KiB, the default page size).
+pub const REDB_REGION_BYTES:u128=4<<30;
+pub const REDB_REGION_PAGES:u128=REDB_REGION_BYTES/4096;
+/// The allocator redb 2.6.4 keeps in memory for one region of `pages` pages (buddy_allocator.rs
+/// `BuddyAllocator::new`, bitmap.rs): for every order 0..=min(20, log2 pages), with the page count halved
+/// at each order, a free `BtreeBitmap` (64-way levels of u64 words down to one word, each level a
+/// `U64GroupedBitmap`) and an allocated `U64GroupedBitmap` (one bit per page of the order), every bitmap
+/// its words and its header, and the allocator's two Vecs.
+pub fn redb_region_allocator(pages:u128)->Option<u128>{
+    let words=|c:u128|c.div_ceil(64);let grouped=|c:u128|words(c).checked_mul(8).and_then(|w|w.checked_add(32));
+    let max_order=(127-pages.max(1).leading_zeros()).min(20);let (mut c,mut b)=(pages,48u128);
+    for _ in 0..=max_order{
+        let mut cap=c;loop{b=b.checked_add(grouped(cap)?)?;if cap<=64{break}cap=cap.div_ceil(64);}
+        b=b.checked_add(grouped(c)?)?;b=b.checked_add(24+24)?;c/=2;
+    }
+    Some(b)
+}
+/// redb's allocator over a file of `bytes`: every region it spans is allocated whole (a partly used last
+/// region too), with its region-tracker entry (counted at 64 bytes).
+pub fn redb_allocator_bytes(bytes:u128)->Option<u128>{mul(bytes.div_ceil(REDB_REGION_BYTES).max(1),redb_region_allocator(REDB_REGION_PAGES)?.checked_add(64)?)}
 /// C-1 E4.5: the largest state.redb file, for its allocator term (A13 counts the file's allocator state
 /// at one byte per 4 KiB page, as for history.redb; the file itself is disk, not memory). Nodes: the
 /// head's and genesis's versions whole, and every other version that a stored entry or a checkpoint pins
@@ -244,11 +265,9 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
         ("store/a block's new trie nodes before their commit (BATCHES batches)",mul(BATCHES,batch_max(cp)?)?),
         ("store/decoded-node cache (NODE_CACHE, resident bytes)",crate::state_store::NODE_CACHE as u128),
         ("store/state.redb page cache (STATE_PAGE_CACHE)",crate::state_store::STATE_PAGE_CACHE as u128),
-        // redb 2.6.4 keeps, per region, a free and an allocated bitmap for every page order (buddy_allocator.rs:
-        // about 4 bits per page); counted at one byte per 4 KiB page of the largest file, by its parts.
-        ("store/state.redb allocator state: the versions' nodes",state_file_parts(cp,k_hist,side_max,limits)?[0]/4096),
-        ("store/state.redb allocator state: code, kept for good",state_file_parts(cp,k_hist,side_max,limits)?[2]/4096),
-        ("store/state.redb allocator state: the checkpoints' snapshots",state_file_parts(cp,k_hist,side_max,limits)?[3]/4096),
+        // redb 2.6.4 keeps every region's allocator in memory, sized for the region's whole capacity
+        // (redb_allocator_bytes), over the largest file (state_file_max).
+        ("store/state.redb allocator state (per-region bitmaps over the largest file)",redb_allocator_bytes(state_file_max(cp,k_hist,side_max,limits)?)?),
         ("store/stored versions' handles and BLOCKHASH windows",mul(stored_versions(k_hist,side_max),pinned_bytes())?),
         ("store/a checkpoint being written (its bytes and its entry index)",checkpoint_bytes(cp,limits)?),
         // Each account an execution loads brings its code from the store (TrieState::info): a copy per
