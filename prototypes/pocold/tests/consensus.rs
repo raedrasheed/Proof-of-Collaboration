@@ -1048,6 +1048,54 @@ fn r_keep_boundary(rk:u64,side_cap:usize,tag:&str){
 #[test] #[ignore="spec-depth test: run in release with --ignored"]
 fn adoption_at_the_spec_depth_2048_and_not_at_2049(){r_keep_boundary(pocold::chain::R_KEEP,pocold::chain::SIDE_BLOCKS_MAX,"spec")}
 
+/// C-1 E4.3: the same boundary on a store-mode node beside a whole-state node: at depth R_keep the
+/// branch is adopted, at R_keep + 1 it is not, by both; before the reorg, after it and after reopening
+/// they answer the same blocks, receipts and state queries at every height, keep exactly the same states,
+/// and the store node's pins are exactly its stored versions (a released state leaks nothing).
+fn r_keep_boundary_store(rk:u64,side_cap:usize,tag:&str){
+    use pocold::node::{Config,Limits,Node};
+    let mk=|t:&str,store:bool|{let dir=std::env::temp_dir().join(format!("pocold-e4b-{t}-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+        let (d,name)=(dir.clone(),t.to_string());
+        let conf=move||Config{dir:d.clone(),name:name.clone(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{r_keep:rk,side_cap,state_store:store,..Default::default()}};
+        (Node::open(conf(),admitted(&cfg(&["a","b","c"]))).unwrap(),dir,conf)};
+    let mut a=net();let g=a.chain.head;
+    let ours=grow(&mut a,g,rk as usize+1,&|n,p|fallback(n,p,1));
+    let mut b=net();let theirs=heavier(&mut b,g,a.chain.head().total_work,1);
+    let ids:Vec<Address>=devnet::build(&cfg(&["a","b","c"])).unwrap().miners.iter().map(|m|m.id).collect();
+    let accounts:Vec<String>=ids.iter().chain([devnet::account_key("alice").address(),apply::escrow(),apply::registry()].iter()).map(|a|format!("{a:#x}")).collect();
+    let states=|n:&mut Node|->Vec<serde_json::Value>{let top=n.chain.head().height;let mut v=vec![];
+        for t in (0..=top).map(|x|json!(format!("{x:#x}"))).chain(["latest","pending"].map(|t|json!(t))){for a in &accounts{
+            v.push(rpc_local(n,"eth_getBalance",json!([a,t])));v.push(rpc_local(n,"eth_getStorageAt",json!([a,"0x0",t])));}}
+        v};
+    let check=|x:&mut Node,y:&mut Node,what:&str|{
+        assert_eq!((x.chain.head,x.chain.head().header.state_root),(y.chain.head,y.chain.head().header.state_root),"{what}: head");
+        assert_eq!(chain_view(x),chain_view(y),"{what}: blocks and receipts");
+        let (p,q)=(states(x),states(y));assert_eq!(p,q,"{what}: state answers");let answered=p.iter().filter(|r|!r.is_null()).count();assert!(answered>=4*accounts.len(),"positive control ({what}): {answered} answers");
+        let mut s1:Vec<[u8;32]>=x.chain.blocks.values().filter(|e|e.stored.is_some()).map(|e|e.hash).collect();
+        let mut s2:Vec<[u8;32]>=y.chain.blocks.values().filter(|e|y.chain.view(e).is_some()).map(|e|e.hash).collect();s1.sort();s2.sort();
+        assert_eq!(s1,s2,"{what}: the retained states");
+        assert!(x.chain.blocks.values().all(|e|e.state.accounts.is_empty()),"{what}: the store node holds no whole state");
+        assert_eq!(x.chain.trie_store.as_ref().unwrap().pinned().unwrap() as usize,s1.len(),"{what}: pins are the stored versions");};
+    let (mut x,dx,cx)=mk(&format!("{tag}-s"),true);let (mut y,dy,cy)=mk(&format!("{tag}-m"),false);
+    for blk in &ours[..rk as usize]{x.import(blk.clone(),None).unwrap();y.import(blk.clone(),None).unwrap();}
+    check(&mut x,&mut y,"before the reorg");
+    for blk in &theirs{x.import(blk.clone(),None).unwrap();y.import(blk.clone(),None).unwrap();}
+    assert_eq!(x.chain.head,theirs.last().unwrap().hash(),"adopted at depth R_keep");
+    check(&mut x,&mut y,"after the reorg");
+    drop(x);drop(y);let (mut x,mut y)=(reopen(&cx),reopen(&cy));check(&mut x,&mut y,"after reopen");drop(x);drop(y);
+    let (mut x,dx2,_)=mk(&format!("{tag}-s2"),true);let (mut y,dy2,_)=mk(&format!("{tag}-m2"),false);
+    for blk in &ours{x.import(blk.clone(),None).unwrap();y.import(blk.clone(),None).unwrap();}
+    for blk in &theirs{let (r1,r2)=(x.import(blk.clone(),None).is_ok(),y.import(blk.clone(),None).is_ok());assert_eq!(r1,r2,"the same verdict at h={}",blk.header.h);}
+    assert_eq!(x.chain.head,ours.last().unwrap().hash(),"not adopted at R_keep + 1");
+    check(&mut x,&mut y,"beyond R_keep");
+    for d in [dx,dy,dx2,dy2]{let _=std::fs::remove_dir_all(&d);}
+}
+#[test] fn e4_store_node_at_the_r_keep_boundary_answers_as_a_whole_state_node(){r_keep_boundary_store(24,24,"rk")}
+/// The spec depth (R_keep = 2048, side cap 2048) in store mode. Release only, about 4,000 blocks on two
+/// nodes: `cargo test --release --test consensus -- --ignored e4_store_node_at_the_spec_depth`.
+#[test] #[ignore="spec-depth test: run in release with --ignored"]
+fn e4_store_node_at_the_spec_depth_2048_and_2049_answers_as_a_whole_state_node(){r_keep_boundary_store(pocold::chain::R_KEEP,pocold::chain::SIDE_BLOCKS_MAX,"spec")}
+
 /// Lowest-work unprotected leaves leave first and the cap holds after a deep reorg. An evicted block
 /// received unsolicited is refused before validation or journaling (churn guard); a sync session
 /// (solicited) takes it again (consensus.md §10: a branch that becomes heavier is fetched by sync).
