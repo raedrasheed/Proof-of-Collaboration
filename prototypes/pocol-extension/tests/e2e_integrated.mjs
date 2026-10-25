@@ -102,7 +102,9 @@ async function main() {
     // c returns the transactions of its abandoned branch to its pool (consensus.md: excluded transactions return
     // after they are checked again); they carry the publisher's next nonces. v3 is published once every pool has
     // settled (each such transaction included or dropped), or a v3 transaction and one of them race for a nonce.
-    await wait(async () => (await Promise.all([0, 1, 2].map((i) => rpc(8540 + i, 'pocol_status')))).every((s) => s.pool === 0 && s.stats.poolBacklog === 0), 240000, 'pools settled after the heal');
+    let pools = [];
+    const settled = async () => { pools = (await Promise.all([0, 1, 2].map((i) => rpc(8540 + i, 'pocol_status')))).map((s) => ({ h: s.head.height, pool: s.pool, gas: s.poolGas, backlog: s.stats.poolBacklog })); return pools.every((p) => p.pool === 0 && p.backlog === 0); };
+    try { await wait(settled, 240000, 'pools settled after the heal'); } catch (e) { throw new Error(`${e.message}; pools ${JSON.stringify(pools)}`); }
     ok('heal: the transactions c returned to its pool are included or dropped before v3', true, `heights ${(await heights()).join(',')}`);
     // ---- v3 through b on the healed network ----
     const d3 = join(work, 's3'); writeSite(d3, site(3)); publish(d3, 8541, cid, S);

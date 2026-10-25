@@ -288,6 +288,21 @@ mod tests{
         let mut p=Vec::new();u64b(0,&mut p);u64b(7,&mut p);rlp::encode_bytes(&[1;32],&mut p);rlp::encode_bytes(&[2;32],&mut p);u64b(9,&mut p);rlp::encode_bytes(b"n",&mut p);
         let mut o=Vec::new();rlp::encode_list_payload(&p,&mut o);assert!(Msg::decode(&o).is_err());
     }
+    /// D-7 re-insertion relays with `offer`: once half the queue is in use an offer is refused and the peer is
+    /// kept, while gossip (`send`) past the whole queue drops the peer as slow. No writer thread: the queue
+    /// only fills.
+    #[test] fn an_offer_past_half_the_queue_is_refused_and_keeps_the_peer(){
+        let l=TcpListener::bind("127.0.0.1:0").unwrap();let s=TcpStream::connect(l.local_addr().unwrap()).unwrap();let _r=l.accept().unwrap();
+        let out=Arc::new(Outbox{q:Mutex::new((VecDeque::new(),0)),cv:Condvar::new(),closed:AtomicBool::new(false),max:4096});
+        let p=Peer{id:1,addr:"t".into(),outbound:false,out:out.clone(),sock:Arc::new(s),counters:Arc::new(Counters::default())};
+        let m=Msg::Tx{raw:vec![7u8;400]};let f=m.encode().len()+4;
+        let mut offered=0;while p.offer(&m){offered+=1;}
+        assert_eq!(offered,2048/f,"offers fill half the queue");assert!(!out.closed.load(Ordering::SeqCst),"a refused offer keeps the peer");
+        assert_eq!(p.counters.dropped_slow.load(Ordering::SeqCst),0);
+        let mut sent=0;while p.send(&m){sent+=1;}
+        assert_eq!(offered+sent,4096/f,"gossip fills the whole queue");
+        assert!(out.closed.load(Ordering::SeqCst)&&p.counters.dropped_slow.load(Ordering::SeqCst)==1,"gossip past the queue drops the peer");
+    }
     /// Windows run 2: shutdown does not wake a blocked read there, so a dropped peer's reader must
     /// see its closed flag. Here only the flag is set (no shutdown, the peer stays open and silent):
     /// the read returns within READ_POLL plus margin, not at its 10 s deadline.

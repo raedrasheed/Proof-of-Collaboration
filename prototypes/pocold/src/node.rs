@@ -166,9 +166,16 @@ pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending:pocol_lp4_execution::view::L
     backlog:VecDeque<PoolItem>,backlog_bytes:usize,
     /// D-7: summed declared gas limits of `txs`, and their bound (`pool_gas_bound`).
     pub gas:u64,pub gas_max:u64}
-/// One backlog entry: an abandoned block's journal offset, or a transaction (and whether to relay it
-/// once admitted: a P2P transaction that arrived during the backlog is relayed then, as it would have been).
-enum PoolItem{Block(u64),Tx(Vec<u8>,bool)}
+/// One backlog entry: an abandoned block's journal offset, or a transaction and how to relay it once
+/// admitted (a P2P transaction that arrived during the backlog is relayed then, as it would have been).
+enum PoolItem{Block(u64),Tx(Vec<u8>,Relay)}
+/// How an admitted transaction is relayed (a local policy). `Gossip` sends it to every peer, and a peer whose
+/// queue is full is dropped. `Offer` is for a transaction returned from an abandoned block (D-7): this node
+/// may be the only one holding it, and a node that is not drawn never builds a block, so it is offered to
+/// each peer, and a peer with half its queue in use does not get it and is kept (one reorganization returns
+/// up to a whole pool at once).
+#[derive(Clone,Copy,PartialEq,Eq,Debug)]
+enum Relay{No,Gossip,Offer}
 /// D-A13-BUDGET: 64 -> 32 MiB (network.md: pool <= 64 MiB); 256 transactions of TX_MAX.
 pub const POOL_MAX_BYTES:usize=32*1024*1024;
 /// Local limit on pooled transactions (about ten blocks of plain transfers): every new head
@@ -252,8 +259,9 @@ pub struct Stats{pub imported:u64,pub mined:u64,pub signed_templates:u64,pub fal
     pub unslims:u64,
     /// Peers whose template from Draw(h,0) for this node's parent failed its checks (consensus.md:101).
     pub template_penalties:u64,
-    /// D-7: pool revalidation slices run and the longest one (ms).
-    pub pool_slices:u64,pub pool_slice_max_ms:u64,
+    /// D-7: pool revalidation slices run and the longest one (ms); offers to peers of transactions
+    /// returned from abandoned blocks, and those a peer's queue had no room for.
+    pub pool_slices:u64,pub pool_slice_max_ms:u64,pub reinserted_offered:u64,pub reinserted_unoffered:u64,
     /// C-1 E4.4: the journal records the last open resumed after (None: replayed from genesis), the
     /// checkpoints it refused (each released), the pins it released (versions no checkpoint holds), and
     /// the checkpoints written since.
@@ -668,14 +676,14 @@ impl Node{
         if self.pool_pending(){match by{
             Some(by)=>{while self.pool_pending()&&Instant::now()<by{self.pool_step_until(by);}if self.pool_pending(){return Err(SUBMIT_BUSY.into())}}
             None=>self.pool_settle()}}
-        self.admit_tx(raw,relay,by)
+        self.admit_tx(raw,if relay{Relay::Gossip}else{Relay::No},by)
     }
     /// A transaction from a peer: admitted now, or queued behind the backlog (D-7) and relayed once
     /// admitted. A queued one is held within POOL_MAX_BYTES with the pool.
     fn relay_tx(&mut self,raw:Vec<u8>){
         if !self.pool_pending(){let _=self.submit_tx(raw,true);return}
         if self.pool.bytes+self.pool.backlog_bytes+raw.len()>POOL_MAX_BYTES{return}
-        self.pool.backlog_bytes+=raw.len();self.pool.backlog.push_back(PoolItem::Tx(raw,true));
+        self.pool.backlog_bytes+=raw.len();self.pool.backlog.push_back(PoolItem::Tx(raw,Relay::Gossip));
     }
     /// Whether a new head left pool revalidation to do (D-7).
     pub fn pool_pending(&self)->bool{!self.pool.backlog.is_empty()}
@@ -688,8 +696,9 @@ impl Node{
         while let Some(item)=self.pool.backlog.pop_front(){
             match item{
                 PoolItem::Block(off)=>match self.journal.read_at(off).map_err(|e|format!("{e:?}")).and_then(|(_,bb,_)|Body::decode(&bb,body_max).map_err(|e|format!("{e:?}"))){
-                    // An abandoned body is held one at a time; its transactions go first, in block order.
-                    Ok(b)=>{for raw in b.txs.into_iter().rev(){self.pool.backlog_bytes+=raw.len();self.pool.backlog.push_front(PoolItem::Tx(raw,false));}}
+                    // An abandoned body is held one at a time; its transactions go first, in block order, and
+                    // each one admitted again is offered to the peers.
+                    Ok(b)=>{for raw in b.txs.into_iter().rev(){self.pool.backlog_bytes+=raw.len();self.pool.backlog.push_front(PoolItem::Tx(raw,Relay::Offer));}}
                     Err(e)=>self.log(&format!("journal read of a detached block at {off}: {e}"))},
                 PoolItem::Tx(raw,relay)=>{self.pool.backlog_bytes-=raw.len();
                     // A pool full by count refuses every further submission without a state change, so
@@ -701,7 +710,7 @@ impl Node{
         }
         let ms=t0.elapsed().as_millis() as u64;self.stats.pool_slices+=1;self.stats.pool_slice_max_ms=self.stats.pool_slice_max_ms.max(ms);
     }
-    fn admit_tx(&mut self,raw:Vec<u8>,relay:bool,by:Option<Instant>)->Result<B256,String>{
+    fn admit_tx(&mut self,raw:Vec<u8>,relay:Relay,by:Option<Instant>)->Result<B256,String>{
         let cp=self.chain.spec.cp();
         if raw.len()>cp.TX_MAX as usize{return Err("-32014 oversized".into())}
         let env=wire::decode_for_profile(&raw,self.chain.spec.profile()).map_err(|e|format!("{} {e:?}",e.specified_pool_code().unwrap_or(-32000)))?;
@@ -734,7 +743,10 @@ impl Node{
         self.pool.code_total=match(self.pool.code_total,before,after){
             (Some(t),Ok(b),Ok(a))=>t.checked_sub(b).and_then(|t|t.checked_add(a)),_=>None};
         self.pool.bytes+=raw.len();self.pool.gas+=gas_limit;self.pool.txs.push((hash,raw.clone()));
-        if relay{self.broadcast(&Msg::Tx{raw},None);}
+        match relay{
+            Relay::Gossip=>self.broadcast(&Msg::Tx{raw},None),
+            Relay::Offer=>{let m=Msg::Tx{raw};for p in self.peers.values(){if p.offer(&m){self.stats.reinserted_offered+=1}else{self.stats.reinserted_unoffered+=1}}}
+            Relay::No=>{}}
         Ok(hash)
     }
     /// Journal offsets of the blocks that left the canonical chain, from `old` back to the common
@@ -757,12 +769,13 @@ impl Node{
         // pool order, then one slice runs now. Transactions in abandoned blocks come first (consensus
         // §10), oldest block first and in block order, then the previous pool (its admitted transactions,
         // then its own backlog); each is re-executed on the new head (nonce, balance, fee), so one the
-        // new branch includes is not taken again.
+        // new branch includes is not taken again. One from an abandoned block that is admitted again is
+        // offered to the peers (Relay::Offer); the previous pool's were relayed when first admitted.
         let old=std::mem::take(&mut self.pool.txs);let rest=std::mem::take(&mut self.pool.backlog);
         self.pool.bytes=0;self.pool.gas=0;self.pool.pending=Default::default();self.pool.pending_base=chain::StateHandle::of(self.chain.head());
         let (meter,code)=pool_start(self.chain.head(),&self.chain.spec);self.pool.code_total=code;self.pool.meter=meter;
         let mut q:VecDeque<PoolItem>=detached.into_iter().map(PoolItem::Block).collect();
-        for (_,raw) in old{self.pool.backlog_bytes+=raw.len();q.push_back(PoolItem::Tx(raw,false));}
+        for (_,raw) in old{self.pool.backlog_bytes+=raw.len();q.push_back(PoolItem::Tx(raw,Relay::No));}
         q.extend(rest);self.pool.backlog=q;
         self.pool_step();
     }
@@ -1174,7 +1187,7 @@ impl Node{
             "a13":crate::resources::derive(self.chain.spec.cp(),self.chain.spec.local().k_hist,self.chain.spec.local().side_max,&self.cfg.limits,self.cfg.peers.len()).map(|b|serde_json::json!({
                 "boundBytes":b.total.to_string(),"budgetBytes":self.cfg.limits.mem_budget,"conditions":crate::resources::CONDITIONS.iter().map(|(id,d)|serde_json::json!({"id":id,"detail":d})).collect::<Vec<_>>()})),
             "stats":{"imported":self.stats.imported,"mined":self.stats.mined,"signedTemplates":self.stats.signed_templates,"fallbackTemplates":self.stats.fallback_templates,"sharesSeen":self.stats.shares_seen,"hashesInExhaustedRanges":self.stats.hashes,"reorgs":self.stats.reorgs,
-                "syncSessions":self.stats.sync_sessions,"syncRounds":self.stats.sync_rounds,"refetched":self.stats.refetched,"restored":self.stats.restored,"replaySkipped":self.stats.replay_skipped,"templatePenalties":self.stats.template_penalties,"poolSlices":self.stats.pool_slices,"poolSliceMaxMs":self.stats.pool_slice_max_ms,"poolBacklog":self.pool.backlog.len(),"historyRefilled":self.stats.history_refilled,"historyRebuilt":self.history.rebuilt,"historyDamaged":self.history.is_damaged()},
+                "syncSessions":self.stats.sync_sessions,"syncRounds":self.stats.sync_rounds,"refetched":self.stats.refetched,"restored":self.stats.restored,"replaySkipped":self.stats.replay_skipped,"templatePenalties":self.stats.template_penalties,"poolSlices":self.stats.pool_slices,"poolSliceMaxMs":self.stats.pool_slice_max_ms,"reinsertedOffered":self.stats.reinserted_offered,"reinsertedUnoffered":self.stats.reinserted_unoffered,"poolBacklog":self.pool.backlog.len(),"historyRefilled":self.stats.history_refilled,"historyRebuilt":self.history.rebuilt,"historyDamaged":self.history.is_damaged()},
             "retention":{"rKeep":self.chain.r_keep,"sideCap":self.chain.side_cap,"side":self.chain.side_counts().0,"protected":self.chain.protect.len(),"evicted":self.chain.evicted_total}})
     }
     pub fn template_json(&self)->serde_json::Value{

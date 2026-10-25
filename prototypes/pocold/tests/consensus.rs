@@ -588,6 +588,52 @@ fn gas_node(tag:&str,limits:pocold::node::Limits)->(Result<pocold::node::Node,St
     assert_eq!(n.submit_tx(b3,false).unwrap_err(),pocold::node::POOL_FULL_GAS,"b3 is not pooled later on its own");
     drop(n);let _=std::fs::remove_dir_all(&dir);
 }
+/// The frames a node sent on `s` within `ms`, decoded; the node handles its queued events (the peer's
+/// connection and Hello) between reads.
+fn frames_from(n:&mut pocold::node::Node,s:&mut std::net::TcpStream,buf:&mut Vec<u8>,ms:u64)->Vec<pocold::net::Msg>{
+    use std::io::Read;let t=std::time::Instant::now();let mut out=Vec::new();let mut b=[0u8;65536];
+    while t.elapsed()<std::time::Duration::from_millis(ms){
+        n.drain_between_members();
+        match s.read(&mut b){Ok(0)=>break,Ok(k)=>buf.extend_from_slice(&b[..k]),Err(_)=>{}}
+        while buf.len()>=4{let len=u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize;if buf.len()<4+len{break}
+            out.push(pocold::net::Msg::decode(&buf[4..4+len]).unwrap());buf.drain(..4+len);}
+    }
+    out
+}
+/// D-7, re-insertion reaches the network. A transaction returned from an abandoned block may be held by this node
+/// alone: in e2e_integrated a node was isolated, its blocks were abandoned at the heal, and it was not drawn on the
+/// healed branch (Draw(h,0) is weighted by shares on that branch), so the transactions it returned to its pool
+/// were never included. Each one admitted again is offered to the peers, and the peer is kept; a transaction of
+/// the previous pool, relayed when it was first admitted, is not sent again.
+#[test] fn transactions_returned_from_an_abandoned_block_are_offered_to_the_peers(){
+    use pocold::{net::Msg,node::{Config,Node}};use std::io::Write;
+    let port=std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let dir=std::env::temp_dir().join(format!("pocold-poolgas-offer-{}",std::process::id()));let _=std::fs::remove_dir_all(&dir);
+    let spec=admitted(&cfg(&["a","b","c"]));let (chain_id,genesis)=(spec.chain_id(),spec.genesis_hash());
+    let mut n=Node::open(Config{dir:dir.clone(),name:"offer".into(),miner:None,listen:Some(format!("127.0.0.1:{port}").parse().unwrap()),peers:vec![],rpc:None,stop_at:None,log:false,limits:Default::default()},spec).unwrap();
+    n.start_network().unwrap();
+    let mut s=std::net::TcpStream::connect(("127.0.0.1",port)).unwrap();s.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+    let hello=Msg::Hello{chain_id,genesis,head:genesis,height:0,work:[0;32],node:"peer".into()}.encode();
+    let mut f=(hello.len() as u32).to_be_bytes().to_vec();f.extend(hello);s.write_all(&f).unwrap();
+    let mut buf=Vec::new();let mut sent=frames_from(&mut n,&mut s,&mut buf,1500);
+    assert_eq!(n.status_json()["peers"].as_array().unwrap().len(),1,"the peer is connected");
+    let (alice,bob)=(devnet::account_key("alice"),devnet::account_key("bob"));
+    let (a0,a1,b0)=(pay(&alice,0,1),pay(&alice,1,1),pay(&bob,0,1));
+    // a0 and a1 reach this node only in its block x; b0 is submitted here and relayed then.
+    let mut h=net();let g=h.chain.head;let x=branch(&mut h,g,1,&[Body{txs:vec![a0.clone(),a1.clone()],evidence:vec![]}]);
+    n.import(x[0].clone(),None).unwrap();n.submit_tx(b0.clone(),true).unwrap();
+    let mut h2=net();let y=branch(&mut h2,g,2,&[]);for b in &y{n.import(b.clone(),None).unwrap();}
+    assert_eq!(n.chain.head,y[1].hash(),"reorganized");assert_eq!(pool(&mut n),vec![a0.clone(),a1.clone(),b0.clone()]);
+    sent.extend(frames_from(&mut n,&mut s,&mut buf,1500));
+    let txs:Vec<Vec<u8>>=sent.into_iter().filter_map(|m|match m{Msg::Tx{raw}=>Some(raw),_=>None}).collect();
+    let count=|t:&Vec<u8>|txs.iter().filter(|r|*r==t).count();
+    assert_eq!((count(&a0),count(&a1)),(1,1),"each returned transaction is offered once");
+    assert_eq!(count(&b0),1,"the previous pool's transaction is not sent again");
+    assert_eq!(txs.len(),3);
+    let st=n.status_json();assert_eq!((st["stats"]["reinsertedOffered"].as_u64(),st["stats"]["reinsertedUnoffered"].as_u64()),(Some(2),Some(0)));
+    assert_eq!(st["peers"].as_array().unwrap().len(),1,"the peer is kept");
+    drop(s);drop(n);let _=std::fs::remove_dir_all(&dir);
+}
 /// D-7, counters: a deterministic sequence of submissions (fitting, past the gas bound, duplicates, same nonce,
 /// wrong nonce), relays during a revalidation backlog, one-item slices, new heads from the node's own template
 /// and reorganizations. After every step the pool's counters equal its contents and every bound holds
