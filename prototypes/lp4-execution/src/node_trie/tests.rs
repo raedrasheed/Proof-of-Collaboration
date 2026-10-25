@@ -113,3 +113,36 @@ fn an_update_from_an_overlay_view_equals_the_update_from_its_merge(){
         assert_eq!(via_view.root(&store,&b1),crate::genesis_builder::world_root(&merged).unwrap(),"case {case}");
     }
 }
+
+/// p1_trie's root of raw 32-byte keys holding nonzero integers (as `state_trie`'s raw test).
+fn reference(rows:&std::collections::BTreeMap<Key,U256>)->B256{
+    let entries:Vec<(Vec<u8>,Vec<u8>)>=rows.iter().map(|(k,v)|{let mut e=Vec::new();rlp_uint(v,&mut e);(k.to_vec(),e)}).collect();
+    B256::from(crate::trie::root(&entries,entries.len()).unwrap())
+}
+/// Keys that share long prefixes, so extensions above branches split and merge at every depth (hashed
+/// keys almost never do).
+fn clustered_key(r:&mut Rng)->Key{
+    let mut k=[0u8;32];let shared=r.below(65) as usize;
+    for i in 0..64{let n=if i<shared{(i%3) as u8}else{r.below(16) as u8};if i%2==0{k[i/2]|=n<<4}else{k[i/2]|=n}}
+    k
+}
+#[test]
+fn raw_clustered_keys_build_and_update_give_p1_roots(){
+    let mut r=Rng(0x9e3779b97f4a7c15);let store=MemStore::default();
+    for round in 0..300{
+        let mut model=std::collections::BTreeMap::new();let mut b=Batch::default();let mut t:Option<(Id,Arc<Node>)>=None;
+        for _ in 0..1+r.below(12){
+            let mut ch:Vec<(Key,Option<Val>)>=Vec::new();
+            for _ in 0..1+r.below(if round%2==0{4}else{40}){
+                let k=if !model.is_empty()&&r.below(3)==0{*model.keys().nth(r.below(model.len() as u64) as usize).unwrap()}else{clustered_key(&mut r)};
+                if ch.iter().any(|(x,_)|*x==k){continue}
+                let small=r.below(2)==0;let v=if r.below(3)==0{None}else{Some(U256::from(1+r.below(if small{3}else{u64::MAX})))};
+                ch.push((k,v.map(Val::Slot)));
+            }
+            ch.sort_by(|a,b|a.0.cmp(&b.0));
+            for (k,v) in &ch{match v{Some(Val::Slot(v))=>{model.insert(*k,*v);}_=>{model.remove(k);}}}
+            t=update(&store,&mut b,t,0,&ch);
+            assert_eq!(root_of(t.as_ref().map(|x|&*x.1)),reference(&model),"round {round}");
+        }
+    }
+}
