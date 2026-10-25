@@ -2126,7 +2126,8 @@ fn e44_conf(dir:&std::path::Path,every:u64)->impl Fn()->pocold::node::Config{
 }
 fn e44_dir(tag:&str)->std::path::PathBuf{let d=std::env::temp_dir().join(format!("pocold-e44-{tag}-{}",std::process::id()));let _=std::fs::remove_dir_all(&d);d}
 fn copy_dir(from:&std::path::Path,to:&std::path::Path){let _=std::fs::remove_dir_all(to);std::fs::create_dir_all(to).unwrap();
-    for e in std::fs::read_dir(from).unwrap(){let e=e.unwrap();if e.file_type().unwrap().is_file(){std::fs::copy(e.path(),to.join(e.file_name())).unwrap();}}}
+    // LOCK is only the journal's lock target (an open node holds a lock on it; Windows refuses to read it).
+    for e in std::fs::read_dir(from).unwrap(){let e=e.unwrap();if e.file_type().unwrap().is_file()&&e.file_name()!="LOCK"{std::fs::copy(e.path(),to.join(e.file_name())).unwrap();}}}
 /// Two nodes are the same node: the same head and canonical chain, every entry equal field by field (its
 /// header, body, receipts, ranges, ParentResult, flags, summary and stored root: the snapshot and the
 /// entry's Debug form), the same answers for every canonical block, receipt and state query at every
@@ -2206,7 +2207,9 @@ fn e44_reference(dir:&std::path::Path,tag:&str)->(pocold::node::Node,std::path::
     assert_eq!(st.count(&orphan).unwrap(),None,"the version no journal record names is gone");assert!(n.stats.pins_released>=1);
     st.recount().unwrap();
     for b in &blocks[60..]{n.import(b.clone(),None).unwrap();}
-    let (mut g,gd)=e44_reference(&a,"leftover-ref");e44_same(&mut n,&mut g,"after the crash leftovers were released");
+    // The reference is copied from a closed data directory (Windows does not let a running node's files be read).
+    drop(n);let (mut g,gd)=e44_reference(&a,"leftover-ref");let mut n=reopen(&e44_conf(&a,5));
+    e44_same(&mut n,&mut g,"after the crash leftovers were released");
     drop(n);drop(g);for d in [a,gd]{let _=std::fs::remove_dir_all(&d);}
 }
 
