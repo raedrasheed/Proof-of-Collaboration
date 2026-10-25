@@ -65,26 +65,30 @@ were not results. The table below replaces them.
 | S2 ✔ | code shared between snapshots (done, `d567ce1`) | code 54.69 → 9.69 | **105.83 (measured)** |
 | S1 ✔ | canonical bodies, receipts, logs and evidence off the heap below a resident window of K_hist blocks, read from the journal and history.redb on demand (storage.md:70) | history 19.19 → 4.28 (tx bytes, receipts and index, logs, evidence moved; offloaded entries drop their header bytes; added: window 0.013, redb cache and allocator 0.025) | **90.93 (measured)**, gate 103.92 |
 | S3a ✔ | retained canonical states as diffs from their parents, materialized from the head on demand (storage.md:70, D30) | 33 retained copies (53.89) less 4 added (genesis counted, 2 materialized), and their code containers (2.62); added: the diffs 0.46 | **41.41 (measured)**, gate 47.33 |
-| S3b (with S5) | transient working copies as copy-on-write overlays (an executor change) | the 10 transient copies and the growth copy (17.96) and their code containers (0.94) | ≈ 19.1 + new: overlays bounded by the written entries of the work in progress |
 | S4 ✔ | old canonical entries slimmed, restored exactly from the journal and history.redb | history 4.28 → 0.83 | **37.96 (measured)**, gate 43.38 |
 | E1 ✔ (S5 step 1) | incremental state root (C-2 item 4): the head's trie in memory, any other parent's derived from it through the diffs or built | added: the trie group 2.23 (the head's trie, one derived or built, a block's changed paths); it moves to state.redb with E4 | **40.20 (measured)**, gate 45.94 |
 | E2 ✔ (S5 step 2) | the per-block whole-state checks (candidate checks, code checks, code drop) from a state summary moved through the changed keys | added: one boxed summary per entry (devnet +2.1 MB) | **40.20 (measured)** |
-| S5 | live state on disk behind a bounded cache (redb live trie, storage.md:63–67) | the remaining full copies: head, genesis, side_max, materialized (9.80), their containers (0.51) and the side code sets (2.25) | ≈ 6.5, or 6.0 with the diffs (0.46) in the store, + new: state cache, overlays; target ≤ 5.25 (budget less the 1/8 reserve) |
+| E3 ✔ (S3b, E3.1–E3.3) | the executor, production, the pool and RPC on overlays over the parent (lp4 `view::Overlay`); the S3a diff from the block's write set | snapshots 27.76 → 16.33 (transient copies 10 → 2; the pool's layer counted as one whole state; growth copy kept), code containers 1.45 → 0.81, history 0.84 → 0.78 (smaller `Entry`); added: the applied block's overlay 0.004 | **28.08 (measured)**, gate 32.09. The projection was ≈ 19.1: it assumed the growth copy and every transient copy go; two transient copies, the growth copy and the pool's layer remain |
+| E3.4 | the head extended in place (the child takes the parent's state by move) | none in the bound: a side child is still merged into a full copy while it is built, so the worst case keeps one transient copy. It saves the whole-state copy on every block that extends the head (time, and memory outside the worst case) | 28.08 (unchanged bound) |
+| E4 + E5 (S5) | head state and trie nodes in state.redb with D-6 checkpoints; code read from the store; a smaller inline entry | projected: every remaining whole state (head, genesis, side_max, materialized, transient, pool layer, growth: 16.33), the code sets and containers (6.44, less a code cache), the in-memory tries (2.23) | ≈ 3.08 + new terms (state, trie and code caches; the overlays of the work in progress; the pool's layer bounded by its gas: D-7's value is not approved); target ≤ 5.25, so the new terms must stay ≤ 2.17 |
 
-After S3a the projections are taken from the measured S3a items (evidence/c1-s3a/a13-network-profile-s3a.log).
-What is left after S5 is then over the target: about 6.0 GiB before any new term (recomputed after
-S4, which removed 3.45 GiB, not the 4.25 projected). It is:
-- three code sets of 1.125 GiB each: the lineage's, a rebuild's and the pool's;
+**Recomputed after E3 (2026-10-25), from the measured E3 items (evidence/c1-e3/a13-network-profile-e3.log).**
+The earlier S5 projection (≈ 6.5, or 6.0 GiB) assumed that S3b would remove every transient copy and the
+growth copy, and it was not a measured result. The measured E3 figure is 28.08 GiB. What is not a whole
+state, a code set or a trie comes to 3.08 GiB:
+- the diffs 0.46;
 - execution 1.10;
-- the slimmed and the in-depth block entries 0.79;
+- history 0.78;
 - side metadata 0.20, queues 0.24, RPC 0.20, threads 0.08.
 
-So besides S5, two more local reductions are needed, both without any normative change:
-- a smaller inline entry (the slimmed entry is about 5 KB in the model);
-- code read from the store by the rebuild and the pool, not copied.
-
-The rebuild and pool sets are full because a separate execution makes separate buffers. S5 must read
-code from the store instead of copying it, or the new terms (state cache, overlays) cannot fit.
+That is the floor E4 and E5 can reach, before their own new terms. Reaching it needs all three of these
+local changes, none of them normative:
+- every whole state off the heap: the head and its trie in state.redb (E4), the side, materialized and
+  working states read through overlays over the store;
+- code read from the store by the rebuild and the pool, not copied (E5). Their code sets are full because
+  a separate execution makes separate buffers;
+- the pool's layer bounded by the pool's gas, not by the block caps. D-7's local work bound would give this.
+  The bound is approved in principle, but its value is not, so the model keeps the layer as a whole state.
 
 These figures are projections until `derive()` prints them. They are derived and pinned stage by stage.
 
@@ -243,6 +247,10 @@ rebuilds the world root.
 - **E2 (2026-10-24, evidence/c1-e2/)** reads the per-block whole-state checks from a state summary. At the
   near-cap state: an empty child 262 → **62 ms**; 380 transfers 349 → **174 ms**; CREATE2-heavy 290 →
   **122 ms**. What remains is mostly the state copies (E3).
+- **E3.1–E3.3 (2026-10-25, evidence/c1-e3/)** run the block, production, the pool and RPC on overlays over
+  the parent. At the near-cap state: an empty child 62 → **8.5 ms**; 380 transfers 174 → **55 ms**;
+  CREATE2-heavy 122 → **17 ms**. One whole-state copy is left per block (the merge at the end); E3.4
+  removes it when the block extends the head.
   Acceptance test 4 (incremental against full root on every block of the suites) passes: the tests build
   with lp4's `root-check` feature. A parent whose trie cannot be derived (more than 64 diffs from the head,
   or a side block deeper than side_max) costs what it did before E1.

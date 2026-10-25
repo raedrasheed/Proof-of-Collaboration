@@ -36,12 +36,12 @@ pub struct NativeBlockContext {
 /// other resource ceilings remain separate obligations, never caller flags.
 /// This chain-only API retains baseline Cancun code limits for old controls.
 /// PoCol candidates must use execute_for_profile for approved CODE-01 limits.
-pub fn execute_in_context(snapshot:&InMemoryDB, tx:TxEnv, block:&NativeBlockContext) -> Result<ResultAndState,EVMError<core::convert::Infallible>> {
+pub fn execute_in_context(snapshot:&dyn crate::view::View, tx:TxEnv, block:&NativeBlockContext) -> Result<ResultAndState,EVMError<core::convert::Infallible>> {
     execute_on_chain(snapshot,tx,block,CHAIN_ID,None,None)
 }
 /// Bound to the same accepted LP3 identity used by signed decoding. P5 still
 /// must supply validated parent/header context; no schema check authorizes boot.
-pub fn execute_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+pub fn execute_for_profile(snapshot:&dyn crate::view::View,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
     crate::code_caps::validate_snapshot(snapshot,limits).map_err(EVMError::Custom)?;
     execute_on_chain(snapshot,tx,block,profile.spec().chain_id,Some(limits),None)
@@ -56,7 +56,7 @@ pub fn execute_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockConte
 /// invariant panics there.
 /// Also the transaction pool's path (pocold): its pending state is the head state, checked once per
 /// new head, changed only by `user_phase::commit_tx` of this engine's results.
-pub fn execute_on_validated(state:&InMemoryDB,code_total:u64,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+pub fn execute_on_validated(state:&dyn crate::view::View,code_total:u64,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
     debug_assert_eq!(crate::code_caps::validate_snapshot(state,limits),Ok(()),"USER-phase state left the code limits");
     debug_assert_eq!(crate::code_caps::inventory(state),Ok(code_total),"USER-phase running code total");
@@ -75,7 +75,7 @@ pub const STOP_GAS:u64=1_000_000;
 /// instruction. A precompile call is not interpreted: it runs to its end (up to the call's gas), so
 /// the cancellation gap is not bounded by STOP_GAS there. When `stop` returns true the execution ends
 /// with EVMError::Custom(SIMULATION_STOPPED). Block validation, SYSTEM and USER never use it.
-pub fn simulate_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity,stop:std::rc::Rc<dyn Fn()->bool>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+pub fn simulate_for_profile(snapshot:&dyn crate::view::View,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity,stop:std::rc::Rc<dyn Fn()->bool>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
     crate::code_caps::validate_snapshot(snapshot,limits).map_err(EVMError::Custom)?;
     validate_nonce(snapshot,tx.caller,tx.nonce)?;
@@ -87,7 +87,7 @@ pub fn simulate_for_profile(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockCont
 /// `execute_for_profile` (without), with `stop` polled as in `simulate_for_profile`. The hook only reads
 /// the clock and calls the next instruction, so while `stop` returns false the result is the same.
 /// Its result is never a block's: blocks are validated with `execute_on_validated` or the USER phase.
-pub fn admit_for_profile(state:&InMemoryDB,code_total:Option<u64>,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity,stop:std::rc::Rc<dyn Fn()->bool>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+pub fn admit_for_profile(state:&dyn crate::view::View,code_total:Option<u64>,tx:TxEnv,block:&NativeBlockContext,profile:&crate::profile::ProfileIdentity,stop:std::rc::Rc<dyn Fn()->bool>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     let limits=crate::code_caps::CodeLimits{runtime:profile.cp().B_code_max,logical:profile.cp().CODE_CAP};
     match code_total{
         Some(t)=>{debug_assert_eq!(crate::code_caps::validate_snapshot(state,limits),Ok(()),"pool state left the code limits");
@@ -114,7 +114,7 @@ fn stop_register<EXT:'static,DB:revm::Database>(h:&mut revm::handler::register::
         });
     }
 }
-fn execute_on_chain(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>,code_total:Option<u64>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
+fn execute_on_chain(snapshot:&dyn crate::view::View,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>,code_total:Option<u64>)->Result<ResultAndState,EVMError<core::convert::Infallible>>{
     validate_nonce(snapshot,tx.caller,tx.nonce)?;
     build_engine(snapshot,code_total,tx,block,chain_id,limits).transact()
 }
@@ -122,7 +122,7 @@ fn execute_on_chain(snapshot:&InMemoryDB,tx:TxEnv,block:&NativeBlockContext,chai
 /// Shared hooks only. SYSTEM uses direct frames; USER retains transact(). The engine reads `snapshot`
 /// through a borrowed `StateRef` instead of a clone (decision package C-2, item 3); `code_total` is the
 /// snapshot's logical code total when the caller knows it.
-pub(crate) fn build_engine<'a>(snapshot:&'a InMemoryDB,code_total:Option<u64>,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>)->Evm<'a,NativeContext,StateRef<'a>>{
+pub(crate) fn build_engine<'a>(snapshot:&'a dyn crate::view::View,code_total:Option<u64>,tx:TxEnv,block:&NativeBlockContext,chain_id:u64,limits:Option<crate::code_caps::CodeLimits>)->Evm<'a,NativeContext,StateRef<'a>>{
     Evm::builder().with_db(StateRef::new(snapshot,code_total)).with_external_context(NativeContext::default())
         .with_spec_id(SpecId::CANCUN)
         .modify_cfg_env(|cfg|cfg.chain_id=chain_id)
@@ -148,8 +148,8 @@ pub(crate) fn build_engine<'a>(snapshot:&'a InMemoryDB,code_total:Option<u64>,tx
 
 /// EIP-2681: maximum u64 transaction/account nonce cannot be incremented.
 /// revm 19.7.0 can otherwise return a normal result for max-nonce creation.
-pub fn validate_nonce(snapshot:&InMemoryDB,caller:Address,nonce:Option<u64>) -> Result<(),EVMError<core::convert::Infallible>> {
-    if nonce==Some(u64::MAX) || snapshot.accounts.get(&caller).map(|a|a.info.nonce==u64::MAX).unwrap_or(false) {
+pub fn validate_nonce(snapshot:&dyn crate::view::View,caller:Address,nonce:Option<u64>) -> Result<(),EVMError<core::convert::Infallible>> {
+    if nonce==Some(u64::MAX) || snapshot.account(&caller).map(|a|a.info.nonce==u64::MAX).unwrap_or(false) {
         Err(EVMError::Transaction(InvalidTransaction::NonceOverflowInTransaction))
     } else {Ok(())}
 }

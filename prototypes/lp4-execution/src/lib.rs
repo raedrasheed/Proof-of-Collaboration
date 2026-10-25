@@ -156,6 +156,8 @@ pub mod apply;
 pub mod state_trie;
 // C-1 E2: the per-block whole-state checks from a state summary.
 pub mod state_summary;
+// C-1 E3: the executor's state, whole or as an overlay over a parent.
+pub mod view;
 pub mod devnet;
 pub mod txsign;
 pub mod resources;

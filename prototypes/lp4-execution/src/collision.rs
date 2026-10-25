@@ -17,9 +17,11 @@ pub fn storage_nonempty<EXT,DB:Database+LocalState>(context:&Context<EXT,DB>,add
     let journal=context.evm.journaled_state.state.get(&address);
     if journal.map(|a|a.storage.values().any(|s|s.present_value()!=U256::ZERO)).unwrap_or(false){return true;}
     if journal.map(|a|a.is_created()).unwrap_or(false){return false;}
-    context.evm.db.local().accounts.get(&address).map(|a|a.storage.iter().any(|(key,value)|{
-        journal.and_then(|a|a.storage.get(key)).map(|s|s.present_value()).unwrap_or(*value)!=U256::ZERO
-    })).unwrap_or(false)
+    let mut any=false;
+    context.evm.db.local().each_slot(&address,&mut |key,value|{
+        if journal.and_then(|a|a.storage.get(key)).map(|s|s.present_value()).unwrap_or(*value)!=U256::ZERO{any=true}
+    });
+    any
 }
 
 // Cancun create-frame adapter based on revm 19.7.0's make_create_frame,

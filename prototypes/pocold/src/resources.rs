@@ -8,11 +8,31 @@ use std::mem::size_of;
 use pocol_lp4_execution::{profile::ConsensusParams,resources::memory,user_phase::caps};
 use crate::{chain::{self,Entry},header::Header,net,node::{self,Limits},types::{Block,Body}};
 
-/// Snapshots alive besides the retained ones: apply_block's working copy, the USER phase
-/// copy, the per-transaction engine database and the PAY pre-transaction copy, production
-/// clones of the parent (begin_attempt, lock), the pool's pending state and its execution
-/// copies, and the rolling rebuild (two). Counted generously: 10.
-pub const TRANSIENT_SNAPSHOTS:u128=10;
+/// Full working copies alive besides the retained ones (C-1 E3; 10 before E3). A block, production,
+/// template selection, RPC simulation and the pool run on overlays (lp4 `view::Overlay`, `view::Layer`)
+/// over a state they share; the engine reads through `StateRef` and PAY through the same view
+/// (decision package C-2). What remains, one task at a time on the consensus thread:
+/// - a block applied: its child state, merged once at the end (one copy);
+/// - a rebuild's or restore's rolling re-execution: the state it holds and the next block's merged state
+///   (two);
+/// - after a new head, until `rebuild_pool`: the pool's base, the previous head's state, which the chain
+///   no longer holds full (one; `restore_canonical` runs before `settle`, so not during a rolling
+///   re-execution).
+///
+/// At most two.
+pub const TRANSIENT_SNAPSHOTS:u128=2;
+/// C-1 E3: the pool's pending state is a layer of its writes over the head (`node::Pool`). The pool admits
+/// a transaction only within the caps (`PoolMeter`), and its gas is bounded only by POOL_MAX_TXS ×
+/// GAS_LIMIT unless `pool_gas_max` is set (D-7: its value is not approved), so the layer is counted as a
+/// whole state.
+pub const POOL_LAYER_SNAPSHOTS:u128=1;
+/// C-1 E3: the overlay of the block being applied (one at a time): an entry for each written account and
+/// each written slot (`block_writes`), with the cleared, deleted and retained address sets, each element
+/// at its inline size with hash-table growth (×2).
+pub fn overlay_max(cp:&ConsensusParams)->Option<u128>{
+    use revm::{db::DbAccount,primitives::{Address,U256}};let (accounts,slots)=block_writes(cp)?;
+    add(&[mul(accounts,2*size_of::<(Address,DbAccount)>() as u128)?,mul(slots,2*size_of::<(U256,U256)>() as u128)?,mul(mul(accounts,3)?,2*size_of::<Address>() as u128)?])
+}
 /// Gas per byte of deployed runtime (EIP-170 code deposit, 200): an execution of g gas deploys at
 /// most g/200 bytes.
 pub const CODE_DEPOSIT:u128=200;
@@ -119,7 +139,7 @@ pub fn header_max(s_max:u16)->u128{768+9*u128::from(s_max)}
 /// resident memory of the process.
 pub const CONDITIONS:&[(&str,&str)]=&[
     ("allocator-overhead","allocator per-allocation overhead and fragmentation are not modelled"),
-    ("transient-snapshot-inventory","TRANSIENT_SNAPSHOTS (10) and EXECUTIONS (1) are inventories by code inspection, not enforced by a counter"),
+    ("transient-snapshot-inventory","TRANSIENT_SNAPSHOTS (2, C-1 E3) and EXECUTIONS (1) are inventories by code inspection, not enforced by a counter"),
     ("main-thread","the main thread's stack is reserved by the platform; counted at 1 MiB because it only spawns and joins"),
     ("revm-representation","the execution term relies on revm 19.7 behaviour checked by source inspection (iterative frames, SharedMemory truncation, fixed stack capacity) and by measured adversarial peaks"),
     ("cpu-and-timing","CPU costs (world-root rebuild, chain scans, pool re-execution, deep-fork rebuild) are not memory terms; worst-case timing is not bounded"),
@@ -148,7 +168,7 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let snapshot_bytes=memory::snapshot(accounts,slots,accounts.checked_add(2)?)?;
     // C-1 S3a: full states are the head, genesis, the side states within side_max, and the materialized
     // ones (MATERIALIZED); every other retained state is a diff (below). Before S3a: 1 + K_hist + side_max.
-    let snapshots=add(&[1,1,u128::from(side_max),MATERIALIZED,TRANSIENT_SNAPSHOTS])?;
+    let snapshots=add(&[1,1,u128::from(side_max),MATERIALIZED,TRANSIENT_SNAPSHOTS,POOL_LAYER_SNAPSHOTS])?;
     // Code (decision package C-1 S2). A runtime is held in refcounted buffers (revm Bytecode: Bytes and
     // an Arc jump table) that a state copy shares (journal_measure::retained_states_of_one_lineage_
     // share_their_code_buffers). Each block's state is its parent's copy plus that block's changes, and
@@ -167,11 +187,13 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     let mut items=vec![("snapshots/head state",snapshot_bytes),("snapshots/genesis state (counted as a full one)",snapshot_bytes),
         ("snapshots/side_max side-branch states",mul(side_states,snapshot_bytes)?),
         ("snapshots/materialized states (C-1 S3a: a parent or an RPC tag, and one kept until settle)",mul(MATERIALIZED,snapshot_bytes)?),
-        ("snapshots/transient working copies",mul(TRANSIENT_SNAPSHOTS,snapshot_bytes)?),
+        ("snapshots/transient working copies (C-1 E3: a block's merged child, a rolling re-execution's two)",mul(TRANSIENT_SNAPSHOTS,snapshot_bytes)?),
+        ("snapshots/the pool's pending layer over the head (counted as a whole state)",mul(POOL_LAYER_SNAPSHOTS,snapshot_bytes)?),
         // A table that grows in a working copy keeps its old allocation until the new one is filled:
         // one table at a time (single consensus thread), at most a whole snapshot's tables.
         ("snapshots/table growth in a working copy",snapshot_bytes),
         ("diffs/retained and side states as diffs (C-1 S3a: 2·K_hist + side_max + 1)",mul(diffs_held(k_hist,side_max),diff_max(cp)?)?),
+        ("diffs/the overlay of the block being applied (C-1 E3)",overlay_max(cp)?),
         // C-1 E1: only the head keeps its state's trie after settle (chain::Chain::settle). A parent that is
         // not the head has its trie derived from the head's or built from its state, one at a time on the
         // consensus thread (validation, production, a rebuild's rolling re-execution); its distinct nodes are
@@ -302,9 +324,10 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     items.extend([("execution/frames, code analysis, preallocations, precompiles",fixed),("execution/memory and operation classes (worst gas split)",execution.checked_sub(fixed)?)]);
     let total=add(&items.iter().map(|x|x.1).collect::<Vec<_>>())?;
     let trie=add(&[mul(2,trie_bytes(accounts,slots)?)?,trie_paths(cp)?])?;
-    debug_assert_eq!(Some(total),add(&[mul(snapshots,snapshot_bytes)?,snapshot_bytes,mul(diffs_held(k_hist,side_max),diff_max(cp)?)?,trie,code,history,side_blocks,queues,rpc,threads,execution]));
+    let diffs=add(&[mul(diffs_held(k_hist,side_max),diff_max(cp)?)?,overlay_max(cp)?])?;
+    debug_assert_eq!(Some(total),add(&[mul(snapshots,snapshot_bytes)?,snapshot_bytes,diffs,trie,code,history,side_blocks,queues,rpc,threads,execution]));
     let _=size_of::<Header>()+size_of::<Body>();
-    Some(Bound{snapshots,snapshot_bytes,diffs:mul(diffs_held(k_hist,side_max),diff_max(cp)?)?,trie,code,history,side_blocks,queues,rpc,threads,execution,total,items})
+    Some(Bound{snapshots,snapshot_bytes,diffs,trie,code,history,side_blocks,queues,rpc,threads,execution,total,items})
 }
 /// The share of the budget kept outside the model (D-A13-BUDGET): allocator headers, size-class
 /// rounding and fragmentation are not modelled (CONDITIONS), so the model total must fit in

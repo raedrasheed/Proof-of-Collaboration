@@ -2,7 +2,8 @@
 //! Context must later be bound to stored headers by P5. No system phase or final
 //! header state-root comparison is claimed here. Budgets are local API bounds.
 use std::collections::HashSet;
-use revm::{DatabaseCommit,InMemoryDB,db::AccountState};
+use revm::{InMemoryDB,db::AccountState};
+use crate::view::{View,WorkState};
 use revm::primitives::{Address,B256,EvmState,Log,TxEnv,U256};
 use crate::{native::{self,NativeBlockContext},wire::{self,WireError},receipts,fees};
 /// `DirtyAccounts`/`AcctCap`: even the halt's own nonce/fee effects would exceed the
@@ -45,9 +46,14 @@ pub struct UserContext{
 #[derive(Clone,Debug,PartialEq,Eq)] pub struct UserCommitments{
  pub transactions_root:B256,pub receipts_root:B256,pub gas_used:u64,pub logs_bloom:[u8;256],
 }
-pub struct UserCandidate{state:InMemoryDB,commitments:UserCommitments,receipts:Vec<Vec<u8>>,tips:U256,log_bytes:u64,halts:Vec<(usize,Halt)>,dirty_accounts:u64}
-impl UserCandidate{
- pub fn state(&self)->&InMemoryDB{&self.state}
+pub struct UserCandidate<S=InMemoryDB>{state:S,commitments:UserCommitments,receipts:Vec<Vec<u8>>,tips:U256,log_bytes:u64,halts:Vec<(usize,Halt)>,dirty_accounts:u64}
+impl<S> UserCandidate<S>{
+ pub fn state(&self)->&S{&self.state}
+ /// The state, and the rest of the candidate without it (C-1 E3: the block keeps working on the state).
+ pub(crate) fn split(self)->(S,UserCandidate<()>){
+  let UserCandidate{state,commitments,receipts,tips,log_bytes,halts,dirty_accounts}=self;
+  (state,UserCandidate{state:(),commitments,receipts,tips,log_bytes,halts,dirty_accounts})
+ }
  /// Charged log bytes of this block (LOG-ACCT-01).
  pub fn log_bytes(&self)->u64{self.log_bytes}
  /// Transactions that halted exceptionally, by index.
@@ -57,6 +63,8 @@ impl UserCandidate{
  pub fn commitments(&self)->&UserCommitments{&self.commitments}
  pub fn receipts(&self)->&[Vec<u8>]{&self.receipts}
  pub fn tips(&self)->U256{self.tips}
+}
+impl UserCandidate{
  /// Intermediate USER root, never the final PoCol header state root.
  pub fn state_root(&self,account_budget:usize,slot_budget_per_account:usize)->Result<B256,UserError>{
   let mut accounts=Vec::new();
@@ -103,12 +111,14 @@ pub fn normalize(db:&mut InMemoryDB,touched:&[Address]){
 /// CacheDB::commit alone keeps touched empty accounts, so they are removed before the next
 /// transaction; with `normalized`, only live entries are kept (A13). The USER phase of a block and
 /// the pool's pending state both commit through here.
-pub fn commit_tx(state:&mut InMemoryDB,diff:EvmState,normalized:bool){
+pub fn commit_tx(state:&mut InMemoryDB,diff:EvmState,normalized:bool){commit_tx_on(state,diff,normalized)}
+/// `commit_tx` on a whole state or an overlay (C-1 E3).
+pub fn commit_tx_on<S:WorkState+?Sized>(state:&mut S,diff:EvmState,normalized:bool){
  let removed:Vec<_>=diff.iter().filter(|(_,a)|a.is_selfdestructed()||(a.is_touched()&&a.is_empty())).map(|(a,_)|*a).collect();
  let touched:Vec<_>=diff.iter().filter(|(_,a)|a.is_touched()).map(|(a,_)|*a).collect();
  state.commit(diff);
- for address in removed{let a=state.accounts.entry(address).or_default();a.account_state=AccountState::NotExisting;a.storage.clear();a.info=Default::default();}
- if normalized{normalize(state,&touched)}
+ for address in removed{state.remove(address);}
+ if normalized{state.normalize(&touched)}
 }
 /// Code bytes no existing account references (A13), kept out of later snapshots.
 pub fn drop_unreferenced_code(db:&mut InMemoryDB){
@@ -127,26 +137,34 @@ struct Effects{keys:Vec<(Address,U256)>,accts:Vec<Address>,sys_keys:Vec<(Address
 fn is_system(a:&Address)->bool{(0..5).any(|i|*a==crate::apply::program_address(i))}
 /// Live (nonzero) storage slots and existing accounts of the user state (outside the five
 /// system programs), counted as genesis check_caps does (D-A03-CAPS).
+/// `live_counts` of any state view (C-1 E3).
+pub(crate) fn live_counts_view(db:&dyn View)->(u64,u64){
+ let (mut slots,mut accts)=(0u64,0u64);let mut users=Vec::new();
+ db.each_account(&mut |k,a|{if a.info().is_some()&&!is_system(k){users.push(*k)}});
+ for k in &users{accts+=1;db.each_slot(k,&mut |_,v|{if *v!=U256::ZERO{slots+=1}});}
+ (slots,accts)
+}
 pub(crate) fn live_counts(db:&InMemoryDB)->(u64,u64){
  let mut slots=0u64;let mut accts=0u64;
  for (_,a) in db.accounts.iter().filter(|(k,a)|a.info().is_some()&&!is_system(k)){accts+=1;slots+=a.storage.values().filter(|v|**v!=U256::ZERO).count() as u64;}
  (slots,accts)
 }
-fn effects(pre:&InMemoryDB,post:&EvmState)->Effects{
+fn effects(pre:&dyn View,post:&EvmState)->Effects{
  let mut e=Effects::default();
  for (a,acct) in post{
   if !acct.is_touched(){continue}
-  let before=pre.accounts.get(a);let pre_info=before.and_then(|x|x.info());
+  let pre_info=pre.account(a).and_then(|x|x.info());
+  let mut pre_nonzero:Vec<U256>=Vec::new();pre.each_slot(a,&mut |k,v|{if *v!=U256::ZERO{pre_nonzero.push(*k)}});
   let removed=acct.is_selfdestructed()||acct.is_empty();
   let changed:Vec<U256>=if removed{vec![]}else{acct.storage.iter().filter(|(_,v)|v.is_changed()).map(|(k,_)|*k).collect()};
-  let pre_slots=before.map(|x|x.storage.values().filter(|v|**v!=U256::ZERO).count() as i64).unwrap_or(0);
+  let pre_slots=pre_nonzero.len() as i64;
   let info_changed=match &pre_info{Some(i)=>removed||i.balance!=acct.info.balance||i.nonce!=acct.info.nonce||i.code_hash!=acct.info.code_hash,None=>!removed};
   if info_changed||!changed.is_empty()||(removed&&pre_slots>0){e.accts.push(*a)}
   for k in &changed{e.keys.push((*a,*k))}
   let user=!is_system(a);
   if removed{if pre_info.is_some()&&user{e.d_accts-=1;e.d_slots-=pre_slots;}
    // Removed slots of a removed account are dirty as well.
-   if let Some(x)=before{for (k,v) in &x.storage{if *v!=U256::ZERO{e.keys.push((*a,*k))}}}}
+   for k in &pre_nonzero{e.keys.push((*a,*k))}}
   else if user{
    if pre_info.is_none(){e.d_accts+=1}
    for (_,v) in acct.storage.iter().filter(|(_,v)|v.is_changed()){
@@ -168,12 +186,15 @@ fn sys_slots(db:&InMemoryDB)->u64{
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct PoolMeter{live_slots:u64,live_accts:u64,sys_slots:u64,slot_cap:u64,acct_cap:u64,sys_slot_max:u64}
 impl PoolMeter{
+ /// C-1 E3: from counts already known (a state summary's user slots, user accounts and system slots).
+ pub fn from_counts(live_slots:u64,live_accts:u64,sys_slots:u64,profile:&crate::profile::ProfileIdentity)->Self{let cp=profile.cp();
+  Self{live_slots,live_accts,sys_slots,slot_cap:cp.SLOT_CAP,acct_cap:cp.ACCT_CAP,sys_slot_max:u64::from(cp.SYS_SLOT_MAX)}}
  pub fn of(db:&InMemoryDB,profile:&crate::profile::ProfileIdentity)->Self{
   let (live_slots,live_accts)=live_counts(db);let cp=profile.cp();
   Self{live_slots,live_accts,sys_slots:sys_slots(db),slot_cap:cp.SLOT_CAP,acct_cap:cp.ACCT_CAP,sys_slot_max:u64::from(cp.SYS_SLOT_MAX)}
  }
  /// Admits the state diff of one transaction executed on `pre`, or names the cap it would pass.
- pub fn admit(&mut self,pre:&InMemoryDB,post:&EvmState)->Result<(),Halt>{
+ pub fn admit(&mut self,pre:&dyn View,post:&EvmState)->Result<(),Halt>{
   let e=effects(pre,post);let mut d_sys=0i64;
   for (a,acct) in post.iter().filter(|(a,x)|is_system(a)&&x.is_touched()){let _=a;
    for (_,v) in acct.storage.iter().filter(|(_,v)|v.is_changed()){
@@ -214,14 +235,14 @@ impl BlockMeter{
 }
 /// Exceptional halt applied to the pre-transaction state: nonce + 1, the sender pays
 /// gas_limit·price, the coinbase (Escrow) receives gas_limit·tip. Nothing else changes.
-fn apply_halt(state:&mut InMemoryDB,m:&mut BlockMeter,tx:&TxEnv,price:U256,tip:U256,i:usize)->Result<(),UserError>{
+fn apply_halt<S:WorkState+?Sized>(state:&mut S,m:&mut BlockMeter,tx:&TxEnv,price:U256,tip:U256,i:usize)->Result<(),UserError>{
  let fee=price.checked_mul(U256::from(tx.gas_limit)).ok_or(UserError::Arithmetic)?;let reward=tip.checked_mul(U256::from(tx.gas_limit)).ok_or(UserError::Arithmetic)?;
- let existed=state.accounts.get(&tx.caller).and_then(|a|a.info()).is_some();
- let mut sender=state.accounts.get(&tx.caller).and_then(|a|a.info()).unwrap_or_default();
+ let existed=state.account(&tx.caller).and_then(|a|a.info()).is_some();
+ let mut sender=state.account(&tx.caller).and_then(|a|a.info()).unwrap_or_default();
  sender.nonce=sender.nonce.checked_add(1).ok_or(UserError::Arithmetic)?;sender.balance=sender.balance.checked_sub(fee).ok_or(UserError::Arithmetic)?;
- state.insert_account_info(tx.caller,sender);
+ state.insert_info(tx.caller,sender);
  let coinbase=crate::pay::escrow_address();
- if reward!=U256::ZERO{let mut c=state.accounts.get(&coinbase).and_then(|a|a.info()).unwrap_or_default();c.balance=c.balance.checked_add(reward).ok_or(UserError::Arithmetic)?;state.insert_account_info(coinbase,c);}
+ if reward!=U256::ZERO{let mut c=state.account(&coinbase).and_then(|a|a.info()).unwrap_or_default();c.balance=c.balance.checked_add(reward).ok_or(UserError::Arithmetic)?;state.insert_info(coinbase,c);}
  let mut touched=vec![tx.caller];if reward!=U256::ZERO{touched.push(coinbase)}
  if m.dirty_accts.len()+new_count(&m.dirty_accts,&touched)>caps::ACCT_DIRTY_BLOCK_MAX{return Err(UserError::DirtyAccounts(i))}
  if !existed{if let Some((_,acct_cap,_))=m.caps{if m.live_accts+1>acct_cap{return Err(UserError::AcctCap(i))}}m.live_accts+=1;}
@@ -229,11 +250,11 @@ fn apply_halt(state:&mut InMemoryDB,m:&mut BlockMeter,tx:&TxEnv,price:U256,tip:U
 }
 /// Logical code at `touched` before a commit (C-2 item 2; no work on the profile-free control path,
 /// where `touched` is empty).
-fn code_change_start(state:&InMemoryDB,touched:&[Address],i:usize)->Result<u64,UserError>{
+fn code_change_start(state:&dyn View,touched:&[Address],i:usize)->Result<u64,UserError>{
  crate::code_caps::code_of(state,touched).map_err(|e|UserError::Execution(i,e))
 }
 /// The running code total after a commit that changed only `touched`.
-fn code_change_end(state:&InMemoryDB,touched:&[Address],total:u64,before:u64,i:usize)->Result<u64,UserError>{
+fn code_change_end(state:&dyn View,touched:&[Address],total:u64,before:u64,i:usize)->Result<u64,UserError>{
  if touched.is_empty(){return Ok(total)}
  let after=crate::code_caps::code_of(state,touched).map_err(|e|UserError::Execution(i,e))?;
  total.checked_sub(before).and_then(|t|t.checked_add(after)).ok_or_else(||UserError::Execution(i,"logical code overflow".into()))
@@ -243,9 +264,18 @@ fn execute_user_phase_inner(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&NativeBlo
 }
 fn execute_user_phase_inner_ctx(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&NativeBlockContext,byte_budget:usize,entry_budget:usize,profile:Option<&crate::profile::ProfileIdentity>,ctx:UserContext)->Result<UserCandidate,UserError>{
  if raw.len()>entry_budget || raw.iter().try_fold(0usize,|n,v|n.checked_add(v.len())).ok_or(UserError::Budget)?>byte_budget{return Err(UserError::Budget)}
+ let live=if profile.is_some(){live_counts(snapshot)}else{(0,0)};
+ execute_user_phase_on(snapshot.clone(),live,None,raw,block,byte_budget,entry_budget,profile,ctx)
+}
+/// The USER phase on a state it owns, whole or an overlay (C-1 E3). `live` is the state's live user
+/// slots and accounts (`live_counts`). `code_total` is its logical code total when the caller knows the
+/// state passes `validate_snapshot` (C-1 E2: a block's summary); with None, the state is validated at
+/// the first transaction, as before.
+pub(crate) fn execute_user_phase_on<S:WorkState>(mut state:S,live:(u64,u64),known_total:Option<u64>,raw:&[Vec<u8>],block:&NativeBlockContext,byte_budget:usize,entry_budget:usize,profile:Option<&crate::profile::ProfileIdentity>,ctx:UserContext)->Result<UserCandidate<S>,UserError>{
+ if raw.len()>entry_budget || raw.iter().try_fold(0usize,|n,v|n.checked_add(v.len())).ok_or(UserError::Budget)?>byte_budget{return Err(UserError::Budget)}
  let limit:u64=block.gas_limit.try_into().map_err(|_|UserError::Gas)?;
- let mut state=snapshot.clone();let mut used=0u64;let mut tips=U256::ZERO;let mut encoded=Vec::new();let mut bloom=[0u8;256];
- let (live_slots,live_accts)=if profile.is_some(){live_counts(snapshot)}else{(0,0)};
+ let mut used=0u64;let mut tips=U256::ZERO;let mut encoded=Vec::new();let mut bloom=[0u8;256];
+ let (live_slots,live_accts)=live;
  let mut meter=BlockMeter{log_bytes:0,log_count:0,cum_log:ctx.cum_log_bytes,dirty_keys:HashSet::new(),dirty_accts:HashSet::new(),sys_keys:HashSet::new(),sys_accts:HashSet::new(),
   live_slots,live_accts,closing:ctx.closing,caps:profile.map(|p|(p.cp().SLOT_CAP,p.cp().ACCT_CAP,u64::from(p.cp().SYS_KEYS_USER_MAX)))};
  let mut halts=Vec::new();
@@ -261,19 +291,24 @@ fn execute_user_phase_inner_ctx(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&Nativ
   // ran (after its decode, gas and fee checks; same index, same error text). Every later state comes
   // from committing this engine's results, so the later per-transaction scans could not fail.
   if let (Some(p),0)=(profile,i){
-   let limits=crate::code_caps::CodeLimits{runtime:p.cp().B_code_max,logical:p.cp().CODE_CAP};
-   let custom=|e|UserError::Execution(0,format!("{:?}",revm::primitives::EVMError::<core::convert::Infallible>::Custom(e)));
-   crate::code_caps::validate_snapshot(&state,limits).map_err(custom)?;
-   code_total=crate::code_caps::inventory(&state).map_err(custom)?;
+   match known_total{
+    Some(t)=>code_total=t,
+    None=>{
+     let limits=crate::code_caps::CodeLimits{runtime:p.cp().B_code_max,logical:p.cp().CODE_CAP};
+     let custom=|e|UserError::Execution(0,format!("{:?}",revm::primitives::EVMError::<core::convert::Infallible>::Custom(e)));
+     crate::code_caps::validate_snapshot(state.as_view(),limits).map_err(custom)?;
+     code_total=crate::code_caps::inventory(state.as_view()).map_err(custom)?;
+    }
+   }
   }
-  let result=match profile{Some(p)=>native::execute_on_validated(&state,code_total,tx.clone(),block,p),None=>native::execute_in_context(&state,tx.clone(),block)}.map_err(|e|UserError::Execution(i,format!("{e:?}")))?;
-  let e=effects(&state,&result.state);
+  let result=match profile{Some(p)=>native::execute_on_validated(state.as_view(),code_total,tx.clone(),block,p),None=>native::execute_in_context(state.as_view(),tx.clone(),block)}.map_err(|e|UserError::Execution(i,format!("{e:?}")))?;
+  let e=effects(state.as_view(),&result.state);
   // The caps are PoCol execution: the profile-free Cancun control path stays geth-equivalent.
   if let Some(why)=profile.and_then(|_|meter.check(result.result.logs(),&e)){
    // Exceptional halt (A03): all gas, no logs, status 0; only nonce and fee remain.
-   let touched=[tx.caller,crate::pay::escrow_address()];let before=code_change_start(&state,&touched,i)?;
+   let touched=[tx.caller,crate::pay::escrow_address()];let before=code_change_start(state.as_view(),&touched,i)?;
    apply_halt(&mut state,&mut meter,&tx,price,tip,i)?;halts.push((i,why));
-   code_total=code_change_end(&state,&touched,code_total,before,i)?;
+   code_total=code_change_end(state.as_view(),&touched,code_total,before,i)?;
    used=used.checked_add(tx.gas_limit).ok_or(UserError::Gas)?;if used>limit{return Err(UserError::Gas)}
    tips=tips.checked_add(tip.checked_mul(U256::from(tx.gas_limit)).ok_or(UserError::Arithmetic)?).ok_or(UserError::Arithmetic)?;
    encoded.push(receipts::encode(signed.kind(),false,used,&[]).map_err(|_|UserError::Root)?);
@@ -285,9 +320,9 @@ fn execute_user_phase_inner_ctx(snapshot:&InMemoryDB,raw:&[Vec<u8>],block:&Nativ
   encoded.push(receipts::encode(signed.kind(),result.result.is_success(),used,result.result.logs()).map_err(|_|UserError::Root)?);
   for (a,b) in bloom.iter_mut().zip(receipts::bloom(result.result.logs())){*a|=b}
   let touched:Vec<Address>=if profile.is_some(){result.state.keys().copied().collect()}else{vec![]};
-  let before=code_change_start(&state,&touched,i)?;
-  commit_tx(&mut state,result.state,profile.is_some());
-  code_total=code_change_end(&state,&touched,code_total,before,i)?;
+  let before=code_change_start(state.as_view(),&touched,i)?;
+  commit_tx_on(&mut state,result.state,profile.is_some());
+  code_total=code_change_end(state.as_view(),&touched,code_total,before,i)?;
  }
  let commitments=UserCommitments{transactions_root:receipts::ordered_root(raw,entry_budget).map_err(|_|UserError::Root)?,receipts_root:receipts::ordered_root(&encoded,entry_budget).map_err(|_|UserError::Root)?,gas_used:used,logs_bloom:bloom};
  Ok(UserCandidate{state,commitments,receipts:encoded,tips,log_bytes:meter.log_bytes,halts,dirty_accounts:meter.dirty_accts.len() as u64})

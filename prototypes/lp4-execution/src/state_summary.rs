@@ -9,7 +9,7 @@
 //! `scan` computes the summary from the whole state exactly as the walks count. Tests (and the
 //! `root-check` feature) compare every moved summary with `scan`, and every outcome with the old walks.
 use revm::{db::{AccountState,DbAccount},primitives::{alloy_primitives::U512,Address,B256,U256,KECCAK_EMPTY},InMemoryDB};
-use crate::{code_caps::{self,CodeLimits},state_trie::Touched};
+use crate::{code_caps::{self,CodeLimits},state_trie::Touched,view::{Acc,View}};
 
 /// What the whole-state checks read, for one state.
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -35,7 +35,7 @@ pub struct Summary{
 
 fn exists(a:&DbAccount)->bool{!matches!(a.account_state,AccountState::NotExisting)}
 fn is_system(a:&Address)->bool{(0..5).any(|i|*a==crate::apply::program_address(i))}
-fn nonzero(a:&DbAccount)->u64{a.storage.values().filter(|v|**v!=U256::ZERO).count() as u64}
+fn nonzero(db:&dyn View,addr:&Address)->u64{let mut n=0u64;db.each_slot(addr,&mut |_,v|{if *v!=U256::ZERO{n+=1}});n}
 fn clean(db:&InMemoryDB)->bool{
     let used:std::collections::HashSet<B256>=db.accounts.values().filter(|a|exists(a)).map(|a|a.info.code_hash).collect();
     db.contracts.keys().all(|h|used.contains(h)||*h==KECCAK_EMPTY||*h==B256::ZERO)&&db.contracts.capacity()<=2*db.contracts.len()+16
@@ -44,23 +44,26 @@ fn clean(db:&InMemoryDB)->bool{
 /// One account's part of a summary, with its storage counted whole or not at all.
 #[derive(Default)]
 struct Part{code:u128,missing:u64,mismatch:u64,over:u64,user:u64,slots:u64,balance:U512}
-fn part(db:&InMemoryDB,addr:&Address,a:&DbAccount,runtime:u32,with_slots:bool)->Part{
-    let mut p=Part::default();if !exists(a){return p}
-    match code_caps::code_len(db,&a.info){
+fn part(db:&dyn View,addr:&Address,a:Acc<'_>,runtime:u32,with_slots:bool)->Part{
+    let mut p=Part::default();if !a.exists(){return p}
+    match code_caps::code_len(db,a.info){
         Ok(n)=>{p.code=u128::from(n);if n>u64::from(runtime){p.over=1}}
         Err(e) if e=="missing runtime bytes"=>p.missing=1,
         Err(_)=>p.mismatch=1,
     }
     if !is_system(addr){p.user=1}
-    if with_slots{p.slots=nonzero(a)}
+    if with_slots{p.slots=nonzero(db,addr)}
     p.balance=U512::from(a.info.balance);p
 }
 
 impl Summary{
     /// From the whole state.
-    pub fn scan(db:&InMemoryDB,runtime:u32)->Summary{
-        let mut s=Summary{runtime,code_total:0,code_missing:0,code_mismatch:0,over_runtime:0,user_accounts:0,user_slots:0,sys_slots:0,balance:U512::ZERO,contracts_clean:clean(db)};
-        for (addr,a) in &db.accounts{let p=part(db,addr,a,runtime,true);s.add(addr,&p);}
+    pub fn scan(db:&InMemoryDB,runtime:u32)->Summary{Summary{contracts_clean:clean(db),..Summary::scan_view(db,runtime)}}
+    /// `scan` of any state view, with `contracts_clean` left true (C-1 E3: an overlay's intermediate state).
+    pub fn scan_view(db:&dyn View,runtime:u32)->Summary{
+        let mut s=Summary{runtime,code_total:0,code_missing:0,code_mismatch:0,over_runtime:0,user_accounts:0,user_slots:0,sys_slots:0,balance:U512::ZERO,contracts_clean:true};
+        let mut parts=Vec::new();db.each_account(&mut |addr,a|parts.push((*addr,part(db,addr,a,runtime,true))));
+        for (addr,p) in &parts{s.add(addr,p);}
         s
     }
     fn add(&mut self,addr:&Address,p:&Part){
@@ -73,19 +76,18 @@ impl Summary{
     }
     /// The summary of `to`, given that this is `from`'s and that only the `touched` accounts and slots
     /// differ between them. `contracts_clean` is left as it is: the caller decides it with the drop.
-    pub fn moved(&self,from:&InMemoryDB,to:&InMemoryDB,touched:&Touched)->Summary{
+    pub fn moved(&self,from:&dyn View,to:&dyn View,touched:&Touched)->Summary{
         let mut s=*self;
         for (addr,slots) in touched.iter(){
-            let (old,new)=(from.accounts.get(addr),to.accounts.get(addr));
-            let both=old.map_or(false,exists)&&new.map_or(false,exists);
+            let (old,new)=(from.account(addr),to.account(addr));
+            let both=old.map_or(false,|a|a.exists())&&new.map_or(false,|a|a.exists());
             // Slots one by one only while the account exists on both sides; otherwise its storage whole.
             let whole=!both||slots.is_none();
             if let Some(a)=old{s.sub(addr,&part(from,addr,a,self.runtime,whole));}
             if let Some(a)=new{s.add(addr,&part(to,addr,a,self.runtime,whole));}
             if let (false,Some(list),Some(o),Some(n))=(whole,slots,old,new){
                 let mut list=list.to_vec();list.sort_unstable();list.dedup();
-                let nz=|a:&DbAccount,k:&U256|a.storage.get(k).map_or(false,|v|*v!=U256::ZERO);
-                let (mut gone,mut came)=(0u64,0u64);for k in &list{if nz(o,k){gone+=1}if nz(n,k){came+=1}}
+                let _=(o,n);let (mut gone,mut came)=(0u64,0u64);for k in &list{if from.slot(addr,k)!=U256::ZERO{gone+=1}if to.slot(addr,k)!=U256::ZERO{came+=1}}
                 if is_system(addr){s.sys_slots=s.sys_slots-gone+came}else{s.user_slots=s.user_slots-gone+came}
             }
         }

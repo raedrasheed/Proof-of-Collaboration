@@ -403,7 +403,7 @@ fn jm_deep_fork_rebuild_vs_height(){
         let hash=chain.canonical_at(f).unwrap().hash;
         // Prune every canonical state except genesis, forcing a full rebuild from genesis to f.
         let hs:Vec<[u8;32]>=chain.canonical.iter().skip(1).copied().collect();
-        for h in hs{let e=chain.blocks.get_mut(&h).unwrap();e.state=revm::InMemoryDB::default();e.pruned=true;}
+        for h in hs{let e=chain.blocks.get_mut(&h).unwrap();e.state=Default::default();e.pruned=true;}
         let before=chain.rebuilds;let t=Instant::now();
         chain.ensure_state(&hash).unwrap();
         let s=t.elapsed().as_secs_f64();
@@ -661,7 +661,7 @@ fn jm_state_root_synthetic(){
     use revm::primitives::AccountInfo;
     let env_n=|k:&str,d:u64|std::env::var(k).ok().and_then(|s|s.parse().ok()).unwrap_or(d);
     let (slots,accts)=(env_n("JM_SYN_SLOTS",4_000_000),env_n("JM_SYN_ACCTS",1_000_000));const PER:u64=359;
-    let base=net().chain.head().state.clone();
+    let base=revm::InMemoryDB::clone(&net().chain.head().state);
     for div in [16u64,4,1]{
         let (sl,ac)=(slots/div,accts/div);let contracts=sl.div_ceil(PER);assert!(contracts<=ac,"slots need {contracts} contracts > {ac} accounts");
         let mut db=base.clone();let t=Instant::now();
@@ -694,7 +694,7 @@ fn jm_rebuild_by_kind(){
         for _ in 0..count{let b=kind_block(&h,h.chain.head,&kind,&alice,&mut nonce,tk,bl);import(&mut h,&b);}
         // Prune every state above the empty parent p0, so the rebuild re-executes exactly the `count` loaded blocks.
         let tip=h.chain.head;let hs:Vec<[u8;32]>=h.chain.canonical.iter().skip(2).copied().collect();
-        for x in hs{let e=h.chain.blocks.get_mut(&x).unwrap();e.state=revm::InMemoryDB::default();e.pruned=true;}
+        for x in hs{let e=h.chain.blocks.get_mut(&x).unwrap();e.state=Default::default();e.pruned=true;}
         let before=h.chain.rebuilds;let t=Instant::now();h.chain.ensure_state(&tip).unwrap();let s=t.elapsed().as_secs_f64();let n=h.chain.rebuilds-before;
         println!("JM-REBUILD-KIND {}",serde_json::json!({"kind":kind,"blocks":count,"reExecutions":n,"seconds":s,"perBlockMillis":s*1e3/n as f64}));
     }

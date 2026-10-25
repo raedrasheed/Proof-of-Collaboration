@@ -8,8 +8,8 @@
 //!   phase 3: roots (state, tx, receipts, bloom, gasUsed, evidence).
 //! Any error discards the whole candidate; the parent snapshot is never mutated.
 //! Inputs never include the current block's nonce, owners, shares or signatures.
-use revm::{InMemoryDB,DatabaseCommit,FrameOrResult,interpreter::CallInputs};
-use revm::primitives::{Address,B256,Bytes,EvmState,TxEnv,TxKind,U256,keccak256};
+use revm::{InMemoryDB,FrameOrResult,interpreter::CallInputs};
+use revm::primitives::{Address,B256,Bytes,TxEnv,TxKind,U256,keccak256};
 use crate::{native::{self,NativeBlockContext},profile::ProfileIdentity,code_caps::{self,CodeLimits},pay};
 
 pub const PER_CALL_GAS:u64=30_000_000;
@@ -116,17 +116,19 @@ pub struct BlockOutput{
     pub trie:crate::state_trie::StateTrie,
     /// C-1 E2: the summary of `state`, for the child's checks.
     pub summary:crate::state_summary::Summary,
+    /// C-1 E3: the accounts and slots the block wrote (complete), when it ran on an overlay.
+    pub writes:Option<crate::state_trie::Touched>,
 }
 
 /// Parent-state facts used by consensus (finality, closing, membership).
 #[derive(Clone,Copy,Debug,PartialEq,Eq,Default)]
 pub struct ChainFacts{pub closing:bool,pub close_h:u64,pub cursor_done:bool,pub rec_len:u64,pub act_len:u64,pub held_total:U256,pub burned_total:U256}
 
-fn word(db:&InMemoryDB,a:Address,slot:U256)->U256{db.accounts.get(&a).and_then(|x|x.storage.get(&slot).copied()).unwrap_or_default()}
+fn word(db:&dyn crate::view::View,a:Address,slot:U256)->U256{db.slot(&a,&slot)}
 fn bits(v:U256,shift:u32,width:u32)->U256{(v>>shift)&((U256::from(1)<<width)-U256::from(1))}
 fn low_u64(v:U256)->u64{v.as_limbs()[0]}
 
-pub fn chain_facts(db:&InMemoryDB)->ChainFacts{
+pub fn chain_facts(db:&dyn crate::view::View)->ChainFacts{
     let r=registry();let c=word(db,r,U256::from(3));let len=word(db,r,U256::ZERO);
     let cursor=bits(c,90,32);
     ChainFacts{closing:bits(c,89,1)!=U256::ZERO,close_h:low_u64(bits(c,187,64)),cursor_done:cursor>=len,
@@ -139,7 +141,7 @@ pub fn chain_facts(db:&InMemoryDB)->ChainFacts{
 pub struct MinerRecord{pub id:Address,pub status:u8,pub tomb:bool,pub bond_state:u8,pub last_share:u64,pub reward:Address,pub bond:U256,pub exit_height:u64,pub due_height:u64,pub burn_height:u64,pub grace_start:u64}
 pub fn record_slot(id:Address)->U256{U256::from_be_bytes(keccak256([id.into_word().as_slice(),U256::from(7).to_be_bytes::<32>().as_slice()].concat()).0)}
 fn array_slot(slot:u64)->U256{U256::from_be_bytes(keccak256(U256::from(slot).to_be_bytes::<32>()).0)}
-pub fn miner_record(db:&InMemoryDB,id:Address)->Option<MinerRecord>{
+pub fn miner_record(db:&dyn crate::view::View,id:Address)->Option<MinerRecord>{
     let r=registry();let s=record_slot(id);let w0=word(db,r,s);if w0==U256::ZERO{return None}
     let w1=word(db,r,s+U256::from(1));let w3=word(db,r,s+U256::from(3));
     Some(MinerRecord{id,status:low_u64(bits(w0,0,8)) as u8,tomb:bits(w0,8,8)!=U256::ZERO,bond_state:low_u64(bits(w0,16,8)) as u8,
@@ -147,23 +149,23 @@ pub fn miner_record(db:&InMemoryDB,id:Address)->Option<MinerRecord>{
         exit_height:low_u64(bits(w3,0,64)),due_height:low_u64(bits(w3,64,64)),burn_height:low_u64(bits(w3,128,64)),grace_start:low_u64(bits(w3,192,64))})
 }
 /// ActList in order (consensus §2 M_h/Act_h from the parent state).
-pub fn active_list(db:&InMemoryDB)->Vec<Address>{
+pub fn active_list(db:&dyn crate::view::View)->Vec<Address>{
     let r=registry();let n=low_u64(word(db,r,U256::from(1)));let b=array_slot(6);
     (0..n).map(|i|Address::from_word(B256::from(word(db,r,b+U256::from(i))))).collect()
 }
-pub fn record_list(db:&InMemoryDB)->Vec<Address>{
+pub fn record_list(db:&dyn crate::view::View)->Vec<Address>{
     let r=registry();let n=low_u64(word(db,r,U256::ZERO));let b=array_slot(5);
     (0..n).map(|i|Address::from_word(B256::from(word(db,r,b+U256::from(i))))).collect()
 }
 fn ledger_slot_total(j:u64)->U256{U256::from_be_bytes(keccak256([U256::from(j).to_be_bytes::<32>(),U256::ZERO.to_be_bytes::<32>()].concat()).0)}
 fn ledger_slot_count_base(j:u64)->U256{U256::from_be_bytes(keccak256([U256::from(j).to_be_bytes::<32>(),U256::from(1).to_be_bytes::<32>()].concat()).0)}
 /// count[j][m] from the ShareLedger layout (LEDGER-01 option 1).
-pub fn share_count(db:&InMemoryDB,j:u64,owner:Address)->u64{
+pub fn share_count(db:&dyn crate::view::View,j:u64,owner:Address)->u64{
     let n=ledger_slot_count_base(j);let slot=U256::from_be_bytes(keccak256([owner.into_word().as_slice(),n.to_be_bytes::<32>().as_slice()].concat()).0);
     low_u64(word(db,ledger(),slot))
 }
-pub fn share_total(db:&InMemoryDB,j:u64)->u64{low_u64(word(db,ledger(),ledger_slot_total(j)))}
-pub fn pending(db:&InMemoryDB,j:u64)->(U256,U256,Address){
+pub fn share_total(db:&dyn crate::view::View,j:u64)->u64{low_u64(word(db,ledger(),ledger_slot_total(j)))}
+pub fn pending(db:&dyn crate::view::View,j:u64)->(U256,U256,Address){
     let b=U256::from_be_bytes(keccak256([U256::from(j).to_be_bytes::<32>(),U256::from(3).to_be_bytes::<32>()].concat()).0);
     let e=escrow();(word(db,e,b),word(db,e,b+U256::from(1)),Address::from_word(B256::from(word(db,e,b+U256::from(2)))))
 }
@@ -193,21 +195,21 @@ impl Genesis{
 
 /// `code_total`: the state's logical code total once the first SYSTEM call has fully checked it
 /// (decision package C-2, item 2).
-struct Exec<'a>{state:InMemoryDB,profile:&'a ProfileIdentity,block:NativeBlockContext,origin:Address,used:u64,limits:CodeLimits,meter:Meter,code_total:Option<u64>}
+struct Exec<'a,S>{state:S,profile:&'a ProfileIdentity,block:NativeBlockContext,origin:Address,used:u64,limits:CodeLimits,meter:Meter,code_total:Option<u64>}
 /// CapsTracker (P7): distinct storage keys changed and accounts touched by SYSTEM
 /// calls in one block, plus the largest single-call gas.
 #[derive(Clone,Debug,Default)]
 pub struct Meter{pub keys:std::collections::HashSet<(Address,U256)>,pub accounts:std::collections::HashSet<Address>,pub max_call_gas:u64,pub calls:u32,
     /// Gas spent by each SYSTEM call in order (measurement only; never a validity input).
     pub call_gas:Vec<(&'static str,u64)>}
-impl<'a> Exec<'a>{
+impl<'a,S:crate::view::WorkState> Exec<'a,S>{
     fn call(&mut self,name:&'static str,to:Address,data:Vec<u8>)->Result<Bytes,ApplyError>{
         let err=|d:String|ApplyError::System{call:name,detail:d};
         let remaining=self.profile.cp().G_SYS.checked_sub(self.used).ok_or(ApplyError::Budget("G_SYS"))?;
         let allocation=remaining.min(PER_CALL_GAS);if allocation==0{return Err(ApplyError::Budget("G_SYS"))}
         let tx=TxEnv{caller:self.origin,transact_to:TxKind::Call(to),gas_limit:allocation,gas_price:U256::ZERO,value:U256::ZERO,
             data:Bytes::from(data),chain_id:Some(self.profile.spec().chain_id),..Default::default()};
-        let mut evm=native::build_engine(&self.state,self.code_total,tx,&self.block,self.profile.spec().chain_id,Some(self.limits));
+        let mut evm=native::build_engine(self.state.as_view(),self.code_total,tx,&self.block,self.profile.spec().chain_id,Some(self.limits));
         evm.handler.pre_execution.load_accounts(&mut evm.context).map_err(|e|err(format!("{e:?}")))?;
         let precompiles=evm.handler.pre_execution.load_precompiles();evm.context.evm.set_precompiles(precompiles);
         for a in [system_address(),to,escrow()]{evm.context.evm.journaled_state.warm_preloaded_addresses.insert(a);}
@@ -227,22 +229,15 @@ impl<'a> Exec<'a>{
         // C-2 item 2: the first call checks the whole state, as before; later calls check what they
         // touched against the running total (the same Ok/Err and texts as a full scan).
         let touched:Vec<Address>=state.keys().copied().collect();
-        let before=match self.code_total{Some(_)=>code_caps::code_of(&self.state,&touched).map_err(ApplyError::Caps)?,None=>0};
-        commit_epoch(&mut self.state,state);
+        let before=match self.code_total{Some(_)=>code_caps::code_of(self.state.as_view(),&touched).map_err(ApplyError::Caps)?,None=>0};
+        crate::user_phase::commit_tx_on(&mut self.state,state,true);
         self.code_total=Some(match self.code_total{
-            Some(total)=>code_caps::revalidate_touched(&self.state,self.limits,&touched,total,before).map_err(ApplyError::Caps)?,
-            None=>{code_caps::validate_snapshot(&self.state,self.limits).map_err(ApplyError::Caps)?;code_caps::inventory(&self.state).map_err(ApplyError::Caps)?}});
-        debug_assert_eq!(code_caps::validate_snapshot(&self.state,self.limits),Ok(()));
-        debug_assert_eq!(code_caps::inventory(&self.state),Ok(self.code_total.unwrap()));
+            Some(total)=>code_caps::revalidate_touched(self.state.as_view(),self.limits,&touched,total,before).map_err(ApplyError::Caps)?,
+            None=>{code_caps::validate_snapshot(self.state.as_view(),self.limits).map_err(ApplyError::Caps)?;code_caps::inventory(self.state.as_view()).map_err(ApplyError::Caps)?}});
+        debug_assert_eq!(code_caps::validate_snapshot(self.state.as_view(),self.limits),Ok(()));
+        debug_assert_eq!(code_caps::inventory(self.state.as_view()),Ok(self.code_total.unwrap()));
         Ok(result.output)
     }
-}
-fn commit_epoch(db:&mut InMemoryDB,state:EvmState){
-    let removed:Vec<_>=state.iter().filter(|(_,a)|a.is_selfdestructed()||(a.is_touched()&&a.is_empty())).map(|(a,_)|*a).collect();
-    let touched:Vec<_>=state.iter().filter(|(_,a)|a.is_touched()).map(|(a,_)|*a).collect();
-    db.commit(state);
-    for address in removed{let a=db.accounts.entry(address).or_default();a.account_state=revm::db::AccountState::NotExisting;a.storage.clear();a.info=Default::default();}
-    crate::user_phase::normalize(db,&touched);
 }
 fn selector(sig:&str)->Vec<u8>{keccak256(sig.as_bytes())[..4].to_vec()}
 fn enc_u256(out:&mut Vec<u8>,v:U256){out.extend(v.to_be_bytes::<32>())}
@@ -269,7 +264,38 @@ pub fn apply_block(parent:&InMemoryDB,genesis:&Genesis,profile:&ProfileIdentity,
 /// candidate check, the code checks of the SYSTEM calls and of the USER phase, the final candidate check
 /// and the code drop read summaries moved through the changed keys instead of walking the whole state;
 /// without it they walk the state as before. The outcomes are the same; the tests compare them.
+///
+/// C-1 E3: with the parent's summary the block runs on an overlay over the parent. Under `root_check()`
+/// it is then applied again without trie and summary (a copy of the parent, whole-state walks) and the
+/// two outcomes are compared: the same error kind, or field by field the same output and state.
 pub fn apply_block_with(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie::StateTrie>,parent_summary:Option<&crate::state_summary::Summary>,genesis:&Genesis,profile:&ProfileIdentity,input:&BlockInput<'_>)->Result<BlockOutput,ApplyError>{
+    let r=apply_impl(parent,parent_trie,parent_summary,genesis,profile,input);
+    if root_check()&&parent_summary.is_some(){
+        let reference=apply_impl(parent,None,None,genesis,profile,input);
+        match (&r,&reference){
+            (Ok(a),Ok(b))=>same_outputs(a,b,input.height),
+            (Err(a),Err(b))=>assert_eq!(std::mem::discriminant(a),std::mem::discriminant(b),"C-1 E3: h={} overlay {a:?}, reference {b:?}",input.height),
+            (a,b)=>panic!("C-1 E3: h={} overlay {:?}, reference {:?}",input.height,a.as_ref().err(),b.as_ref().err()),
+        }
+    }
+    r
+}
+/// C-1 E3: two block outputs are the same (roots, receipts, accounting and the whole state).
+fn same_outputs(a:&BlockOutput,b:&BlockOutput,h:u64){
+    assert_eq!((a.state_root,a.transactions_root,a.receipts_root,a.evidence_root,a.gas_used,a.tips,a.issued,a.system_gas,a.is_final,a.log_bytes,a.dirty_accounts),
+        (b.state_root,b.transactions_root,b.receipts_root,b.evidence_root,b.gas_used,b.tips,b.issued,b.system_gas,b.is_final,b.log_bytes,b.dirty_accounts),"C-1 E3: h={h} outputs");
+    assert_eq!((&a.receipts,a.logs_bloom,&a.facts,a.summary),(&b.receipts,b.logs_bloom,&b.facts,b.summary),"C-1 E3: h={h} receipts, facts or summary");
+    assert_eq!((&a.meter.keys,&a.meter.accounts,a.meter.calls),(&b.meter.keys,&b.meter.accounts,b.meter.calls),"C-1 E3: h={h} meter");
+    let (x,y)=(&a.state,&b.state);
+    assert_eq!(x.accounts.len(),y.accounts.len(),"C-1 E3: h={h} account count");
+    for (k,v) in &y.accounts{let u=x.accounts.get(k).unwrap_or_else(||panic!("C-1 E3: h={h} account {k} missing"));
+        assert_eq!((&u.info.nonce,&u.info.balance,&u.info.code_hash,&u.account_state,&u.storage),(&v.info.nonce,&v.info.balance,&v.info.code_hash,&v.account_state,&v.storage),"C-1 E3: h={h} account {k}");
+        assert_eq!(u.info.code.as_ref().map(|c|c.original_bytes()),v.info.code.as_ref().map(|c|c.original_bytes()),"C-1 E3: h={h} code of {k}");}
+    assert!(x.contracts.len()==y.contracts.len()&&y.contracts.keys().all(|h|x.contracts.contains_key(h)),"C-1 E3: h={h} contracts");
+    assert_eq!(x.block_hashes,y.block_hashes,"C-1 E3: h={h} block hashes");
+    assert_eq!(x.logs.len(),y.logs.len(),"C-1 E3: h={h} logs");
+}
+fn apply_impl(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie::StateTrie>,parent_summary:Option<&crate::state_summary::Summary>,genesis:&Genesis,profile:&ProfileIdentity,input:&BlockInput<'_>)->Result<BlockOutput,ApplyError>{
     use crate::{state_summary::Summary,state_trie::Touched};
     let cp=profile.cp();
     let h=input.height;
@@ -290,77 +316,19 @@ pub fn apply_block_with(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie
     let is_final=is_final_block(parent,profile,h,input.timestamp);
     let limits=CodeLimits{runtime:cp.B_code_max,logical:cp.CODE_CAP};
     let origin=match input.proposer{Proposer::Signed(a) if a!=Address::ZERO=>a,Proposer::Signed(_)=>return Err(ApplyError::Context("proposer")),Proposer::Fallback=>Address::ZERO};
-    let mut state=parent.clone();
-    state.block_hashes.clear();
-    for (n,hash) in &input.ancestors{
-        if *n>=h||h-*n>256{return Err(ApplyError::Context("ancestor window"))}
-        state.block_hashes.insert(U256::from(*n),*hash);
-    }
+    for (n,_) in &input.ancestors{if *n>=h||h-*n>256{return Err(ApplyError::Context("ancestor window"))}}
     let block=NativeBlockContext{height:U256::from(h),timestamp:U256::from(input.timestamp),gas_limit:U256::from(input.gas_limit),base_fee:input.base_fee,prevrandao:input.prevrandao};
-    // C-1 E2: a parent that passed the checks above starts the SYSTEM calls from its code total, as the
-    // first call's whole check would have found it (C-2 item 2's invariant).
-    let mut ex=Exec{state,profile,block,origin,used:0,limits,meter:Meter::default(),code_total:parent_summary.map(|s|s.inventory())};
-
-    // Phase 0.
-    for e in &input.evidence{
-        let (accused,j)=match e{EvidenceEffect::Punish{accused}=>(*accused,None),EvidenceEffect::PunishAndInvalidate{accused,j}=>(*accused,Some(*j))};
-        if let Some(j)=j{ if pending(&ex.state,j).1!=U256::ZERO{let mut d=selector("invalidate(uint256)");enc_u256(&mut d,U256::from(j));ex.call("invalidate",escrow(),d)?;} }
-        let mut d=selector("punish(address)");enc_addr(&mut d,accused);ex.call("punish",registry(),d)?;
-    }
-    ex.call("markClose",registry(),selector("markClose()"))?;
-    ex.call("pruneShares",ledger(),selector("pruneShares()"))?;
-    if let Some(pr)=&input.parent_result{
-        let seq=pr.owner_sequence();
-        if seq.len()>usize::from(cp.S_max)+1{return Err(ApplyError::Context("parent shares"))}
-        let mut d=selector("recordShares(uint64,address[])");enc_u256(&mut d,U256::from(h-1));enc_u256(&mut d,U256::from(64));enc_u256(&mut d,U256::from(seq.len()));
-        for a in &seq{enc_addr(&mut d,*a)}
-        ex.call("recordShares",registry(),d)?;
-        let mut d=selector("recordResult(uint256,address)");enc_u256(&mut d,U256::from(h-1));enc_addr(&mut d,pr.winner);
-        ex.call("recordResult",escrow(),d)?;
-    }
-    if h>u64::from(cp.D){let mut d=selector("settle(uint256)");enc_u256(&mut d,U256::from(h-u64::from(cp.D)));ex.call("settle",escrow(),d)?;}
-    ex.call("beginBlock",registry(),selector("beginBlock()"))?;
-
-    // Phase 1: USER transactions.
-    let budget=cp.BODY_MAX as usize;
-    let ctx=crate::user_phase::UserContext{cum_log_bytes:input.cum_log_bytes,closing:chain_facts(&ex.state).closing};
-    let users=crate::user_phase::execute_for_block(&ex.state,input.transactions,&ex.block,budget,budget,profile,ctx).map_err(|e|ApplyError::User(format!("{e:?}")))?;
-    ex.state=users.state().clone();
-    let tips=users.tips();
-    // The USER phase replaced the state: without a summary the next SYSTEM call checks it whole again, as
-    // before C-2; with one, the summary moved to the USER phase's state gives the check and the total.
-    ex.code_total=match parent_summary{
-        Some(sum)=>{let t=Touched::between(parent,&ex.state);let u=sum.moved(parent,&ex.state,&t);let r=u.code_check(limits);
-            if check{assert!(same_counts(&u,&Summary::scan(&ex.state,cp.B_code_max)),"C-1 E2: the USER phase's summary differs from a scan");
-                assert_eq!(r.is_ok(),code_caps::validate_snapshot(&ex.state,limits).is_ok(),"C-1 E2: USER phase code check");}
-            r.map_err(ApplyError::Caps)?;Some(u.inventory())}
-        None=>{code_caps::validate_snapshot(&ex.state,limits).map_err(ApplyError::Caps)?;None}
+    let job=Job{parent,parent_summary,profile,input,block,origin,limits,is_final,check};
+    // C-1 E3: with the parent's summary the block runs on an overlay over the parent (no copy until the
+    // end); without it on an owned copy of the parent, as before.
+    let (mut state,touched,ran)=match parent_summary{
+        Some(_)=>{let r=job.run(crate::view::Overlay::new(parent))?;let t=r.state.touched();let m=r.state.merge();(m,Some(t),r.rest)}
+        None=>{let r=job.run(parent.clone())?;let t=parent_trie.is_some().then(||Touched::between(parent,&r.state));(r.state,t,r.rest)}
     };
-
-    // Phase 2: issuance + closeBlock, or finalize (no subsidy, tips burned).
-    let mut issued=U256::ZERO;
-    if !is_final{
-        let subsidy=U256::from_be_bytes(profile.spec().cp[15].to_be_bytes());
-        let account=ex.state.accounts.get_mut(&pay::escrow_address()).ok_or(ApplyError::Genesis("escrow".into()))?;
-        account.info.balance=account.info.balance.checked_add(subsidy).ok_or(ApplyError::Supply("issuance"))?;
-        issued=subsidy;
-        let mut d=selector("closeBlock(uint256)");enc_u256(&mut d,tips);ex.call("closeBlock",escrow(),d)?;
-    }else{
-        let mut d=selector("finalize(uint256)");enc_u256(&mut d,tips);ex.call("finalize",escrow(),d)?;
-        // LP4-FINAL-01: one SYSTEM call per remaining pot j in [F-D+1, F-1].
-        let start=if h>u64::from(cp.D){h-u64::from(cp.D)+1}else{1};
-        for j in start..h{ if pending(&ex.state,j).1!=U256::ZERO{let mut d=selector("settleFinal(uint256)");enc_u256(&mut d,U256::from(j));ex.call("settleFinal",escrow(),d)?;} }
-    }
-    let system_gas=ex.used;
-    // R18 per-block SYS caps (CapsTracker): distinct keys and accounts.
-    if ex.meter.keys.len() as u64>u64::from(cp.SYS_KEYS_BLOCK_MAX){return Err(ApplyError::Budget("SYS_KEYS_BLOCK_MAX"))}
-    if ex.meter.accounts.len() as u64>u64::from(cp.SYS_ACCT_BLOCK_MAX){return Err(ApplyError::Budget("SYS_ACCT_BLOCK_MAX"))}
-    let meter=ex.meter.clone();
-    let mut state=ex.state;
-    // C-1 E1/E2: the keys the block changed, for the trie and the summary (the drop changes no account).
-    let touched=(parent_trie.is_some()||parent_summary.is_some()).then(||Touched::between(parent,&state));
+    let Rest{users,tips,issued,system_gas,meter}=ran;
     let summary=match (parent_summary,&touched){
         (Some(sum),Some(t))=>{
+            if check{assert!(same_touched(t,&Touched::between(parent,&state)),"C-1 E3: the overlay's write set misses a change");}
             let reference=check.then(||{let mut r=state.clone();crate::user_phase::drop_unreferenced_code(&mut r);r.contracts});
             let clean=crate::state_summary::drop_unreferenced_code(parent,sum,&mut state,t);
             if let Some(r)=reference{assert!(r.len()==state.contracts.len()&&r.keys().all(|k|state.contracts.contains_key(k)),"C-1 E2: the code drop differs");}
@@ -374,14 +342,107 @@ pub fn apply_block_with(parent:&InMemoryDB,parent_trie:Option<&crate::state_trie
     check_escrow_invariant(&state,profile,h,is_final)?;
 
     // Phase 3: roots.
-    let c=users.commitments();
+    let c=users.commitments().clone();
     let evidence_root=crate::trie::ordered_root(input.evidence_raw,usize::from(cp.E_max)).map(B256::from).map_err(|_|ApplyError::Root)?;
     let trie=match (parent_trie,&touched){(Some(p),Some(t))=>p.update(&state,t),_=>crate::state_trie::StateTrie::build(&state)};
     let state_root=trie.root();
     if root_check(){assert_eq!(state_root,self::state_root(&state)?,"C-1 E1: the incremental state root differs from the full computation at height {h}")}
     let facts=chain_facts(&state);
     Ok(BlockOutput{state,state_root,transactions_root:c.transactions_root,receipts_root:c.receipts_root,evidence_root,logs_bloom:c.logs_bloom,gas_used:c.gas_used,
-        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts(),trie,summary})
+        receipts:users.receipts().to_vec(),tips,issued,system_gas,is_final,facts,meter,log_bytes:users.log_bytes(),halts:users.halts().to_vec(),dirty_accounts:users.dirty_accounts(),trie,summary,writes:parent_summary.and(touched)})
+}
+/// What `apply_block_with` runs on a working state (phases 0 to 2), with what it borrows.
+struct Job<'a>{parent:&'a InMemoryDB,parent_summary:Option<&'a crate::state_summary::Summary>,profile:&'a ProfileIdentity,input:&'a BlockInput<'a>,block:NativeBlockContext,origin:Address,limits:CodeLimits,is_final:bool,check:bool}
+struct Ran<S>{state:S,rest:Rest}
+struct Rest{users:crate::user_phase::UserCandidate<()>,tips:U256,issued:U256,system_gas:u64,meter:Meter}
+/// The written set of a working state since the parent (C-1 E3): complete for an overlay, a whole-state
+/// comparison for a copy.
+trait Since:crate::view::WorkState+Sized{fn since(&self,parent:&InMemoryDB)->crate::state_trie::Touched;fn placeholder(&self)->Self;}
+impl Since for InMemoryDB{fn since(&self,parent:&InMemoryDB)->crate::state_trie::Touched{crate::state_trie::Touched::between(parent,self)}fn placeholder(&self)->Self{InMemoryDB::default()}}
+impl Since for crate::view::Overlay<'_>{fn since(&self,_:&InMemoryDB)->crate::state_trie::Touched{self.touched()}fn placeholder(&self)->Self{crate::view::Overlay::new(self.base)}}
+impl Job<'_>{
+    fn run<S:Since>(&self,mut state:S)->Result<Ran<S>,ApplyError>{
+        use crate::state_summary::Summary;
+        let (cp,profile,input,parent,limits,check)=(self.profile.cp(),self.profile,self.input,self.parent,self.limits,self.check);
+        let h=input.height;
+        state.set_block_hashes(&input.ancestors.iter().map(|(n,x)|(*n,*x)).collect::<Vec<_>>());
+        let block=NativeBlockContext{height:self.block.height,timestamp:self.block.timestamp,gas_limit:self.block.gas_limit,base_fee:self.block.base_fee,prevrandao:self.block.prevrandao};
+        // C-1 E2: a parent that passed the checks above starts the SYSTEM calls from its code total, as the
+        // first call's whole check would have found it (C-2 item 2's invariant).
+        let mut ex=Exec{state,profile,block,origin:self.origin,used:0,limits,meter:Meter::default(),code_total:self.parent_summary.map(|s|s.inventory())};
+
+        // Phase 0.
+        for e in &input.evidence{
+            let (accused,j)=match e{EvidenceEffect::Punish{accused}=>(*accused,None),EvidenceEffect::PunishAndInvalidate{accused,j}=>(*accused,Some(*j))};
+            if let Some(j)=j{ if pending(ex.state.as_view(),j).1!=U256::ZERO{let mut d=selector("invalidate(uint256)");enc_u256(&mut d,U256::from(j));ex.call("invalidate",escrow(),d)?;} }
+            let mut d=selector("punish(address)");enc_addr(&mut d,accused);ex.call("punish",registry(),d)?;
+        }
+        ex.call("markClose",registry(),selector("markClose()"))?;
+        ex.call("pruneShares",ledger(),selector("pruneShares()"))?;
+        if let Some(pr)=&input.parent_result{
+            let seq=pr.owner_sequence();
+            if seq.len()>usize::from(cp.S_max)+1{return Err(ApplyError::Context("parent shares"))}
+            let mut d=selector("recordShares(uint64,address[])");enc_u256(&mut d,U256::from(h-1));enc_u256(&mut d,U256::from(64));enc_u256(&mut d,U256::from(seq.len()));
+            for a in &seq{enc_addr(&mut d,*a)}
+            ex.call("recordShares",registry(),d)?;
+            let mut d=selector("recordResult(uint256,address)");enc_u256(&mut d,U256::from(h-1));enc_addr(&mut d,pr.winner);
+            ex.call("recordResult",escrow(),d)?;
+        }
+        if h>u64::from(cp.D){let mut d=selector("settle(uint256)");enc_u256(&mut d,U256::from(h-u64::from(cp.D)));ex.call("settle",escrow(),d)?;}
+        ex.call("beginBlock",registry(),selector("beginBlock()"))?;
+
+        // Phase 1: USER transactions, on the working state itself (C-1 E3: no copy in, none out).
+        let budget=cp.BODY_MAX as usize;
+        if ex.block.gas_limit!=U256::from(cp.GAS_LIMIT){return Err(ApplyError::User(format!("{:?}",crate::user_phase::UserError::Context)))}
+        let ctx=crate::user_phase::UserContext{cum_log_bytes:input.cum_log_bytes,closing:chain_facts(ex.state.as_view()).closing};
+        // The live user counts and the code total: from the parent's summary moved to this state, or a
+        // whole-state count as before.
+        let (live,known)=match self.parent_summary{
+            Some(sum)=>{let u=sum.moved(parent,ex.state.as_view(),&ex.state.since(parent));
+                if check{let full=Summary::scan_view(ex.state.as_view(),cp.B_code_max);assert!(same_counts(&u,&full),"C-1 E3: the summary before the USER phase differs from a scan");}
+                ((u.user_slots,u.user_accounts),ex.code_total)}
+            None=>(crate::user_phase::live_counts_view(ex.state.as_view()),None),
+        };
+        let empty=ex.state.placeholder();let state=std::mem::replace(&mut ex.state,empty);
+        let users=crate::user_phase::execute_user_phase_on(state,live,known,input.transactions,&ex.block,budget,budget,Some(profile),ctx).map_err(|e|ApplyError::User(format!("{e:?}")))?;
+        let (state,users)=users.split();ex.state=state;
+        let tips=users.tips();
+        // The USER phase replaced the state: without a summary the next SYSTEM call checks it whole again, as
+        // before C-2; with one, the summary moved to the USER phase's state gives the check and the total.
+        ex.code_total=match self.parent_summary{
+            Some(sum)=>{let t=ex.state.since(parent);let u=sum.moved(parent,ex.state.as_view(),&t);let r=u.code_check(limits);
+                if check{assert!(same_counts(&u,&Summary::scan_view(ex.state.as_view(),cp.B_code_max)),"C-1 E2: the USER phase's summary differs from a scan");
+                    assert_eq!(r.is_ok(),code_caps::validate_snapshot(ex.state.as_view(),limits).is_ok(),"C-1 E2: USER phase code check");}
+                r.map_err(ApplyError::Caps)?;Some(u.inventory())}
+            None=>{code_caps::validate_snapshot(ex.state.as_view(),limits).map_err(ApplyError::Caps)?;None}
+        };
+
+        // Phase 2: issuance + closeBlock, or finalize (no subsidy, tips burned).
+        let mut issued=U256::ZERO;
+        if !self.is_final{
+            let subsidy=U256::from_be_bytes(profile.spec().cp[15].to_be_bytes());
+            let info=ex.state.info_mut(&pay::escrow_address()).ok_or(ApplyError::Genesis("escrow".into()))?;
+            info.balance=info.balance.checked_add(subsidy).ok_or(ApplyError::Supply("issuance"))?;
+            issued=subsidy;
+            let mut d=selector("closeBlock(uint256)");enc_u256(&mut d,tips);ex.call("closeBlock",escrow(),d)?;
+        }else{
+            let mut d=selector("finalize(uint256)");enc_u256(&mut d,tips);ex.call("finalize",escrow(),d)?;
+            // LP4-FINAL-01: one SYSTEM call per remaining pot j in [F-D+1, F-1].
+            let start=if h>u64::from(cp.D){h-u64::from(cp.D)+1}else{1};
+            for j in start..h{ if pending(ex.state.as_view(),j).1!=U256::ZERO{let mut d=selector("settleFinal(uint256)");enc_u256(&mut d,U256::from(j));ex.call("settleFinal",escrow(),d)?;} }
+        }
+        let system_gas=ex.used;
+        // R18 per-block SYS caps (CapsTracker): distinct keys and accounts.
+        if ex.meter.keys.len() as u64>u64::from(cp.SYS_KEYS_BLOCK_MAX){return Err(ApplyError::Budget("SYS_KEYS_BLOCK_MAX"))}
+        if ex.meter.accounts.len() as u64>u64::from(cp.SYS_ACCT_BLOCK_MAX){return Err(ApplyError::Budget("SYS_ACCT_BLOCK_MAX"))}
+        let meter=ex.meter.clone();
+        Ok(Ran{state:ex.state,rest:Rest{users,tips,issued,system_gas,meter}})
+    }
+}
+/// The two write sets name the same accounts and slots (the overlay's may name more: written but unchanged).
+fn same_touched(overlay:&crate::state_trie::Touched,full:&crate::state_trie::Touched)->bool{
+    let o:std::collections::HashMap<_,_>=overlay.iter().map(|(a,s)|(*a,s.map(|v|v.iter().copied().collect::<std::collections::HashSet<_>>()))).collect();
+    full.iter().all(|(a,s)|match (o.get(a),s){(None,_)=>false,(Some(None),_)=>true,(Some(Some(_)),None)=>false,(Some(Some(os)),Some(fs))=>fs.iter().all(|k|os.contains(k))})
 }
 /// The summaries agree on everything but `contracts_clean` (an intermediate state's map is not dropped).
 fn same_counts(a:&crate::state_summary::Summary,b:&crate::state_summary::Summary)->bool{

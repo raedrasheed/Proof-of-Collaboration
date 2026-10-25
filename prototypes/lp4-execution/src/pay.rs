@@ -1,7 +1,7 @@
 //! Native PAY boundary, LP4-PAY-01: development/LP4-PAY-APPROVAL.md.
 //! PAY-02: development/LP4-PAY-LIFECYCLE-APPROVAL.md.
 //! Transfer primitive only. Full compiled-system policy/integration acceptance is separate.
-use revm::{Context, InMemoryDB, FrameOrResult, FrameResult};
+use revm::{Context, FrameOrResult, FrameResult};
 use revm::primitives::{Address, Bytes, EVMError, U256};
 use revm::interpreter::{CallInputs, CallOutcome, CallScheme, Gas, InstructionResult, InterpreterResult};
 use crate::pay_address;
@@ -20,9 +20,9 @@ pub struct NativeContext {
 /// That database is the snapshot the engine borrows (`state_view::StateRef`), which nothing writes
 /// while the engine runs, so it answers exactly as the copy of the snapshot this context used to own
 /// (decision package C-2, item 3). Callers still cannot submit an eligibility/success flag.
-fn durable(pre_transaction: &InMemoryDB, recipient: Address) -> bool {
-    pre_transaction.accounts.get(&recipient).map(|account| {
-        account.account_state != revm::db::AccountState::NotExisting
+fn durable(pre_transaction: &dyn crate::view::View, recipient: Address) -> bool {
+    pre_transaction.account(&recipient).map(|account| {
+        *account.state != revm::db::AccountState::NotExisting
             && (account.info.nonce > 0
                 || (account.info.code_hash != revm::primitives::KECCAK_EMPTY
                     && account.info.code_hash != revm::primitives::B256::ZERO))

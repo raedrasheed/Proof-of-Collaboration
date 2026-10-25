@@ -463,7 +463,7 @@ fn slice_node(tag:&str,slice:std::time::Duration)->(pocold::node::Node,std::path
     let expected:Vec<Vec<u8>>=std::iter::once(mined).chain(pooled.iter().cloned()).collect();
     assert_eq!(pool(&mut b),expected,"the whole rebuild: the detached transaction first, then the pool in order");
     assert_eq!(pool(&mut a),pool(&mut b),"sliced revalidation gives the same pool");
-    assert_eq!(apply::state_root(a.pool_state()).unwrap(),apply::state_root(b.pool_state()).unwrap(),"and the same pending state");
+    assert_eq!(apply::state_root(&a.pool_state()).unwrap(),apply::state_root(&b.pool_state()).unwrap(),"and the same pending state");
     assert!(a.stats.pool_slices>1,"it ran in more than one slice: {}",a.stats.pool_slices);
     // An in-process submission during a backlog is executed after it, in pool order.
     let (mut c,dc)=slice_node("submit",std::time::Duration::ZERO);c.import(ours[0].clone(),None).unwrap();
@@ -717,7 +717,7 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     node.submit_tx(tx,false).unwrap();assert_eq!(entries(&node),e0,"200 SLOADs add no storage entries");
     // Second review: zero-value calls touch empty accounts. They are removed as in a block (EIP-161),
     // so neither the pending state nor the meter drifts.
-    let profile=admitted(&c);let recount=|n:&Node|pocol_lp4_execution::user_phase::PoolMeter::of(n.pool_state(),profile.profile()).live();
+    let profile=admitted(&c);let recount=|n:&Node|pocol_lp4_execution::user_phase::PoolMeter::of(&n.pool_state(),profile.profile()).live();
     let accounts=|n:&Node|n.pool_state().accounts.len();let a0=accounts(&node);assert_eq!(node.pool_live(),recount(&node));
     for k in 0..3u64{let to=Address::from([0xee;20]);
         let tx=Tx{chain_id:777910,nonce:3+k,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:21000,to:Some(to),value:U256::ZERO,data:Default::default()}.sign_1559(&alice);
@@ -727,6 +727,42 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     let tx=Tx{chain_id:777910,nonce:6,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:8_000_000,to:None,value:U256::ZERO,data:calls.into()}.sign_1559(&alice);
     node.submit_tx(tx,false).unwrap();assert_eq!(node.pool_live(),recount(&node),"meter = recount after 300 empty calls");
     assert!(accounts(&node)<=a0+2,"touched empty accounts are not kept: {} -> {}",a0,accounts(&node));
+    let _=std::fs::remove_dir_all(&dir);
+}
+
+/// C-1 E3: the RPC "pending" answers are read in place on the pool's layer over the head. Balance, nonce,
+/// code and storage at "pending" equal the merged pending state for every account the pool wrote (and a
+/// few it did not), "latest" still answers from the head, and eth_call funds its caller's value on an
+/// overlay without changing the head.
+#[test] fn e3_pending_answers_are_the_pool_layer(){
+    let (mut n,dir)=a11_node("e3-pending");
+    let (alice,bob)=(devnet::account_key("alice"),devnet::account_key("bob"));
+    let mut init=Vec::new();for i in 0..4u8{init.extend([0x60,i+1,0x60,i,0x55]);}init.extend([0x60,0x01,0x60,0x00,0xf3]);
+    let create=|nonce:u64|Tx{chain_id:777910,nonce,max_priority:U256::from(1_000_000_000u64),max_fee:U256::from(100_000_000_000u64),gas:1_000_000,to:None,value:U256::ZERO,data:init.clone().into()}.sign_1559(&alice);
+    for t in [pay(&alice,0,7),create(1),pay(&alice,2,9),pay(&bob,0,11)]{n.submit_tx(t,false).unwrap();}
+    assert_eq!(n.pool.txs.len(),4);assert!(n.pool_written()>=4,"positive control: the layer holds the pool's writes");
+    let merged=n.pool_state();let head=n.chain.head().state.clone();
+    let accounts:Vec<Address>=[alice.address(),bob.address(),alice.address().create(1),Address::ZERO,Address::repeat_byte(0x77)].into();
+    let q=|v:serde_json::Value|v.as_str().map(|s|U256::from_str_radix(s.trim_start_matches("0x"),16).unwrap()).expect("an answer");
+    for a in &accounts{let s=format!("{a:#x}");
+        for (tag,st) in [("pending",&merged),("latest",&*head)]{
+            let acc=st.accounts.get(a).filter(|x|x.info().is_some());
+            assert_eq!(q(rpc_local(&mut n,"eth_getBalance",json!([s,tag]))),acc.map(|x|x.info.balance).unwrap_or_default(),"{tag} balance of {s}");
+            assert_eq!(q(rpc_local(&mut n,"eth_getTransactionCount",json!([s,tag]))),U256::from(acc.map(|x|x.info.nonce).unwrap_or(0)),"{tag} nonce of {s}");
+            let code=acc.and_then(|x|x.info.code.as_ref()).map(|c|c.original_bytes().to_vec()).unwrap_or_default();
+            assert_eq!(rpc_local(&mut n,"eth_getCode",json!([s,tag])),json!(format!("0x{}",code.iter().map(|b|format!("{b:02x}")).collect::<String>())),"{tag} code of {s}");
+            for k in 0..5u64{assert_eq!(q(rpc_local(&mut n,"eth_getStorageAt",json!([s,format!("{k:#x}"),tag]))),st.accounts.get(a).and_then(|x|x.storage.get(&U256::from(k)).copied()).unwrap_or_default(),"{tag} slot {k} of {s}");}
+        }
+    }
+    // Positive controls: the pending state differs from the head where the pool wrote.
+    let nonce=|tag:&str,n:&mut pocold::node::Node|q(rpc_local(n,"eth_getTransactionCount",json!([format!("{:#x}",alice.address()),tag])));
+    assert_eq!((nonce("pending",&mut n),nonce("latest",&mut n)),(U256::from(3),U256::ZERO));
+    assert_eq!(q(rpc_local(&mut n,"eth_getStorageAt",json!([format!("{:#x}",alice.address().create(1)),"0x3","pending"]))),U256::from(4),"the created contract's slot");
+    // eth_call from bob with more value than bob holds: the caller is funded on the overlay only.
+    let bal=q(rpc_local(&mut n,"eth_getBalance",json!([format!("{:#x}",bob.address()),"latest"])));
+    let call=json!([{"from":format!("{:#x}",bob.address()),"to":format!("{:#x}",alice.address()),"value":format!("{:#x}",bal+U256::from(1))},"latest"]);
+    assert_eq!(rpc_local(&mut n,"eth_call",call),json!("0x"),"a funded value call succeeds");
+    assert_eq!(q(rpc_local(&mut n,"eth_getBalance",json!([format!("{:#x}",bob.address()),"latest"]))),bal,"the head is unchanged");
     let _=std::fs::remove_dir_all(&dir);
 }
 
@@ -869,10 +905,11 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     // canonical states as diffs, -> 3,601,500,638 B; C-1 S4: old canonical entries slimmed,
     // -> 3,322,680,105 B; C-1 E1: the head's state trie, one derived or built trie and a block's changed
     // paths, and the entry's trie handle, -> 3,486,909,657 B; C-1 E2: each entry's boxed state summary,
-    // -> 3,489,051,177 B). Some terms are type
+    // -> 3,489,051,177 B; C-1 E3: blocks, production, the pool and RPC on overlays, 10 transient working
+    // copies -> 2, plus the pool's layer and the applied block's overlay, -> 3,186,963,844 B). Some terms are type
     // sizes (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
     // target checks that it boots within the budget with its reserve.
-    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_489_051_177,"the A13 model total changed");}
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_186_963_844,"the A13 model total changed");}
     // C-1 S1: a window of the whole chain is the model before S1, plus history.redb's cache and allocator.
     let all=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits{history_window:Some(u64::MAX),..Default::default()},2).unwrap();
     let redb:u128=all.items.iter().filter(|x|x.0.starts_with("history/history.redb")).map(|x|x.1).sum();

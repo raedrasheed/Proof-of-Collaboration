@@ -606,6 +606,126 @@ to the decision package.
 `block_writes` (and, for the pool, by its own caps). The full copies left are the head, genesis, side_max,
 the materialized states and the side child under construction. E4 then moves the head into `state.redb`.
 
+### E3 status (2026-10-25): E3.1–E3.3 landed; evidence/c1-e3/
+
+E3.4 (the head extended in place) is not done yet.
+
+**One deviation from the design, in the implementation only.** The executor is generic over two small
+lp4 traits (`view::View` for reads, `view::WorkState` for writes). It is not generic over revm's
+`CacheDB<B>`, for two reasons:
+- `CacheDB<B>`'s `commit` and its normalization would have to be reproduced over a base anyway (point 2
+  above);
+- the pool and RPC need a layer they can keep between uses, without a borrow of the head.
+
+`InMemoryDB` implements both traits with the code it replaces. Validity, roots, receipts and RPC answers
+are unchanged, so no decision is affected.
+
+**Code:**
+- **lp4 `src/view.rs` (new):**
+  - `View`, `WorkState`;
+  - `Overlay` over a borrowed parent, with its `Layer`: `top`, `cleared`, the tombstones `deleted`,
+    `retain` and the BLOCKHASH window;
+  - `LayerView`, a layer read over its base;
+  - `Overlay::merge`, the state the copy would have reached;
+  - `Overlay::touched`, the complete write set.
+- **lp4 executor on `&dyn View` / `WorkState`:**
+  - `state_view::StateRef`, `code_caps`, `collision`, `pay`, `native`;
+  - `user_phase::execute_user_phase_on` with `commit_tx_on`;
+  - `apply::Job::run<S>` for phases 0–2;
+  - `apply_block_with` on an overlay whenever the parent's summary is present; `BlockOutput.writes`;
+  - `state_summary::moved` and `part` on views.
+- **lp4 reference check.** Under `root_check()` (lp4's tests; pocold's tests through the `root-check`
+  feature), every block applied on an overlay is applied again on a copy without trie or summary. The two
+  are compared with `same_outputs`:
+  - roots, receipts, bloom, facts, summary, meter;
+  - every account (info, state, storage, code), the contracts, block hashes and logs;
+  - a failing candidate must fail with the same error kind.
+- **pocold:**
+  - `Entry.state` is an `Arc<InMemoryDB>`, shared by the chain, the pool base and RPC reads;
+  - `StateDiff::of_output` builds the S3a diff from the write set (`between_written`). Under the reference
+    check it is applied both ways and the states are compared with the child and the parent;
+  - the pool keeps a `Layer` over `pending_base`, the head's `Arc`: `pool_view`, `pool_written`;
+  - template selection simulates on an overlay over the parent;
+  - RPC `eth_call`/`estimateGas` run on an overlay, and "pending" is read in place (`TagState`);
+  - `resources.rs`: `TRANSIENT_SNAPSHOTS` 10 → 2, `POOL_LAYER_SNAPSHOTS = 1`, `overlay_max`.
+
+**A13, recounted from the code.** These remain full copies:
+- a block's merged child (one);
+- a rolling re-execution's state and its next block's merged state (two);
+- the pool's base after a new head until `rebuild_pool`, which shares the previous head's `Arc` (counted
+  in the transient two, since `restore_canonical` does not overlap a rolling re-execution);
+- the pool's layer, counted as a whole state, because its gas is bounded only by POOL_MAX_TXS × GAS_LIMIT
+  until D-7's value is approved.
+
+The applied block's overlay is counted in the diffs group.
+
+| | before E3 (E2) | **E3** |
+|---|---:|---:|
+| devnet model (`a13-devnet-breakdown-e3.log`) | 3,489,051,177 B | **3,186,963,844 B** |
+| network profile (`a13-network-profile-e3.log`) | 40.20 GiB | **28.08 GiB** (required 32.09 GiB with the reserve) |
+| snapshots group at the network profile | 27.76 GiB (16 whole states + growth) | **16.33 GiB** (9 whole states + growth, 1.63 GiB each) |
+| code group (containers in every snapshot) | 7.07 GiB | 6.44 GiB |
+| history group (`Entry` is smaller: its state is an `Arc`) | 0.84 GiB | 0.78 GiB |
+
+The network figure is still far above 6 GiB. Most of what remains is whole states:
+- head, genesis, the two side states, the two materialized states, the two transient copies, the pool
+  layer, and growth;
+- code sets, 6.44 GiB;
+- the tries, 2.23 GiB.
+
+E4 (`state.redb`: head state and trie nodes on disk, D-6 checkpoints) and E5 are what take these off the
+heap.
+
+**Validation time** at the near-cap devnet state (`validation-near-cap-e3.log`, reference checks off):
+| | before E1 | E1 | E2 | **E3** |
+|---|---:|---:|---:|---:|
+| empty child | 491 ms | 262 ms | 62 ms | **8.5 ms** |
+| 380 transfers | 672 ms | 349 ms | 174 ms | **55 ms** |
+| CREATE2-heavy child | 554 ms | 290 ms | 122 ms | **17 ms** |
+| 149 one-create transactions | 556 ms | 321 ms | 154 ms | **32 ms** |
+
+The state is the `accts-end` point of the `all` series: 18,833 accounts and 46,636 slots. One run, on
+this container.
+
+What changed:
+- the block no longer copies its parent at the start, and the USER phase no longer makes its two copies;
+- the two `Touched::between` walks, about 14 ms each, are replaced by the overlay's write set;
+- S3a's diff is built from the write set.
+
+What remains is one copy of the parent, at the end (`merge`). E3.4 removes it when the block extends
+the head. The rolling rebuild's and restore's diffs still use `StateDiff::between`; E3.4 moves them to the
+write set too.
+
+**Acceptance tests:**
+- **lp4 `view` unit test `an_overlay_reads_and_merges_as_the_copy_it_replaces`:** 3000 random cases.
+  Each case builds a normalized parent, then applies up to 12 steps to a copy and to an overlay alike. The
+  steps are commits with created, self-destructed, removed and read-only accounts, `insert_info`,
+  `info_mut` and the BLOCKHASH window. After every step every read (account, slot, nonzero slots, block
+  hash) is the same. At the end the merged overlay equals the copy, and the write set names every changed
+  account.
+- **The reference comparison on every block:** every lp4 test and every pocold test that applies a block
+  with a summary (validation, production, rebuilds, restores, the E1/E2/S3a/S4 path tests) also runs it
+  on a copy and compares the outcomes field by field; the S3a diff from the write set is checked both
+  ways against the parent and the child.
+- **pocold `e3_pending_answers_are_the_pool_layer` (new):** after four pool transactions (transfers and
+  a contract creation with storage), balance, nonce, code and storage at "pending" equal the merged
+  pending state, and at "latest" the head, for written and unwritten accounts. eth_call from bob with
+  more value than bob holds succeeds, and the head is unchanged.
+- **The suites, release, reference comparisons on** (`suite-lp4.log`, `suite-pocold.log`): lp4 187 passed / 0 failed; pocold 200 passed / 0 failed / 17 ignored (prototypes tree `3b2e0baaa42f26b57ef5686b937c7f7c5241fc46`).
+- **Mutation controls** (`mutants.log`): 19 mutants of the overlay, the write set, the diff from it, the pool's layer, RPC and
+  template selection.
+  - **Pass 1:** the base passes; 17 are killed. The new pocold test kills E3M16–E3M18; E3M17 and E3M18 by
+    it alone.
+  - **Pass 2:** after pass 1 the overlay unit test was strengthened. It now also requires every changed
+    slot to be in the write set, or its account to be written whole. This kills E3M5: a cleared account
+    not written whole. Execution cannot reach E3M5 as far as I can tell, because a CREATE onto an account
+    with storage is a collision and a self-destruct changes existence; the test now holds the invariant
+    directly.
+  - **E3M7 is equivalent** on normalized commit sequences, the only ones the overlay models. A
+    self-destruct that does not mark the account cleared is still marked cleared, and deleted, by the
+    normalization that follows every commit. The insertion is kept as a defence.
+  - **18 of 19 killed.**
+
 ## S4: per-block metadata off the heap
 
 - Entries older than R_keep keep only what fork choice and contexts need for the heights still reachable
@@ -680,9 +800,10 @@ The journal already holds the header and ParentResult bytes, so nothing else had
 ## Order of work
 
 1. S1 (done).
-2. S3a.
-3. S5 with S3b (one executor change), and D-6 on it.
-4. S4.
+2. S3a (done).
+3. S4 (done).
+4. S5 with S3b, in steps: E1 (done), E2 (done), E3.1–E3.3 (done), then E3.4, E4 with D-6 on it, and
+   E5.
 
 Each stage lands with its own commit, evidence directory, suites and mutation controls. Its `derive()`
 output replaces the projection in DECISION-PACKAGE.md §1.

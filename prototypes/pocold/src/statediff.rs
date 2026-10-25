@@ -82,6 +82,42 @@ impl StateDiff{
         if parent.logs!=child.logs{d.logs=Some((parent.logs.clone(),child.logs.clone()));}
         d
     }
+    /// C-1 E3: `between` for a child that differs from its parent only at the accounts in `written`
+    /// (the block's write set): the same diff, from those accounts' entries (storage compared whole, so
+    /// that a slot dropped by normalization is recorded too), and from the contracts, block hashes and
+    /// logs, which are compared whole as before.
+    pub fn between_written(parent:&InMemoryDB,child:&InMemoryDB,written:&pocol_lp4_execution::state_trie::Touched)->Self{
+        let mut d=StateDiff::default();
+        for (addr,_) in written.iter(){
+            match (parent.accounts.get(addr),child.accounts.get(addr)){
+                (None,None)=>{}
+                (None,Some(c))=>d.accounts.push((*addr,AccountDiff{before:None,after:Some(meta(c)),slots:c.storage.iter().map(|(k,v)|(*k,None,Some(*v))).collect()})),
+                (Some(p),None)=>d.accounts.push((*addr,AccountDiff{before:Some(meta(p)),after:None,slots:p.storage.iter().map(|(k,v)|(*k,Some(*v),None)).collect()})),
+                (Some(p),Some(c))=>{
+                    let mut slots:Vec<_>=c.storage.iter().filter_map(|(k,v)|match p.storage.get(k){Some(pv) if pv==v=>None,pv=>Some((*k,pv.copied(),Some(*v)))}).collect();
+                    slots.extend(p.storage.iter().filter(|(k,_)|!c.storage.contains_key(*k)).map(|(k,v)|(*k,Some(*v),None)));
+                    if !same_meta(p,c)||!slots.is_empty(){d.accounts.push((*addr,AccountDiff{before:Some(meta(p)),after:Some(meta(c)),slots}));}
+                }
+            }
+        }
+        for (h,c) in &child.contracts{match parent.contracts.get(h){Some(p) if same_code(p,c)=>{},p=>d.contracts.push((*h,p.cloned(),Some(c.clone())))}}
+        for (h,p) in &parent.contracts{if !child.contracts.contains_key(h){d.contracts.push((*h,Some(p.clone()),None));}}
+        for (n,c) in &child.block_hashes{match parent.block_hashes.get(n){Some(p) if p==c=>{},p=>d.block_hashes.push((*n,p.copied(),Some(*c)))}}
+        for (n,p) in &parent.block_hashes{if !child.block_hashes.contains_key(n){d.block_hashes.push((*n,Some(*p),None));}}
+        if parent.logs!=child.logs{d.logs=Some((parent.logs.clone(),child.logs.clone()));}
+        d
+    }
+    /// The diff of a block's output from its parent: from the write set when there is one (checked against
+    /// `between` under lp4's reference check, by applying both to the parent).
+    pub fn of_output(parent:&InMemoryDB,out:&pocol_lp4_execution::apply::BlockOutput)->Self{
+        let Some(w)=&out.writes else{return Self::between(parent,&out.state)};
+        let d=Self::between_written(parent,&out.state,w);
+        if pocol_lp4_execution::apply::root_check(){
+            let mut s=parent.clone();d.apply_after(&mut s);assert!(states_equal(&s,&out.state),"C-1 E3: the diff from the write set does not give the child");
+            let mut b=out.state.clone();d.apply_before(&mut b);assert!(states_equal(&b,parent),"C-1 E3: the diff from the write set does not give the parent back");
+        }
+        d
+    }
     /// child -> parent.
     pub fn apply_before(&self,s:&mut InMemoryDB){self.apply(s,true)}
     /// parent -> child.

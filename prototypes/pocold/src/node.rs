@@ -131,9 +131,22 @@ struct Production{parent:[u8;32],height:u64,attempt:u32,mode:Mode,shares:BTreeSe
 fn checked_code_total(state:&InMemoryDB,spec:&Spec)->Option<u64>{
     let cp=spec.cp();pocol_lp4_execution::code_caps::checked_total(state,pocol_lp4_execution::code_caps::CodeLimits{runtime:cp.B_code_max,logical:cp.CODE_CAP}).ok()
 }
+/// C-1 E2/E3: a full entry's code total once its state passes the code limits, from its summary (a
+/// whole-state check without one).
+fn summary_code_total(e:&Entry,spec:&Spec)->Option<u64>{
+    let cp=spec.cp();let lim=pocol_lp4_execution::code_caps::CodeLimits{runtime:cp.B_code_max,logical:cp.CODE_CAP};
+    match &e.summary{Some(s)=>s.code_check(lim).ok().map(|_|s.inventory()),None=>checked_code_total(&e.state,spec)}
+}
+/// The pool's meter and code total for a new pending state over `head`: from its summary, or counted.
+fn pool_start(head:&Entry,spec:&Spec)->(PoolMeter,Option<u64>){
+    let meter=match &head.summary{Some(s)=>PoolMeter::from_counts(s.user_slots,s.user_accounts,s.sys_slots,spec.profile()),None=>PoolMeter::of(&head.state,spec.profile())};
+    (meter,summary_code_total(head,spec))
+}
 /// `code_total`: the pending state's logical code total once it is known to pass the code limits (the head
 /// state is checked once per new head; decision package C-2), so a submission does not rescan the state.
-pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending_state:InMemoryDB,pub bytes:usize,meter:PoolMeter,code_total:Option<u64>,
+/// C-1 E3: the pending state is a layer of the pool's writes over the head state it was started on
+/// (`pending_base`, shared with the head entry), not a copy of the head.
+pub struct Pool{pub txs:Vec<(B256,Vec<u8>)>,pending:pocol_lp4_execution::view::Layer,pending_base:Arc<InMemoryDB>,pub bytes:usize,meter:PoolMeter,code_total:Option<u64>,
     /// D-7: what a new head left to revalidate, in pool order. An abandoned block (its journal
     /// offset) expands to its transactions when reached; a transaction is re-executed on the pending
     /// state. `backlog_bytes` counts the transactions held here against POOL_MAX_BYTES.
@@ -310,11 +323,11 @@ impl Node{
         let (tx,rx)=mpsc::sync_channel(EVENT_QUEUE);let (miner_tx,miner_rx)=mpsc::channel::<MinerEvent>();
         let (light,light_rx)=crate::rpc::LightLane::new(cfg.limits.rpc.light_queue);let resp=crate::rpc::RespPools::new(&cfg.limits.rpc);
         let fwd=tx.clone();crate::threads::spawn("miner-fwd",crate::threads::IO_STACK,move||{for e in miner_rx{if fwd.send(Event::Miner(e)).is_err(){break}}}).map_err(|e|format!("spawn: {e}"))?;
-        let head_state=chain.head().state.clone();let meter=PoolMeter::of(&head_state,chain.spec.profile());let pool_code=checked_code_total(&head_state,&chain.spec);
+        let head_state=chain.head().state.clone();let (meter,pool_code)=pool_start(chain.head(),&chain.spec);
         let net=net::Net::new(cfg.limits.net.clone());
         let mut node=Self{cfg,chain,net,orphan_order:VecDeque::new(),orphan_bytes:0,journal:rec.journal,history,peers:HashMap::new(),peer_status:HashMap::new(),session:None,sync_ask_ms:0,sync_turn:0,outbound:Arc::new(Mutex::new(HashSet::new())),tx,rx,light,light_rx,draining:false,deferred:VecDeque::new(),between:false,resp,tick_pending:Arc::new(std::sync::atomic::AtomicBool::new(false)),miner_tx,prod:None,
             orphans:HashMap::new(),future:Vec::new(),own_future:HashSet::new(),templates:HashMap::new(),received:HashMap::new(),
-            pool:Pool{code_total:pool_code,txs:vec![],pending_state:head_state,bytes:0,meter,backlog:VecDeque::new(),backlog_bytes:0,gas:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
+            pool:Pool{code_total:pool_code,txs:vec![],pending:Default::default(),pending_base:head_state,bytes:0,meter,backlog:VecDeque::new(),backlog_bytes:0,gas:0},rejects:VecDeque::new(),stats:Stats::default(),stopped:false,seen_templates:HashMap::new(),seen_wins:HashMap::new(),evidence_pool:Vec::new()};
         node.stats.imported=rec.payloads.len() as u64;node.stats.replay_skipped=skipped;node.stats.restored=restored as u64;node.stats.history_refilled=refilled;
         if rec.torn_tail{node.log("recovered torn journal tail into a new journal");}
         if rec.migrated_v1{node.log("migrated a fully verified v1 journal to format v2 (original kept as blocks.journal.v1-n)");}
@@ -562,22 +575,26 @@ impl Node{
         let gas_limit=env.tx_env().gas_limit;
         if self.cfg.limits.pool_gas_max.is_some_and(|m|self.pool.gas.saturating_add(gas_limit)>m){return Err("-32016 pool full (gas)".into())}
         let ctx=self.next_block_ctx();
+        let base=self.pool.pending_base.clone();let view=pocol_lp4_execution::view::LayerView{base:&base,layer:&self.pool.pending};
         let r=match(by,self.pool.code_total){
-            (Some(by),total)=>native::admit_for_profile(&self.pool.pending_state,total,env.tx_env(),&ctx,self.chain.spec.profile(),std::rc::Rc::new(move||Instant::now()>=by)),
-            (None,Some(total))=>native::execute_on_validated(&self.pool.pending_state,total,env.tx_env(),&ctx,self.chain.spec.profile()),
-            (None,None)=>native::execute_for_profile(&self.pool.pending_state,env.tx_env(),&ctx,self.chain.spec.profile())};
+            (Some(by),total)=>native::admit_for_profile(&view,total,env.tx_env(),&ctx,self.chain.spec.profile(),std::rc::Rc::new(move||Instant::now()>=by)),
+            (None,Some(total))=>native::execute_on_validated(&view,total,env.tx_env(),&ctx,self.chain.spec.profile()),
+            (None,None)=>native::execute_for_profile(&view,env.tx_env(),&ctx,self.chain.spec.profile())};
         let r=match r{Err(revm::primitives::EVMError::Custom(m)) if m==native::SIMULATION_STOPPED=>return Err(SUBMIT_DEADLINE.into()),r=>r.map_err(|e|format!("-32000 {e:?}"))?};
         // A precompile runs to its end between two polls: the deadline is checked again before the commit.
         if by.is_some_and(|by|Instant::now()>=by){return Err(SUBMIT_DEADLINE.into())}
         // A13: the effects must stay within the caps a block enforces; then only live entries are kept.
-        self.pool.meter.admit(&self.pool.pending_state,&r.state).map_err(|h|format!("-32000 pending state would exceed a cap ({h:?})"))?;
+        self.pool.meter.admit(&view,&r.state).map_err(|h|format!("-32000 pending state would exceed a cap ({h:?})"))?;
         // The same commit as a block's USER phase (EIP-161 cleanup, normalization), so the meter
         // follows the pending state exactly (second review: touched empty accounts were kept).
         let touched:Vec<Address>=r.state.keys().copied().collect();
-        let before=pocol_lp4_execution::code_caps::code_of(&self.pool.pending_state,&touched);
-        user_phase::commit_tx(&mut self.pool.pending_state,r.state,true);user_phase::drop_unreferenced_code(&mut self.pool.pending_state);
+        let before=pocol_lp4_execution::code_caps::code_of(&view,&touched);
+        // C-1 E3: committed into the layer (no early return between taking it and putting it back). The
+        // code drop of a whole pending state is not needed: the layer holds only the code written here.
+        let mut ov=pocol_lp4_execution::view::Overlay::from_layer(&base,std::mem::take(&mut self.pool.pending));
+        user_phase::commit_tx_on(&mut ov,r.state,true);let after=pocol_lp4_execution::code_caps::code_of(&ov,&touched);self.pool.pending=ov.into_layer();
         // The running total follows the commit; any failure (unreachable for an engine result) falls back to full checks.
-        self.pool.code_total=match(self.pool.code_total,before,pocol_lp4_execution::code_caps::code_of(&self.pool.pending_state,&touched)){
+        self.pool.code_total=match(self.pool.code_total,before,after){
             (Some(t),Ok(b),Ok(a))=>t.checked_sub(b).and_then(|t|t.checked_add(a)),_=>None};
         self.pool.bytes+=raw.len();self.pool.gas+=gas_limit;self.pool.txs.push((hash,raw.clone()));
         if relay{self.broadcast(&Msg::Tx{raw},None);}
@@ -605,9 +622,8 @@ impl Node{
         // then its own backlog); each is re-executed on the new head (nonce, balance, fee), so one the
         // new branch includes is not taken again.
         let old=std::mem::take(&mut self.pool.txs);let rest=std::mem::take(&mut self.pool.backlog);
-        self.pool.bytes=0;self.pool.gas=0;self.pool.pending_state=self.chain.head().state.clone();
-        self.pool.code_total=checked_code_total(&self.pool.pending_state,&self.chain.spec);
-        self.pool.meter=PoolMeter::of(&self.pool.pending_state,self.chain.spec.profile());
+        self.pool.bytes=0;self.pool.gas=0;self.pool.pending=Default::default();self.pool.pending_base=self.chain.head().state.clone();
+        let (meter,code)=pool_start(self.chain.head(),&self.chain.spec);self.pool.code_total=code;self.pool.meter=meter;
         let mut q:VecDeque<PoolItem>=detached.into_iter().map(PoolItem::Block).collect();
         for (_,raw) in old{self.pool.backlog_bytes+=raw.len();q.push_back(PoolItem::Tx(raw,false));}
         q.extend(rest);self.pool.backlog=q;
@@ -629,7 +645,8 @@ impl Node{
         // its USER phase; a transaction depending on them may still be dropped by build_signed_template's
         // retry.) Without a checked parent state the selection is made as before.
         let profile=self.chain.spec.profile();let ctx=self.child_block_ctx(p);
-        let mut sim=if p.pruned||!p.full{None}else{checked_code_total(&p.state,&self.chain.spec).map(|t|(p.state.clone(),t))};
+        // C-1 E3: on an overlay over p's state, not a copy of it.
+        let mut sim=if p.pruned||!p.full{None}else{summary_code_total(p,&self.chain.spec).map(|t|(pocol_lp4_execution::view::Overlay::new(&p.state),t))};
         // D-7: candidates are the admitted transactions, then the backlog's (each is executed here on p's
         // state anyway); an abandoned block not yet expanded is not a candidate.
         let backlog=self.pool.backlog.iter().filter_map(|i|match i{PoolItem::Tx(r,_)=>Some(r),PoolItem::Block(_)=>None});
@@ -639,11 +656,11 @@ impl Node{
             if room_txs==0||raw.len() as u64>room_bytes{skipped.insert(tx.caller);continue}
             if gas+tx.gas_limit>cp.GAS_LIMIT||bytes+enc(raw.len())>cp.BODY_MAX as usize-12{break}
             if let Some((st,total))=&mut sim{
-                match native::execute_on_validated(st,*total,tx.clone(),&ctx,profile){
+                match native::execute_on_validated(&*st,*total,tx.clone(),&ctx,profile){
                     Ok(r)=>{
-                        let touched:Vec<Address>=r.state.keys().copied().collect();let before=pocol_lp4_execution::code_caps::code_of(st,&touched);
-                        user_phase::commit_tx(st,r.state,true);
-                        match(before,pocol_lp4_execution::code_caps::code_of(st,&touched)){
+                        let touched:Vec<Address>=r.state.keys().copied().collect();let before=pocol_lp4_execution::code_caps::code_of(&*st,&touched);
+                        user_phase::commit_tx_on(st,r.state,true);
+                        match(before,pocol_lp4_execution::code_caps::code_of(&*st,&touched)){
                             (Ok(b),Ok(a))=>match total.checked_sub(b).and_then(|t|t.checked_add(a)){Some(t)=>*total=t,None=>sim=None},_=>sim=None}
                     }
                     Err(_)=>{skipped.insert(tx.caller);continue}
@@ -977,7 +994,12 @@ impl Node{
     pub fn rebuild_state(&mut self,hash:&[u8;32])->Result<(),Reject>{self.chain.ensure_state_with(hash,Some(&Src{journal:&self.journal,history:&self.history}))}
     /// A stored block's committed body (resident or from the journal).
     pub fn body_of(&self,hash:&[u8;32])->Result<Body,Reject>{let e=self.chain.get(hash).ok_or(Reject::UnknownParent)?;self.chain.body_of(e,Some(&self.journal))}
-    pub fn pool_state(&self)->&InMemoryDB{&self.pool.pending_state}
+    /// The pending state as a whole state (the layer merged over its base; tests and inspection).
+    pub fn pool_state(&self)->InMemoryDB{pocol_lp4_execution::view::Overlay::from_layer(&self.pool.pending_base,self.pool.pending.clone()).merge()}
+    /// The pending state read in place (RPC "pending").
+    pub fn pool_view(&self)->pocol_lp4_execution::view::LayerView<'_>{pocol_lp4_execution::view::LayerView{base:&self.pool.pending_base,layer:&self.pool.pending}}
+    /// Accounts the pool's layer has written (A13).
+    pub fn pool_written(&self)->usize{self.pool.pending.written()}
     /// The pool meter's (user slots, user accounts, system slots).
     pub fn pool_live(&self)->(u64,u64,u64){self.pool.meter.live()}
     pub fn peer_count(&self)->usize{self.peers.len()}

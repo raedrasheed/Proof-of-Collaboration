@@ -20,10 +20,12 @@
 >     and stay OPEN.
 >   - The five independent reviews of the round-3 tracks are done, and their MEDIUM-and-above findings
 >     are fixed, except R3-6 (decision D-7) (§3d).
->   - The network profile still does not boot within 6 GiB. Its model is 40.20 GiB (gate 45.94 GiB) after
->     C-1 S2, S1, S3a, S4 and E1, against 150.83 GiB before them (C-1, D-1 approved as option (a)). E1 also
->     cut the near-cap validation of 380 transfers to 349 ms. S3b and S5 remain: E2–E5 of the executor
->     on a layered state.
+>   - The network profile still does not boot within 6 GiB. Its model is 28.08 GiB (gate 32.09 GiB) after
+>     C-1 S2, S1, S3a, S4, E1, E2 and E3.1–E3.3, against 150.83 GiB before them (C-1, D-1 approved as
+>     option (a)). The near-cap validation of 380 transfers is now 55 ms, and an empty child 8.5 ms.
+>     E3.4, E4 (with D-6) and E5 remain. The earlier ≈ 6 GiB projection for S5 was not a measured result
+>     and has been withdrawn: the measured floor without whole states, code sets and tries is 3.08 GiB,
+>     before the new terms E4 and E5 add (decision package §1).
 > - Windows: the repair-scope CI passes on the last code commit `d567ce1` (run 33; runs 29–32 on the earlier
 >   decision-package commits). Before them it passed on `462fffc` (run 26, PR head `43e7e0f`; the
 >   review-thread fix, §3c); earlier runs 9, 16, 19, 21 and 22. The CI does not
@@ -567,6 +569,19 @@ Also done in this pass:
   - A13 adds a trie group (2.23 GiB at the network profile): network model 37.96 → 40.20 GiB; devnet
     3,486,909,657 B.
   - Evidence: [evidence/c1-e1/](evidence/c1-e1/README.md).
+- **C-1 E2** (2026-10-24). The per-block whole-state checks (candidate checks, code checks, code drop)
+  are read from a state summary moved through the changed keys.
+  - Near-cap validation: an empty child 262 → 62 ms; 380 transfers 349 → 174 ms.
+  - Mutation controls: 11 of 12 killed; E2M8 is unreachable.
+  - Evidence: [evidence/c1-e2/](evidence/c1-e2/README.md).
+- **C-1 E3.1–E3.3** (2026-10-25). The executor, production, template selection, the pool and RPC run on
+  overlays over the parent. The S3a diff is built from the block's write set.
+  - Every block in the tests is also applied on a copy and compared field by field.
+  - Near-cap validation: an empty child 62 → 8.5 ms; 380 transfers 174 → 55 ms.
+  - A13: transient copies 10 → 2, plus the pool's layer. Network model 40.20 → 28.08 GiB; devnet
+    3,186,963,844 B.
+  - Mutation controls: 18 of 19 killed; E3M7 is equivalent.
+  - Evidence: [evidence/c1-e3/](evidence/c1-e3/README.md).
 - **consensus.md:101 "the peer is punished"** (R1-5): a local disconnect, with a test and a mutation
   control.
 

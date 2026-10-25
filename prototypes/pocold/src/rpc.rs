@@ -899,12 +899,15 @@ fn whole<'a>(n:&'a Node,e:&'a Entry)->Result<std::borrow::Cow<'a,Entry>,Fail>{
 }
 /// The state a tag names. C-1 S3a: a retained state that is not the head's is materialized from the head
 /// through the diffs (the same answer as when every retained state was held full).
-fn state_for<'a>(n:&'a Node,tag:&Value)->Result<std::borrow::Cow<'a,revm::InMemoryDB>,(i64,String)>{
-    if tag.as_str()==Some("pending"){return Ok(std::borrow::Cow::Borrowed(n.pool_state()))}
+/// C-1 E3: "pending" is read in place on the pool's layer over the head.
+enum TagState<'a>{Full(std::borrow::Cow<'a,revm::InMemoryDB>),Pending(pocol_lp4_execution::view::LayerView<'a>)}
+impl TagState<'_>{fn v(&self)->&dyn pocol_lp4_execution::view::View{match self{TagState::Full(c)=>&**c,TagState::Pending(l)=>l}}}
+fn state_for<'a>(n:&'a Node,tag:&Value)->Result<TagState<'a>,(i64,String)>{
+    if tag.as_str()==Some("pending"){return Ok(TagState::Pending(n.pool_view()))}
     let e=meta_by_tag(n,tag).ok_or((-32001,"unknown block".to_string()))?;
     let pruned=||(-32017,"state outside the retained trie window (K_hist)".to_string());
     if e.pruned{return Err(pruned())}
-    n.chain.state_of(&e.hash).ok_or_else(pruned)
+    n.chain.state_of(&e.hash).map(TagState::Full).ok_or_else(pruned)
 }
 fn call(n:&mut Node,m:&str,p:&[Value],b:&mut Budget)->R{
     let cp=n.chain.spec.cp();
@@ -927,13 +930,13 @@ fn call(n:&mut Node,m:&str,p:&[Value],b:&mut Budget)->R{
             fees.push(qty256(next_base(n)));Ok(json!({"oldestBlock":qty(start),"baseFeePerGas":fees,"gasUsedRatio":ratio,"reward":[]}))
         }
         "eth_getBalance"=>{let a=p.first().and_then(parse_addr).ok_or(bad("address"))?;let s=state_for(n,p.get(1).unwrap_or(&Value::Null))?;
-            Ok(json!(qty256(s.accounts.get(&a).map(|x|x.info.balance).unwrap_or_default())))}
+            Ok(json!(qty256(s.v().account(&a).map(|x|x.info.balance).unwrap_or_default())))}
         "eth_getTransactionCount"=>{let a=p.first().and_then(parse_addr).ok_or(bad("address"))?;let s=state_for(n,p.get(1).unwrap_or(&Value::Null))?;
-            Ok(json!(qty(s.accounts.get(&a).map(|x|x.info.nonce).unwrap_or(0))))}
+            Ok(json!(qty(s.v().account(&a).map(|x|x.info.nonce).unwrap_or(0))))}
         "eth_getCode"=>{let a=p.first().and_then(parse_addr).ok_or(bad("address"))?;let s=state_for(n,p.get(1).unwrap_or(&Value::Null))?;
-            Ok(json!(hex(&s.accounts.get(&a).and_then(|x|x.info.code.as_ref()).map(|c|c.original_bytes().to_vec()).unwrap_or_default())))}
+            Ok(json!(hex(&s.v().account(&a).and_then(|x|x.info.code.as_ref()).map(|c|c.original_bytes().to_vec()).unwrap_or_default())))}
         "eth_getStorageAt"=>{let a=p.first().and_then(parse_addr).ok_or(bad("address"))?;let k=p.get(1).and_then(parse_u256).ok_or(bad("slot"))?;
-            let s=state_for(n,p.get(2).unwrap_or(&Value::Null))?;let v=s.accounts.get(&a).and_then(|x|x.storage.get(&k).copied()).unwrap_or_default();
+            let s=state_for(n,p.get(2).unwrap_or(&Value::Null))?;let v=s.v().slot(&a,&k);
             Ok(json!(hex(&v.to_be_bytes::<32>())))}
         "eth_call"=>{let o=p.first().ok_or(bad("call"))?;let r=simulate(n,o,p.get(1).unwrap_or(&Value::Null),None,b)?;
             match r{ExecutionResult::Success{output,..}=>Ok(json!(hex(output.data()))),ExecutionResult::Revert{output,..}=>Err(Fail::from((3,format!("execution reverted:{}",hex(&output))))),ExecutionResult::Halt{reason,..}=>Err(Fail::from((-32000,format!("halt {reason:?}"))))}}
@@ -1052,9 +1055,11 @@ fn simulate(n:&Node,o:&Value,tag:&Value,gas:Option<u64>,b:&Budget)->Result<Execu
         gas_limit:gas.or_else(||parse_u64(&o["gas"])).unwrap_or(CALL_GAS_MAX).min(CALL_GAS_MAX),gas_price:U256::ZERO,value:parse_u256(&o["value"]).unwrap_or_default(),
         data:Bytes::from(data),nonce:None,chain_id:Some(n.chain.spec.chain_id()),..Default::default()};
     let ctx=NativeBlockContext{height:U256::from(e.height+1),timestamp:U256::from(e.ts+1),gas_limit:U256::from(cp.GAS_LIMIT.max(CALL_GAS_MAX)),base_fee:U256::ZERO,prevrandao:B256::ZERO};
-    let mut st=n.chain.state_of(&e.hash).ok_or_else(||Fail::from((-32017,"state outside the retained trie window (K_hist)".to_string())))?.into_owned();
-    // eth_call simulation: fund the caller for value transfers, never committed.
-    if let Some(a)=st.accounts.get_mut(&tx.caller){a.info.balance=a.info.balance.max(tx.value);}
+    let base=n.chain.state_of(&e.hash).ok_or_else(||Fail::from((-32017,"state outside the retained trie window (K_hist)".to_string())))?;
+    // eth_call simulation: fund the caller for value transfers, never committed (C-1 E3: on an overlay,
+    // not a copy of the state).
+    let mut st=pocol_lp4_execution::view::Overlay::new(&base);
+    {use pocol_lp4_execution::view::WorkState;if let Some(a)=st.info_mut(&tx.caller){a.balance=a.balance.max(tx.value);}}
     // Cancellation (network.md:286): the stop hook ends the execution at its next poll once the
     // deadline has passed (native::simulate_for_profile: every STOP_GAS gas of a frame, before every
     // call). A precompile runs to its end, so the cancellation gap is not bounded there (CANCEL_MAX

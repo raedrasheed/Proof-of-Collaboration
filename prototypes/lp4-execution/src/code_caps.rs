@@ -11,8 +11,8 @@ pub struct CodeLimits { pub runtime: u32, pub logical: u64 }
 
 /// Resolve actual runtime bytes and verify their content address. An unknown
 /// nonempty hash must never silently resolve to EmptyDB's empty-code fallback.
-pub(crate) fn code_len(db:&InMemoryDB, info:&AccountInfo)->Result<u64,String> {
-    let code=info.code.as_ref().or_else(||db.contracts.get(&info.code_hash));
+pub(crate) fn code_len(db:&dyn crate::view::View, info:&AccountInfo)->Result<u64,String> {
+    let code=info.code.as_ref().or_else(||db.contract(&info.code_hash));
     match code {
         Some(code) if code.hash_slow()==info.code_hash =>
             u64::try_from(code.original_bytes().len()).map_err(|_|"code length overflow".into()),
@@ -24,15 +24,16 @@ pub(crate) fn code_len(db:&InMemoryDB, info:&AccountInfo)->Result<u64,String> {
 
 /// Logical bytes per existing address, not unique code hashes. EmptyDB has no
 /// hidden accounts: callers with a different backing store cannot use this API.
-pub fn inventory(db:&InMemoryDB)->Result<u64,String> {
-    db.accounts.values().filter_map(|a|a.info()).try_fold(0u64,|sum,info| {
-        sum.checked_add(code_len(db,&info)?).ok_or_else(||"logical code overflow".into())
+pub fn inventory(db:&dyn crate::view::View)->Result<u64,String> {
+    let mut infos=Vec::new();db.each_account(&mut |_,a|{if let Some(i)=a.info(){infos.push(i)}});
+    infos.iter().try_fold(0u64,|sum,info| {
+        sum.checked_add(code_len(db,info)?).ok_or_else(||"logical code overflow".into())
     })
 }
 
 /// Logical code of the given addresses' current accounts (absent or NotExisting: 0).
-pub fn code_of(db:&InMemoryDB,addresses:&[revm::primitives::Address])->Result<u64,String> {
-    addresses.iter().filter_map(|a|db.accounts.get(a).and_then(|x|x.info())).try_fold(0u64,|sum,info|{
+pub fn code_of(db:&dyn crate::view::View,addresses:&[revm::primitives::Address])->Result<u64,String> {
+    addresses.iter().filter_map(|a|db.account(a).and_then(|x|x.info())).try_fold(0u64,|sum,info|{
         sum.checked_add(code_len(db,&info)?).ok_or_else(||"logical code overflow".into())
     })
 }
@@ -40,10 +41,10 @@ pub fn code_of(db:&InMemoryDB,addresses:&[revm::primitives::Address])->Result<u6
 /// `touched`, whose logical code was `before`; `total` is the inventory before the change. Returns the
 /// new inventory. Untouched accounts are unchanged, so checking the touched ones and the updated total
 /// gives the same Ok/Err, with the same texts, as a full scan (decision package C-2, item 2).
-pub(crate) fn revalidate_touched(db:&InMemoryDB,limits:CodeLimits,touched:&[revm::primitives::Address],total:u64,before:u64)->Result<u64,String> {
+pub(crate) fn revalidate_touched(db:&dyn crate::view::View,limits:CodeLimits,touched:&[revm::primitives::Address],total:u64,before:u64)->Result<u64,String> {
     if limits.runtime<24577 {return Err("R9: B_code_max below 24577".into());}
     let mut after=0u64;
-    for info in touched.iter().filter_map(|a|db.accounts.get(a).and_then(|x|x.info())) {
+    for info in touched.iter().filter_map(|a|db.account(a).and_then(|x|x.info())) {
         let n=code_len(db,&info)?;
         if n>u64::from(limits.runtime) {return Err("snapshot exceeds B_code_max".into());}
         after=after.checked_add(n).ok_or_else(||"logical code overflow".to_string())?;
@@ -56,10 +57,11 @@ pub(crate) fn revalidate_touched(db:&InMemoryDB,limits:CodeLimits,touched:&[revm
 /// `validate_snapshot`, then the inventory: the code total of a state that passes the limits.
 pub fn checked_total(db:&InMemoryDB,limits:CodeLimits)->Result<u64,String> {validate_snapshot(db,limits)?;inventory(db)}
 
-pub fn validate_snapshot(db:&InMemoryDB,limits:CodeLimits)->Result<(),String> {
+pub fn validate_snapshot(db:&dyn crate::view::View,limits:CodeLimits)->Result<(),String> {
     if limits.runtime<24577 {return Err("R9: B_code_max below 24577".into());}
-    for a in db.accounts.values().filter_map(|a|a.info()) {
-        if code_len(db,&a)?>u64::from(limits.runtime) {return Err("snapshot exceeds B_code_max".into());}
+    let mut infos=Vec::new();db.each_account(&mut |_,a|{if let Some(i)=a.info(){infos.push(i)}});
+    for a in &infos {
+        if code_len(db,a)?>u64::from(limits.runtime) {return Err("snapshot exceeds B_code_max".into());}
     }
     if inventory(db)?>limits.logical {return Err("snapshot exceeds CODE_CAP".into());}
     Ok(())
@@ -73,18 +75,17 @@ fn current_total<EXT,DB:Database+LocalState>(context:&Context<EXT,DB>)->Result<u
     if let Some(total)=context.evm.db.code_total() {
         let mut sum=total;
         for address in state.keys() {
-            if let Some(info)=db.accounts.get(address).and_then(|a|a.info()) {
+            if let Some(info)=db.account(address).and_then(|a|a.info()) {
                 sum=sum.checked_sub(code_len(db,&info)?).ok_or_else(||"logical code total below a member".to_string())?;
             }
         }
         return state.values().try_fold(sum,|sum,a|sum.checked_add(code_len(db,&a.info)?).ok_or_else(||"logical code overflow".into()));
     }
-    let base=db.accounts.iter().filter(|(address,_)|!state.contains_key(*address))
-        .filter_map(|(_,a)|a.info());
+    let mut base=Vec::new();db.each_account(&mut |address,a|{if !state.contains_key(address){if let Some(i)=a.info(){base.push(i)}}});
     // SELFDESTRUCT schedules end-of-transaction deletion. Its code remains
     // observable until that deletion, so no early credit is granted here.
     // After actual commit/removal the next complete inventory releases charge.
-    base.chain(state.values().map(|a|a.info.clone())).try_fold(0u64,|sum,info| {
+    base.into_iter().chain(state.values().map(|a|a.info.clone())).try_fold(0u64,|sum,info| {
         sum.checked_add(code_len(db,&info)?).ok_or_else(||"logical code overflow".into())
     })
 }
