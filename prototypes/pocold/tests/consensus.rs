@@ -907,13 +907,15 @@ fn fallback_on_pruned(n:&mut Net,parent:[u8;32])->Block{n.chain.ensure_state(&pa
     // paths, and the entry's trie handle, -> 3,486,909,657 B; C-1 E2: each entry's boxed state summary,
     // -> 3,489,051,177 B; C-1 E3: blocks, production, the pool and RPC on overlays, 10 transient working
     // copies -> 2, plus the pool's layer and the applied block's overlay, -> 3,186,963,844 B; C-1 E4.3: each entry's handle to a
-    // stored version, 8 B, -> 3,187,591,348 B). Some terms are type
+    // stored version, 8 B, -> 3,187,591,348 B; C-1 E5: entries without a state share one empty state,
+    // -> 3,154,465,633 B). Some terms are type
     // sizes (Entry, Block), so the exact value is pinned for the target the evidence is produced on; every
     // target checks that it boots within the budget with its reserve.
-    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_187_591_348,"the A13 model total changed");}
+    if cfg!(all(target_os="linux",target_arch="x86_64")){assert_eq!(d.total,3_154_465_633,"the A13 model total changed");}
     // C-1 S1: a window of the whole chain is the model before S1, plus history.redb's cache and allocator.
     let all=pocold::resources::derive(admitted(&cfg(&["a","b","c"])).cp(),l.k_hist,l.side_max,&Limits{history_window:Some(u64::MAX),..Default::default()},2).unwrap();
-    let redb:u128=all.items.iter().filter(|x|x.0.starts_with("history/history.redb")).map(|x|x.1).sum();
+    // (C-1 E5: and the one empty state entries share, which each entry counted before.)
+    let redb:u128=all.items.iter().filter(|x|x.0.starts_with("history/history.redb")||x.0.starts_with("history/the one empty state")).map(|x|x.1).sum();
     // The one term that differs: the logs, now also bounded per block (LOG_BLOCK_MAX, enforced by the USER
     // phase), which is tighter than LOG_CAP for H_END+1 devnet blocks.
     let logs=all.items.iter().find(|x|x.0=="history/resident window: logs").unwrap().1;let pre_logs=u128::from(pocol_lp4_execution::user_phase::caps::LOG_CAP)/32*33;
@@ -2433,4 +2435,20 @@ fn e4_checkpoint_kill_child(){
     assert!(!f.evicted_order.is_empty()&&n.chain.evicted_total>0,"positive control: side blocks were evicted");
     e44_same(&mut n,&mut r0,"resumed with slimmed, offloaded and evicted entries");
     drop(n);drop(r0);for d in [a,g,c]{let _=std::fs::remove_dir_all(&d);}
+}
+
+/// C-1 E5 (A13 counts one empty state for all entries): every entry that holds no whole state, pruned,
+/// slimmed or stored, shares the one empty state; none allocates its own. Whole-state and store mode.
+#[test] fn e5_entries_without_a_state_share_one_empty_state(){
+    let (_,blocks,_)=s1_chain();
+    for store in [false,true]{
+        let d=e44_dir(&format!("empty-{store}"));
+        let mk=|d:&std::path::Path|{use pocold::node::{Config,Limits};let d=d.to_path_buf();move||Config{dir:d.clone(),name:"e5".into(),miner:None,listen:None,peers:vec![],rpc:None,stop_at:None,log:false,limits:Limits{state_store:store,..Default::default()}}};
+        let mut n=reopen(&mk(&d));for b in &blocks{n.import(b.clone(),None).unwrap();}
+        let check=|n:&pocold::node::Node,what:&str|{let empty=pocold::chain::empty_state();let mut k=0;
+            for e in n.chain.blocks.values(){if e.state.accounts.is_empty(){assert!(std::sync::Arc::ptr_eq(&e.state,&empty),"{what}: entry {} has its own empty state",e.height);k+=1;}}
+            assert!(k>=60,"positive control ({what}): {k} entries without a state");};
+        check(&n,&format!("store={store}, live"));drop(n);let n=reopen(&mk(&d));check(&n,&format!("store={store}, reopened"));
+        drop(n);let _=std::fs::remove_dir_all(&d);
+    }
 }

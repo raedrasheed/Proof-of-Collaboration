@@ -137,10 +137,10 @@ fn raw_clustered_keys_build_and_update_give_p1_roots(){
                 let k=if !model.is_empty()&&r.below(3)==0{*model.keys().nth(r.below(model.len() as u64) as usize).unwrap()}else{clustered_key(&mut r)};
                 if ch.iter().any(|(x,_)|*x==k){continue}
                 let small=r.below(2)==0;let v=if r.below(3)==0{None}else{Some(U256::from(1+r.below(if small{3}else{u64::MAX})))};
-                ch.push((k,v.map(Val::Slot)));
+                ch.push((k,v.map(|v|Val::Slot(v,U256::from(7u64)))));
             }
             ch.sort_by(|a,b|a.0.cmp(&b.0));
-            for (k,v) in &ch{match v{Some(Val::Slot(v))=>{model.insert(*k,*v);}_=>{model.remove(k);}}}
+            for (k,v) in &ch{match v{Some(Val::Slot(v,_))=>{model.insert(*k,*v);}_=>{model.remove(k);}}}
             t=update(&store,&mut b,t,0,&ch);
             assert_eq!(root_of(t.as_ref().map(|x|&*x.1)),reference(&model),"round {round}");
         }

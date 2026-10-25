@@ -2,7 +2,7 @@
 //!
 //! It keeps the nodes of every pinned state version (lp4 `node_trie`): each node under its `Id` (the
 //! Keccak-256 of its serialization) with the number of stored nodes and pins that name it, the runtime
-//! code by hash, and the preimages of the hashed keys. A commit stores a version's new nodes and pins its
+//! code by hash (C-1 E5: a leaf keeps its key's preimage). A commit stores a version's new nodes and pins its
 //! root in one redb transaction; releasing a pin deletes, in one transaction, the nodes nothing names
 //! any more. The store is derived data (invariant I1): it can be rebuilt from the journal, and a store
 //! that does not open or is found damaged is set aside and rebuilt, as `history.redb` is.
@@ -16,16 +16,16 @@ use std::path::{Path,PathBuf};
 use std::sync::{Arc,Mutex,atomic::{AtomicBool,Ordering}};
 use pocol_lp4_execution::node_trie::{Batch,Id,Node,NodeStore};
 use redb::{Database,Durability,ReadableTable,ReadableTableMetadata,TableDefinition};
-use revm::primitives::{keccak256,Address,Bytecode,Bytes,B256,U256};
+use revm::primitives::{keccak256,Bytecode,Bytes,B256};
 
 /// node id -> reference count (u32 big-endian) ++ node encoding.
 const NODES:TableDefinition<&[u8;32],&[u8]>=TableDefinition::new("node");
 /// code hash -> runtime bytes (kept for good: storage.md keeps code to the end).
 const CODE:TableDefinition<&[u8;32],&[u8]>=TableDefinition::new("code");
-/// Keccak(address) -> address.
-const ADDRS:TableDefinition<&[u8;32],&[u8;20]>=TableDefinition::new("addr");
-/// address ++ Keccak(slot) -> slot.
-const SLOTS:TableDefinition<&[u8;52],&[u8;32]>=TableDefinition::new("slotkey");
+/// The store's format ("format" -> FORMAT). C-1 E5: a leaf keeps its key's preimage (format 2); a store
+/// of another format is set aside and rebuilt, as a damaged one is (derived data, I1).
+const META:TableDefinition<&str,u64>=TableDefinition::new("meta");
+pub const FORMAT:u64=2;
 /// root id -> pins.
 const PINS:TableDefinition<&[u8;32],u32>=TableDefinition::new("pins");
 /// C-1 E4.4 (D-6): checkpoint sequence -> the sealed chain snapshot (`checkpoint::encode`).
@@ -68,7 +68,6 @@ pub struct StateStore{db:Database,path:PathBuf,dir:PathBuf,pub rebuilt:bool,dama
     pub reads:std::sync::atomic::AtomicU64,pub writes:std::sync::atomic::AtomicU64}
 
 fn node_value(count:u32,enc:&[u8])->Vec<u8>{let mut v=Vec::with_capacity(4+enc.len());v.extend_from_slice(&count.to_be_bytes());v.extend_from_slice(enc);v}
-fn slot_key(a:&Address,k:&[u8;32])->[u8;52]{let mut x=[0u8;52];x[..20].copy_from_slice(a.as_slice());x[20..].copy_from_slice(k);x}
 
 impl StateStore{
     /// Opens `dir/state.redb`. A file redb cannot open (an error or a panic inside redb), one that fails
@@ -81,8 +80,11 @@ impl StateStore{
             let mut db=catch_unwind(AssertUnwindSafe(||{let mut b=Database::builder();b.set_cache_size(STATE_PAGE_CACHE);b.create(p)})).map_err(|_|StateStoreError("redb panicked at open".into()))?.map_err(err)?;
             match catch_unwind(AssertUnwindSafe(||db.check_integrity())){Ok(Ok(true))=>{}_=>return Err(StateStoreError("integrity check failed".into()))}
             catch_unwind(AssertUnwindSafe(||->Result<(),StateStoreError>{let w=db.begin_write().map_err(err)?;
-                {w.open_table(NODES).map_err(err)?;w.open_table(CODE).map_err(err)?;w.open_table(ADDRS).map_err(err)?;w.open_table(SLOTS).map_err(err)?;w.open_table(PINS).map_err(err)?;
-                 w.open_table(CKPT).map_err(err)?;w.open_table(CKPT_ROOTS).map_err(err)?;}
+                {let nodes=w.open_table(NODES).map_err(err)?;w.open_table(CODE).map_err(err)?;w.open_table(PINS).map_err(err)?;
+                 w.open_table(CKPT).map_err(err)?;w.open_table(CKPT_ROOTS).map_err(err)?;let mut m=w.open_table(META).map_err(err)?;
+                 let format=m.get("format").map_err(err)?.map(|v|v.value());
+                 match format{Some(FORMAT)=>{}None if nodes.is_empty().map_err(err)?=>{m.insert("format",FORMAT).map_err(err)?;}
+                     f=>return Err(StateStoreError(format!("state store format {f:?}, not {FORMAT}")))}}
                 w.commit().map_err(err)})).map_err(|_|StateStoreError("redb panicked at open".into()))??;
             Ok(db)};
         let first=if marker.exists(){Err(StateStoreError("marked damaged".into()))}else{create(&path)};
@@ -133,8 +135,6 @@ impl StateStore{
         self.guard(||{let r=self.db.begin_read().map_err(err)?;let mut n=0u64;
             {let t=r.open_table(NODES).map_err(err)?;for kv in t.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;n+=32+v.value().len() as u64;}}
             {let t=r.open_table(CODE).map_err(err)?;for kv in t.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;n+=32+v.value().len() as u64;}}
-            {let t=r.open_table(ADDRS).map_err(err)?;n+=t.len().map_err(err)?*(32+20);}
-            {let t=r.open_table(SLOTS).map_err(err)?;n+=t.len().map_err(err)?*(52+32);}
             {let t=r.open_table(PINS).map_err(err)?;n+=t.len().map_err(err)?*(32+4);}
             {let t=r.open_table(CKPT).map_err(err)?;for kv in t.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;n+=8+v.value().len() as u64;}}
             {let t=r.open_table(CKPT_ROOTS).map_err(err)?;for kv in t.iter().map_err(err)?{let (_,v)=kv.map_err(err)?;n+=8+v.value().len() as u64;}}
@@ -144,15 +144,13 @@ impl StateStore{
     pub fn cache_bytes(&self)->usize{self.cache.lock().unwrap().bytes}
     pub fn node_count(&self)->Result<u64,StateStoreError>{self.guard(||{let r=self.db.begin_read().map_err(err)?;let t=r.open_table(NODES).map_err(err)?;t.len().map_err(err)})}
     /// Stores the nodes of `root` that the batch holds (every node reachable from it that is not stored
-    /// yet, each counting one reference to each child), the batch's code and preimages, and pins the root
+    /// yet, each counting one reference to each child), the batch's code, and pins the root
     /// once, in one transaction (`durable`: fsynced at commit).
     pub fn commit(&self,b:&Batch,root:Option<Id>,durable:bool)->Result<(),StateStoreError>{
         self.guard(||{
             let mut w=self.db.begin_write().map_err(err)?;if !durable{w.set_durability(Durability::None);}
             {
                 let mut c=w.open_table(CODE).map_err(err)?;for (h,code) in &b.code{if c.get(&h.0).map_err(err)?.is_none(){c.insert(&h.0,code.original_bytes().as_ref()).map_err(err)?;}}
-                let mut a=w.open_table(ADDRS).map_err(err)?;for (k,addr) in &b.addrs{if a.get(k).map_err(err)?.is_none(){a.insert(k,&addr.0 .0).map_err(err)?;}}
-                let mut s=w.open_table(SLOTS).map_err(err)?;for ((addr,k),v) in &b.slots{let key=slot_key(addr,k);if s.get(&key).map_err(err)?.is_none(){s.insert(&key,&v.to_be_bytes::<32>()).map_err(err)?;}}
                 if let Some(root)=root{
                     let mut p=w.open_table(PINS).map_err(err)?;let n=p.get(&root).map_err(err)?.map_or(0,|v|v.value());p.insert(&root,n+1).map_err(err)?;
                     let mut t=w.open_table(NODES).map_err(err)?;let mut stack=vec![root];
@@ -311,8 +309,6 @@ impl NodeStore for StateStore{
         if keccak256(&b)!=*h{panic!("C-1 E4: {}",self.mark_damaged("code does not hash to its key").0)}
         Some(Bytecode::new_raw(Bytes::from(b)))
     }
-    fn address(&self,k:&[u8;32])->Option<Address>{self.read(|r|{let t=r.open_table(ADDRS).map_err(err)?;Ok(t.get(k).map_err(err)?.map(|v|Address::from(*v.value())))}).flatten()}
-    fn slot_key(&self,a:&Address,k:&[u8;32])->Option<U256>{self.read(|r|{let t=r.open_table(SLOTS).map_err(err)?;Ok(t.get(&slot_key(a,k)).map_err(err)?.map(|v|U256::from_be_bytes(*v.value())))}).flatten()}
 }
 impl pocol_lp4_execution::node_trie::TrieStore for StateStore{
     /// Durable: a block's nodes are committed before its journal record (I3).

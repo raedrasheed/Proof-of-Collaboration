@@ -23,16 +23,18 @@ pub type Id=[u8;32];
 /// What a leaf holds.
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub enum Val{
-    /// A storage slot's nonzero value.
-    Slot(U256),
-    /// An account: its fields, its storage trie's root and that trie's top node (None: no storage).
-    Acct{nonce:u64,balance:U256,code_hash:B256,storage_root:B256,storage:Option<Id>},
+    /// A storage slot's nonzero value, and the slot (the preimage of the leaf's key; C-1 E5: kept in the
+    /// leaf, so it goes with the leaf's node and needs no table of its own).
+    Slot(U256,U256),
+    /// An account: its fields, its storage trie's root and that trie's top node (None: no storage), and
+    /// its address (the preimage of the leaf's key).
+    Acct{nonce:u64,balance:U256,code_hash:B256,storage_root:B256,storage:Option<Id>,address:Address},
 }
 impl Val{
     /// The bytes the leaf commits to in the trie (as `state_trie`'s values).
     fn commit(&self,out:&mut Vec<u8>){
         match self{
-            Val::Slot(v)=>rlp_uint(v,out),
+            Val::Slot(v,_)=>rlp_uint(v,out),
             Val::Acct{nonce,balance,code_hash,storage_root,..}=>{
                 let mut p=Vec::with_capacity(110);rlp_uint(&U256::from(*nonce),&mut p);rlp_uint(balance,&mut p);
                 rlp_bytes(storage_root.as_slice(),&mut p);rlp_bytes(code_hash.as_slice(),&mut p);out.extend(rlp_list(&p));
@@ -64,11 +66,12 @@ impl Node{
             Node::Leaf{key,val}=>{
                 out.push(0);out.extend_from_slice(key);
                 match val{
-                    Val::Slot(v)=>{out.push(0);out.extend_from_slice(&v.to_be_bytes::<32>());}
-                    Val::Acct{nonce,balance,code_hash,storage_root,storage}=>{
+                    Val::Slot(v,slot)=>{out.push(0);out.extend_from_slice(&v.to_be_bytes::<32>());out.extend_from_slice(&slot.to_be_bytes::<32>());}
+                    Val::Acct{nonce,balance,code_hash,storage_root,storage,address}=>{
                         out.push(1);out.extend_from_slice(&nonce.to_be_bytes());out.extend_from_slice(&balance.to_be_bytes::<32>());
                         out.extend_from_slice(code_hash.as_slice());out.extend_from_slice(storage_root.as_slice());
                         match storage{Some(id)=>{out.push(1);out.extend_from_slice(id);}None=>out.push(0)}
+                        out.extend_from_slice(address.as_slice());
                     }
                 }
             }
@@ -86,12 +89,13 @@ impl Node{
             0=>{
                 let key:Key=take(b,&mut i,32)?.try_into().ok()?;
                 let val=match *take(b,&mut i,1)?.first()?{
-                    0=>Val::Slot(U256::from_be_slice(take(b,&mut i,32)?)),
+                    0=>{let v=U256::from_be_slice(take(b,&mut i,32)?);Val::Slot(v,U256::from_be_slice(take(b,&mut i,32)?))}
                     1=>{
                         let nonce=u64::from_be_bytes(take(b,&mut i,8)?.try_into().ok()?);let balance=U256::from_be_slice(take(b,&mut i,32)?);
                         let code_hash=B256::from_slice(take(b,&mut i,32)?);let storage_root=B256::from_slice(take(b,&mut i,32)?);
                         let storage=match *take(b,&mut i,1)?.first()?{0=>None,1=>Some(take(b,&mut i,32)?.try_into().ok()?),_=>return None};
-                        Val::Acct{nonce,balance,code_hash,storage_root,storage}
+                        let address=Address::from_slice(take(b,&mut i,20)?);
+                        Val::Acct{nonce,balance,code_hash,storage_root,storage,address}
                     }
                     _=>return None,
                 };
@@ -135,26 +139,20 @@ fn node_ref(n:&Node,d:usize)->Ref{
     }
 }
 
-/// Where nodes, code and key preimages are read from.
+/// Where nodes and code are read from. (C-1 E5: a leaf keeps its key's preimage.)
 pub trait NodeStore{
     fn node(&self,id:&Id)->Option<Arc<Node>>;
     fn code(&self,h:&B256)->Option<Bytecode>;
-    /// The address whose Keccak-256 is `k`.
-    fn address(&self,k:&Key)->Option<Address>;
-    /// The slot of `a` whose Keccak-256 is `k`.
-    fn slot_key(&self,a:&Address,k:&Key)->Option<U256>;
 }
 
 /// What an update creates, before it is committed: nodes, and the code and preimages they need.
 #[derive(Default,Clone)]
-pub struct Batch{pub nodes:HashMap<Id,Arc<Node>>,pub code:HashMap<B256,Bytecode>,pub addrs:HashMap<Key,Address>,pub slots:HashMap<(Address,Key),U256>}
+pub struct Batch{pub nodes:HashMap<Id,Arc<Node>>,pub code:HashMap<B256,Bytecode>}
 /// A store read through a batch.
 pub struct Over<'a>{pub store:&'a dyn NodeStore,pub batch:&'a Batch}
 impl NodeStore for Over<'_>{
     fn node(&self,id:&Id)->Option<Arc<Node>>{self.batch.nodes.get(id).cloned().or_else(||self.store.node(id))}
     fn code(&self,h:&B256)->Option<Bytecode>{self.batch.code.get(h).cloned().or_else(||self.store.code(h))}
-    fn address(&self,k:&Key)->Option<Address>{self.batch.addrs.get(k).copied().or_else(||self.store.address(k))}
-    fn slot_key(&self,a:&Address,k:&Key)->Option<U256>{self.batch.slots.get(&(*a,*k)).copied().or_else(||self.store.slot_key(a,k))}
 }
 
 fn load(s:&dyn NodeStore,b:&Batch,id:&Id)->Arc<Node>{
@@ -284,13 +282,12 @@ fn root_of(n:Option<&Node>)->B256{match n{None=>keccak256([0x80u8]),Some(n)=>nod
 #[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
 pub struct NodeTrie{pub world:Option<Id>}
 fn exists(a:&revm::db::DbAccount)->bool{!matches!(a.account_state,AccountState::NotExisting)}
-fn acct_val(info:&AccountInfo,storage:Option<(Id,Arc<Node>)>)->Val{
+fn acct_val(address:&Address,info:&AccountInfo,storage:Option<(Id,Arc<Node>)>)->Val{
     let storage_root=root_of(storage.as_ref().map(|(_,n)|&**n));
-    Val::Acct{nonce:info.nonce,balance:info.balance,code_hash:info.code_hash,storage_root,storage:storage.map(|(id,_)|id)}
+    Val::Acct{nonce:info.nonce,balance:info.balance,code_hash:info.code_hash,storage_root,storage:storage.map(|(id,_)|id),address:*address}
 }
-/// The code and preimages a state's account brings to the batch.
-fn note(b:&mut Batch,s:&dyn NodeStore,addr:&Address,info:&AccountInfo,code:Option<Bytecode>){
-    b.addrs.entry(hashed(addr)).or_insert(*addr);
+/// The code a state's account brings to the batch.
+fn note(b:&mut Batch,s:&dyn NodeStore,info:&AccountInfo,code:Option<Bytecode>){
     if info.code_hash!=KECCAK_EMPTY&&!info.code_hash.is_zero()&&s.code(&info.code_hash).is_none(){if let Some(c)=code{b.code.entry(info.code_hash).or_insert(c);}}
 }
 impl NodeTrie{
@@ -298,11 +295,11 @@ impl NodeTrie{
     pub fn build(db:&InMemoryDB,s:&dyn NodeStore,b:&mut Batch)->NodeTrie{
         let mut rows:Vec<(Key,Val)>=Vec::with_capacity(db.accounts.len());
         for (addr,a) in db.accounts.iter().filter(|(_,a)|exists(a)){
-            let mut sr:Vec<(Key,Val)>=a.storage.iter().filter(|(_,v)|**v!=U256::ZERO).map(|(k,v)|{let h=hashed_slot(k);b.slots.entry((*addr,h)).or_insert(*k);(h,Val::Slot(*v))}).collect();
+            let mut sr:Vec<(Key,Val)>=a.storage.iter().filter(|(_,v)|**v!=U256::ZERO).map(|(k,v)|(hashed_slot(k),Val::Slot(*v,*k))).collect();
             sr.sort_unstable_by(|x,y|x.0.cmp(&y.0));
             let storage=build(b,0,&sr);
-            note(b,s,addr,&a.info,a.info.code.clone().or_else(||db.contracts.get(&a.info.code_hash).cloned()));
-            rows.push((hashed(addr),acct_val(&a.info,storage)));
+            note(b,s,&a.info,a.info.code.clone().or_else(||db.contracts.get(&a.info.code_hash).cloned()));
+            rows.push((hashed(addr),acct_val(addr,&a.info,storage)));
         }
         rows.sort_unstable_by(|x,y|x.0.cmp(&y.0));
         NodeTrie{world:build(b,0,&rows).map(|(id,_)|id)}
@@ -320,19 +317,19 @@ impl NodeTrie{
             let old_storage=match &old{Some(Val::Acct{storage,..})=>*storage,_=>None};
             let storage=match (&old,slots){
                 (Some(_),Some(slots))=>{
-                    let mut sc:Vec<(Key,Option<Val>)>=slots.iter().map(|sl|{let h=hashed_slot(sl);let v=child.slot(addr,sl);if v!=U256::ZERO{b.slots.entry((*addr,h)).or_insert(*sl);}(h,(v!=U256::ZERO).then_some(Val::Slot(v)))}).collect();
+                    let mut sc:Vec<(Key,Option<Val>)>=slots.iter().map(|sl|{let h=hashed_slot(sl);let v=child.slot(addr,sl);(h,(v!=U256::ZERO).then_some(Val::Slot(v,*sl)))}).collect();
                     sc.sort_unstable_by(|x,y|x.0.cmp(&y.0));sc.dedup_by(|x,y|x.0==y.0);
                     let start=old_storage.map(|id|(id,load(s,b,&id)));update(s,b,start,0,&sc)
                 }
                 _=>{
                     let mut sr:Vec<(Key,Val)>=Vec::new();
-                    child.each_slot(addr,&mut |sl,v|{if *v!=U256::ZERO{let h=hashed_slot(sl);b.slots.entry((*addr,h)).or_insert(*sl);sr.push((h,Val::Slot(*v)))}});
+                    child.each_slot(addr,&mut |sl,v|{if *v!=U256::ZERO{sr.push((hashed_slot(sl),Val::Slot(*v,*sl)))}});
                     sr.sort_unstable_by(|x,y|x.0.cmp(&y.0));sr.dedup_by(|x,y|x.0==y.0);build(b,0,&sr)
                 }
             };
             let code=a.info.code.clone().or_else(||child.contract(&a.info.code_hash));
-            note(b,s,addr,&a.info,code);
-            ch.push((k,Some(acct_val(&a.info,storage))));
+            note(b,s,&a.info,code);
+            ch.push((k,Some(acct_val(addr,&a.info,storage))));
         }
         ch.sort_unstable_by(|x,y|x.0.cmp(&y.0));
         let start=self.world.map(|id|(id,load(s,b,&id)));
@@ -356,8 +353,6 @@ pub struct SharedMem(pub std::sync::Mutex<MemStore>);
 impl NodeStore for SharedMem{
     fn node(&self,id:&Id)->Option<Arc<Node>>{self.0.lock().unwrap().node(id)}
     fn code(&self,h:&B256)->Option<Bytecode>{self.0.lock().unwrap().code(h)}
-    fn address(&self,k:&Key)->Option<Address>{self.0.lock().unwrap().address(k)}
-    fn slot_key(&self,a:&Address,k:&Key)->Option<U256>{self.0.lock().unwrap().slot_key(a,k)}
 }
 impl TrieStore for SharedMem{
     fn commit(&self,b:&Batch,root:Option<Id>)->Result<(),String>{self.0.lock().unwrap().commit(b,root);Ok(())}
@@ -366,20 +361,16 @@ impl TrieStore for SharedMem{
 }
 /// A store in memory with reference counts: a node lives while a pinned root or a stored node names it.
 #[derive(Default)]
-pub struct MemStore{pub nodes:HashMap<Id,(Arc<Node>,u32)>,pub code:HashMap<B256,Bytecode>,pub addrs:HashMap<Key,Address>,pub slots:HashMap<(Address,Key),U256>,pub pins:HashMap<Id,u32>}
+pub struct MemStore{pub nodes:HashMap<Id,(Arc<Node>,u32)>,pub code:HashMap<B256,Bytecode>,pub pins:HashMap<Id,u32>}
 impl NodeStore for MemStore{
     fn node(&self,id:&Id)->Option<Arc<Node>>{self.nodes.get(id).map(|x|x.0.clone())}
     fn code(&self,h:&B256)->Option<Bytecode>{self.code.get(h).cloned()}
-    fn address(&self,k:&Key)->Option<Address>{self.addrs.get(k).copied()}
-    fn slot_key(&self,a:&Address,k:&Key)->Option<U256>{self.slots.get(&(*a,*k)).copied()}
 }
 impl MemStore{
     /// Stores the nodes of `root` that the batch holds (every node reachable from it that is not stored
     /// yet), with the code and preimages, and pins the root once.
     pub fn commit(&mut self,b:&Batch,root:Option<Id>){
         for (h,c) in &b.code{self.code.entry(*h).or_insert_with(||c.clone());}
-        for (k,a) in &b.addrs{self.addrs.entry(*k).or_insert(*a);}
-        for (k,v) in &b.slots{self.slots.entry(*k).or_insert(*v);}
         let Some(root)=root else{return};
         *self.pins.entry(root).or_insert(0)+=1;
         let mut stack=vec![root];
@@ -422,7 +413,7 @@ pub struct TrieState<'a>{pub store:&'a dyn NodeStore,pub trie:NodeTrie,pub block
 impl TrieState<'_>{
     fn acct(&self,a:&Address)->Option<(u64,U256,B256,Option<Id>)>{
         let w=self.trie.world?;
-        match get(self.store,&w,&hashed(a))?{Val::Acct{nonce,balance,code_hash,storage,..}=>Some((nonce,balance,code_hash,storage)),Val::Slot(_)=>None}
+        match get(self.store,&w,&hashed(a))?{Val::Acct{nonce,balance,code_hash,storage,..}=>Some((nonce,balance,code_hash,storage)),Val::Slot(..)=>None}
     }
     fn info(&self,nonce:u64,balance:U256,code_hash:B256)->AccountInfo{
         let code=if code_hash==KECCAK_EMPTY||code_hash.is_zero(){Some(Bytecode::default())}else{self.store.code(&code_hash)};
@@ -435,20 +426,18 @@ impl View for TrieState<'_>{
     }
     fn slot(&self,a:&Address,k:&U256)->U256{
         let Some((_,_,_,Some(st)))=self.acct(a) else{return U256::ZERO};
-        match get(self.store,&st,&hashed_slot(k)){Some(Val::Slot(v))=>v,_=>U256::ZERO}
+        match get(self.store,&st,&hashed_slot(k)){Some(Val::Slot(v,_))=>v,_=>U256::ZERO}
     }
     fn each_slot(&self,a:&Address,f:&mut dyn FnMut(&U256,&U256)){
         let Some((_,_,_,Some(st)))=self.acct(a) else{return};
-        walk(self.store,&st,&mut |k,v|{if let Val::Slot(v)=v{
-            let slot=self.store.slot_key(a,k).unwrap_or_else(||panic!("C-1 E4: no preimage for a slot of {a}"));f(&slot,v)}});
+        walk(self.store,&st,&mut |_,v|{if let Val::Slot(v,slot)=v{f(slot,v)}});
     }
     fn contract(&self,h:&B256)->Option<Bytecode>{self.store.code(h)}
     fn block_hash(&self,n:u64)->B256{self.block_hashes.get(&U256::from(n)).copied().unwrap_or_else(||keccak256(n.to_string().as_bytes()))}
     fn each_account(&self,f:&mut dyn FnMut(&Address,Acc)){
         let Some(w)=self.trie.world else{return};
-        walk(self.store,&w,&mut |k,v|{if let Val::Acct{nonce,balance,code_hash,..}=v{
-            let a=self.store.address(k).unwrap_or_else(||panic!("C-1 E4: no preimage for an account key"));
-            f(&a,Acc{info:self.info(*nonce,*balance,*code_hash),state:AccountState::Touched})}});
+        walk(self.store,&w,&mut |_,v|{if let Val::Acct{nonce,balance,code_hash,address,..}=v{
+            f(address,Acc{info:self.info(*nonce,*balance,*code_hash),state:AccountState::Touched})}});
     }
 }
 

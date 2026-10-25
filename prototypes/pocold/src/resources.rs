@@ -133,12 +133,13 @@ pub fn node_resident_max()->u128{use pocol_lp4_execution::{node_trie::{Id,Node},
 /// reference, with its key and its own reference.
 pub const NODE_ENC_MAX:u128=1+1+2+32+1+33+16*(32+1+33);
 /// C-1 E4: one batch at most: the nodes on the copied path of every changed slot and account (as
-/// `trie_paths` counts them), each decoded behind an `Arc` with its map slot, the preimages of the changed
-/// keys, and the block's write set (`state_trie::Touched`). Its code is shared with the execution's.
+/// `trie_paths` counts them), each decoded behind an `Arc` with its map slot (a leaf holds its key's
+/// preimage, C-1 E5), and the block's write set (`state_trie::Touched`). Its code is shared with the
+/// execution's.
 pub fn batch_max(cp:&ConsensusParams)->Option<u128>{
     use pocol_lp4_execution::node_trie::{Id,Node};use revm::primitives::{Address,U256};let (accounts,slots)=block_writes(cp)?;
     let nodes=mul(accounts+slots,TRIE_PATH_NODES)?;let slot=|n:usize|memory::entry_bytes(n as u128);
-    add(&[mul(nodes,node_resident_max()+slot(size_of::<(Id,std::sync::Arc<Node>)>()))?,mul(accounts,slot(size_of::<([u8;32],Address)>()))?,mul(slots,slot(size_of::<((Address,[u8;32]),U256)>()))?,
+    add(&[mul(nodes,node_resident_max()+slot(size_of::<(Id,std::sync::Arc<Node>)>()))?,
         mul(accounts,slot(size_of::<(Address,Option<Vec<U256>>)>()))?,mul(slots,memory::VEC*size_of::<U256>() as u128)?])
 }
 /// C-1 E4: entries that hold a stored version at once: genesis, the K_hist canonical window, side_max side
@@ -160,9 +161,9 @@ pub fn checkpoint_bytes(cp:&ConsensusParams,limits:&Limits)->Option<u128>{
 /// head's and genesis's versions whole, and every other version that a stored entry or a checkpoint pins
 /// differing from the head's by the paths of the blocks between them (a window state: K_hist blocks; a
 /// side state: 2·R_keep; a checkpoint's versions: KEPT·checkpoint_every + 2·R_keep), at most a whole
-/// state. Preimages and code are kept for good (the code table, storage.md; the key preimages, until E5):
-/// the writes of every block to H_END. The checkpoints' snapshots. All at HISTORY_FILE_FACTOR times their
-/// bytes.
+/// state. Code is kept for good (storage.md): the code every block to H_END can deploy. (C-1 E5: a leaf
+/// keeps its key's preimage, released with it; no preimage is kept for good.) The checkpoints' snapshots.
+/// All at HISTORY_FILE_FACTOR times their bytes.
 pub fn state_file_max(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits)->Option<u128>{let p=state_file_parts(cp,k_hist,side_max,limits)?;add(&p)}
 /// `state_file_max`'s parts: (versions' nodes, key preimages, code, checkpoint snapshots), each at
 /// HISTORY_FILE_FACTOR times its bytes.
@@ -174,7 +175,7 @@ pub fn state_file_parts(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limi
     let ck_span=add(&[mul(kept,u128::from(limits.checkpoint_every.max(1)))?,mul(2,u128::from(limits.r_keep))?])?;
     let nodes=add(&[mul(2,full)?,mul(k,span(k)?)?,mul(sm,span(mul(2,u128::from(limits.r_keep))?)?)?,mul(mul(kept,k+sm+2)?,span(ck_span)?)?])?;
     let blocks=u128::from(cp.H_END)+1;
-    let preimages=mul(blocks,add(&[mul(wa,32+20)?,mul(ws,52+32)?])?)?;
+    let preimages=0;
     let code=mul(blocks,memory::execution_gas(cp.GAS_LIMIT)/CODE_DEPOSIT)?;
     let ckpts=mul(kept,checkpoint_bytes(cp,limits)?/2)?;
     Some([mul(HISTORY_FILE_FACTOR,mul(nodes,NODE_ENC_MAX+4+32)?)?,mul(HISTORY_FILE_FACTOR,preimages)?,mul(HISTORY_FILE_FACTOR,code)?,mul(HISTORY_FILE_FACTOR,ckpts)?])
@@ -246,7 +247,6 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
         // redb 2.6.4 keeps, per region, a free and an allocated bitmap for every page order (buddy_allocator.rs:
         // about 4 bits per page); counted at one byte per 4 KiB page of the largest file, by its parts.
         ("store/state.redb allocator state: the versions' nodes",state_file_parts(cp,k_hist,side_max,limits)?[0]/4096),
-        ("store/state.redb allocator state: key preimages, kept for good",state_file_parts(cp,k_hist,side_max,limits)?[1]/4096),
         ("store/state.redb allocator state: code, kept for good",state_file_parts(cp,k_hist,side_max,limits)?[2]/4096),
         ("store/state.redb allocator state: the checkpoints' snapshots",state_file_parts(cp,k_hist,side_max,limits)?[3]/4096),
         ("store/stored versions' handles and BLOCKHASH windows",mul(stored_versions(k_hist,side_max),pinned_bytes())?),
@@ -295,11 +295,11 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     (snapshots,items)};
     // Per block kept in memory: the map slot (Entry inline), the canonical index, header heap
     // (encoded, ut_raw, bloom, proposer, sig, share nonces), ParentResult shares, nonce ranges
-    // (members <= M_max), an empty pruned state and evidence (E_max items <= EVID_BYTES_MAX).
+    // (members <= M_max) and evidence (E_max items <= EVID_BYTES_MAX); an empty state is shared (C-1 E5).
     let entry=size_of::<([u8;32],Entry)>() as u128;
     // C-1 E2: and its state summary (boxed; a slimmed entry drops it).
     let per_block=add(&[mul(entry+1,3)?,64,size_of::<pocol_lp4_execution::state_summary::Summary>() as u128,mul(hdr,2)?,256+20+65+64,mul(8,s)?,mul(32,s+1)?,mul(64,m)?,
-        memory::empty_snapshot()?,mul(u128::from(cp.E_max),24)?])?;
+        mul(u128::from(cp.E_max),24)?])?;
     // A block's transactions are bounded by its body and by its gas.
     let side_txs=(u128::from(cp.BODY_MAX)/MIN_TX_BYTES).min(u128::from(cp.GAS_LIMIT)/TX_GAS_MIN);
     let per_tx=24+24+32+RECEIPT_BASE;
@@ -332,12 +332,13 @@ pub fn derive(cp:&ConsensusParams,k_hist:u32,side_max:u32,limits:&Limits,dials:u
     // the entry, its map slot and canonical index, and an empty state; the header's heap fields, the
     // ParentResult and the nonce ranges are restored from the journal and history.redb on demand.
     let depth=u128::from(limits.slim_depth.unwrap_or(2*limits.r_keep+u64::from(cp.E_win)+257)).min(blocks);
-    let slim_entry=add(&[mul(entry+1,3)?,64,memory::empty_snapshot()?])?;
+    // C-1 E5: an entry without a state shares one empty state (chain::empty_state), counted once below.
+    let slim_entry=add(&[mul(entry+1,3)?,64])?;
     let (full_old,slim_old)=(depth.saturating_sub(window),blocks-depth.max(window));
     let redb_alloc=mul(payload,HISTORY_FILE_FACTOR)?/4096;
     let hist=[("history/offloaded canonical block metadata (slim_depth − window entries)",mul(full_old,offloaded_entry)?),
         ("history/slimmed canonical block metadata (H_END+1 − slim_depth entries, C-1 S4)",mul(slim_old,slim_entry)?),
-        ("history/resident window: block entries",mul(window,per_block)?),("history/resident window: transaction bytes",w_bodies),("history/resident window: evidence",w_evidence),
+        ("history/the one empty state entries share (C-1 E5)",memory::empty_snapshot()?),("history/resident window: block entries",mul(window,per_block)?),("history/resident window: transaction bytes",w_bodies),("history/resident window: evidence",w_evidence),
         ("history/resident window: transaction hashes and receipts",w_receipts),("history/resident window: logs",w_logs),
         ("history/history.redb page cache (HISTORY_CACHE)",crate::history::HISTORY_CACHE as u128),("history/history.redb allocator state",redb_alloc)];
     let history=add(&hist.map(|x|x.1))?;items.extend(hist);

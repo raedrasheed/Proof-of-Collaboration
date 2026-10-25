@@ -138,3 +138,15 @@ fn dir(tag:&str)->std::path::PathBuf{let d=std::env::temp_dir().join(format!("po
     drop(s);assert!(StateStore::open(&d).unwrap().rebuilt);
     let _=std::fs::remove_dir_all(&d);
 }
+
+/// C-1 E5: a store of another format (a store written before leaves kept their keys' preimages) is set
+/// aside and rebuilt, never read; one of the current format reopens as it is.
+#[test] fn a_store_of_another_format_is_rebuilt(){
+    let d=std::env::temp_dir().join(format!("pocold-ss-format-{}",std::process::id()));let _=std::fs::remove_dir_all(&d);std::fs::create_dir_all(&d).unwrap();
+    {let s=StateStore::open(&d).unwrap();assert!(!s.rebuilt);}
+    {let s=StateStore::open(&d).unwrap();assert!(!s.rebuilt,"the current format reopens as it is");}
+    {let db=redb::Database::open(d.join(pocold::state_store::FILE)).unwrap();let w=db.begin_write().unwrap();
+     {let meta:redb::TableDefinition<&str,u64>=redb::TableDefinition::new("meta");let mut m=w.open_table(meta).unwrap();m.insert("format",1).unwrap();}w.commit().unwrap();}
+    let s=StateStore::open(&d).unwrap();assert!(s.rebuilt,"format 1 is set aside and rebuilt");assert!(d.join(format!("{}.aside",pocold::state_store::FILE)).exists());
+    drop(s);let _=std::fs::remove_dir_all(&d);
+}

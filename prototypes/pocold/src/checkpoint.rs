@@ -211,7 +211,7 @@ pub fn restore(c:&mut Chain,s:&Snapshot,src:&dyn Source,store:&Arc<dyn TrieStore
             let ranges=if r.flags&F_SLIM!=0{Vec::new()}else{src.ranges(&r.hash)?.ok_or_else(||why("nonce ranges not in history.redb"))?};
             let tx_hashes=body.txs.iter().map(|t|keccak256(t)).collect();
             let mut e=Entry{hash:r.hash,height:header.h,parent:Some(header.parent_hash),total_work:r.total_work,import_seq:r.import_seq,signed:!header.proposer.is_empty(),ts:header.ts,
-                target:header.target,base_fee:from_fixed(&header.base_fee),gas_used:header.gas_used,seal:seal(&template_id(&header.ut_raw),header.nonce),state:Default::default(),
+                target:header.target,base_fee:from_fixed(&header.base_fee),gas_used:header.gas_used,seal:seal(&template_id(&header.ut_raw),header.nonce),state:crate::chain::empty_state(),
                 is_final:r.flags&F_FINAL!=0,result,receipts,tx_hashes,cum_txs:r.cum_txs,cum_tx_bytes:r.cum_tx_bytes,cum_log_bytes:r.cum_log_bytes,pruned:false,full:false,diff:None,
                 slim:false,drawn:r.drawn,ranges,body_off:Some(off),offloaded:false,trie:None,summary:r.summary.map(Box::new),stored:None,header,body};
             if r.flags&F_OFFLOADED!=0{crate::chain::offload(&mut e);}

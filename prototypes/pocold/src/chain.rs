@@ -222,7 +222,7 @@ impl Entry{
     /// A copy without the executed state (an empty, pruned state), for rolling re-execution and views.
     pub fn meta_clone(&self)->Entry{
         Entry{hash:self.hash,header:self.header.clone(),body:self.body.clone(),height:self.height,parent:self.parent,total_work:self.total_work,import_seq:self.import_seq,
-            signed:self.signed,ts:self.ts,target:self.target,base_fee:self.base_fee,gas_used:self.gas_used,seal:self.seal,state:Default::default(),is_final:self.is_final,
+            signed:self.signed,ts:self.ts,target:self.target,base_fee:self.base_fee,gas_used:self.gas_used,seal:self.seal,state:empty_state(),is_final:self.is_final,
             result:self.result.clone(),receipts:self.receipts.clone(),tx_hashes:self.tx_hashes.clone(),cum_txs:self.cum_txs,cum_tx_bytes:self.cum_tx_bytes,
             cum_log_bytes:self.cum_log_bytes,pruned:true,full:false,diff:self.diff.clone(),slim:self.slim,drawn:self.drawn,ranges:self.ranges.clone(),body_off:self.body_off,offloaded:self.offloaded,trie:self.trie.clone(),summary:self.summary.clone(),stored:None}
     }
@@ -311,6 +311,10 @@ pub struct Chain{
     pub trie_store:Option<std::sync::Arc<dyn pocol_lp4_execution::node_trie::TrieStore>>,
 }
 
+/// C-1 E5: the state of an entry that holds none (pruned, stored, or a metadata copy): one shared empty
+/// state, so an entry without a state allocates none (A13 counts it once, not per entry). Nothing writes
+/// through an entry's `Arc` (a state is replaced, never changed in place).
+pub fn empty_state()->std::sync::Arc<InMemoryDB>{static E:std::sync::OnceLock<std::sync::Arc<InMemoryDB>>=std::sync::OnceLock::new();E.get_or_init(Default::default).clone()}
 pub fn u256_fixed(v:&Fixed)->U256{from_fixed(v)}
 pub fn work(t:&Fixed)->U256{from_fixed(&crate::fixed::work(t))}
 
@@ -336,7 +340,7 @@ impl Chain{
         let g=self.spec.genesis().state();let mut b=pocol_lp4_execution::node_trie::Batch::default();
         let t=pocol_lp4_execution::node_trie::NodeTrie::build(g,&*store,&mut b);
         let pin=Pinned::new(store.clone(),StoredChild{trie:t,batch:b,hashes:g.block_hashes.clone()})?;
-        let e=self.blocks.get_mut(&self.head).unwrap();e.stored=Some(std::sync::Arc::new(pin));e.state=Default::default();e.trie=None;e.diff=None;
+        let e=self.blocks.get_mut(&self.head).unwrap();e.stored=Some(std::sync::Arc::new(pin));e.state=empty_state();e.trie=None;e.diff=None;
         self.trie_store=Some(store);Ok(())
     }
     /// A stored block's state read in place: its stored version, its whole state, or materialized through
@@ -581,7 +585,7 @@ impl Chain{
             Executed::Stored{run,child,..}=>{
                 let store=self.trie_store.clone().ok_or_else(||Reject::Block("a stored child without a store".into()))?;
                 let pin=Pinned::new(store,child)?;
-                Ok(ChildState{state:Default::default(),diff:None,trie:None,summary:run.summary,receipts:run.receipts,stored:Some(std::sync::Arc::new(pin))})
+                Ok(ChildState{state:empty_state(),diff:None,trie:None,summary:run.summary,receipts:run.receipts,stored:Some(std::sync::Arc::new(pin))})
             }
         }
     }
@@ -702,7 +706,7 @@ impl Chain{
         // a side block below the window made each block of a deep competing branch rebuild its parent
         // from genesis: quadratic work for an R_keep-deep adoption.)
         let prune:Vec<[u8;32]>=self.canonical.iter().skip(1).take(cut as usize).copied().collect();
-        for h in prune{if let Some(e)=self.blocks.get_mut(&h){if !e.pruned{e.state=Default::default();e.pruned=true;}e.stored=None;e.full=false;e.diff=None;}}
+        for h in prune{if let Some(e)=self.blocks.get_mut(&h){if !e.pruned{e.state=empty_state();e.pruned=true;}e.stored=None;e.full=false;e.diff=None;}}
         let side=|c:&Chain|->Vec<[u8;32]>{c.blocks.values().filter(|e|e.height>0&&!c.is_canonical(&e.hash)).map(|e|e.hash).collect()};
         let r_keep=self.r_keep;
         let mut gone:Vec<[u8;32]>=side(self).into_iter().filter(|h|self.blocks[h].height+r_keep<=head_h).collect();
@@ -770,7 +774,7 @@ impl Chain{
         let drop:Vec<[u8;32]>=with_state.iter().take(over).map(|x|x.3).collect();
         let keep:Vec<[u8;32]>=with_state.iter().skip(over).map(|x|x.3).collect();
         // The pruned side states' memory goes first; their diffs stay until the kept ones are full.
-        for h in &drop{if let Some(e)=self.blocks.get_mut(h){e.state=Default::default();e.stored=None;e.pruned=true;e.full=false;}}
+        for h in &drop{if let Some(e)=self.blocks.get_mut(h){e.state=empty_state();e.stored=None;e.pruned=true;e.full=false;}}
         // C-1 S3a: every side state kept within side_max is full (materialized while the diffs that lead
         // to it are still here), as all of them were before S3a: none becomes unreachable when its
         // neighbours are pruned, and one that is adopted again answers as it did.
@@ -794,7 +798,7 @@ impl Chain{
         let head=self.head;
         let canon:Vec<[u8;32]>=self.canonical.iter().skip(1).copied().filter(|h|*h!=head).collect();
         for h in canon{if let Some(e)=self.blocks.get_mut(&h){if e.full&&!e.pruned{
-            if e.diff.is_some(){e.state=Default::default();e.full=false;}else{e.state=Default::default();e.full=false;e.pruned=true;}}}}
+            if e.diff.is_some(){e.state=empty_state();e.full=false;}else{e.state=empty_state();e.full=false;e.pruned=true;}}}}
         if self.blocks.get(&head).map_or(false,|e|!e.full&&!e.pruned){if let Some(s)=self.materialize(&head){let e=self.blocks.get_mut(&head).unwrap();e.state=s.into();e.full=true;self.materializations.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}}
         let open:Vec<[u8;32]>=self.blocks.values().filter(|e|!e.pruned&&!e.full).map(|e|e.hash).collect();
         for h in open{if self.state_path(&h).is_none(){let side=!self.is_canonical(&h);let e=self.blocks.get_mut(&h).unwrap();e.pruned=true;if side{e.diff=None;}}}
@@ -911,7 +915,7 @@ impl Chain{
         let ph=self.canonical[first as usize-1];let (was_pruned,was_full)=(self.blocks[&ph].pruned,self.blocks[&ph].full);
         self.ensure_state_with(&ph,Some(src))?;
         let mut p=self.blocks[&ph].meta_clone();p.state=self.blocks[&ph].state.clone();p.stored=self.blocks[&ph].stored.clone();
-        if (was_pruned||!was_full)&&ph!=self.canonical[0]{let x=self.blocks.get_mut(&ph).unwrap();x.state=Default::default();x.stored=None;x.full=false;x.pruned=was_pruned;}
+        if (was_pruned||!was_full)&&ph!=self.canonical[0]{let x=self.blocks.get_mut(&ph).unwrap();x.state=empty_state();x.stored=None;x.full=false;x.pruned=was_pruned;}
         let mut n=0;
         for hgt in first..=last{
             let hash=self.canonical[hgt as usize];let er=self.meta_restored(&hash,Some(src))?;let e=&er;
@@ -957,7 +961,7 @@ impl Chain{
         if !e.slim{return Ok(std::borrow::Cow::Borrowed(e))}
         let (mut header,result,ranges)=self.restored_fields(e,src.ok_or_else(||Reject::Block("slim entry without a block source".into()))?)?;
         if e.offloaded{header.encoded=Vec::new();}
-        let mut x=e.meta_clone();x.state=Default::default();x.pruned=e.pruned;x.full=false;x.header=header;x.result=result;x.ranges=ranges;x.slim=false;
+        let mut x=e.meta_clone();x.state=empty_state();x.pruned=e.pruned;x.full=false;x.header=header;x.result=result;x.ranges=ranges;x.slim=false;
         Ok(std::borrow::Cow::Owned(x))
     }
     /// A stored block's metadata copy (no state) with its slimmed fields restored.
@@ -992,7 +996,7 @@ impl Chain{
         let (root_state,root_stored)=loop{
             let e=self.blocks.get(&cur).ok_or_else(||Reject::Block("rebuild root".into()))?;
             // C-1 E4: a stored root state is read in place (its pin is shared).
-            if let Some(pin)=&e.stored{break (Default::default(),Some(pin.clone()))}
+            if let Some(pin)=&e.stored{break (empty_state(),Some(pin.clone()))}
             // C-1 E3: a full root state is shared, not copied (the rolling re-execution only reads it).
             if !e.pruned&&self.trie_store.is_none(){if e.full{break (e.state.clone(),None)}if let Some(st)=self.materialize(&cur){self.materializations.fetch_add(1,std::sync::atomic::Ordering::Relaxed);break (std::sync::Arc::new(st),None)}}
             path.push(cur);cur=e.parent.ok_or_else(||Reject::Block("rebuild root".into()))?;
